@@ -1,61 +1,52 @@
+#!/usr/bin/env python
 """
-Main Application (main.py):
-Coordinates all the steps:
-
-Reads the SQL query (as a string),
-Parses it to a parse tree,
-Transforms the MATCH_RECOGNIZE clause to a canonical representation,
-Loads a sample input DataFrame,
-Calls the engine's match_recognize function, and
-Outputs the resulting DataFrame. Example:
-
+Main entry point for the MATCH_RECOGNIZE project.
 """
 
+import logging
+from src.ast.ast_builder import build_enhanced_match_recognize_ast
+from src.ast.expression_ast import visualize_expression_ast  # (if you want to visualize an expression)
+from src.ast.pattern_ast import visualize_pattern
+from src.parser.expression_parser import parse_expression_full
 
-from utils.parser_utils import parse_input
-from transformations.match_recognize_transformer import MatchRecognizeTransformer
-from engine.match_recognize import match_recognize
-import pandas as pd
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
+logger = logging.getLogger(__name__)
 
 def main():
-    # Example SQL query with MATCH_RECOGNIZE clause
-    sql_query = """SELECT * FROM orders
-    MATCH_RECOGNIZE (
-        PARTITION BY custkey
-        ORDER BY orderdate
-        MEASURES
-            A.totalprice AS starting_price,
-            LAST(B.totalprice) AS bottom_price,
-            LAST(U.totalprice) AS top_price
-        ONE ROW PER MATCH
-        AFTER MATCH SKIP PAST LAST ROW
-        PATTERN (PERMUTE(A, B, C) D+)
-        SUBSET U = (B, C)
-        DEFINE
-            A AS totalprice > 10,
-            B AS totalprice < PREV(totalprice),
-            C AS totalprice = PREV(totalprice),
-            D AS totalprice > PREV(totalprice)
-    );"""
-
-    # Parse the query
-    tree, parser = parse_input(sql_query)
-
-    # Transform the MATCH_RECOGNIZE clause
-    transformer = MatchRecognizeTransformer()
-    transformer.visit(tree)
-    canonical_query = transformer.get_canonical()
-
-    print("Canonical MATCH_RECOGNIZE Representation:")
-    print(canonical_query)
-
-    # Load or create your input DataFrame (for example purposes)
-    df = pd.read_csv("orders_sample.csv")  # Your input DataFrame
-
-    # Apply MATCH_RECOGNIZE on the DataFrame
-    output_df = match_recognize(df, canonical_query)
-    print("Output DataFrame:")
-    print(output_df)
+    # Sample SQL query with MATCH_RECOGNIZE clause
+    query = (
+        "SELECT * FROM orders "
+        "MATCH_RECOGNIZE ("
+        "  PARTITION BY custkey "
+        "  ORDER BY orderdate "
+        "  PATTERN (A+ B) "
+        "  DEFINE A AS price > 10, "
+        "         B AS price < 20"
+        ");"
+    )
+    
+    # Build the enhanced AST from the query
+    ast, errors = build_enhanced_match_recognize_ast(query)
+    
+    if errors:
+        print("Validation Errors:")
+        for err in errors:
+            print(" -", err)
+    else:
+        print("Generated AST for MATCH_RECOGNIZE clause:")
+        print(ast)
+    
+    # Visualize the row pattern if available
+    if ast.pattern and "ast" in ast.pattern:
+        print("\nPattern Visualization:")
+        print(visualize_pattern(ast.pattern["ast"]))
+    
+    # Example: Parsing an independent expression
+    expression = "price * 1.1 + 5"
+    expr_ast = parse_expression_full(expression)
+    print("\nParsed Expression AST:")
+    print(expr_ast)
 
 if __name__ == "__main__":
     main()
