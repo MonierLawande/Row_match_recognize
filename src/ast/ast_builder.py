@@ -1,3 +1,5 @@
+# src/ast/ast_builder.py
+
 import logging
 import re
 from antlr4 import ParseTreeWalker
@@ -6,13 +8,14 @@ from src.grammar.TrinoParserListener import TrinoParserListener
 from src.ast.match_recognize_ast import MatchRecognizeAST
 from src.parser.expression_parser import parse_expression_full
 from src.parser.pattern_parser import parse_pattern_full
+from src.ast.pattern_optimizer import optimize_pattern
 
 logger = logging.getLogger(__name__)
 
 def get_formatted_text(ctx):
     """
-    Recursively extract text from a parse tree context.
-    For demonstration, we simply call getText() if available.
+    Recursively extracts text from a parse tree context.
+    For simplicity, uses the getText() method if available.
     """
     try:
         return ctx.getText().strip()
@@ -26,13 +29,13 @@ def get_formatted_text(ctx):
 class EnhancedMatchRecognizeASTBuilder(TrinoParserListener):
     """
     Walks the parse tree produced by the ANTLR parser and builds a full AST
-    for the MATCH_RECOGNIZE clause.
+    for the MATCH_RECOGNIZE clause, including subclauses for PARTITION BY,
+    ORDER BY, MEASURES, ROWS PER MATCH, AFTER MATCH SKIP, PATTERN, SUBSET, and DEFINE.
     """
     def __init__(self):
         self.ast = MatchRecognizeAST()
         self.errors = []
 
-    # Assuming the grammar rule is named matchRecognizeClause.
     def enterMatchRecognizeClause(self, ctx):
         logger.debug("Entering MATCH_RECOGNIZE clause.")
 
@@ -73,11 +76,13 @@ class EnhancedMatchRecognizeASTBuilder(TrinoParserListener):
             if hasattr(ctx, 'afterMatchSkipClause') and ctx.afterMatchSkipClause():
                 self.ast.after_match_skip = get_formatted_text(ctx.afterMatchSkipClause())
                 logger.debug("Extracted AFTER MATCH SKIP: %s", self.ast.after_match_skip)
-            # Extract PATTERN clause
+            # Extract PATTERN clause and optimize the resulting AST
             if hasattr(ctx, 'patternClause') and ctx.patternClause():
                 pattern_text = get_formatted_text(ctx.patternClause())
-                self.ast.pattern = parse_pattern_full(pattern_text)
-                logger.debug("Extracted PATTERN: %s", self.ast.pattern)
+                parsed_pattern = parse_pattern_full(pattern_text)
+                optimized_pattern = optimize_pattern(parsed_pattern)
+                self.ast.pattern = optimized_pattern
+                logger.debug("Extracted and optimized PATTERN: %s", self.ast.pattern)
             # Extract SUBSET clause
             if hasattr(ctx, 'subsetClause') and ctx.subsetClause():
                 subset_mapping = {}
@@ -109,7 +114,7 @@ class EnhancedMatchRecognizeASTBuilder(TrinoParserListener):
                         })
                 self.ast.define = defines
                 logger.debug("Extracted DEFINE: %s", self.ast.define)
-            # Check for an empty pattern
+            # Flag empty pattern if detected
             if hasattr(ctx, 'patternClause') and get_formatted_text(ctx.patternClause()) == "()":
                 self.ast.is_empty_match = True
                 logger.debug("Empty match detected.")
@@ -119,6 +124,7 @@ class EnhancedMatchRecognizeASTBuilder(TrinoParserListener):
 
     def enterEveryRule(self, ctx):
         pass
+
     def exitEveryRule(self, ctx):
         pass
 
@@ -127,18 +133,15 @@ class EnhancedMatchRecognizeASTBuilder(TrinoParserListener):
 
 def build_enhanced_match_recognize_ast(query: str):
     """
-    Ties together the parsing and AST building:
-      1. Calls the ANTLR parser to get the parse tree.
-      2. Uses a custom error listener.
-      3. Walks the tree with the EnhancedMatchRecognizeASTBuilder.
-      4. Returns the AST along with any errors.
+    Combines ANTLR parsing with AST building:
+      1. Parses the query to generate a parse tree.
+      2. Walks the tree with EnhancedMatchRecognizeASTBuilder.
+      3. Returns the complete AST along with any collected errors.
     """
     tree, parser = parse_input(query)
     error_listener = CustomErrorListener()
     parser.removeErrorListeners()
-    # Uncomment below if your parser supports adding custom listeners:
-    # parser.addErrorListener(error_listener)
-
+    # Optionally, add error_listener if supported.
     builder = EnhancedMatchRecognizeASTBuilder()
     walker = ParseTreeWalker()
     walker.walk(builder, tree)

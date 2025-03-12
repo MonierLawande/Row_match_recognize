@@ -1,23 +1,27 @@
 import re
 from src.ast.expression_ast import ExpressionAST
 
+AGGREGATE_FUNCTIONS = ['avg', 'min', 'max', 'count', 'sum', 'max_by', 'min_by', 'array_agg']
+
 class ExpressionParser:
     """
     A recursive descent parser for SQL expressions.
     
-    This parser supports:
+    Supports:
       - Binary operations (+, -, *, /)
       - Parenthesized expressions
-      - Navigation functions (PREV, NEXT, FIRST, LAST) with optional offsets
-      - Nested navigation (i.e. navigation functions within navigation function arguments)
-      - Semantics keywords (RUNNING, FINAL) that set a semantics field on the AST node
+      - General function calls, including aggregate functions (avg, count, etc.),
+        classifier, and match_number.
+      - Navigation functions (PREV, NEXT, FIRST, LAST) with optional offsets,
+        which may be nested.
+      - Optional semantics keywords ("RUNNING", "FINAL") that annotate the AST node.
     """
     def __init__(self, expr_text: str):
         self.tokens = self.tokenize(expr_text)
         self.pos = 0
 
     def tokenize(self, expr: str):
-        # Insert spaces around special symbols for easier tokenization.
+        # Insert spaces around special symbols to ease tokenization.
         for sym in ['(', ')', ',', '+', '-', '*', '/']:
             expr = expr.replace(sym, f' {sym} ')
         return [t for t in expr.split() if t]
@@ -38,7 +42,7 @@ class ExpressionParser:
         return self.parse_expression()
 
     def parse_expression(self):
-        # Parse an expression with binary operators + and -.
+        # Parse an expression supporting binary operators + and -
         left = self.parse_term()
         while self.peek() in ['+', '-']:
             op = self.next_token()
@@ -47,7 +51,7 @@ class ExpressionParser:
         return left
 
     def parse_term(self):
-        # Parse an expression with binary operators * and /.
+        # Parse multiplication/division.
         left = self.parse_factor()
         while self.peek() in ['*', '/']:
             op = self.next_token()
@@ -56,18 +60,19 @@ class ExpressionParser:
         return left
 
     def parse_factor(self):
-        # For this example, factor is the same as primary.
+        # For simplicity, factor is the same as primary.
         return self.parse_primary()
 
     def parse_primary(self):
         """
         Parses a primary expression.
         
-        It checks for optional semantics keywords ("RUNNING" or "FINAL") first.
-        Then it supports:
+        Checks for an optional semantics keyword ("RUNNING" or "FINAL").
+        Then, handles:
           - Parenthesized expressions
-          - Navigation functions (which may be nested)
-          - Literals and identifiers
+          - Function calls (general and aggregate)
+          - Navigation functions (treated as a special function call)
+          - Literals and identifiers.
         """
         semantics = None
         token = self.peek()
@@ -75,7 +80,6 @@ class ExpressionParser:
             semantics = self.next_token().upper()
 
         token = self.peek()
-        # Parenthesized expression
         if token == '(':
             self.next_token()  # Consume '('
             expr = self.parse_expression()
@@ -85,13 +89,45 @@ class ExpressionParser:
                 expr.semantics = semantics
             return expr
 
-        # Navigation functions: PREV, NEXT, FIRST, LAST
-        if token and token.upper() in ['PREV', 'NEXT', 'FIRST', 'LAST']:
-            func_name = self.next_token().upper()
+        # Look for a function call.
+        token = self.next_token()
+        if token is None:
+            raise ValueError("Unexpected end of expression")
+
+        # If the next token is '(' then this is a function call.
+        if self.peek() == '(':
+            func_name = token
+            self.next_token()  # Consume '('
+            arguments = []
+            if self.peek() != ')':
+                while True:
+                    arg = self.parse_expression()
+                    arguments.append(arg)
+                    if self.peek() == ',':
+                        self.next_token()  # Consume comma
+                    else:
+                        break
+            if self.next_token() != ')':
+                raise ValueError(f"Expected closing ')' in function call {func_name}")
+            # Distinguish aggregate functions.
+            if func_name.lower() in AGGREGATE_FUNCTIONS:
+                func_type = "aggregate"
+            else:
+                func_type = "function"
+            func_ast = ExpressionAST(
+                type=func_type,
+                value=func_name,
+                children=arguments,
+                semantics=semantics
+            )
+            return func_ast
+
+        # Check for navigation function call (if the token itself is a navigation keyword)
+        if token.upper() in ['PREV', 'NEXT', 'FIRST', 'LAST']:
+            func_name = token.upper()
             if self.next_token() != '(':
                 raise ValueError(f"Expected '(' after {func_name}")
-            # Parse the target expression; this call allows nesting
-            target_expr = self.parse_expression()
+            target_expr = self.parse_expression()  # Allow nested navigation
             offset = 0
             if self.peek() == ',':
                 self.next_token()  # Consume comma
@@ -111,15 +147,12 @@ class ExpressionParser:
             )
             return nav_ast
 
-        # Handle numeric literals
-        token = self.next_token()
-        if token is None:
-            raise ValueError("Unexpected end of expression")
+        # If token is numeric, treat as literal.
         if token.isdigit() or self.is_decimal(token):
             lit_ast = ExpressionAST(type="literal", value=token, semantics=semantics)
             return lit_ast
 
-        # Otherwise, treat as an identifier
+        # Otherwise, treat as an identifier.
         ident_ast = ExpressionAST(type="identifier", value=token, semantics=semantics)
         return ident_ast
 

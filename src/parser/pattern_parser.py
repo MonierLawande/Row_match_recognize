@@ -4,7 +4,11 @@ from src.ast.pattern_ast import PatternAST
 class PatternParser:
     """
     Tokenizes and parses a row pattern string into a preliminary parse tree.
-    Supports nested quantifiers, grouping, alternation, permutation, and exclusion.
+    
+    Extended to support:
+      - Nested quantifiers (including reluctant quantifiers)
+      - Proper exclusion syntax using {- ... -}
+      - Grouping, alternation, permutation, and concatenation.
     """
     def __init__(self, pattern_text: str, subset_mapping=None):
         self.pattern_text = pattern_text
@@ -13,10 +17,24 @@ class PatternParser:
         self.pos = 0
 
     def tokenize(self, pattern: str):
-        # Insert spaces around special symbols.
+        """
+        Tokenizes the pattern string.
+        Special handling:
+          - Recognize '{-' and '-}' as single tokens for exclusion syntax.
+          - Insert spaces around other special symbols.
+        """
+        # First, replace exclusion delimiters with special markers.
+        pattern = pattern.replace("{-", " EXCL_START ")
+        pattern = pattern.replace("-}", " EXCL_END ")
+        # Insert spaces around other symbols.
         for sym in ['(', ')', '|', '+', '*', '?', '{', '}', ',', '^']:
             pattern = pattern.replace(sym, f' {sym} ')
-        return [t for t in pattern.split() if t]
+        # Split tokens and then restore exclusion tokens.
+        tokens = [t for t in pattern.split() if t]
+        # Replace tokens that are our markers.
+        tokens = ['{-' if t == "EXCL_START" else t for t in tokens]
+        tokens = [t if t != "EXCL_END" else "-}" for t in tokens]
+        return tokens
 
     def next_token(self):
         if self.pos < len(self.tokens):
@@ -31,7 +49,7 @@ class PatternParser:
         return None
 
     def parse(self):
-        # Parse a concatenation of pattern elements.
+        # Parse a concatenation of elements.
         elements = []
         while self.pos < len(self.tokens) and self.peek() != ')':
             element = self.parse_quantified_element()
@@ -43,23 +61,25 @@ class PatternParser:
         return PatternAST(type="concatenation", children=elements)
 
     def parse_quantified_element(self):
-        # Check for exclusion operator.
-        excluded = False
-        if self.peek() == '^':
-            self.next_token()  # consume '^'
-            excluded = True
+        # Check for exclusion syntax.
+        if self.peek() == "{-":
+            return self.parse_exclusion()
 
+        # Parse a single element.
         element = self.parse_element()
-        element.excluded = excluded
 
-        # Support nested quantifiers: while the next token is a quantifier, wrap the element.
+        # Check for quantifiers (greedy or reluctant).
         while self.peek() in ['+', '*', '?'] or self.peek() == '{':
             token = self.peek()
+            reluctant = False
             if token in ['+', '*', '?']:
-                quant = self.next_token()  # consume quantifier symbol
+                quant = self.next_token()  # consume quantifier
+                if self.peek() == '?':
+                    self.next_token()  # consume reluctant marker
+                    reluctant = True
                 element = PatternAST(
                     type="quantifier",
-                    quantifier=quant,
+                    quantifier=quant + ("?" if reluctant else ""),
                     children=[element]
                 )
             elif token == '{':
@@ -82,14 +102,38 @@ class PatternParser:
                     max_val = min_val
                 if self.next_token() != '}':
                     raise ValueError("Expected '}' in quantifier")
+                # Check for reluctant marker after quantifier.
+                if self.peek() == '?':
+                    self.next_token()
+                    reluctant = True
+                quant_str = "{n,m}" + ("?" if reluctant else "")
                 element = PatternAST(
                     type="quantifier",
-                    quantifier="{n,m}",
+                    quantifier=quant_str,
                     quantifier_min=min_val,
                     quantifier_max=max_val,
                     children=[element]
                 )
+            else:
+                break
         return element
+
+    def parse_exclusion(self):
+        """
+        Parses an exclusion pattern of the form:
+           {- row_pattern -}
+        """
+        # Consume the exclusion start token.
+        token = self.next_token()
+        if token != "{-":
+            raise ValueError("Expected '{-' for exclusion syntax")
+        # Parse the inner row pattern.
+        inner_pattern = self.parse()
+        # Expect the exclusion end token.
+        if self.next_token() != "-}":
+            raise ValueError("Expected '-}' for exclusion syntax")
+        # Return a PatternAST node for exclusion.
+        return PatternAST(type="exclusion", children=[inner_pattern])
 
     def parse_element(self):
         token = self.next_token()
@@ -118,7 +162,7 @@ class PatternParser:
         if token in self.subset_mapping:
             alternatives = [PatternAST(type="literal", value=v) for v in self.subset_mapping[token]]
             return PatternAST(type="alternation", children=alternatives)
-        # Otherwise, return a literal node.
+        # Otherwise, treat as a literal.
         return PatternAST(type="literal", value=token)
 
 def parse_pattern_full(pattern_text: str, subset_mapping=None):

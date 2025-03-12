@@ -42,3 +42,44 @@ my_match_recognize_project/
     ├── test_parser.py
     ├── test_ast.py
     └── test_validator.py
+
+
+General function call parsing (for aggregates, classifier, match_number),
+Further semantic checks for aggregate 
+function arguments to ensure they do not contain nested navigation functions,
+
+Full support for reluctant quantifiers and proper exclusion syntax,
+And possibly more detailed modeling of unmatched row semantics.
+
+now can recheck again and told me if any thing missing ?
+
+General Function Call Parsing:
+Our current expression parser is focused on navigation and basic arithmetic. It does not yet support general function calls (like aggregate functions such as avg(), count(), classifier(), or match_number()). Full support for these would include parsing their arguments and representing them as function call AST nodes.
+
+
+
+Additional Aggregate Function Validation:
+While we validate that multiple aggregate arguments refer to the same pattern variable, we do not yet check that aggregate function arguments do not include any pattern navigation functions. The documentation requires that aggregate function arguments must not contain navigation functions, and this check should be added.
+
+
+
+Enhanced Quantifier and Exclusion Syntax:
+
+Reluctant Quantifiers:
+Our pattern parser supports greedy quantifiers (like +, *, ?, and {m,n}) but does not yet support the reluctant form (e.g. +? or {3,5}?).
+Exclusion Syntax:
+The documentation describes exclusion syntax using a format like {- row_pattern -}. Our current implementation uses a simple ^ operator for exclusions. Supporting the full syntax would require extending the pattern tokenizer and parser accordingly.
+
+
+
+Unmatched Row Handling & Detailed Output Semantics:
+Although we capture the rows_per_match and after_match_skip options and flag empty matches, the nuances of handling unmatched rows (especially with options like ALL ROWS PER MATCH WITH UNMATCHED ROWS) aren’t modeled in our AST or validation phase. That behavior is typically part of the evaluation phase—but it might be useful to represent these options more explicitly in the AST.
+
+
+
+
+
+
+
+Evaluation Engine:
+• Our work here focuses on parsing and AST construction plus semantic validation. A complete evaluation engine would be needed to fully implement running vs. final semantics during match evaluation, compute measures, and handle unmatched rows dynamically. This is typically a separate phase beyond parsing/AST building.
