@@ -9,6 +9,8 @@ class PatternAST:
     quantifier: str = None      # For quantifier nodes: "+", "*", "?", or "{n,m}"
     quantifier_min: int = None  # For bounded quantifiers
     quantifier_max: int = None  # For bounded quantifiers
+    line: int = 0               # Line number in source
+    column: int = 0             # Column number in source
 
 def visualize_pattern(ast: PatternAST, indent=0) -> str:
     spacing = " " * indent

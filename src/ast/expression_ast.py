@@ -2,15 +2,18 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ExpressionAST:
-    type: str                    # "literal", "identifier", "binary", "navigation", etc.
-    value: str = None            # Literal value or identifier name
-    operator: str = None         # For binary operations
+    type: str                   # "binary", "literal", "identifier", "pattern_variable_reference", etc.
+    value: str = None           # For literal and identifier nodes
+    operator: str = None        # For binary operation nodes
     children: list = field(default_factory=list)
-    # Fields for navigation functions:
-    navigation_type: str = None  # "PREV", "NEXT", "FIRST", "LAST"
-    offset: int = 0              # Optional offset for navigation
-    # Field for semantics (e.g., RUNNING, FINAL)
-    semantics: str = None
+    pattern_variable: str = None  # For pattern variable references
+    column: str = None          # For pattern variable references
+    semantics: str = None       # For RUNNING/FINAL semantics
+    navigation_type: str = None  # For navigation functions
+    offset: int = 0             # For navigation functions
+    count_star: bool = False    # For count(*) and count(var.*)
+    line: int = 0               # Line number in source
+    column: int = 0             # Column number in source
 
 def visualize_expression_ast(ast: ExpressionAST, indent=0) -> str:
     spacing = " " * indent

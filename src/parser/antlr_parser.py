@@ -5,6 +5,8 @@ from src.grammar.TrinoLexer import TrinoLexer
 from src.grammar.TrinoParser import TrinoParser
 from src.grammar.TrinoParserListener import TrinoParserListener
 
+# src/parser/antlr_parser.py - Fix for the error listener
+
 class CustomErrorListener:
     def __init__(self):
         self.errors = []
@@ -18,11 +20,11 @@ class CustomErrorListener:
         self.errors.append(error_message)
         
     def reportAttemptingFullContext(self, recognizer, dfa, startIndex, stopIndex, conflictingAlts, configs):
-        # We might not need to report this
+        # We don't need to report this, but the method must exist
         pass
         
     def reportContextSensitivity(self, recognizer, dfa, startIndex, stopIndex, prediction, configs):
-        # We might not need to report this
+        # We don't need to report this, but the method must exist
         pass
         
     def get_errors(self):

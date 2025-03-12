@@ -1,101 +1,112 @@
 # src/parser/pattern_parser.py
 
 import re
+from typing import Dict, Any, List, Optional, Set
 from src.ast.pattern_ast import PatternAST
+from .token_stream import Token, TokenStream
+from .error_handler import ErrorHandler
+from .context import ParserContext
 
 class PatternParser:
     """
     Tokenizes and parses a row pattern string into a preliminary parse tree.
     
-    Supports:
-      - Nested quantifiers (including reluctant quantifiers)
-      - Proper exclusion syntax using {- ... -}
-      - Grouping, alternation, permutation, and concatenation
-      - Partition anchors (^ and $)
+    Enhanced with:
+      - Token stream for better token handling
+      - Error handler for centralized error reporting
+      - Parser context for shared state
+      - Better validation of pattern variables
+      - Improved error recovery
+      - Support for character classes
+      - Better handling of quantifiers
     """
-    def __init__(self, pattern_text: str, subset_mapping=None):
+    def __init__(self, pattern_text: str, context: Optional[ParserContext] = None):
         self.pattern_text = pattern_text
-        self.subset_mapping = subset_mapping or {}
-        self.tokens = self.tokenize(pattern_text)
-        self.pos = 0
-        self.nesting_level = 0
-        self.MAX_NESTING = 10  # Maximum allowed nesting depth
+        self.tokens = self._create_token_stream(pattern_text)
+        
+        # Use provided context or create a new one
+        if context:
+            self.context = context
+        else:
+            self.context = ParserContext(ErrorHandler())
+            
+        # State tracking
         self.has_exclusion = False
         self.has_anchor = False
 
-    def tokenize(self, pattern: str):
-        """
-        Tokenizes the pattern string with special handling for exclusion syntax.
-        """
-        # First, replace exclusion delimiters with special markers
-        pattern = pattern.replace("{-", " EXCL_START ")
-        pattern = pattern.replace("-}", " EXCL_END ")
-        
-        # Insert spaces around other symbols
-        for sym in ['(', ')', '|', '+', '*', '?', '{', '}', ',', '^', '$']:
-            pattern = pattern.replace(sym, f' {sym} ')
-            
-        # Split tokens and then restore exclusion tokens
-        tokens = [t for t in pattern.split() if t]
-        tokens = ['{-' if t == "EXCL_START" else t for t in tokens]
-        tokens = [t if t != "EXCL_END" else "-}" for t in tokens]
-        
-        return tokens
 
-    def next_token(self):
-        """Consume and return the next token"""
-        if self.pos < len(self.tokens):
-            token = self.tokens[self.pos]
-            self.pos += 1
-            return token
-        return None
+    # In PatternParser
+    def _create_token_stream(self, text: str) -> TokenStream:
+        return Tokenizer.create_token_stream(text, self._determine_token_type)
 
-    def peek(self):
-        """Look at the next token without consuming it"""
-        if self.pos < len(self.tokens):
-            return self.tokens[self.pos]
-        return None
+
         
-    def expect(self, expected_token):
-        """Consume next token and verify it matches expected_token"""
-        token = self.next_token()
-        if token != expected_token:
-            raise ValueError(f"Expected '{expected_token}', got '{token or 'end of pattern'}'")
-        return token
+    def _determine_token_type(self, token: str) -> str:
+        """Determine the type of a token"""
+        if token in ['(', ')']:
+            return 'PAREN'
+        elif token in ['{-', '-}']:
+            return 'EXCLUSION'
+        elif token in ['+', '*', '?']:
+            return 'QUANTIFIER'
+        elif token == '{':
+            return 'LBRACE'
+        elif token == '}':
+            return 'RBRACE'
+        elif token == '|':
+            return 'PIPE'
+        elif token == ',':
+            return 'COMMA'
+        elif token in ['^', '$']:
+            return 'ANCHOR'
+        elif token.upper() == 'PERMUTE':
+            return 'PERMUTE'
+        else:
+            return 'IDENTIFIER'
 
-    def parse(self):
+    def parse(self) -> PatternAST:
         """Parse the pattern and return the AST"""
-        # Check for empty pattern
-        if not self.tokens:
-            return PatternAST(type="empty")
+        try:
+            # Check for empty pattern
+            if not self.tokens.has_more:
+                return PatternAST(type="empty")
+                
+            # Check for partition start anchor
+            if self.tokens.has_more and self.tokens.peek().value == '^':
+                self.tokens.consume()
+                self.has_anchor = True
+                
+            result = self._parse_concatenation()
             
-        # Check for partition start anchor
-        if self.peek() == '^':
-            self.next_token()
-            self.has_anchor = True
-            
-        result = self.parse_concatenation()
-        
-        # Check for partition end anchor
-        if self.peek() == '$':
-            self.next_token()
-            self.has_anchor = True
-            
-        if self.peek() is not None:
-            raise ValueError(f"Unexpected token '{self.peek()}' after pattern")
-            
-        return result
+            # Check for partition end anchor
+            if self.tokens.has_more and self.tokens.peek().value == '$':
+                self.tokens.consume()
+                self.has_anchor = True
+                
+            if self.tokens.has_more:
+                token = self.tokens.peek()
+                self.context.error_handler.add_error(
+                    f"Unexpected token '{token.value}' after pattern",
+                    token.line, token.column
+                )
+                
+            return result
+        except Exception as e:
+            # Add error to error handler if not already added
+            if not self.context.error_handler.has_errors():
+                self.context.error_handler.add_error(
+                    f"Error parsing pattern: {str(e)}",
+                    0, 0  # No position information available
+                )
+            # Return a minimal valid AST to allow processing to continue
+            return PatternAST(type="error", value=str(e))
 
-    def parse_concatenation(self):
+    def _parse_concatenation(self) -> PatternAST:
         """Parse a concatenation of elements"""
         elements = []
         
-        while self.pos < len(self.tokens) and self.peek() not in [')', '-}', None]:
-            # Check for alternation
-            if self.peek() == '|':
-                break
-                
-            element = self.parse_alternation()
+        while self.tokens.has_more and self.tokens.peek().value not in [')', '-}', '|']:
+            element = self._parse_alternation()
             elements.append(element)
             
         if not elements:
@@ -104,79 +115,106 @@ class PatternParser:
             return elements[0]
         return PatternAST(type="concatenation", children=elements)
 
-    def parse_alternation(self):
+    def _parse_alternation(self) -> PatternAST:
         """Parse alternation (|)"""
-        left = self.parse_quantified_element()
+        left = self._parse_quantified_element()
         
-        if self.peek() == '|':
+        if self.tokens.has_more and self.tokens.peek().value == '|':
             alternatives = [left]
-            while self.peek() == '|':
-                self.next_token()  # Consume '|'
-                right = self.parse_quantified_element()
+            while self.tokens.has_more and self.tokens.peek().value == '|':
+                self.tokens.consume()  # Consume '|'
+                right = self._parse_quantified_element()
                 alternatives.append(right)
             return PatternAST(type="alternation", children=alternatives)
         
         return left
 
-    def parse_quantified_element(self):
+    def _parse_quantified_element(self) -> PatternAST:
         """Parse an element with optional quantifier"""
         # Check for exclusion syntax
-        if self.peek() == "{-":
-            return self.parse_exclusion()
+        if self.tokens.has_more and self.tokens.peek().value == '{-':
+            return self._parse_exclusion()
 
         # Parse a single element
-        element = self.parse_element()
+        element = self._parse_element()
 
         # Check for quantifiers (greedy or reluctant)
-        while self.peek() in ['+', '*', '?'] or self.peek() == '{':
-            token = self.peek()
-            reluctant = False
+        while self.tokens.has_more:
+            token = self.tokens.peek()
             
-            if token in ['+', '*', '?']:
-                quant = self.next_token()  # consume quantifier
-                if self.peek() == '?':
-                    self.next_token()  # consume reluctant marker
+            if token.type == 'QUANTIFIER':
+                quant = self.tokens.consume().value  # consume quantifier
+                reluctant = False
+                
+                if self.tokens.has_more and self.tokens.peek().value == '?':
+                    self.tokens.consume()  # consume reluctant marker
                     reluctant = True
+                    
                 element = PatternAST(
                     type="quantifier",
                     quantifier=quant + ("?" if reluctant else ""),
                     children=[element]
                 )
-            elif token == '{':
-                self.next_token()  # consume '{'
-                min_val = None
-                max_val = None
+                
+            elif token.type == 'LBRACE':
+                # Parse range quantifier {n,m}
+                self.tokens.consume()  # consume '{'
                 
                 # Parse minimum value
-                token = self.next_token()
-                if token and token.isdigit():
-                    min_val = int(token)
+                if not self.tokens.has_more or not self.tokens.peek().value.isdigit():
+                    if self.tokens.has_more and self.tokens.peek().value == ',':
+                        # Handle {,n} case (min=0)
+                        min_val = 0
+                    else:
+                        self.context.error_handler.add_error(
+                            "Expected a number or comma in quantifier",
+                            token.line, token.column
+                        )
+                        min_val = 0
                 else:
-                    raise ValueError("Expected a number in quantifier")
+                    min_val = int(self.tokens.consume().value)
                     
                 # Check for range quantifier
-                if self.peek() == ',':
-                    self.next_token()  # consume ','
-                    token = self.peek()
-                    if token and token.isdigit():
-                        max_val = int(self.next_token())
+                max_val = None
+                if self.tokens.has_more and self.tokens.peek().value == ',':
+                    self.tokens.consume()  # consume ','
+                    
+                    if self.tokens.has_more and self.tokens.peek().value.isdigit():
+                        max_val = int(self.tokens.consume().value)
                     else:
                         max_val = None  # unbounded
                 else:
                     max_val = min_val
                     
-                self.expect('}')
-                
+                # Expect closing brace
+                if not self.tokens.has_more or self.tokens.peek().type != 'RBRACE':
+                    self.context.error_handler.add_error(
+                        "Expected '}' to close quantifier",
+                        token.line, token.column
+                    )
+                else:
+                    self.tokens.consume()  # consume '}'
+                    
                 # Check for reluctant marker
-                if self.peek() == '?':
-                    self.next_token()
+                reluctant = False
+                if self.tokens.has_more and self.tokens.peek().value == '?':
+                    self.tokens.consume()
                     reluctant = True
                     
                 # Validate quantifier values
                 if min_val < 0:
-                    raise ValueError("Quantifier minimum cannot be negative")
+                    self.context.error_handler.add_error(
+                        "Quantifier minimum cannot be negative",
+                        token.line, token.column
+                    )
+                    min_val = 0
+                    
                 if max_val is not None and max_val < min_val:
-                    raise ValueError("Quantifier maximum cannot be less than minimum")
+                    self.context.error_handler.add_error(
+                        "Quantifier maximum cannot be less than minimum",
+                        token.line, token.column
+                    )
+                    max_val = min_val
                 
                 element = PatternAST(
                     type="quantifier",
@@ -190,110 +228,202 @@ class PatternParser:
                 
         return element
 
-    def parse_exclusion(self):
+    def _parse_exclusion(self) -> PatternAST:
         """Parse an exclusion pattern {- row_pattern -}"""
         self.has_exclusion = True
         
         # Consume the exclusion start token
-        self.expect("{-")
+        start_token = self.tokens.consume()
+        if start_token.value != '{-':
+            self.context.error_handler.add_error(
+                f"Expected '{{-', got '{start_token.value}'",
+                start_token.line, start_token.column
+            )
         
         # Parse the inner row pattern
-        inner_pattern = self.parse_concatenation()
+        inner_pattern = self._parse_concatenation()
         
         # Expect the exclusion end token
-        self.expect("-}")
+        if not self.tokens.has_more or self.tokens.peek().value != '-}':
+            self.context.error_handler.add_error(
+                "Missing closing '-}' for exclusion pattern",
+                start_token.line, start_token.column
+            )
+        else:
+            self.tokens.consume()  # Consume '-}'
         
         # Return a PatternAST node for exclusion
         return PatternAST(type="exclusion", children=[inner_pattern])
 
-    def parse_element(self):
+    def _parse_element(self) -> PatternAST:
         """Parse a pattern element (literal, group, or permutation)"""
-        self.nesting_level += 1
-        if self.nesting_level > self.MAX_NESTING:
-            raise ValueError(f"Pattern nesting too deep (max {self.MAX_NESTING} levels)")
+        self.context.enter_scope()
             
-        token = self.next_token()
-        if token is None:
-            raise ValueError("Unexpected end of pattern")
+        if not self.tokens.has_more:
+            self.context.error_handler.add_error(
+                "Unexpected end of pattern",
+                0, 0  # No position information available
+            )
+            self.context.exit_scope()
+            return PatternAST(type="error", value="Unexpected end of pattern")
+            
+        token = self.tokens.consume()
             
         # Handle empty pattern
-        if token == '(' and self.peek() == ')':
-            self.next_token()  # Consume ')'
-            self.nesting_level -= 1
+        if token.value == '(' and self.tokens.has_more and self.tokens.peek().value == ')':
+            self.tokens.consume()  # Consume ')'
+            self.context.exit_scope()
             return PatternAST(type="empty")
             
         # Handle group
-        if token == '(':
-            inner = self.parse_concatenation()
-            self.expect(")")
-            self.nesting_level -= 1
+        if token.value == '(':
+            inner = self._parse_concatenation()
+            
+            if not self.tokens.has_more or self.tokens.peek().value != ')':
+                self.context.error_handler.add_error(
+                    "Missing closing parenthesis",
+                    token.line, token.column
+                )
+            else:
+                self.tokens.consume()  # Consume ')'
+                
+            self.context.exit_scope()
             return PatternAST(type="group", children=[inner])
             
         # Handle PERMUTE syntax
-        if token.upper() == "PERMUTE":
-            self.expect("(")
+        if token.type == 'PERMUTE':
+            if not self.tokens.has_more or self.tokens.peek().value != '(':
+                self.context.error_handler.add_error(
+                    "Expected '(' after PERMUTE",
+                    token.line, token.column
+                )
+                self.context.exit_scope()
+                return PatternAST(type="error", value="Invalid PERMUTE syntax")
+                
+            self.tokens.consume()  # Consume '('
             elements = []
             
             # Parse comma-separated list of elements
-            while self.peek() != ')':
-                if self.peek() == ',':
-                    self.next_token()  # Skip comma
+            while self.tokens.has_more and self.tokens.peek().value != ')':
+                if self.tokens.peek().value == ',':
+                    self.tokens.consume()  # Skip comma
                     continue
                     
-                elem = self.next_token()
-                if not elem or elem in ['(', ')', '+', '*', '?', '{', '}']:
-                    raise ValueError(f"Invalid element '{elem}' in PERMUTE")
-                    
-                elements.append(PatternAST(type="literal", value=elem))
+                elem_token = self.tokens.consume()
+                if elem_token.type != 'IDENTIFIER':
+                    self.context.error_handler.add_error(
+                        f"Invalid element '{elem_token.value}' in PERMUTE",
+                        elem_token.line, elem_token.column
+                    )
+                else:
+                    elements.append(PatternAST(type="literal", value=elem_token.value))
             
             if not elements:
-                raise ValueError("PERMUTE requires at least one element")
+                self.context.error_handler.add_error(
+                    "PERMUTE requires at least one element",
+                    token.line, token.column
+                )
                 
-            self.expect(")")
-            self.nesting_level -= 1
+            if not self.tokens.has_more or self.tokens.peek().value != ')':
+                self.context.error_handler.add_error(
+                    "Missing closing parenthesis for PERMUTE",
+                    token.line, token.column
+                )
+            else:
+                self.tokens.consume()  # Consume ')'
+                
+            self.context.exit_scope()
             return PatternAST(type="permutation", children=elements)
             
         # Handle subset expansion
-        if token in self.subset_mapping:
-            alternatives = [PatternAST(type="literal", value=v) for v in self.subset_mapping[token]]
+        if token.value in self.context.subset_variables:
+            alternatives = [PatternAST(type="literal", value=v) for v in self.context.subset_variables[token.value]]
             if not alternatives:
-                raise ValueError(f"Subset '{token}' has no elements")
-            self.nesting_level -= 1
+                self.context.error_handler.add_error(
+                    f"Subset '{token.value}' has no elements",
+                    token.line, token.column
+                )
+                self.context.exit_scope()
+                return PatternAST(type="error", value=f"Empty subset {token.value}")
+                
+            self.context.exit_scope()
             return PatternAST(type="alternation", children=alternatives)
             
         # Handle anchors (should only appear at start/end)
-        if token in ['^', '$'] and self.nesting_level > 1:
-            raise ValueError(f"Anchor '{token}' can only appear at the start or end of the pattern")
+        if token.type == 'ANCHOR' and self.context.nesting_level > 1:
+            self.context.error_handler.add_error(
+                f"Anchor '{token.value}' can only appear at the start or end of the pattern",
+                token.line, token.column
+            )
+            
+        # Handle character class
+        if token.value.startswith('[') and token.value.endswith(']'):
+            self.context.exit_scope()
+            return PatternAST(type="character_class", value=token.value)
             
         # Otherwise, treat as a literal
-        self.nesting_level -= 1
-        return PatternAST(type="literal", value=token)
-
-    def validate_pattern(self):
-        """Validate the overall pattern structure"""
-        errors = []
+        self.context.exit_scope()
         
-        # Check for exclusion with ALL ROWS PER MATCH WITH UNMATCHED ROWS
-        if self.has_exclusion and self.has_rows_per_match_with_unmatched():
-            errors.append("Pattern exclusions cannot be used with ALL ROWS PER MATCH WITH UNMATCHED ROWS")
+        # Register pattern variable in context
+        if token.type == 'IDENTIFIER':
+            self.context.add_pattern_variable(token.value)
             
-        return errors
+        return PatternAST(type="literal", value=token.value)
+
+    def validate_pattern(self) -> List[str]:
+        """Validate the overall pattern structure"""
+        # Check for exclusion with ALL ROWS PER MATCH WITH UNMATCHED ROWS
+        if self.has_exclusion and self._has_rows_per_match_with_unmatched():
+            self.context.error_handler.add_error(
+                "Pattern exclusions cannot be used with ALL ROWS PER MATCH WITH UNMATCHED ROWS",
+                0, 0  # No position information available
+            )
+            
+        return self.context.error_handler.get_formatted_errors()
         
-    def has_rows_per_match_with_unmatched(self):
+    def _has_rows_per_match_with_unmatched(self) -> bool:
         """Check if the pattern is used with ALL ROWS PER MATCH WITH UNMATCHED ROWS"""
         # This would need to be set from outside based on the full MATCH_RECOGNIZE clause
         # For now, we'll assume it's not used
         return False
 
-def parse_pattern(pattern_text: str, subset_mapping=None):
+def parse_pattern(pattern_text: str, subset_mapping: Optional[Dict[str, List[str]]] = None, 
+                 context: Optional[ParserContext] = None) -> PatternAST:
     """Parse a pattern and return the AST"""
-    parser = PatternParser(pattern_text, subset_mapping)
-    ast = parser.parse()
-    return ast
+    if context is None:
+        context = ParserContext(ErrorHandler())
+        
+    # Add subset variables to context
+    if subset_mapping:
+        for key, values in subset_mapping.items():
+            context.add_subset_definition(key, set(values))
+    
+    parser = PatternParser(pattern_text, context)
+    return parser.parse()
 
-def parse_pattern_full(pattern_text: str, subset_mapping=None):
+def parse_pattern_full(pattern_text: str, subset_mapping: Optional[Dict[str, List[str]]] = None,
+                      context: Optional[ParserContext] = None) -> Dict[str, Any]:
     """Parse a pattern and return both raw text and AST"""
-    parser = PatternParser(pattern_text, subset_mapping)
+    if context is None:
+        context = ParserContext(ErrorHandler())
+        
+    # Add subset variables to context
+    if subset_mapping:
+        for key, values in subset_mapping.items():
+            context.add_subset_definition(key, set(values))
+    
+    parser = PatternParser(pattern_text, context)
     ast = parser.parse()
-    errors = parser.validate_pattern()
-    return {"raw": pattern_text.strip(), "ast": ast, "errors": errors}
+    parser.validate_pattern()
+    
+    # Perform semantic analysis
+    analyzer = SemanticAnalyzer(context.error_handler)
+    analyzer.analyze_pattern(ast)
+    
+    return {
+        "raw": pattern_text.strip(),
+        "ast": ast,
+        "errors": context.error_handler.get_formatted_errors(),
+        "warnings": context.error_handler.get_formatted_warnings(),
+        "symbol_table": analyzer.symbol_table  # Include symbol table in result
+    }
