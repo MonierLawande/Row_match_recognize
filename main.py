@@ -1,15 +1,15 @@
 #!/usr/bin/env python
 """
 Main entry point for the MATCH_RECOGNIZE project.
+Demonstrates parsing a SQL query with MATCH_RECOGNIZE and extended expression features.
 """
 
 import logging
 from src.ast.ast_builder import build_enhanced_match_recognize_ast
-from src.ast.expression_ast import visualize_expression_ast  # (if you want to visualize an expression)
+from src.ast.expression_ast import visualize_expression_ast
 from src.ast.pattern_ast import visualize_pattern
 from src.parser.expression_parser import parse_expression_full
 
-# Configure logging
 logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
 logger = logging.getLogger(__name__)
 
@@ -20,9 +20,19 @@ def main():
         "MATCH_RECOGNIZE ("
         "  PARTITION BY custkey "
         "  ORDER BY orderdate "
-        "  PATTERN (A+ B) "
-        "  DEFINE A AS price > 10, "
-        "         B AS price < 20"
+        "  MEASURES "
+        "         A.totalprice AS starting_price, "
+        "         LAST(B.totalprice) AS bottom_price, "
+        "         LAST(U.totalprice) AS top_price, "
+        "         match_number() AS match_no "
+        "  ONE ROW PER MATCH "
+        "  AFTER MATCH SKIP PAST LAST ROW "
+        "  PATTERN (A B+ C+ D+) "
+        "  SUBSET U = (C, D) "
+        "  DEFINE "
+        "         B AS totalprice < PREV(totalprice), "
+        "         C AS totalprice > PREV(totalprice) AND totalprice <= A.totalprice, "
+        "         D AS totalprice > PREV(totalprice) "
         ");"
     )
     
@@ -42,11 +52,11 @@ def main():
         print("\nPattern Visualization:")
         print(visualize_pattern(ast.pattern["ast"]))
     
-    # Example: Parsing an independent expression
-    expression = "price * 1.1 + 5"
-    expr_ast = parse_expression_full(expression)
+    # Example: Parsing an independent expression with nested navigation and semantics
+    expression = "RUNNING PREV(FIRST(A.totalprice, 3), 2) + 5"
+    expr_result = parse_expression_full(expression)
     print("\nParsed Expression AST:")
-    print(expr_ast)
+    print(visualize_expression_ast(expr_result["ast"]))
 
 if __name__ == "__main__":
     main()

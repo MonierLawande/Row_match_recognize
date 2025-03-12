@@ -6,7 +6,7 @@ class TestValidator(unittest.TestCase):
     def test_missing_clauses(self):
         ast = MatchRecognizeAST()
         errors = validate_match_recognize_ast(ast)
-        self.assertTrue(len(errors) >= 3)  # Expecting errors for missing PARTITION BY, ORDER BY, etc.
+        self.assertGreaterEqual(len(errors), 4)
 
 if __name__ == '__main__':
     unittest.main()

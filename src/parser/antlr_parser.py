@@ -14,7 +14,7 @@ class CustomErrorListener:
 
 def parse_input(query: str):
     """
-    Initializes ANTLR lexer, parser and returns the parse tree.
+    Initializes ANTLR lexer and parser and returns the parse tree.
     """
     input_stream = InputStream(query)
     lexer = TrinoLexer(input_stream)
