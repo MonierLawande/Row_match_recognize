@@ -6,3 +6,10 @@ An advanced pattern parser with subset expansion (AdvancedPatternVisitor in pars
 A stub for pattern optimization (optimize_pattern).
 Deep semantic validation in the AST builder.
 Clear integration points for further enhancements (detailed expression sub‑ASTs, further pattern optimizations, and semantic validations).
+
+
+
+
+
+
+

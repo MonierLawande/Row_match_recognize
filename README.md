@@ -61,7 +61,7 @@ Our current expression parser is focused on navigation and basic arithmetic. It 
 Additional Aggregate Function Validation:
 While we validate that multiple aggregate arguments refer to the same pattern variable, we do not yet check that aggregate function arguments do not include any pattern navigation functions. The documentation requires that aggregate function arguments must not contain navigation functions, and this check should be added.
 
-
+based on requirements was sent before ,is parser and AST meet this rquirments well in details ? 
 
 Enhanced Quantifier and Exclusion Syntax:
 
@@ -83,3 +83,26 @@ Although we capture the rows_per_match and after_match_skip options and flag emp
 
 Evaluation Engine:
 • Our work here focuses on parsing and AST construction plus semantic validation. A complete evaluation engine would be needed to fully implement running vs. final semantics during match evaluation, compute measures, and handle unmatched rows dynamically. This is typically a separate phase beyond parsing/AST building.
+
+
+
+
+
+Option 3: Evaluation engine improvements first (implement explicit RUNNING vs FINAL semantics, optimize pattern matching performance, expand edge-case testing)
+ Clearly implement distinct running and final semantics in measure evaluation.
+ Optimize pattern matching via automata (optional, recommended for efficiency).
+ Extend testing for edge cases and larger datasets for performance validation.
+
+
+
+
+
+
+
+
+Priority	Task
+🔥 High	Improve nested function parsing and grammar restrictions
+🔥 High	Enhance validation error clarity and coverage
+⚙️ Medium	Implement explicit RUNNING vs. FINAL semantics
+⚙️ Medium	Extend testing for robustness
+🚀 Optional	Automata-based optimization
