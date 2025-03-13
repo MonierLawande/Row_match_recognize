@@ -6,7 +6,7 @@ Demonstrates parsing a SQL query with MATCH_RECOGNIZE and extended expression fe
 
 import logging
 from src.ast.ast_builder import build_enhanced_match_recognize_ast
-from src.ast.expression_ast import visualize_expression_ast
+from ast.expression_optimizer import visualize_expression_ast
 from src.ast.pattern_ast import visualize_pattern
 from src.parser.expression_parser import parse_expression_full
 

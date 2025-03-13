@@ -4,6 +4,7 @@ from typing import Dict, Any, List
 from src.validator.semantic_validator import validate_semantics
 from src.validator.pattern_validator import validate_pattern
 from src.ast.match_recognize_ast import MatchRecognizeAST
+from src.ast.expression_ast import ExpressionAST
 
 def validate_ast(ast: Dict[str, Any]) -> Dict[str, Any]:
     """

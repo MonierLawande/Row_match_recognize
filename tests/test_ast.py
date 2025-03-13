@@ -1,5 +1,5 @@
 import unittest
-from src.ast.expression_ast import ExpressionAST, visualize_expression_ast
+from ast.expression_optimizer import ExpressionAST, visualize_expression_ast
 from src.ast.pattern_ast import PatternAST, visualize_pattern
 
 class TestASTVisualization(unittest.TestCase):

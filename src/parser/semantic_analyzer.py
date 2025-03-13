@@ -1,8 +1,8 @@
 # src/parser/semantic_analyzer.py
 
 from typing import Dict, Set, List, Any, Optional
-from src.ast.expression_ast import ExpressionAST
-from src.ast.pattern_ast import PatternAST
+from src.ast.expression_ast import ExpressionAST  # Use full path
+from src.ast.pattern_ast import PatternAST  # Use full path
 from .error_handler import ErrorHandler
 from .symbol_table import SymbolTable, SymbolType
 
