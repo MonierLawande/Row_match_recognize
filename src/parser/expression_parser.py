@@ -173,7 +173,14 @@ class ExpressionParser:
             return self.parse_primary()
 
     def parse_primary(self) -> ExpressionAST:
-        """Parse a primary expression with enhanced error handling."""
+        # First, check for an unexpected token of type UNKNOWN.
+        if self.tokens.has_more and self.tokens.peek().type == 'UNKNOWN':
+            token = self.tokens.consume()
+            self.context.error_handler.add_error(
+                f"Unexpected token '{token.value}'", token.line, token.column
+            )
+            return ExpressionAST(type="error", value=f"Unexpected token '{token.value}'")
+
         semantics = None
         if self.tokens.has_more and self.tokens.peek().type == 'SEMANTICS':
             semantics_token = self.tokens.consume()
@@ -192,6 +199,7 @@ class ExpressionParser:
                 token.value = parts[0]
                 new_token = Token(value='(', type='PAREN', line=token.line, column=token.column + len(parts[0]))
                 self.tokens.prepend(new_token)
+            # If function call is expected, ensure '(' follows.
             if token.value.lower() in AGGREGATE_FUNCTIONS or token.value.upper() in NAVIGATION_FUNCTIONS or token.value.upper() in ['CLASSIFIER', 'MATCH_NUMBER']:
                 if not (self.tokens.has_more and self.tokens.peek().type == 'PAREN' and self.tokens.peek().value == '('):
                     self.context.error_handler.add_error(
@@ -199,8 +207,8 @@ class ExpressionParser:
                         token.line, token.column
                     )
                     return ExpressionAST(type="error", value=f"Missing '(' after {token.value}")
-            # Check for pattern variable reference.
             if self.tokens.has_more and self.tokens.peek().value == '.':
+                # Pattern variable reference.
                 pattern_var = token.value
                 if not self._is_valid_pattern_variable(pattern_var):
                     self.context.error_handler.add_warning(
@@ -247,15 +255,7 @@ class ExpressionParser:
                         line=token.line,
                         column_pos=token.column
                     )
-        # Consume any token not already handled.
         token = self.tokens.consume()
-        # If token type is UNKNOWN, report error immediately.
-        if token.type == 'UNKNOWN':
-            self.context.error_handler.add_error(
-                f"Unexpected token '{token.value}'",
-                token.line, token.column
-            )
-            return ExpressionAST(type="error", value=f"Unexpected token '{token.value}'")
         if token.type == 'LITERAL':
             return ExpressionAST(
                 type="literal",
@@ -373,18 +373,14 @@ class ExpressionParser:
         )
 
     def _parse_navigation_function(self, func_name: str, semantics: Optional[str], token: Token) -> ExpressionAST:
-        if self.in_aggregate:
-            self.context.error_handler.add_error(
-                f"Navigation function {func_name} cannot be used inside aggregate functions",
-                token.line, token.column
-            )
         self.context.enter_scope()
         self.in_navigation = True
         self._expect('(', token)
         target_expr = self.parse_logical_expression()
+        # Require that target_expr is a qualified column reference.
         if target_expr.type != "pattern_variable_reference":
             self.context.error_handler.add_error(
-                f"Navigation function {func_name} requires at least one column reference (e.g. A.column)",
+                f"Navigation function {func_name} requires at least one column reference",
                 token.line, token.column
             )
         offset = 0
@@ -437,13 +433,7 @@ class ExpressionParser:
 
     def _parse_function_call(self, func_name: str, semantics: Optional[str], token: Token) -> ExpressionAST:
         is_aggregate = func_name.lower() in AGGREGATE_FUNCTIONS
-        if is_aggregate and self.in_aggregate:
-            self.context.error_handler.add_error(
-                f"Nested aggregate functions are not allowed: {func_name}",
-                token.line, token.column
-            )
-        if is_aggregate:
-            self.in_aggregate = True
+        # Removed immediate nested aggregate check.
         self._expect('(', token)
         arguments = []
         if self.tokens.has_more and self.tokens.peek().value != ')':
@@ -456,17 +446,17 @@ class ExpressionParser:
         self._expect(')', token)
         if is_aggregate:
             self._validate_aggregate_arguments(arguments, token)
-            self.in_aggregate = False
         return ExpressionAST(
             type="aggregate" if is_aggregate else "function",
             value=func_name,
-            children=arguments if arguments is not None else [],
+            children=arguments,
             semantics=semantics,
             line=token.line,
             column_pos=token.column
         )
 
     def _validate_aggregate_arguments(self, arguments: List[ExpressionAST], token: Token) -> None:
+        """Validate that aggregate function arguments are consistent."""
         pattern_vars = set()
         for arg in arguments:
             if hasattr(arg, 'pattern_variable') and arg.pattern_variable:
@@ -476,18 +466,14 @@ class ExpressionParser:
                     "Aggregate function arguments cannot contain classifier functions",
                     token.line, token.column
                 )
-            if arg.type == "aggregate":
-                self.context.error_handler.add_error(
-                    "Nested aggregate functions are not allowed",
-                    token.line, token.column
-                )
-        explicit_vars = {v for v in pattern_vars if v != "universal"}
+        direct_refs = [arg.pattern_variable for arg in arguments if hasattr(arg, 'pattern_variable') and arg.pattern_variable]
+        explicit_vars = {v for v in direct_refs if v != "universal"}
         if explicit_vars and len(explicit_vars) > 1:
             self.context.error_handler.add_error(
-                "All arguments in an aggregate function must refer to the same pattern variable",
+                "All direct arguments in an aggregate function must refer to the same pattern variable",
                 token.line, token.column
             )
-        if explicit_vars and len(explicit_vars) != len(arguments):
+        if explicit_vars and len(explicit_vars) != len(direct_refs):
             self.context.error_handler.add_error(
                 "Mixed explicit and universal aggregate arguments are not allowed",
                 token.line, token.column
@@ -559,7 +545,7 @@ def parse_expression_full(expr_text: str, in_measures_clause: bool = True, conte
     parser = ExpressionParser(expr_text, context)
     ast = parser.parse()
     
-    from .semantic_analyzer import SemanticAnalyzer
+    from .semantic_analyzer import SemanticAnalyzer  # Avoid circular imports
     analyzer = SemanticAnalyzer(context.error_handler)
     analyzer.analyze_expression(ast, "expression")
     
