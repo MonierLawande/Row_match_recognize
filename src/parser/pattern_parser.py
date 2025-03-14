@@ -83,10 +83,16 @@ class PatternParser:
             
     def _parse_part(self, part: str) -> PatternAST:
         """Parse a single part of the pattern"""
-        # Check for quantifiers
+        # Check for quantifiers: the base must be a valid non-empty alphanumeric literal.
         if part.endswith('+'):
             var_name = part[:-1]
-            self.pattern_variables.add(var_name)
+            if not var_name or not var_name.isalnum():
+                self.context.error_handler.add_error(
+                    f"Invalid quantifier placement in pattern: '{part}'",
+                    1, 1
+                )
+            else:
+                self.pattern_variables.add(var_name)
             return PatternAST(
                 type="quantifier",
                 quantifier="+",
@@ -101,7 +107,13 @@ class PatternParser:
             )
         elif part.endswith('*'):
             var_name = part[:-1]
-            self.pattern_variables.add(var_name)
+            if not var_name or not var_name.isalnum():
+                self.context.error_handler.add_error(
+                    f"Invalid quantifier placement in pattern: '{part}'",
+                    1, 1
+                )
+            else:
+                self.pattern_variables.add(var_name)
             return PatternAST(
                 type="quantifier",
                 quantifier="*",
@@ -116,7 +128,13 @@ class PatternParser:
             )
         elif part.endswith('?'):
             var_name = part[:-1]
-            self.pattern_variables.add(var_name)
+            if not var_name or not var_name.isalnum():
+                self.context.error_handler.add_error(
+                    f"Invalid quantifier placement in pattern: '{part}'",
+                    1, 1
+                )
+            else:
+                self.pattern_variables.add(var_name)
             return PatternAST(
                 type="quantifier",
                 quantifier="?",
@@ -130,7 +148,12 @@ class PatternParser:
                 column=1
             )
         else:
-            # Regular pattern variable
+            # Regular pattern variable: it must be alphanumeric.
+            if not part.isalnum():
+                self.context.error_handler.add_error(
+                    f"Unknown token in pattern: '{part}'",
+                    1, 1
+                )
             self.pattern_variables.add(part)
             return PatternAST(
                 type="literal",

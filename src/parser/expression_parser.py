@@ -188,7 +188,11 @@ class ExpressionParser:
 
         if self.tokens.has_more and self.tokens.peek().value == '(':
             paren_token = self.tokens.consume()
+            # NEW: Increase nesting level when entering parentheses
+            self.context.enter_scope()
             expr = self.parse_logical_expression()
+            # NEW: Exit scope after finishing nested expression
+            self.context.exit_scope()
             self._expect(')', paren_token)
             # Attach semantics (if any) to the expression
             if semantics:
