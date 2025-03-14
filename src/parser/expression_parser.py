@@ -190,6 +190,9 @@ class ExpressionParser:
             paren_token = self.tokens.consume()
             expr = self.parse_logical_expression()
             self._expect(')', paren_token)
+            # Attach semantics (if any) to the expression
+            if semantics:
+                expr.semantics = semantics
             return expr
 
         if self.tokens.has_more and self.tokens.peek().type in ['IDENTIFIER', 'AGGREGATE', 'NAVIGATION']:
