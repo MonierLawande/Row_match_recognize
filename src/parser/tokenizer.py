@@ -1,3 +1,5 @@
+# src/parser/tokenizer.py
+
 from dataclasses import dataclass
 from typing import List, Callable, Optional
 
@@ -47,38 +49,43 @@ class TokenStream:
 class Tokenizer:
     """Tokenizer for SQL expressions and patterns."""
     @staticmethod
-    def create_token_stream(text: str, token_type_determiner: Callable[[str], str]) -> TokenStream:
+    def create_token_stream(
+        text: str, 
+        token_type_determiner: Callable[[str], str],
+        punctuation: Optional[List[str]] = None
+    ) -> TokenStream:
+        # Default punctuation set for SQL expressions.
+        default_punctuation = ['(', ')', ',', '+', '-', '*', '/', '.', '=', '>', '<', '!']
+        # For patterns, we may need additional punctuation.
+        punct = punctuation if punctuation is not None else default_punctuation
+        
         lines = text.split('\n')
         tokens: List[Token] = []
         
         for line_num, line in enumerate(lines, 1):
             pos = 0
             while pos < len(line):
+                # Skip whitespace
                 while pos < len(line) and line[pos].isspace():
                     pos += 1
                 if pos >= len(line):
                     continue
-                if line[pos] in ['(', ')', ',', '+', '-', '*', '/', '.', '=', '>', '<', '!']:
+                # If character is in punctuation set, tokenize it.
+                if line[pos] in punct:
+                    # Handle compound operators (>=, <=, etc.)
                     if pos + 1 < len(line) and line[pos:pos+2] in ['>=', '<=', '!=', '<>']:
-                        token_type = token_type_determiner(line[pos:pos+2])
-                        tokens.append(Token(
-                            type=token_type,
-                            value=line[pos:pos+2],
-                            line=line_num,
-                            column=pos + 1
-                        ))
+                        token_val = line[pos:pos+2]
+                        token_type = token_type_determiner(token_val)
+                        tokens.append(Token(type=token_type, value=token_val, line=line_num, column=pos+1))
                         pos += 2
                         continue
-                    token_type = token_type_determiner(line[pos])
-                    tokens.append(Token(
-                        type=token_type,
-                        value=line[pos],
-                        line=line_num,
-                        column=pos + 1
-                    ))
+                    token_val = line[pos]
+                    token_type = token_type_determiner(token_val)
+                    tokens.append(Token(type=token_type, value=token_val, line=line_num, column=pos+1))
                     pos += 1
                 else:
                     start = pos
+                    # Handle string literals
                     if line[pos] == "'":
                         pos += 1
                         while pos < len(line) and line[pos] != "'":
@@ -96,20 +103,10 @@ class Tokenizer:
                         token_value = line[start:pos]
                         token_type = 'LITERAL'
                     else:
-                        while pos < len(line) and not line[pos].isspace() and line[pos] not in ['(', ')', ',', '+', '-', '*', '/', '.', '=', '>', '<', '!']:
+                        while pos < len(line) and not line[pos].isspace() and line[pos] not in punct:
                             pos += 1
                         token_value = line[start:pos]
                         token_type = token_type_determiner(token_value)
-                    tokens.append(Token(
-                        type=token_type,
-                        value=token_value,
-                        line=line_num,
-                        column=start + 1
-                    ))
-        tokens.append(Token(
-            type='EOF',
-            value='',
-            line=len(lines),
-            column=1
-        ))
+                    tokens.append(Token(type=token_type, value=token_value, line=line_num, column=start+1))
+        tokens.append(Token(type='EOF', value='', line=len(lines), column=1))
         return TokenStream(tokens)

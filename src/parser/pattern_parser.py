@@ -4,136 +4,118 @@ from typing import Dict, Any, Optional, List, Set, Tuple
 from src.parser.parse_tree import ParseTreeNode
 from .parser_util import ErrorHandler, ParserContext
 from .tokenizer import Token, TokenStream, Tokenizer
+
 class PatternParser:
     """
     A recursive descent parser for pattern expressions in MATCH_RECOGNIZE.
-    This parser produces a parse tree.
+    Produces a parse tree.
     """
     
     def __init__(self, pattern_text: str, context: Optional[ParserContext] = None):
         self.pattern_text = pattern_text
-        
-        if context:
-            self.context = context
-        else:
-            self.context = ParserContext(ErrorHandler())
-            
-        self.tokens = self._create_token_stream(pattern_text)
-        self.pattern_variables = set()
-        
-    def _create_token_stream(self, text: str) -> TokenStream:
-        return Tokenizer.create_token_stream(text, self._determine_token_type)
-        
+        self.context = context if context else ParserContext(ErrorHandler())
+        # Use a punctuation set that includes additional characters for patterns.
+        pattern_punctuation = ['(', ')', ',', '+', '-', '*', '/', '.', '=', '>', '<', '!', '|', '?']
+        self.tokens: TokenStream = Tokenizer.create_token_stream(pattern_text, self._determine_token_type, punctuation=pattern_punctuation)
+        self.current_token = self.tokens.consume()
+        self.pattern_variables: Set[str] = set()
+    
     def _determine_token_type(self, token: str) -> str:
-        """Determine the type of a token in pattern syntax."""
-        if token in ['(', ')', '{', '}', '[', ']', '^', '$', '-']:
+        if token in ['(', ')', '{', '}', '[', ']', '^', '$']:
             return 'SPECIAL'
         elif token in ['*', '+', '?']:
             return 'QUANTIFIER'
-        elif token in ['|', ',']:
+        elif token == '|':
+            return 'ALTERNATION'
+        elif token == ',':
             return 'OPERATOR'
         elif token.isalnum():
             return 'VARIABLE'
         else:
             return 'UNKNOWN'
-            
+    
+    def _eat(self, token_value: str):
+        if self.current_token and self.current_token.value == token_value:
+            self.current_token = self.tokens.consume()
+        else:
+            line = self.current_token.line if self.current_token else 0
+            col = self.current_token.column if self.current_token else 0
+            self.context.error_handler.add_error(
+                f"Expected token '{token_value}' but got '{self.current_token.value if self.current_token else 'EOF'}'",
+                line, col
+            )
+    
     def parse(self) -> ParseTreeNode:
-        """Parse the pattern and return the parse tree."""
-        try:
-            pattern_text = self.pattern_text.strip()
-            if pattern_text.startswith('(') and pattern_text.endswith(')'):
-                pattern_text = pattern_text[1:-1].strip()
-                
-            parts = pattern_text.split()
-            if not parts:
-                return ParseTreeNode("empty")
-                
-            if len(parts) > 1:
-                children = []
-                for part in parts:
-                    children.append(self._parse_part(part))
-                return ParseTreeNode(
-                    node_type="concatenation",
-                    token={"line": 1, "column": 1},
-                    children=children
-                )
+        return self._parse_pattern()
+    
+    def _parse_pattern(self) -> ParseTreeNode:
+        return self._parse_alternation()
+    
+    def _parse_alternation(self) -> ParseTreeNode:
+        left = self._parse_concatenation()
+        while self.current_token and self.current_token.type == 'ALTERNATION':
+            self._eat('|')
+            right = self._parse_concatenation()
+            left = ParseTreeNode("alternation", token={"value": "|"}, children=[left, right])
+        return left
+    
+    def _parse_concatenation(self) -> ParseTreeNode:
+        nodes = []
+        while self.current_token and self.current_token.value != ')' and self.current_token.type != 'ALTERNATION' and self.current_token.type != 'EOF':
+            term = self._parse_term()
+            if term:
+                nodes.append(term)
+        if not nodes:
+            return ParseTreeNode("empty")
+        if len(nodes) == 1:
+            return nodes[0]
+        return ParseTreeNode("concatenation", token={"value": "concatenation"}, children=nodes)
+    
+    def _parse_term(self) -> ParseTreeNode:
+        factor = self._parse_factor()
+        if self.current_token and self.current_token.type == 'QUANTIFIER':
+            quant = self.current_token.value
+            self._eat(quant)
+            return ParseTreeNode("quantifier", token={"quantifier": quant}, children=[factor])
+        return factor
+    
+    def _parse_factor(self) -> ParseTreeNode:
+        if self.current_token and self.current_token.type == 'QUANTIFIER':
+            token = self.current_token
+            self._eat(token.value)
+            self.context.error_handler.add_error(f"Invalid quantifier placement in pattern: '{token.value}'", token.line, token.column)
+            return ParseTreeNode("error", token={"value": token.value})
+        
+        if self.current_token and self.current_token.value == '(':
+            self._eat('(')
+            node = self._parse_pattern()
+            if self.current_token and self.current_token.value == ')':
+                self._eat(')')
             else:
-                return self._parse_part(parts[0])
-                
-        except Exception as e:
-            if not self.context.error_handler.has_errors():
-                self.context.error_handler.add_error(
-                    f"Error parsing pattern: {str(e)}",
-                    0, 0
-                )
+                line = self.current_token.line if self.current_token else 0
+                col = self.current_token.column if self.current_token else 0
+                self.context.error_handler.add_error("Expected ')' after group", line, col)
+            return ParseTreeNode("group", token={"value": "group"}, children=[node])
+        elif self.current_token and self.current_token.type == 'VARIABLE':
+            token = self.current_token
+            self._eat(token.value)
+            self.pattern_variables.add(token.value)
+            return ParseTreeNode("literal", token={"value": token.value, "line": token.line, "column": token.column})
+        else:
+            if self.current_token:
+                token = self.current_token
+                self._eat(token.value)
+                self.context.error_handler.add_error(f"Unknown token in pattern: '{token.value}'", token.line, token.column)
+                return ParseTreeNode("error", token={"value": token.value})
             return ParseTreeNode("empty")
             
-    def _parse_part(self, part: str) -> ParseTreeNode:
-        """Parse a single part of the pattern."""
-        if part.endswith('+'):
-            var_name = part[:-1]
-            if not var_name or not var_name.isalnum():
-                self.context.error_handler.add_error(
-                    f"Invalid quantifier placement in pattern: '{part}'",
-                    1, 1
-                )
-            else:
-                self.pattern_variables.add(var_name)
-            return ParseTreeNode(
-                node_type="quantifier",
-                token={"quantifier": "+", "line": 1, "column": 1},
-                children=[ParseTreeNode("literal", token={"value": var_name, "line": 1, "column": 1})]
-            )
-        elif part.endswith('*'):
-            var_name = part[:-1]
-            if not var_name or not var_name.isalnum():
-                self.context.error_handler.add_error(
-                    f"Invalid quantifier placement in pattern: '{part}'",
-                    1, 1
-                )
-            else:
-                self.pattern_variables.add(var_name)
-            return ParseTreeNode(
-                node_type="quantifier",
-                token={"quantifier": "*", "line": 1, "column": 1},
-                children=[ParseTreeNode("literal", token={"value": var_name, "line": 1, "column": 1})]
-            )
-        elif part.endswith('?'):
-            var_name = part[:-1]
-            if not var_name or not var_name.isalnum():
-                self.context.error_handler.add_error(
-                    f"Invalid quantifier placement in pattern: '{part}'",
-                    1, 1
-                )
-            else:
-                self.pattern_variables.add(var_name)
-            return ParseTreeNode(
-                node_type="quantifier",
-                token={"quantifier": "?", "line": 1, "column": 1},
-                children=[ParseTreeNode("literal", token={"value": var_name, "line": 1, "column": 1})]
-            )
-        else:
-            if not part.isalnum():
-                self.context.error_handler.add_error(
-                    f"Unknown token in pattern: '{part}'",
-                    1, 1
-                )
-            self.pattern_variables.add(part)
-            return ParseTreeNode(
-                node_type="literal",
-                token={"value": part, "line": 1, "column": 1},
-                children=[]
-            )
-            
-    def get_pattern_variables(self) -> Set[str]:
-        return self.pattern_variables
-
 def parse_pattern(pattern_text: str, context: Optional[ParserContext] = None) -> ParseTreeNode:
     parser = PatternParser(pattern_text, context)
     return parser.parse()
 
 def parse_pattern_full(pattern_text: str, subset_mapping=None, context: Optional[ParserContext] = None) -> Dict[str, Any]:
     if context is None:
+        from .parser_util import ErrorHandler, ParserContext
         context = ParserContext(ErrorHandler())
         
     if subset_mapping:
@@ -143,7 +125,7 @@ def parse_pattern_full(pattern_text: str, subset_mapping=None, context: Optional
     parser = PatternParser(pattern_text, context)
     tree = parser.parse()
     
-    for var in parser.get_pattern_variables():
+    for var in parser.pattern_variables:
         context.add_pattern_variable(var)
         
     return {
@@ -151,5 +133,5 @@ def parse_pattern_full(pattern_text: str, subset_mapping=None, context: Optional
         "parse_tree": tree,
         "errors": context.error_handler.get_formatted_errors(),
         "warnings": context.error_handler.get_formatted_warnings(),
-        "pattern_variables": parser.get_pattern_variables()
+        "pattern_variables": parser.pattern_variables
     }

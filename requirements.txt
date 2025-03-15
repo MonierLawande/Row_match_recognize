@@ -20,3 +20,35 @@ Validated AST → Executor → Results
 
 
 can rebuild ast_builder.py and return full code of files that updated 
+
+
+
+ok , we can go forward in pipeline stages with AST Builder by using the parse trees produced by the parser to build your raw AST 
+aslo will share with old version of implementation we can also make some updates and apply refelctoring to make AST module as we targeted on pipeline.
+
+pipeline we following is 
+SQL Query → Parser (using parser_util and others) → Parse Tree  
+Parse Tree → AST Builder → Raw AST  
+Raw AST → NFA/DFA Module → Pattern Matching  
+Pattern Matching → Optimizer → Optimized AST  
+Optimized AST → Validator → Validated AST  
+Validated AST → Executor → Results
+
+
+
+
+Since the parser stage is now robustly covered by our tests, you can confidently move forward with integrating the subsequent pipeline stages:
+
+AST Builder:
+Use the parse trees produced by the parser to build your raw AST.
+NFA/DFA Module:
+Convert the raw AST for pattern matching into a corresponding automaton.
+Pattern Matching & Optimizer:
+Run optimizations on the AST to improve matching performance.
+Validator:
+Validate the final AST to ensure correctness before execution.
+Executor:
+Execute the validated AST against your dataset.
+This modular approach with thorough testing at the parser level minimizes the risk of errors when integrating later stages.
+
+If you need further test cases or help with the integration of the next stages (e.g., AST building), just
