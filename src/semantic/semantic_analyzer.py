@@ -1,14 +1,17 @@
-# src/parser/semantic_analyzer.py
+# src/semantic/semantic_analyzer.py
 
 from typing import Optional, List, Dict, Set
 from src.ast.expression_ast import ExpressionAST
-from .error_handler import ErrorHandler
-from .symbol_table import SymbolTable, SymbolType
+from src.parser.error_handler import ErrorHandler
+from src.parser.symbol_table import SymbolTable, SymbolType
 
 class SemanticAnalyzer:
     """
     Semantic analyzer for SQL expressions in MATCH_RECOGNIZE context.
-    Performs type checking, validation of aggregate functions, etc.
+    
+    This module operates on the raw AST produced by the AST builder.
+    It performs type checking, validates aggregate functions, and enforces
+    semantic rules (e.g., no direct nested aggregate functions).
     """
     
     def __init__(self, error_handler: Optional[ErrorHandler] = None):
@@ -20,19 +23,23 @@ class SemanticAnalyzer:
         Analyze an expression AST for semantic errors.
         
         Args:
-            expr_ast: The expression AST to analyze
-            context: Context string for error messages
+            expr_ast: The expression AST to analyze.
+            context: Context string for error messages.
         """
-        # Validate aggregate functions
+        # Validate aggregate functions in the AST.
         self.validate_aggregate_functions(expr_ast, context)
         
-        # Additional semantic checks could be added here
+        # Additional semantic checks can be added here.
         
     def validate_aggregate_functions(self, expr_ast: ExpressionAST, context: str):
         """
         Validate aggregate function usage.
-        Only direct nested aggregates (i.e. an aggregate function immediately inside another aggregate)
+        Only direct nested aggregates (i.e., an aggregate function immediately inside another aggregate)
         are disallowed.
+        
+        Args:
+            expr_ast: The expression AST.
+            context: Context string for error messages.
         """
         def check_nested(node: ExpressionAST, parent_is_aggregate: bool = False):
             if node.type == "aggregate":
@@ -45,6 +52,7 @@ class SemanticAnalyzer:
                 current_parent = True
             else:
                 current_parent = False
-            for child in node.children:
+            for child in getattr(node, 'children', []):
                 check_nested(child, current_parent)
+                
         check_nested(expr_ast)

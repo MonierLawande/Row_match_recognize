@@ -9,6 +9,12 @@ Clear integration points for further enhancements (detailed expression sub‑AST
 
 
 
+SQL Query → Parser (using parser_util and others) → Parse Tree  
+Parse Tree → AST Builder → Raw AST  
+Raw AST → NFA/DFA Module → Pattern Matching  
+Pattern Matching → Optimizer → Optimized AST  
+Optimized AST → Validator → Validated AST  
+Validated AST → Executor → Results
 
 
 

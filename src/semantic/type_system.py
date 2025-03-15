@@ -1,11 +1,12 @@
-# src/parser/type_system.py
+# src/semantic/type_system.py
+#from src.semantic.type_system import TypeInferer
 
 from typing import Optional
 from src.ast.expression_ast import ExpressionAST
 
 class TypeInferer:
     """Centralized type inference for expressions"""
-    
+
     @staticmethod
     def infer_type(ast: ExpressionAST) -> str:
         """Infer the type of an expression"""

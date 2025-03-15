@@ -1,10 +1,9 @@
-# src/parser/sql_parser.py
-
 from typing import Dict, Any
 from antlr4 import InputStream, CommonTokenStream
 from src.grammar.TrinoLexer import TrinoLexer
 from src.grammar.TrinoParser import TrinoParser
-from .error_handler import ErrorHandler
+from src.grammar.TrinoParserListener import TrinoParserListener
+from .parser_util import ErrorHandler  # Updated import
 
 def parse_sql_query(query: str) -> Dict[str, Any]:
     """
@@ -38,7 +37,7 @@ def parse_sql_query(query: str) -> Dict[str, Any]:
         
         return {
             "parse_tree": parse_tree,
-            "parser": parser,  # Return the parser as well
+            "parser": parser,
             "errors": error_handler.get_formatted_errors(),
             "tokens": token_stream.tokens
         }
