@@ -337,7 +337,7 @@ class ExpressionParser:
         node = ParseTreeNode("aggregate", token={"value": "count", "line": token.line, "column": token.column, "semantics": semantics}, children=[arg])
         logger.debug("Parsed count() function with argument: %s", node)
         return node
-    
+
     def _parse_navigation_function(self, func_name: str, semantics: Optional[str], token: Token) -> ParseTreeNode:
         self.context.enter_scope()
         self.in_navigation = True
@@ -353,10 +353,7 @@ class ExpressionParser:
             self.tokens.consume()
             marker = self.tokens.mark()
             offset_expr = self.parse_logical_expression()
-            try:
-                offset_val = int(offset_expr.token.get("value", "0"))
-            except Exception:
-                offset_val = None
+            offset_val = self._eval_offset(offset_expr)
             if offset_val is None or offset_val < 0:
                 self.context.error_handler.add_error(
                     "Navigation offset must be a positive integer literal",
@@ -369,8 +366,29 @@ class ExpressionParser:
         self.context.exit_scope()
         self.in_navigation = False
         node = ParseTreeNode("navigation", token={"navigation_type": func_name.upper(), "line": token.line, "column": token.column, "semantics": semantics, "offset": offset}, children=[target_expr])
-        logger.debug("Parsed navigation function: %s", node)
         return node
+
+    def _eval_offset(self, expr: ParseTreeNode) -> Optional[int]:
+        """
+        Evaluates a parse tree node for a numeric literal, possibly wrapped in a unary minus.
+        Returns the integer value if successful, or None otherwise.
+        """
+        # If the node is a literal, try to return its integer value.
+        if expr.node_type == "literal" and expr.token and "value" in expr.token:
+            try:
+                return int(expr.token["value"])
+            except Exception:
+                return None
+        # Check if the node is a binary node representing a unary minus (i.e. 0 - literal)
+        if expr.node_type == "binary" and expr.token and expr.token.get("operator") == '-' and len(expr.children) == 2:
+            left, right = expr.children
+            if left.node_type == "literal" and left.token.get("value") == "0" and right.node_type == "literal":
+                try:
+                    return -int(right.token["value"])
+                except Exception:
+                    return None
+        return None
+
     
     def _parse_function_call(self, func_name: str, semantics: Optional[str], token: Token) -> ParseTreeNode:
         is_aggregate = func_name.lower() in AGGREGATE_FUNCTIONS

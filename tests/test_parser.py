@@ -55,6 +55,12 @@ class TestExpressionParserEdgeCases(unittest.TestCase):
         self.assertIn(result["parse_tree"].node_type, ["aggregate", "function"],
                       "Expected function call node type")
     
+    def test_function_call_missing_parenthesis(self):
+        expr = "avg(A.totalprice"
+        result = parse_expression_full(expr, in_measures_clause=True, context=self.context)
+        self.assertTrue(any("Expected" in err for err in result["errors"]),
+                        f"Expected error for missing ')' but got: {result['errors']}")
+    
     def test_valid_navigation_function(self):
         expr = "PREV(A.totalprice, 2)"
         result = parse_expression_full(expr, in_measures_clause=True, context=self.context)
@@ -62,11 +68,22 @@ class TestExpressionParserEdgeCases(unittest.TestCase):
         self.assertEqual(result["parse_tree"].node_type, "navigation",
                          "Expected navigation function node")
     
+    def test_navigation_negative_offset(self):
+        expr = "PREV(A.totalprice, -1)"
+        result = parse_expression_full(expr, in_measures_clause=True, context=self.context)
+        self.assertTrue(any("Navigation offset must be a positive integer literal" in err for err in result["errors"]),
+                        f"Expected error for negative offset, got: {result['errors']}")
+    
+    def test_function_call_with_extra_tokens(self):
+        expr = "sum(A.totalprice) extra"
+        result = parse_expression_full(expr, in_measures_clause=True, context=self.context)
+        self.assertTrue(any("Unexpected token" in err for err in result["errors"]),
+                        f"Expected error for extra tokens, got: {result['errors']}")
+    
     def test_decimal_literal(self):
         expr = "3.14 + 2.71"
         result = parse_expression_full(expr, in_measures_clause=True, context=self.context)
-        self.assertFalse(result["errors"], f"Errors found: {result['errors']}")
-        # Check that the parse tree contains at least two literal nodes.
+        self.assertFalse(result["errors"], f"Unexpected errors: {result['errors']}")
         literals = [node for node in self._collect_nodes(result["parse_tree"]) if node.node_type == "literal"]
         self.assertGreaterEqual(len(literals), 2, "Expected at least two literal nodes for decimals")
     
@@ -74,7 +91,6 @@ class TestExpressionParserEdgeCases(unittest.TestCase):
         expr = "A + B"
         result1 = parse_expression_full(expr, in_measures_clause=True, context=self.context)
         result2 = parse_expression_full(expr, in_measures_clause=True, context=self.context)
-        # Expect that the cached result is reused.
         self.assertIs(result1, result2, "Expected cached result to be reused")
     
     @given(st.text(min_size=1, max_size=50))
@@ -117,7 +133,6 @@ class TestPatternParserEdgeCases(unittest.TestCase):
     def test_pattern_with_extra_parentheses(self):
         pattern = "((A+ B*))"
         result = parse_pattern_full(pattern, subset_mapping=None, context=self.context)
-        # Outer parentheses should be stripped; expect a non-empty parse tree.
         self.assertNotEqual(result["parse_tree"].node_type, "empty")
     
     def test_valid_pattern_concatenation(self):
@@ -125,6 +140,13 @@ class TestPatternParserEdgeCases(unittest.TestCase):
         result = parse_pattern_full(pattern, subset_mapping=None, context=self.context)
         self.assertFalse(result["errors"], f"Errors found: {result['errors']}")
         self.assertEqual(result["parse_tree"].node_type, "concatenation")
+        self.assertEqual(result["pattern_variables"], {"A", "B", "C"})
+    
+    def test_pattern_with_subset_definition(self):
+        pattern = "A B"
+        subset_mapping = {"X": ["A", "B"]}
+        result = parse_pattern_full(pattern, subset_mapping=subset_mapping, context=self.context)
+        self.assertIn("X", self.context.subset_variables)
     
     @given(st.text(min_size=1, max_size=20))
     def test_pattern_fuzzing(self, random_pattern):
