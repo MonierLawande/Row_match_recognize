@@ -1,5 +1,3 @@
-# src/parser/parse_tree.py
-
 class ParseTreeNode:
     def __init__(self, node_type, token=None, children=None):
         """
@@ -7,8 +5,8 @@ class ParseTreeNode:
         
         Args:
             node_type (str): The type of node (e.g., "binary", "literal", "identifier").
-            token (dict or any): Optional token information (e.g., value, line, column).
-            children (list): A list of child ParseTreeNode objects.
+            token (dict): Optional token information (value, line, column, etc.).
+            children (list): List of child ParseTreeNode objects.
         """
         self.node_type = node_type  
         self.token = token  

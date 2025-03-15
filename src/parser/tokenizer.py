@@ -1,5 +1,3 @@
-# src/parser/tokenizer.py
-
 from dataclasses import dataclass
 from typing import List, Callable, Optional
 

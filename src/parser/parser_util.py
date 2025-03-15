@@ -1,5 +1,3 @@
-# src/parser/parser_util.py
-
 from dataclasses import dataclass, field
 from typing import Dict, Set, List, Tuple
 
@@ -52,7 +50,7 @@ class ParserContext:
     max_nesting: int = 10
     
     def enter_scope(self):
-        """Enter a new nesting level; add an error if maximum nesting is exceeded."""
+        """Enter a new nesting level; report an error if maximum nesting is exceeded."""
         self.nesting_level += 1
         if self.nesting_level > self.max_nesting:
             self.error_handler.add_error(
@@ -65,9 +63,7 @@ class ParserContext:
         self.nesting_level -= 1
         
     def add_pattern_variable(self, variable: str):
-        """Register a pattern variable."""
         self.pattern_variables.add(variable)
         
     def add_subset_definition(self, name: str, variables: Set[str]):
-        """Register a subset definition."""
         self.subset_variables[name] = variables
