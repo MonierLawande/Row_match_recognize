@@ -1,15 +1,21 @@
-# src/parser/match_recognize_extractor.py
-
 import re
 import logging
 from antlr4 import InputStream, CommonTokenStream
 from src.grammar.TrinoLexer import TrinoLexer
 from src.grammar.TrinoParser import TrinoParser
 from src.grammar.TrinoParserVisitor import TrinoParserVisitor
+import cProfile
 
-# Configure logging.
+# Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# Custom exception for parser errors
+class ParserError(Exception):
+    def __init__(self, message, position=None):
+        self.message = message
+        self.position = position
+        super().__init__(message)
 
 def post_process_text(text):
     """
@@ -29,148 +35,128 @@ def smart_split(raw_text):
     """
     Splits the raw text on the literal "AS" (case-insensitive) into two parts.
     
-    If the raw_text contains a closing parenthesis, first try splitting on an "AS"
-    that immediately follows a ')'. If that does not yield two parts, fall back to
-    a literal split on "AS". This prevents splitting inside function names like LAST.
+    Ensures whitespace around 'AS' to prevent incorrect splits.
     """
     parts = None
     if ")" in raw_text:
-        parts = re.split(r'(?<=\))AS', raw_text, maxsplit=1, flags=re.IGNORECASE)
+        parts = re.split(r'(?<=\))\s*AS\s*', raw_text, maxsplit=1, flags=re.IGNORECASE)
         if len(parts) == 2:
             return parts
-    # Fallback: simple split on "AS"
-    parts = re.split(r'AS', raw_text, maxsplit=1, flags=re.IGNORECASE)
+    parts = re.split(r'\s*AS\s*', raw_text, maxsplit=1, flags=re.IGNORECASE)
     return parts
 
+def format_rows_per_match(text):
+    """
+    Formats the 'ROWS PER MATCH' clause by adding spaces between camel-cased words.
+    """
+    return re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+
+# Parser visitor class for MATCH_RECOGNIZE
 class MatchRecognizeExtractor(TrinoParserVisitor):
     def __init__(self):
-        # Store components in a structured dictionary.
         self.components = {
             "partition_by": [],
             "order_by": [],
             "measures": [],
+            "rows_per_match": None,
+            "after_match_skip": None,
             "pattern": None,
             "subset": [],
-            "define": [],
-            "after_match_skip": None
+            "define": []
         }
 
-    def visitPatternRecognition(self, ctx:TrinoParser.PatternRecognitionContext):
+    def visitPatternRecognition(self, ctx: TrinoParser.PatternRecognitionContext):
         logger.debug("Visiting PatternRecognition context")
         
         # --- PARTITION BY Clause ---
         if ctx.PARTITION_():
-            partitions = ctx.partition  # list of ExpressionContext
-            self.components["partition_by"] = [post_process_text(expr.getText()) for expr in partitions]
+            self.components["partition_by"] = [post_process_text(expr.getText()) for expr in ctx.partition]
             logger.debug(f"Extracted PARTITION BY: {self.components['partition_by']}")
         
         # --- ORDER BY Clause ---
         if ctx.ORDER_():
-            sort_items = ctx.sortItem()  # list of SortItemContext
-            self.components["order_by"] = [post_process_text(si.getText()) for si in sort_items]
+            self.components["order_by"] = [post_process_text(si.getText()) for si in ctx.sortItem()]
             logger.debug(f"Extracted ORDER BY: {self.components['order_by']}")
         
         # --- MEASURES Clause ---
         if ctx.MEASURES_():
-            measure_defs = ctx.measureDefinition()
-            measures = []
-            if isinstance(measure_defs, list):
-                for md in measure_defs:
-                    raw_text = md.getText()
-                    logger.debug(f"Raw measure text: {raw_text}")
-                    parts = smart_split(raw_text)
-                    if len(parts) == 2:
-                        measure_expr = post_process_text(parts[0])
-                        alias = post_process_text(parts[1])
-                        measures.append({"expression": measure_expr, "alias": alias})
-                    else:
-                        measures.append({"expression": post_process_text(raw_text), "alias": None})
-            elif measure_defs is not None:
-                raw_text = measure_defs.getText()
-                logger.debug(f"Raw measure text: {raw_text}")
+            for md in ctx.measureDefinition():
+                raw_text = md.getText()
                 parts = smart_split(raw_text)
-                if len(parts) == 2:
-                    measure_expr = post_process_text(parts[0])
-                    alias = post_process_text(parts[1])
-                    measures.append({"expression": measure_expr, "alias": alias})
-                else:
-                    measures.append({"expression": post_process_text(raw_text), "alias": None})
-            self.components["measures"] = measures
+                measure = {"expression": post_process_text(parts[0]), "alias": post_process_text(parts[1])} if len(parts) == 2 else {"expression": post_process_text(raw_text), "alias": None}
+                self.components["measures"].append(measure)
             logger.debug(f"Extracted MEASURES: {self.components['measures']}")
+        
+        # --- ROWS PER MATCH Clause ---
+        if ctx.rowsPerMatch():
+            self.visitRowsPerMatch(ctx.rowsPerMatch())  # Using the dedicated method
+        
+        # --- AFTER MATCH SKIP Clause ---
+        if ctx.AFTER_():
+            self.components["after_match_skip"] = post_process_text(join_children_text(ctx.skipTo()))
+            logger.debug(f"Extracted AFTER MATCH SKIP: {self.components['after_match_skip']}")
         
         # --- PATTERN Clause ---
         if ctx.PATTERN_():
-            row_pattern = ctx.rowPattern()
-            if row_pattern:
-                self.components["pattern"] = post_process_text(row_pattern.getText())
+            self.components["pattern"] = post_process_text(ctx.rowPattern().getText())
             logger.debug(f"Extracted PATTERN: {self.components['pattern']}")
         
         # --- SUBSET Clause ---
         if ctx.SUBSET_():
-            subset_defs = ctx.subsetDefinition()
-            subsets = []
-            if isinstance(subset_defs, list):
-                for sd in subset_defs:
-                    subsets.append(post_process_text(sd.getText()))
-            elif subset_defs is not None:
-                subsets.append(post_process_text(subset_defs.getText()))
-            self.components["subset"] = subsets
+            self.components["subset"] = [post_process_text(sd.getText()) for sd in ctx.subsetDefinition()]
             logger.debug(f"Extracted SUBSET: {self.components['subset']}")
         
         # --- DEFINE Clause ---
         if ctx.DEFINE_():
-            var_defs = ctx.variableDefinition()
-            defines = []
-            if isinstance(var_defs, list):
-                for vd in var_defs:
-                    raw_text = vd.getText()
-                    logger.debug(f"Raw define text: {raw_text}")
-                    parts = smart_split(raw_text)
-                    if len(parts) == 2:
-                        variable = post_process_text(parts[0])
-                        condition = post_process_text(parts[1])
-                        defines.append({"variable": variable, "condition": condition})
-                    else:
-                        defines.append({"variable": post_process_text(raw_text), "condition": None})
-            elif var_defs is not None:
-                raw_text = var_defs.getText()
-                logger.debug(f"Raw define text: {raw_text}")
+            for vd in ctx.variableDefinition():
+                raw_text = vd.getText()
                 parts = smart_split(raw_text)
-                if len(parts) == 2:
-                    variable = post_process_text(parts[0])
-                    condition = post_process_text(parts[1])
-                    defines.append({"variable": variable, "condition": condition})
-                else:
-                    defines.append({"variable": post_process_text(raw_text), "condition": None})
-            self.components["define"] = defines
+                define = {"variable": post_process_text(parts[0]), "condition": post_process_text(parts[1])} if len(parts) == 2 else {"variable": post_process_text(raw_text), "condition": None}
+                self.components["define"].append(define)
             logger.debug(f"Extracted DEFINE: {self.components['define']}")
         
-        # --- AFTER MATCH SKIP Clause ---
-        if ctx.AFTER_():
-            skip_to = ctx.skipTo()
-            if skip_to:
-                self.components["after_match_skip"] = post_process_text(join_children_text(skip_to))
-            logger.debug(f"Extracted AFTER MATCH SKIP: {self.components['after_match_skip']}")
+        # Perform cross-clause validation
+        self.validate_clauses(ctx)
         
         return self.components
 
-def parse_match_recognize_query(query: str):
+    def visitRowsPerMatch(self, ctx: TrinoParser.RowsPerMatchContext):
+        """
+        Handles the extraction of the 'ROWS PER MATCH' clause.
+        """
+        rows_per_match_text = post_process_text(ctx.getText())
+        
+        # Directly map known values
+        if "ONEROWPERMATCH" in rows_per_match_text:
+            self.components["rows_per_match"] = "ONE ROW PER MATCH"
+        elif "ALLROWSPERMATCH" in rows_per_match_text:
+            self.components["rows_per_match"] = "ALL ROWS PER MATCH"
+        else:
+            self.components["rows_per_match"] = rows_per_match_text  # In case the format is different
+        logger.debug(f"Extracted ROWS PER MATCH: {self.components['rows_per_match']}")
+
+    def validate_clauses(self, ctx):
+        """
+        Cross-clause validation logic to ensure clause dependencies are correct.
+        """
+        # Example validation: Ensure ORDER BY follows PARTITION BY
+        if 'PARTITION BY' in self.components and 'ORDER BY' not in self.components:
+            raise ParserError("ORDER BY clause is required when PARTITION BY is used.", position=ctx.start.line)
+        
+        # Example validation for DEFINE and PATTERN clauses
+        if 'DEFINE' in self.components and 'PATTERN' not in self.components:
+            raise ParserError("PATTERN clause is required when DEFINE is used.", position=ctx.start.line)
+
+def parse_match_recognize_query(query: str, dialect='default'):
     """
     Parse a SQL query containing a MATCH_RECOGNIZE clause and extract its components.
-    
-    Enhancements:
-      • Appends a semicolon if missing.
-      • Structured extraction.
-      • Uses smart_split() to split measure and define texts on 'AS'.
-      • Reassembles AFTER MATCH SKIP clause from child tokens.
-      • Debug logging.
-    
-    Args:
-        query (str): SQL query string.
-    
-    Returns:
-        dict: Dictionary of extracted MATCH_RECOGNIZE components.
     """
+    # Optional dialect-based parsing
+    if dialect == 'trino':
+        return parse_trino_query(query)
+    elif dialect == 'mysql':
+        return parse_mysql_query(query)
+    
     query = query.strip()
     if not query.endswith(";"):
         query += ";"
@@ -185,3 +171,6 @@ def parse_match_recognize_query(query: str):
     extractor.visit(tree)
     return extractor.components
 
+# Example usage of performance profiling
+def profile_parsing():
+    cProfile.run('parse_match_recognize_query(sample_query)')

@@ -106,3 +106,5 @@ Priority	Task
 ⚙️ Medium	Implement explicit RUNNING vs. FINAL semantics
 ⚙️ Medium	Extend testing for robustness
 🚀 Optional	Automata-based optimization
+
+Run Tests: Write automated tests to verify that all clauses are being parsed correctly, especially edge cases like missing or malformed clauses.
