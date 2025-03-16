@@ -1,11 +1,9 @@
-import re
+from antlr4 import *
 import logging
-from antlr4 import InputStream, CommonTokenStream
-from src.grammar.TrinoLexer import TrinoLexer
+import re
 from src.grammar.TrinoParser import TrinoParser
 from src.grammar.TrinoParserVisitor import TrinoParserVisitor
-import cProfile
-
+from src.grammar.TrinoLexer import TrinoLexer
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -17,6 +15,7 @@ class ParserError(Exception):
         self.position = position
         super().__init__(message)
 
+# Utility functions for text processing
 def post_process_text(text):
     """
     Normalize whitespace in the text.
@@ -34,8 +33,6 @@ def join_children_text(ctx):
 def smart_split(raw_text):
     """
     Splits the raw text on the literal "AS" (case-insensitive) into two parts.
-    
-    Ensures whitespace around 'AS' to prevent incorrect splits.
     """
     parts = None
     if ")" in raw_text:
@@ -45,13 +42,6 @@ def smart_split(raw_text):
     parts = re.split(r'\s*AS\s*', raw_text, maxsplit=1, flags=re.IGNORECASE)
     return parts
 
-def format_rows_per_match(text):
-    """
-    Formats the 'ROWS PER MATCH' clause by adding spaces between camel-cased words.
-    """
-    return re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-
-# Parser visitor class for MATCH_RECOGNIZE
 class MatchRecognizeExtractor(TrinoParserVisitor):
     def __init__(self):
         self.components = {
@@ -89,7 +79,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         
         # --- ROWS PER MATCH Clause ---
         if ctx.rowsPerMatch():
-            self.visitRowsPerMatch(ctx.rowsPerMatch())  # Using the dedicated method
+            self.visitRowsPerMatch(ctx.rowsPerMatch())  # Using the visitor's method
         
         # --- AFTER MATCH SKIP Clause ---
         if ctx.AFTER_():
@@ -115,22 +105,24 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 self.components["define"].append(define)
             logger.debug(f"Extracted DEFINE: {self.components['define']}")
         
-        # Perform cross-clause validation
+        # Perform cross-clause validation after all clauses have been visited
         self.validate_clauses(ctx)
         
         return self.components
 
     def visitRowsPerMatch(self, ctx: TrinoParser.RowsPerMatchContext):
         """
-        Handles the extraction of the 'ROWS PER MATCH' clause.
+        Handles the extraction of the 'ROWS PER MATCH' clause using the visitor pattern.
         """
         rows_per_match_text = post_process_text(ctx.getText())
         
-        # Directly map known values
+        # Directly map known values with enhanced logic
         if "ONEROWPERMATCH" in rows_per_match_text:
             self.components["rows_per_match"] = "ONE ROW PER MATCH"
         elif "ALLROWSPERMATCH" in rows_per_match_text:
             self.components["rows_per_match"] = "ALL ROWS PER MATCH"
+        elif "UNLIMITED" in rows_per_match_text:
+            self.components["rows_per_match"] = "UNLIMITED ROWS PER MATCH"  # Example of additional logic
         else:
             self.components["rows_per_match"] = rows_per_match_text  # In case the format is different
         logger.debug(f"Extracted ROWS PER MATCH: {self.components['rows_per_match']}")
@@ -170,7 +162,3 @@ def parse_match_recognize_query(query: str, dialect='default'):
     extractor = MatchRecognizeExtractor()
     extractor.visit(tree)
     return extractor.components
-
-# Example usage of performance profiling
-def profile_parsing():
-    cProfile.run('parse_match_recognize_query(sample_query)')
