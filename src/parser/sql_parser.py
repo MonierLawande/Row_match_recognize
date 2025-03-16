@@ -2,7 +2,6 @@ from typing import Dict, Any
 from antlr4 import InputStream, CommonTokenStream
 from src.grammar.TrinoLexer import TrinoLexer
 from src.grammar.TrinoParser import TrinoParser
-from src.grammar.TrinoParserListener import TrinoParserListener
 from .parser_util import ErrorHandler
 def parse_sql_query(query: str) -> Dict[str, Any]:
     """
@@ -47,3 +46,6 @@ def parse_sql_query(query: str) -> Dict[str, Any]:
             "errors": error_handler.get_formatted_errors(),
             "tokens": []
         }
+    
+
+    

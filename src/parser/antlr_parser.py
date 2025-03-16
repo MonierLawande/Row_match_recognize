@@ -3,7 +3,6 @@
 from antlr4 import InputStream, CommonTokenStream, ParseTreeWalker
 from src.grammar.TrinoLexer import TrinoLexer
 from src.grammar.TrinoParser import TrinoParser
-from src.grammar.TrinoParserListener import TrinoParserListener
 
 # src/parser/antlr_parser.py - Fix for the error listener
 

@@ -11380,6 +11380,7 @@ class TrinoParser ( Parser ):
             self.percentage = None # ExpressionContext
 
         def patternRecognition(self):
+            print("Entered patternRecognition rule")
             return self.getTypedRuleContext(TrinoParser.PatternRecognitionContext,0)
 
 
