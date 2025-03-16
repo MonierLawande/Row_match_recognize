@@ -52,3 +52,72 @@ Execute the validated AST against your dataset.
 This modular approach with thorough testing at the parser level minimizes the risk of errors when integrating later stages.
 
 If you need further test cases or help with the integration of the next stages (e.g., AST building), just
+
+
+
+Key Parameters and Clauses
+PARTITION BY
+
+Divides data into partitions for independent pattern matching.
+Syntax: PARTITION BY column [, ...]
+ORDER BY
+
+Specifies the order of rows within each partition.
+Syntax: ORDER BY column [, ...]
+MEASURES
+
+Defines expressions to compute values from matched rows.
+Syntax: MEASURES measure_expression [, ...]
+ROWS PER MATCH
+
+Determines the number of output rows per match.
+ONE ROW PER MATCH (default) - One row per match.
+ALL ROWS PER MATCH - All rows of the match are output.
+ALL ROWS PER MATCH OMIT EMPTY MATCHES - Excludes empty matches.
+ALL ROWS PER MATCH WITH UNMATCHED ROWS - Includes unmatched rows.
+Syntax: ROWS PER MATCH (ONE ROW PER MATCH | ALL ROWS PER MATCH)
+AFTER MATCH SKIP
+
+Specifies where pattern matching should continue after a match.
+Options: PAST LAST ROW, TO NEXT ROW, TO FIRST pattern_variable, TO LAST pattern_variable.
+Syntax: AFTER MATCH SKIP (PAST LAST ROW | TO NEXT ROW | TO FIRST pattern_variable | TO LAST pattern_variable)
+PATTERN
+
+Defines the row pattern to be matched using regular expression-like syntax.
+Syntax: PATTERN (row_pattern)
+SUBSET
+
+Defines union variables for a set of primary pattern variables.
+Syntax: SUBSET union_variable = (pattern_variable [, ...])
+DEFINE
+
+Specifies the conditions for each row pattern variable.
+Syntax: DEFINE pattern_variable AS condition [, ...]
+AGGREGATE FUNCTIONS
+
+Performs aggregations over matched rows (e.g., COUNT(), AVG(), SUM()).
+Syntax: AGGREGATE FUNCTION(column_name) AS alias
+CLASSIFIER
+
+Identifies which primary pattern variable matched a particular row.
+Syntax: CLASSIFIER(pattern_variable)
+MATCH_NUMBER
+Returns the sequential number of the match within the partition.
+Syntax: MATCH_NUMBER()
+LOGICAL NAVIGATION FUNCTIONS
+Navigates within matched rows (e.g., FIRST(), LAST()).
+Syntax: FIRST(pattern_variable.column, N), LAST(pattern_variable.column, N)
+PHYSICAL NAVIGATION FUNCTIONS
+Navigates to rows before or after the current row (e.g., PREV(), NEXT()).
+Syntax: PREV(pattern_variable.column, N), NEXT(pattern_variable.column, N)
+NESTING OF NAVIGATION FUNCTIONS
+Allows navigation functions to be nested for more complex row searches.
+Syntax: PREV(FIRST(pattern_variable.column, N), M)
+AGGREGATE FUNCTION SEMANTICS
+Defines whether aggregation should consider the current row (RUNNING) or the final match (FINAL).
+Syntax: RUNNING AGGREGATE_FUNCTION(column_name), FINAL AGGREGATE_FUNCTION(column_name)
+EVALUATING EXPRESSIONS IN EMPTY MATCHES AND UNMATCHED ROWS
+Defines how expressions are evaluated when there are empty matches or unmatched rows.
+EXCLUSION SYNTAX
+Excludes specific parts of the match from the output.
+Syntax: {- row_pattern -}

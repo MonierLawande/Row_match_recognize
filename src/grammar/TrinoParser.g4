@@ -33,7 +33,6 @@ statements
     | standaloneType
     | standaloneRowPattern SEMICOLON_?
     | standaloneFunctionSpecification
-    | patternRecognition SEMICOLON_?  # ✅ Add this if missing
     ;
 
 singleStatement
@@ -255,8 +254,6 @@ queryPrimary
     | TABLE_ qualifiedName                    # table
     | VALUES_ expression (COMMA_ expression)* # inlineTable
     | LPAREN_ queryNoWith RPAREN_             # subquery
-    | patternRecognition                      # patternRecognitionQuery  <-- ADD THIS
-
     ;
 
 sortItem
@@ -319,7 +316,6 @@ relation
         | NATURAL_ joinType JOIN_ right = sampledRelation
     )                 # joinRelation
     | sampledRelation # relationDefault
-    | patternRecognition  # Allow standalone MATCH_RECOGNIZE
     ;
 
 joinType
