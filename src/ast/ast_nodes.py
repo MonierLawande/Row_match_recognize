@@ -1,4 +1,5 @@
-from typing import List, Optional
+from typing import List, Optional, Dict
+import re
 
 # Base AST node
 class ASTNode:
@@ -21,14 +22,15 @@ class OrderByClause(ASTNode):
         return f"OrderByClause(columns={self.columns})"
 
 class Measure(ASTNode):
-    def __init__(self, expression: str, alias: Optional[str] = None):
+    def __init__(self, expression: str, alias: Optional[str] = None, metadata: Optional[Dict] = None):
         self.expression = expression
         self.alias = alias
+        self.metadata = metadata or {}
 
     def __repr__(self):
         if self.alias:
-            return f"Measure(expression={self.expression}, alias={self.alias})"
-        return f"Measure(expression={self.expression})"
+            return f"Measure(expression={self.expression}, alias={self.alias}, metadata={self.metadata})"
+        return f"Measure(expression={self.expression}, metadata={self.metadata})"
 
 class MeasuresClause(ASTNode):
     def __init__(self, measures: List[Measure]):
@@ -54,9 +56,11 @@ class AfterMatchSkipClause(ASTNode):
 class PatternClause(ASTNode):
     def __init__(self, pattern: str):
         self.pattern = pattern
+        # Extract pattern variables as all single uppercase letters (optionally followed by '+')
+        self.metadata = {"variables": set(re.findall(r'([A-Z][A-Z0-9_]*)\+?', pattern))}
 
     def __repr__(self):
-        return f"PatternClause(pattern={self.pattern})"
+        return f"PatternClause(pattern={self.pattern}, metadata={self.metadata})"
 
 class SubsetClause(ASTNode):
     def __init__(self, subset_text: str):
@@ -113,17 +117,18 @@ class MatchRecognizeClause(ASTNode):
 # --- Full Query AST Nodes ---
 class SelectItem(ASTNode):
     """Represents an individual item (column or expression with an optional alias) in the SELECT clause."""
-    def __init__(self, expression: str, alias: Optional[str] = None):
+    def __init__(self, expression: str, alias: Optional[str] = None, metadata: Optional[Dict] = None):
         self.expression = expression
         self.alias = alias
+        self.metadata = metadata or {}
 
     def __repr__(self):
         if self.alias:
-            return f"SelectItem(expression={self.expression}, alias={self.alias})"
-        return f"SelectItem(expression={self.expression})"
+            return f"SelectItem(expression={self.expression}, alias={self.alias}, metadata={self.metadata})"
+        return f"SelectItem(expression={self.expression}, metadata={self.metadata})"
 
 class SelectClause(ASTNode):
-    """Represents the SELECT clause as a list of SelectItems."""
+    """Represents the SELECT clause as a list of SelectItem nodes."""
     def __init__(self, items: List[SelectItem]):
         self.items = items
 
@@ -139,17 +144,20 @@ class FromClause(ASTNode):
         return f"FromClause(table={self.table})"
 
 class FullQueryAST(ASTNode):
-    """Aggregates the SELECT clause, FROM clause, and the MATCH_RECOGNIZE clause into a full query representation."""
+    """Aggregates the SELECT clause, FROM clause, and the MATCH_RECOGNIZE clause."""
     def __init__(self,
                  select_clause: Optional[SelectClause],
                  from_clause: Optional[FromClause],
-                 match_recognize: Optional[MatchRecognizeClause]):
+                 match_recognize: Optional[MatchRecognizeClause],
+                 metadata: Optional[Dict] = None):
         self.select_clause = select_clause
         self.from_clause = from_clause
         self.match_recognize = match_recognize
+        self.metadata = metadata or {}
 
     def __repr__(self):
         return (f"FullQueryAST(\n"
                 f"  select_clause={self.select_clause},\n"
                 f"  from_clause={self.from_clause},\n"
-                f"  match_recognize={self.match_recognize}\n)")
+                f"  match_recognize={self.match_recognize},\n"
+                f"  metadata={self.metadata}\n)")

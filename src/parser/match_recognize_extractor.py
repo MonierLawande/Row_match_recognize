@@ -34,7 +34,6 @@ class ParserError(Exception):
         self.snippet = snippet
         super().__init__(f"{message} (Line: {line}, Column: {column})\nSnippet: {snippet}")
 
-
 def post_process_text(text):
     """Normalize whitespace in the given text."""
     if text is None:
@@ -50,6 +49,28 @@ def smart_split(raw_text):
             return parts
     parts = re.split(r'\s*AS\s*', raw_text, maxsplit=1, flags=re.IGNORECASE)
     return parts
+
+def split_select_items(select_text: str) -> list:
+    """
+    Split the SELECT clause into individual items.
+    This function tracks parentheses to avoid splitting on commas that occur inside expressions.
+    """
+    items = []
+    current = []
+    depth = 0
+    for char in select_text:
+        if char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+        if char == ',' and depth == 0:
+            items.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if current:
+        items.append("".join(current).strip())
+    return items
 
 ###########################################
 # MATCH_RECOGNIZE clause extractor visitor
@@ -85,6 +106,8 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             self.ast.define = self.extract_define(ctx)
             logger.debug(f"Extracted DEFINE: {self.ast.define}")
         self.validate_clauses(ctx)
+        self.validate_identifiers(ctx)
+        self.validate_function_usage(ctx)
         return self.ast
 
     def extract_partition_by(self, ctx: TrinoParser.PatternRecognitionContext) -> PartitionByClause:
@@ -149,6 +172,39 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             raise ParserError("PATTERN clause is required when DEFINE is used.",
                               line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
 
+    def validate_identifiers(self, ctx):
+        """Ensure that each identifier used in DEFINE is present in the pattern."""
+        if self.ast.pattern:
+            pattern_vars = set(re.findall(r'([A-Z])(?:\+)?', self.ast.pattern.pattern))
+            logger.debug(f"Extracted pattern variables: {pattern_vars}")
+            if self.ast.define:
+                for definition in self.ast.define.definitions:
+                    if definition.variable not in pattern_vars:
+                        raise ParserError(f"Define variable '{definition.variable}' not found in pattern variables {pattern_vars}",
+                                          line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+
+    def validate_function_usage(self, ctx):
+        """Validate aggregate and navigation functions in measures."""
+        # Updated patterns to allow dot-qualified identifiers (e.g., B.totalprice).
+        allowed_functions = {
+            "COUNT": r"COUNT\(\s*(\*|[A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)\s*\)",
+            "FIRST": r"FIRST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+            "LAST": r"LAST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+            "PREV": r"PREV\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+            "NEXT": r"NEXT\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+        }
+        if self.ast.measures:
+            for measure in self.ast.measures.measures:
+                expr_upper = measure.expression.upper()
+                for func, pattern in allowed_functions.items():
+                    if func in expr_upper:
+                        m = re.search(pattern, expr_upper)
+                        if not m:
+                            raise ParserError(f"Invalid usage of {func} in measure: {measure.expression}",
+                                              line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+                        # m.group(1) should be a column name; further DataFrame validation is done later.
+                logger.debug(f"Validated function usage for measure: {measure.expression}")
+
 ###############################################
 # Full Query extractor visitor for SELECT/FROM/MATCH_RECOGNIZE
 ###############################################
@@ -163,17 +219,18 @@ class FullQueryExtractor(TrinoParserVisitor):
         return self.visitChildren(ctx)
 
     def visitSingleStatement(self, ctx: TrinoParser.SingleStatementContext):
-        # Use the original query text (with whitespace preserved) for regex extraction.
         full_text = post_process_text(self.original_query)
         logger.debug(f"Full statement text: {full_text}")
 
-        # Extract SELECT clause between "SELECT" and "FROM"
+        # Use robust splitting for the SELECT clause.
         select_match = re.search(r'(?i)^SELECT\s+(.+?)\s+FROM', full_text)
         if select_match:
             select_text = select_match.group(1)
+            items_raw = split_select_items(select_text)
             items = []
-            # Naively split by comma; this may not handle nested expressions.
-            for item in select_text.split(","):
+            # Use a regex to check for simple column references (identifiers only).
+            simple_column_regex = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+            for item in items_raw:
                 item = post_process_text(item)
                 alias_match = re.search(r'(?i)^(.+?)\s+AS\s+(.+)$', item)
                 if alias_match:
@@ -183,7 +240,7 @@ class FullQueryExtractor(TrinoParserVisitor):
                 else:
                     items.append(SelectItem(item))
             self.select_clause = SelectClause(items)
-            logger.debug(f"Extracted SELECT clause via regex: {self.select_clause}")
+            logger.debug(f"Extracted SELECT clause via robust splitting: {self.select_clause}")
         else:
             logger.warning("No SELECT clause found via regex.")
 
@@ -196,7 +253,7 @@ class FullQueryExtractor(TrinoParserVisitor):
         else:
             logger.warning("No FROM clause found via regex.")
 
-        # Recursively search for a PatternRecognitionContext in the statement.
+        # Recursively search for a PatternRecognitionContext.
         self.match_recognize = self.find_pattern_recognition(ctx)
         if self.match_recognize:
             extractor = MatchRecognizeExtractor()

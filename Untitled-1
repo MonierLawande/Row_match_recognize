@@ -1,0 +1,13 @@
+Once you are confident that the AST is constructed correctly, the next phase is to write a translator that converts this AST into a sequence of pandas DataFrame operations (such as filtering, grouping, aggregating, etc.).
+You can further improve error recovery and performance by integrating ANTLR’s error listeners and optimizing the parsing process.
+
+Implementing the additional validations, richer metadata, error recovery strategies, and performance optimization
+
+Further Cross‑Clause Validations:
+
+Validate that the columns in the ORDER BY clause exist in the DataFrame.
+Ensure that any column references in MEASURES or navigation functions (like PREV, NEXT) are present in the DataFrame schema.
+Function Usage Validation:
+
+Extend validations for functions beyond COUNT() to cover FIRST(), LAST(), PREV(), NEXT(), etc.
+Consider building a mapping of allowed functions and their argument patterns to catch usage errors early.
