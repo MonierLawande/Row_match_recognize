@@ -1,0 +1,46 @@
+1. Robust AST Construction and Data Modeling
+Strongly Typed AST:
+Instead of returning a plain dictionary, design an abstract syntax tree (AST) with dedicated classes (e.g., PartitionByClause, OrderByClause, MeasuresClause, etc.). This improves type safety and clarity while making it easier for downstream modules (optimizer, executor) to work with a structured representation.
+
+Separation of Concerns:
+Separate the extraction logic for each clause into dedicated methods or classes. This modularity makes the code more maintainable and easier to extend when supporting new SQL dialects or additional MATCH_RECOGNIZE features.
+
+2. Enhanced Error Handling and Validation
+Improved Error Reporting:
+Expand your ParserError to include detailed position information (line, column) and contextual snippets of the query. This will help users pinpoint syntax or semantic errors quickly.
+
+Cross-Clause and Semantic Validation:
+Beyond syntactic checks, incorporate a semantic analysis phase. For instance, validate that:
+
+An ORDER BY clause is present when PARTITION BY is used (if required).
+All referenced pattern variables in DEFINE, MEASURES, and AFTER MATCH SKIP are consistent.
+Aggregation and navigation functions are used according to your requirements.
+Error Recovery:
+Consider implementing error recovery strategies (e.g., ANTLR’s error listeners) that can gracefully report multiple issues in a single pass, rather than failing on the first error.
+
+3. Performance and Scalability
+Parser and Lexer Optimization:
+Leverage ANTLR’s options to fine-tune performance (for example, using prediction modes, caching token streams, etc.). Ensure that the parser can efficiently handle large or complex queries without significant latency.
+
+Incremental Parsing:
+Investigate incremental parsing strategies if your application demands high throughput, so that repeated or similar queries don’t trigger full re-parses.
+
+Resource Monitoring:
+Integrate monitoring (such as metrics for parse times and error rates) to proactively identify performance bottlenecks or regressions in production.
+
+4. Configurability and Extensibility
+Dialect-Specific Parsing:
+Refactor your parser to support different SQL dialects (e.g., Trino, MySQL) by introducing a factory or strategy pattern. This will let you switch or extend behavior based on the dialect without impacting the core logic.
+
+Configurable Logging:
+While debug logging is useful during development, ensure that production logging can be tuned via configuration to avoid performance overhead and reduce log verbosity.
+
+Testing and CI/CD Integration:
+Develop extensive unit and integration tests covering both typical queries and edge cases (including empty matches and invalid syntax). Integrate these tests into a CI/CD pipeline to maintain quality and catch issues early.
+
+5. Documentation and Maintainability
+Comprehensive Documentation:
+Document the internal structure of your AST, the responsibilities of each module (lexer, parser, extractor, etc.), and the expected error messages. This improves onboarding and future maintenance.
+
+Code Quality:
+Enforce code style guidelines and perform regular code reviews. Consider static analysis tools to catch potential issues before deployment.
