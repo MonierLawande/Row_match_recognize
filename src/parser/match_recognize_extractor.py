@@ -16,29 +16,33 @@ from src.ast.ast_nodes import (
     Define,
     DefineClause,
     MatchRecognizeClause,
-    SelectItem,         # <-- Add this line
+    SelectItem,
     SelectClause,
     FromClause,
     FullQueryAST
 )
-
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class ParserError(Exception):
-    def __init__(self, message, position=None):
+    def __init__(self, message, line=None, column=None, snippet=None):
         self.message = message
-        self.position = position
-        super().__init__(message)
+        self.line = line
+        self.column = column
+        self.snippet = snippet
+        super().__init__(f"{message} (Line: {line}, Column: {column})\nSnippet: {snippet}")
+
 
 def post_process_text(text):
+    """Normalize whitespace in the given text."""
     if text is None:
         return text
     return re.sub(r'\s+', ' ', text).strip()
 
 def smart_split(raw_text):
+    """Splits raw_text on 'AS', trying to respect parentheses boundaries."""
     parts = None
     if ")" in raw_text:
         parts = re.split(r'(?<=\))\s*AS\s*', raw_text, maxsplit=1, flags=re.IGNORECASE)
@@ -139,18 +143,18 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
 
     def validate_clauses(self, ctx):
         if self.ast.partition_by and not self.ast.order_by:
-            raise ParserError("ORDER BY clause is required when PARTITION BY is used.", position=ctx.start.line)
+            raise ParserError("ORDER BY clause is required when PARTITION BY is used.",
+                              line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         if self.ast.define and not self.ast.pattern:
-            raise ParserError("PATTERN clause is required when DEFINE is used.", position=ctx.start.line)
-
-
+            raise ParserError("PATTERN clause is required when DEFINE is used.",
+                              line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
 
 ###############################################
 # Full Query extractor visitor for SELECT/FROM/MATCH_RECOGNIZE
 ###############################################
 class FullQueryExtractor(TrinoParserVisitor):
     def __init__(self, original_query: str):
-        self.original_query = original_query  # Preserve original query with whitespace.
+        self.original_query = original_query  # Preserve original query formatting.
         self.select_clause = None
         self.from_clause = None
         self.match_recognize = None
@@ -159,7 +163,7 @@ class FullQueryExtractor(TrinoParserVisitor):
         return self.visitChildren(ctx)
 
     def visitSingleStatement(self, ctx: TrinoParser.SingleStatementContext):
-        # Use the original query text instead of ctx.getText(), which loses whitespace.
+        # Use the original query text (with whitespace preserved) for regex extraction.
         full_text = post_process_text(self.original_query)
         logger.debug(f"Full statement text: {full_text}")
 
@@ -167,8 +171,8 @@ class FullQueryExtractor(TrinoParserVisitor):
         select_match = re.search(r'(?i)^SELECT\s+(.+?)\s+FROM', full_text)
         if select_match:
             select_text = select_match.group(1)
-            # Split by comma to get individual select items.
             items = []
+            # Naively split by comma; this may not handle nested expressions.
             for item in select_text.split(","):
                 item = post_process_text(item)
                 alias_match = re.search(r'(?i)^(.+?)\s+AS\s+(.+)$', item)
@@ -181,18 +185,18 @@ class FullQueryExtractor(TrinoParserVisitor):
             self.select_clause = SelectClause(items)
             logger.debug(f"Extracted SELECT clause via regex: {self.select_clause}")
         else:
-            logger.debug("No SELECT clause found via regex.")
+            logger.warning("No SELECT clause found via regex.")
 
-        # Extract FROM clause: look for "FROM" followed by table name.
+        # Extract FROM clause: look for "FROM" followed by a table name.
         from_match = re.search(r'(?i)FROM\s+(\w+)', full_text)
         if from_match:
             table_name = from_match.group(1)
             self.from_clause = FromClause(table_name)
             logger.debug(f"Extracted FROM clause via regex: {self.from_clause}")
         else:
-            logger.debug("No FROM clause found via regex.")
+            logger.warning("No FROM clause found via regex.")
 
-        # Recursively search for a PatternRecognitionContext.
+        # Recursively search for a PatternRecognitionContext in the statement.
         self.match_recognize = self.find_pattern_recognition(ctx)
         if self.match_recognize:
             extractor = MatchRecognizeExtractor()
@@ -205,7 +209,6 @@ class FullQueryExtractor(TrinoParserVisitor):
         return FullQueryAST(self.select_clause, self.from_clause, self.match_recognize)
 
     def find_pattern_recognition(self, ctx):
-        # Check if the node has children.
         if not hasattr(ctx, "getChildren"):
             return None
         if isinstance(ctx, TrinoParser.PatternRecognitionContext):
@@ -238,7 +241,6 @@ def parse_full_query(query: str, dialect='default') -> FullQueryAST:
     token_stream = CommonTokenStream(lexer)
     parser = TrinoParser(token_stream)
     tree = parser.parse()
-    # Pass the original query to preserve formatting.
     extractor = FullQueryExtractor(query)
     extractor.visit(tree)
     return FullQueryAST(extractor.select_clause, extractor.from_clause, extractor.match_recognize)

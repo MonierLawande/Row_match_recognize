@@ -2,6 +2,7 @@ from typing import List, Optional
 
 # Base AST node
 class ASTNode:
+    """Base class for all AST nodes."""
     pass
 
 # --- MATCH_RECOGNIZE Clause AST Nodes ---
@@ -25,7 +26,9 @@ class Measure(ASTNode):
         self.alias = alias
 
     def __repr__(self):
-        return f"Measure(expression={self.expression}, alias={self.alias})"
+        if self.alias:
+            return f"Measure(expression={self.expression}, alias={self.alias})"
+        return f"Measure(expression={self.expression})"
 
 class MeasuresClause(ASTNode):
     def __init__(self, measures: List[Measure]):
@@ -108,8 +111,8 @@ class MatchRecognizeClause(ASTNode):
                 f"  define={self.define}\n)")
 
 # --- Full Query AST Nodes ---
-# New node to represent a single item in the SELECT clause
 class SelectItem(ASTNode):
+    """Represents an individual item (column or expression with an optional alias) in the SELECT clause."""
     def __init__(self, expression: str, alias: Optional[str] = None):
         self.expression = expression
         self.alias = alias
@@ -119,8 +122,8 @@ class SelectItem(ASTNode):
             return f"SelectItem(expression={self.expression}, alias={self.alias})"
         return f"SelectItem(expression={self.expression})"
 
-# Updated SelectClause holds a list of SelectItem objects.
 class SelectClause(ASTNode):
+    """Represents the SELECT clause as a list of SelectItems."""
     def __init__(self, items: List[SelectItem]):
         self.items = items
 
@@ -128,6 +131,7 @@ class SelectClause(ASTNode):
         return f"SelectClause(items={self.items})"
 
 class FromClause(ASTNode):
+    """Represents the FROM clause with the table name."""
     def __init__(self, table: str):
         self.table = table
 
@@ -135,6 +139,7 @@ class FromClause(ASTNode):
         return f"FromClause(table={self.table})"
 
 class FullQueryAST(ASTNode):
+    """Aggregates the SELECT clause, FROM clause, and the MATCH_RECOGNIZE clause into a full query representation."""
     def __init__(self,
                  select_clause: Optional[SelectClause],
                  from_clause: Optional[FromClause],
