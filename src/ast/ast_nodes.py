@@ -53,14 +53,23 @@ class AfterMatchSkipClause(ASTNode):
     def __repr__(self):
         return f"AfterMatchSkipClause(value={self.value})"
 
+
+
+
 class PatternClause(ASTNode):
     def __init__(self, pattern: str):
         self.pattern = pattern
-        # Extract pattern variables as all single uppercase letters (optionally followed by '+')
-        self.metadata = {"variables": set(re.findall(r'([A-Z][A-Z0-9_]*)\+?', pattern))}
+
+        # Extract variables while maintaining their order of appearance
+        seen = set()
+        variables = [match for match in re.findall(r'\b([A-Z][A-Z0-9_]*)\b', pattern) if not (match in seen or seen.add(match))]
+
+        self.metadata = {"variables": variables}
 
     def __repr__(self):
         return f"PatternClause(pattern={self.pattern}, metadata={self.metadata})"
+
+
 
 class SubsetClause(ASTNode):
     def __init__(self, subset_text: str):

@@ -145,8 +145,21 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         return AfterMatchSkipClause(text)
 
     def extract_pattern(self, ctx: TrinoParser.PatternRecognitionContext) -> PatternClause:
-        pattern_text = post_process_text(ctx.rowPattern().getText())
+        """Extracts the PATTERN clause while preserving spaces between tokens."""
+
+        # Get the full input query from the original context
+        start_index = ctx.rowPattern().start.start
+        stop_index = ctx.rowPattern().stop.stop
+        pattern_text = ctx.start.getInputStream().getText(start_index, stop_index)
+
+        # Normalize spaces
+        pattern_text = re.sub(r'\s+', ' ', pattern_text.strip())
+
         return PatternClause(pattern_text)
+
+
+
+
 
     def extract_subset(self, ctx: TrinoParser.PatternRecognitionContext) -> list:
         subsets = [SubsetClause(post_process_text(sd.getText())) for sd in ctx.subsetDefinition()]
