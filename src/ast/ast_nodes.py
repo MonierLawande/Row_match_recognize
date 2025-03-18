@@ -60,39 +60,47 @@ class MeasuresClause(ASTNode):
 
 class RowsPerMatchClause(ASTNode):
     def __init__(self, mode: str, show_empty: Optional[bool] = None, with_unmatched: Optional[bool] = None):
-        self.mode = mode  # Store original mode string
+        # Store both the raw mode and a normalized mode for internal checks
+        self.raw_mode = mode.strip()
+        self.mode = self.raw_mode.replace(" ", "").upper()  # For comparison
         self.show_empty = show_empty
         self.with_unmatched = with_unmatched
 
+    @staticmethod
+    def one_row_per_match():
+        return RowsPerMatchClause("ONE ROW PER MATCH")
+
+    @staticmethod
+    def all_rows_per_match_show_empty():
+        return RowsPerMatchClause("ALL ROWS PER MATCH", show_empty=True, with_unmatched=False)
+
+    @staticmethod
+    def all_rows_per_match_omit_empty():
+        return RowsPerMatchClause("ALL ROWS PER MATCH", show_empty=False, with_unmatched=False)
+
+    @staticmethod
+    def all_rows_per_match_with_unmatched():
+        return RowsPerMatchClause("ALL ROWS PER MATCH", show_empty=True, with_unmatched=True)
+
     def __repr__(self):
-        # Normalize the mode by removing spaces for comparison
-        normalized_mode = self.mode.replace(" ", "").upper()
-        
-        if normalized_mode == "ONEROWPERMATCH":
+        if self.mode == "ONEROWPERMATCH":
             return "RowsPerMatchClause(mode=ONE ROW PER MATCH)"
-        elif normalized_mode.startswith("ALLROWSPERMATCH"):
+        elif self.mode.startswith("ALLROWSPERMATCH"):
             base = "ALL ROWS PER MATCH"
             modifiers = []
-            
-            # Use boolean flags as the source of truth for modifiers when available
-            if self.show_empty is False or "OMITEMPTYMATCHES" in normalized_mode:
+            if self.show_empty is False or "OMITEMPTYMATCHES" in self.mode:
                 modifiers.append("OMIT EMPTY MATCHES")
-            elif self.show_empty is True or "SHOWEMPTYMATCHES" in normalized_mode:
+            elif self.show_empty is True or "SHOWEMPTYMATCHES" in self.mode:
                 modifiers.append("SHOW EMPTY MATCHES")
-                
-            if self.with_unmatched or "WITHUNMATCHEDROWS" in normalized_mode:
+            if self.with_unmatched or "WITHUNMATCHEDROWS" in self.mode:
                 modifiers.append("WITH UNMATCHED ROWS")
-                
             if modifiers:
                 return f"RowsPerMatchClause(mode={base}, {', '.join(modifiers)})"
             else:
                 return f"RowsPerMatchClause(mode={base})"
-                
-        # For any other mode, add spaces between CamelCase or UPPERCASE words
-        pretty_mode = re.sub(r'([a-z])([A-Z])', r'\1 \2', self.mode)
-        pretty_mode = re.sub(r'([A-Z])([A-Z][a-z])', r'\1 \2', pretty_mode)
-        return f"RowsPerMatchClause(mode={pretty_mode})"
-
+        else:
+            # For any other mode, return the raw mode as provided
+            return f"RowsPerMatchClause(mode={self.raw_mode})"
 
 class AfterMatchSkipClause(ASTNode):
     def __init__(self, value: str):

@@ -8,25 +8,17 @@ Extend validations for functions beyond COUNT() to cover FIRST(), LAST(), PREV()
 
 
 
-RUNNING / FINAL	❌ Not Checked	❌ Needs Validation
-Classifier Function (CLASSIFIER())	❌ Not Checked	❌ Needs Validation
-Match Number Function (MATCH_NUMBER())	❌ Not Checked	❌ Needs Validation
+Overall Assessment and Recommendations
+Readability of AST:
+Your improvements in the RowsPerMatchClause.__repr__ method provide a clearer, human‐readable output (with spaces between words) when printing the AST. This is a significant usability improvement.
 
+Requirement Coverage:
+All major subclauses of MATCH_RECOGNIZE—PARTITION BY, ORDER BY, MEASURES, ROWS PER MATCH (with its various modifiers), AFTER MATCH SKIP, PATTERN, SUBSET, and DEFINE—are being parsed and represented as AST nodes. Special functions (classifier, match number, logical/physical navigation, aggregates) and the running/final semantics are handled per the specification.
 
-2️⃣ RUNNING / FINAL Semantics ,Update MEASURES clause extraction to handle:
-RUNNING LAST(A.totalprice)
-FINAL avg(A.totalprice)
+Validation:
+Your code validates that each identifier in DEFINE is found in the pattern variables and that the functions in the measure expressions are used correctly. This helps catch mismatches and incorrect usage early.
 
-3️⃣ CLASSIFIER() and MATCH_NUMBER() Functions
-CLASSIFIER(A), CLASSIFIER(U), MATCH_NUMBER()
+Potential Enhancements:
 
-4️⃣ Pattern Alternation (A | B) Extend extract_pattern to recognize:
-PATTERN (A | B | C)
-
-5️⃣ Pattern Permutation (PERMUTE(A, B))
-Extend extract_pattern to detect
-PATTERN (PERMUTE(A, B, C))
-
-6️⃣ Exclusion Syntax ({- A -})
-Modify extract_pattern to handle:
-PATTERN (A {- B+ C+ -} D+)
+Error Messages: You might consider refining error messages to include suggestions (e.g. if a classifier function is used with an argument that isn’t found in the pattern, hint at using a valid pattern variable).
+Testing Edge Cases: Additional tests might be added to cover nested functions and combinations (e.g. nested navigation functions, aggregates with classifier arguments, etc.), but the logs already show a good coverage of the key cases.
