@@ -186,8 +186,16 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 measure = Measure(post_process_text(parts[0]), post_process_text(parts[1]))
             else:
                 measure = Measure(post_process_text(raw_text))
+
+            # Detect classifier and match_number functions
+            if measure.is_classifier:
+                logger.debug(f"Detected CLASSIFIER function in measure: {measure}")
+            if measure.is_match_number:
+                logger.debug(f"Detected MATCH_NUMBER function in measure: {measure}")
+
             measures.append(measure)
         return MeasuresClause(measures)
+
     
     def extract_rows_per_match(self, ctx: TrinoParser.RowsPerMatchContext) -> RowsPerMatchClause:
         text = post_process_text(ctx.getText()).upper()
@@ -283,6 +291,8 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             "LAST": r"LAST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
             "PREV": r"PREV\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
             "NEXT": r"NEXT\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+            "CLASSIFIER": r"CLASSIFIER\(\s*([A-Z][A-Z0-9_]*)?\s*\)",  # Supports optional argument
+            "MATCH_NUMBER": r"MATCH_NUMBER\(\s*\)"
         }
         if self.ast.measures:
             for measure in self.ast.measures.measures:

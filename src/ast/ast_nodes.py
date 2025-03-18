@@ -32,17 +32,23 @@ class OrderByClause(ASTNode):
     def __repr__(self):
         return f"OrderByClause(sort_items={self.sort_items})"
 
-
 class Measure(ASTNode):
     def __init__(self, expression: str, alias: Optional[str] = None, metadata: Optional[Dict] = None):
         self.expression = expression
         self.alias = alias
         self.metadata = metadata or {}
 
+        # Detect function types
+        self.is_classifier = re.match(r'CLASSIFIER\(\s*([A-Z][A-Z0-9_]*)?\s*\)', expression, re.IGNORECASE) is not None
+        self.is_match_number = re.match(r'MATCH_NUMBER\(\s*\)', expression, re.IGNORECASE) is not None
+
     def __repr__(self):
-        if self.alias:
-            return f"Measure(expression={self.expression}, alias={self.alias}, metadata={self.metadata})"
-        return f"Measure(expression={self.expression}, metadata={self.metadata})"
+        extra_info = []
+        if self.is_classifier:
+            extra_info.append("CLASSIFIER() detected")
+        if self.is_match_number:
+            extra_info.append("MATCH_NUMBER() detected")
+        return f"Measure(expression={self.expression}, alias={self.alias}, metadata={self.metadata}, {' | '.join(extra_info)})"
 
 class MeasuresClause(ASTNode):
     def __init__(self, measures: List[Measure]):
