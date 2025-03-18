@@ -14,12 +14,24 @@ class PartitionByClause(ASTNode):
     def __repr__(self):
         return f"PartitionByClause(columns={self.columns})"
 
-class OrderByClause(ASTNode):
-    def __init__(self, columns: List[str]):
-        self.columns = columns
+
+class SortItem(ASTNode):
+    """Represents an individual sorting item in ORDER BY clause."""
+    def __init__(self, column: str, ordering: str = "ASC", nulls_ordering: Optional[str] = None):
+        self.column = column
+        self.ordering = ordering.upper()  # "ASC" or "DESC"
+        self.nulls_ordering = nulls_ordering.upper() if nulls_ordering else None  # "NULLS FIRST" or "NULLS LAST"
 
     def __repr__(self):
-        return f"OrderByClause(columns={self.columns})"
+        return f"SortItem(column={self.column}, ordering={self.ordering}, nulls_ordering={self.nulls_ordering})"
+
+class OrderByClause(ASTNode):
+    def __init__(self, sort_items: List[SortItem]):
+        self.sort_items = sort_items
+
+    def __repr__(self):
+        return f"OrderByClause(sort_items={self.sort_items})"
+
 
 class Measure(ASTNode):
     def __init__(self, expression: str, alias: Optional[str] = None, metadata: Optional[Dict] = None):

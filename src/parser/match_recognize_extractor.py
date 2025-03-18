@@ -6,7 +6,7 @@ from src.grammar.TrinoParserVisitor import TrinoParserVisitor
 from src.grammar.TrinoLexer import TrinoLexer
 from src.ast.ast_nodes import (
     PartitionByClause,
-    OrderByClause,
+    OrderByClause,   SortItem, 
     Measure,
     MeasuresClause,
     RowsPerMatchClause,
@@ -114,9 +114,39 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         columns = [post_process_text(expr.getText()) for expr in ctx.partition]
         return PartitionByClause(columns)
 
+   
     def extract_order_by(self, ctx: TrinoParser.PatternRecognitionContext) -> OrderByClause:
-        columns = [post_process_text(si.getText()) for si in ctx.sortItem()]
-        return OrderByClause(columns)
+        sort_items = []
+        
+        for si in ctx.sortItem():
+            column = post_process_text(si.getChild(0).getText())  # Extract column name
+            ordering = "ASC"  # Default is ASC
+            nulls_ordering = None  # Default: Unspecified
+
+            # Track tokens and capture NULLS FIRST/LAST in any order
+            child_tokens = [si.getChild(i).getText().upper() for i in range(1, si.getChildCount())]
+
+            if "DESC" in child_tokens:
+                ordering = "DESC"
+            elif "ASC" in child_tokens:
+                ordering = "ASC"
+
+            if "NULLS" in child_tokens:
+                nulls_index = child_tokens.index("NULLS")
+                if nulls_index + 1 < len(child_tokens):
+                    next_token = child_tokens[nulls_index + 1]
+                    if next_token == "FIRST":
+                        nulls_ordering = "NULLS FIRST"
+                    elif next_token == "LAST":
+                        nulls_ordering = "NULLS LAST"
+
+            sort_items.append(SortItem(column, ordering, nulls_ordering))
+
+        return OrderByClause(sort_items)
+
+
+
+
 
     def extract_measures(self, ctx: TrinoParser.PatternRecognitionContext) -> MeasuresClause:
         measures = []
