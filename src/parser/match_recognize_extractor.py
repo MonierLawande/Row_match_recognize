@@ -183,18 +183,31 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             raw_text = md.getText()
             parts = smart_split(raw_text)
             if len(parts) == 2:
-                measure = Measure(post_process_text(parts[0]), post_process_text(parts[1]))
+                expr = post_process_text(parts[0])
+                alias = post_process_text(parts[1])
             else:
-                measure = Measure(post_process_text(raw_text))
+                expr = post_process_text(raw_text)
+                alias = None
 
-            # Detect classifier and match_number functions
-            if measure.is_classifier:
-                logger.debug(f"Detected CLASSIFIER function in measure: {measure}")
-            if measure.is_match_number:
-                logger.debug(f"Detected MATCH_NUMBER function in measure: {measure}")
+            # Check for RUNNING or FINAL modifiers
+            semantics = "RUNNING"  # default semantics
+            # Look for prefixes (we assume the measure expression may start with them)
+            if expr.upper().startswith("RUNNING "):
+                semantics = "RUNNING"
+                expr = expr[len("RUNNING "):].strip()
+            elif expr.upper().startswith("FINAL "):
+                semantics = "FINAL"
+                expr = expr[len("FINAL "):].strip()
 
+            # Create the Measure and store the semantics in metadata
+            measure_metadata = {}
+            if semantics:
+                measure_metadata["semantics"] = semantics
+
+            measure = Measure(expr, alias, measure_metadata)
             measures.append(measure)
         return MeasuresClause(measures)
+
 
     
     def extract_rows_per_match(self, ctx: TrinoParser.RowsPerMatchContext) -> RowsPerMatchClause:
@@ -286,14 +299,13 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         """Validate aggregate and navigation functions in measures."""
         # Updated patterns to allow dot-qualified identifiers (e.g., B.totalprice).
         allowed_functions = {
-            "COUNT": r"COUNT\(\s*(\*|[A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)\s*\)",
-            "FIRST": r"FIRST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-            "LAST": r"LAST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-            "PREV": r"PREV\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-            "NEXT": r"NEXT\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-            "CLASSIFIER": r"CLASSIFIER\(\s*([A-Z][A-Z0-9_]*)?\s*\)",  # Supports optional argument
-            "MATCH_NUMBER": r"MATCH_NUMBER\(\s*\)"
-        }
+        "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[A-Z][A-Z0-9]*(?:\.\*)?(?:\.[A-Z][A-Z0-9]*)?)\s*\)",
+        "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+        "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+        "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+        "NEXT":  r"(?:FINAL|RUNNING)?\s*NEXT\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+    }
+
         if self.ast.measures:
             for measure in self.ast.measures.measures:
                 expr_upper = measure.expression.upper()
