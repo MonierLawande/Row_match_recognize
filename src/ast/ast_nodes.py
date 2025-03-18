@@ -66,21 +66,43 @@ class AfterMatchSkipClause(ASTNode):
         return f"AfterMatchSkipClause(value={self.value})"
 
 
-
+import re
 
 class PatternClause(ASTNode):
+    """Represents the PATTERN clause in MATCH_RECOGNIZE"""
+
+    # Reserved keywords that should not be extracted as variables
+    RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
+
     def __init__(self, pattern: str):
         self.pattern = pattern
 
-        # Extract variables while maintaining their order of appearance
+        # Step 1: Remove function-like calls for reserved keywords.
+        # For example, "PERMUTE(A, B, C)" becomes "A, B, C"
+        pattern_no_func = re.sub(
+            r'\b(?:' + '|'.join(self.RESERVED_KEYWORDS) + r')\s*\((.*?)\)',
+            r'\1',
+            pattern
+        )
+
+        # Step 2: Remove punctuation and quantifier symbols.
+        # This converts "A, B, C" (or with braces, etc.) into a space-separated string.
+        cleaned_pattern = re.sub(r'[\{\}\,\+\*\?\(\)]', ' ', pattern_no_func)
+        cleaned_pattern = re.sub(r'\s+', ' ', cleaned_pattern).strip()
+
+        # Step 3: Extract valid pattern variables from the cleaned string.
         seen = set()
-        variables = [match for match in re.findall(r'\b([A-Z][A-Z0-9_]*)\b', pattern) if not (match in seen or seen.add(match))]
+        variables = []
+        for match in re.finditer(r'\b([A-Z][A-Z0-9_]*)\b', cleaned_pattern):
+            var_name = match.group(1)
+            if var_name not in seen:
+                variables.append(var_name)
+                seen.add(var_name)
 
         self.metadata = {"variables": variables}
 
     def __repr__(self):
         return f"PatternClause(pattern={self.pattern}, metadata={self.metadata})"
-
 
 
 class SubsetClause(ASTNode):

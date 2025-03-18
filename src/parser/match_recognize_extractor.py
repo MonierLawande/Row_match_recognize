@@ -98,7 +98,8 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             logger.debug(f"Extracted AFTER MATCH SKIP: {self.ast.after_match_skip}")
         if ctx.PATTERN_():
             self.ast.pattern = self.extract_pattern(ctx)
-            logger.debug(f"Extracted PATTERN: {self.ast.pattern}")
+            logger.debug(f"Extracted Pattern: {self.ast.pattern}")
+
         if ctx.SUBSET_():
             self.ast.subset = self.extract_subset(ctx)
             logger.debug(f"Extracted SUBSET: {self.ast.subset}")
@@ -113,6 +114,35 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
     def extract_partition_by(self, ctx: TrinoParser.PatternRecognitionContext) -> PartitionByClause:
         columns = [post_process_text(expr.getText()) for expr in ctx.partition]
         return PartitionByClause(columns)
+
+
+    def visitRowPattern(self, ctx: TrinoParser.RowPatternContext):
+        """
+        Visit a pattern expression, handling alternation, concatenation, and quantifiers.
+        """
+        if isinstance(ctx, TrinoParser.PatternAlternationContext):
+            return self.visitPatternAlternation(ctx)
+        elif isinstance(ctx, TrinoParser.PatternConcatenationContext):
+            return self.visitPatternConcatenation(ctx)
+        elif isinstance(ctx, TrinoParser.QuantifiedPrimaryContext):
+            return self.visitQuantifiedPrimary(ctx)
+        return None
+    def visitPatternAlternation(self, ctx: TrinoParser.PatternAlternationContext):
+        """
+        Handles pattern alternation (e.g., A | B | C).
+        """
+        patterns = [self.visit(p) for p in ctx.rowPattern()]
+        return {"type": "alternation", "patterns": patterns}
+    def visitQuantifiedPrimary(self, ctx: TrinoParser.QuantifiedPrimaryContext):
+        pattern = self.visit(ctx.patternPrimary())
+        quantifier = ctx.patternQuantifier().getText() if ctx.patternQuantifier() else None
+        return {"type": "quantified", "pattern": pattern, "quantifier": quantifier}
+
+    def visitPatternVariable(self, ctx: TrinoParser.PatternVariableContext):
+        """
+        Handles pattern variables (e.g., A, B, C).
+        """
+        return {"type": "variable", "name": ctx.identifier().getText()}
 
    
     def extract_order_by(self, ctx: TrinoParser.PatternRecognitionContext) -> OrderByClause:
@@ -218,13 +248,15 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
     def validate_identifiers(self, ctx):
         """Ensure that each identifier used in DEFINE is present in the pattern."""
         if self.ast.pattern:
-            pattern_vars = set(re.findall(r'([A-Z])(?:\+)?', self.ast.pattern.pattern))
+            # Use the already extracted variables from the PatternClause metadata.
+            pattern_vars = set(self.ast.pattern.metadata.get("variables", []))
             logger.debug(f"Extracted pattern variables: {pattern_vars}")
             if self.ast.define:
                 for definition in self.ast.define.definitions:
                     if definition.variable not in pattern_vars:
                         raise ParserError(f"Define variable '{definition.variable}' not found in pattern variables {pattern_vars}",
-                                          line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+                                        line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+
 
     def validate_function_usage(self, ctx):
         """Validate aggregate and navigation functions in measures."""
