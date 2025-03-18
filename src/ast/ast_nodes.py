@@ -50,13 +50,43 @@ class MeasuresClause(ASTNode):
 
     def __repr__(self):
         return f"MeasuresClause(measures={self.measures})"
+# Update the RowsPerMatchClause class in src/ast/ast_nodes.py
 
 class RowsPerMatchClause(ASTNode):
-    def __init__(self, value: str):
-        self.value = value
+    def __init__(self, mode: str, show_empty: Optional[bool] = None, with_unmatched: Optional[bool] = None):
+        self.mode = mode  # Store original mode string
+        self.show_empty = show_empty
+        self.with_unmatched = with_unmatched
 
     def __repr__(self):
-        return f"RowsPerMatchClause(value={self.value})"
+        # Normalize the mode by removing spaces for comparison
+        normalized_mode = self.mode.replace(" ", "").upper()
+        
+        if normalized_mode == "ONEROWPERMATCH":
+            return "RowsPerMatchClause(mode=ONE ROW PER MATCH)"
+        elif normalized_mode.startswith("ALLROWSPERMATCH"):
+            base = "ALL ROWS PER MATCH"
+            modifiers = []
+            
+            # Use boolean flags as the source of truth for modifiers when available
+            if self.show_empty is False or "OMITEMPTYMATCHES" in normalized_mode:
+                modifiers.append("OMIT EMPTY MATCHES")
+            elif self.show_empty is True or "SHOWEMPTYMATCHES" in normalized_mode:
+                modifiers.append("SHOW EMPTY MATCHES")
+                
+            if self.with_unmatched or "WITHUNMATCHEDROWS" in normalized_mode:
+                modifiers.append("WITH UNMATCHED ROWS")
+                
+            if modifiers:
+                return f"RowsPerMatchClause(mode={base}, {', '.join(modifiers)})"
+            else:
+                return f"RowsPerMatchClause(mode={base})"
+                
+        # For any other mode, add spaces between CamelCase or UPPERCASE words
+        pretty_mode = re.sub(r'([a-z])([A-Z])', r'\1 \2', self.mode)
+        pretty_mode = re.sub(r'([A-Z])([A-Z][a-z])', r'\1 \2', pretty_mode)
+        return f"RowsPerMatchClause(mode={pretty_mode})"
+
 
 class AfterMatchSkipClause(ASTNode):
     def __init__(self, value: str):

@@ -34,7 +34,9 @@ class ParserError(Exception):
         self.snippet = snippet
         super().__init__(f"{message} (Line: {line}, Column: {column})\nSnippet: {snippet}")
 
-def post_process_text(text):
+from typing import List, Optional, Dict
+
+def post_process_text(text: Optional[str]) -> Optional[str]:
     """Normalize whitespace in the given text."""
     if text is None:
         return text
@@ -175,9 +177,6 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         return OrderByClause(sort_items)
 
 
-
-
-
     def extract_measures(self, ctx: TrinoParser.PatternRecognitionContext) -> MeasuresClause:
         measures = []
         for md in ctx.measureDefinition():
@@ -189,16 +188,33 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 measure = Measure(post_process_text(raw_text))
             measures.append(measure)
         return MeasuresClause(measures)
-
+    
     def extract_rows_per_match(self, ctx: TrinoParser.RowsPerMatchContext) -> RowsPerMatchClause:
-        text = post_process_text(ctx.getText())
-        if "ONEROWPERMATCH" in text.upper():
-            value = "ONE ROW PER MATCH"
-        elif "ALLROWSPERMATCH" in text.upper():
-            value = "ALL ROWS PER MATCH"
+        text = post_process_text(ctx.getText()).upper()
+        normalized_text = text.replace(" ", "")
+
+            #   # Check for ONE ROW PER MATCH
+        if "ONEROWPERMATCH" in normalized_text:
+            return RowsPerMatchClause("ONE ROW PER MATCH")
+        
+        # Check for ALL ROWS PER MATCH variants
+        elif "ALLROWSPERMATCH" in normalized_text:
+            show_empty = True  # Default to showing empty matches
+            with_unmatched = False
+            
+            if "OMITEMPTYMATCHES" in normalized_text:
+                show_empty = False
+            if "WITHUNMATCHEDROWS" in normalized_text:
+                with_unmatched = True
+                
+            return RowsPerMatchClause("ALL ROWS PER MATCH", show_empty, with_unmatched)
+                
+        # For any other mode, preserve spaces in the text
         else:
-            value = text
-        return RowsPerMatchClause(value)
+            # Add spaces between words in camelCase or UPPERCASE text
+            spaced_text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+            spaced_text = re.sub(r'([A-Z])([A-Z][a-z])', r'\1 \2', spaced_text)
+            return RowsPerMatchClause(spaced_text)
 
     def extract_after_match_skip(self, ctx: TrinoParser.PatternRecognitionContext) -> AfterMatchSkipClause:
         text = post_process_text(" ".join(child.getText() for child in ctx.skipTo().getChildren()))

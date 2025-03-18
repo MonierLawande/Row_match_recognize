@@ -1,44 +1,17 @@
-Once you are confident that the AST is constructed correctly, the next phase is to write a translator that converts this AST into a sequence of pandas DataFrame operations (such as filtering, grouping, aggregating, etc.).
-You can further improve error recovery and performance by integrating ANTLR’s error listeners and optimizing the parsing process.
 
-Implementing the additional validations, richer metadata, error recovery strategies, and performance optimization
 
-Further Cross‑Clause Validations:
-
-Validate that the columns in the ORDER BY clause exist in the DataFrame.
 Ensure that any column references in MEASURES or navigation functions (like PREV, NEXT) are present in the DataFrame schema.
 Function Usage Validation:
 
 Extend validations for functions beyond COUNT() to cover FIRST(), LAST(), PREV(), NEXT(), etc.
-Consider building a mapping of allowed functions and their argument patterns to catch usage errors early.
 
 
-Feature	Status in AST?	Implementation Status?
-PARTITION BY	✅ Extracted	✅ Implemented (PartitionByClause)
-ORDER BY	✅ Extracted	✅ Implemented (OrderByClause)
-MEASURES	✅ Extracted	✅ Implemented (MeasuresClause)
-ROWS PER MATCH	✅ Extracted	✅ Implemented (RowsPerMatchClause)
-AFTER MATCH SKIP	✅ Extracted	✅ Implemented (AfterMatchSkipClause)
-PATTERN	✅ Extracted	✅ Implemented (PatternClause)
-SUBSET	✅ Extracted	✅ Implemented (SubsetClause)
-DEFINE	✅ Extracted	✅ Implemented (DefineClause)
-ALL ROWS PER MATCH	❌ Not Checked	❌ Needs Validation
-SHOW EMPTY MATCHES	❌ Not Checked	❌ Needs Validation
-OMIT EMPTY MATCHES	❌ Not Checked	❌ Needs Validation
-WITH UNMATCHED ROWS	❌ Not Checked	❌ Needs Validation
+
+
 RUNNING / FINAL	❌ Not Checked	❌ Needs Validation
 Classifier Function (CLASSIFIER())	❌ Not Checked	❌ Needs Validation
 Match Number Function (MATCH_NUMBER())	❌ Not Checked	❌ Needs Validation
-FIRST/LAST Navigation	✅ Extracted	✅ Implemented (FIRST(), LAST())
-PREV/NEXT Navigation	✅ Extracted	✅ Implemented (PREV(), NEXT())
-Pattern Quantifiers (*, +, {n,m})	✅ Extracted	✅ Implemented
-`Pattern Alternation (A	B)`	❌ Not Checked
-Pattern Permutation (PERMUTE(A,B))	❌ Not Checked	❌ Needs Validation
-Exclusion Syntax ({- A -})	❌ Not Checked	❌ Needs Validation
-Aggregation in MEASURES	✅ Extracted	✅ Implemented (COUNT(), AVG(), MIN(),
 
-
-1️⃣ ALL ROWS PER MATCH, SHOW EMPTY MATCHES, OMIT EMPTY MATCHES, WITH UNMATCHED ROWS
 
 2️⃣ RUNNING / FINAL Semantics ,Update MEASURES clause extraction to handle:
 RUNNING LAST(A.totalprice)
@@ -46,11 +19,14 @@ FINAL avg(A.totalprice)
 
 3️⃣ CLASSIFIER() and MATCH_NUMBER() Functions
 CLASSIFIER(A), CLASSIFIER(U), MATCH_NUMBER()
+
 4️⃣ Pattern Alternation (A | B) Extend extract_pattern to recognize:
 PATTERN (A | B | C)
+
 5️⃣ Pattern Permutation (PERMUTE(A, B))
 Extend extract_pattern to detect
 PATTERN (PERMUTE(A, B, C))
+
 6️⃣ Exclusion Syntax ({- A -})
 Modify extract_pattern to handle:
 PATTERN (A {- B+ C+ -} D+)
