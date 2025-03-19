@@ -281,49 +281,46 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
 
 
     def validate_clauses(self, ctx):
-        # Mandatory: If PARTITION BY is used, ORDER BY must be provided.
+        # Mandatory: If PARTITION BY is present, an ORDER BY clause is required.
         if self.ast.partition_by and not self.ast.order_by:
             raise ParserError("ORDER BY clause is required when PARTITION BY is used.",
                               line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-        # Mandatory: If a DEFINE clause is present, a PATTERN clause must be provided.
+        # Mandatory: If a DEFINE clause is provided, then a PATTERN clause must also be present.
         if self.ast.define and not self.ast.pattern:
             raise ParserError("PATTERN clause is required when DEFINE is used.",
                               line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-        # Validate the AFTER MATCH SKIP clause, if present.
+        # Validate AFTER MATCH SKIP clause if present.
         if self.ast.after_match_skip:
-            tokens = self.ast.after_match_skip.value.upper().split()
-            # For tokens like "TO LAST A" or "TO NEXT A"
+            skip_value = self.ast.after_match_skip.value.upper()
+            tokens = skip_value.split()
+            # For cases like "SKIP TO LAST X" or "SKIP TO FIRST Y"
             if "TO" in tokens:
-                target_var = tokens[-1]  # Assume last token is the target variable.
+                target_var = tokens[-1]  # Assume the target variable is the last token.
                 pattern_vars = self.ast.pattern.metadata.get("variables", [])
                 if target_var not in pattern_vars:
                     raise ParserError(f"AFTER MATCH SKIP target '{target_var}' not found in pattern variables {pattern_vars}.",
                                       line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-                # Prevent skipping to the first row (e.g. 'A' if it is the first variable)
                 if pattern_vars and target_var == pattern_vars[0]:
-                    raise ParserError(f"AFTER MATCH SKIP target '{target_var}' cannot be the first element of the match (infinite loop).",
+                    raise ParserError(f"AFTER MATCH SKIP target '{target_var}' cannot be the first element (infinite loop).",
                                       line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-
-        # Validate pattern clause syntax further.
         self.validate_pattern_clause(ctx)
 
     def validate_identifiers(self, ctx):
-        """Ensure that each identifier used in DEFINE is present in the pattern."""
-        if self.ast.pattern:
-            pattern_vars = set(self.ast.pattern.metadata.get("variables", []))
-            if self.ast.define:
-                for definition in self.ast.define.definitions:
-                    if definition.variable not in pattern_vars:
-                        raise ParserError(f"Define variable '{definition.variable}' not found in pattern variables {pattern_vars}",
-                                          line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+        """Ensure that each identifier in the DEFINE clause appears in the pattern variables."""
+        if self.ast.pattern and self.ast.define:
+            pattern_vars = set(var.upper() for var in self.ast.pattern.metadata.get("variables", []))
+            for definition in self.ast.define.definitions:
+                if definition.variable.upper() not in pattern_vars:
+                    raise ParserError(f"Define variable '{definition.variable}' not found in pattern variables {pattern_vars}.",
+                                      line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
 
     def validate_function_usage(self, ctx):
-        """Validate aggregate and navigation functions in measure expressions."""
+        """Validate aggregate and navigation function usage in measures."""
         allowed_functions = {
             "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[A-Z][A-Z0-9]*(?:\.\*)?(?:\.[A-Z][A-Z0-9]*)?)\s*\)",
             "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
             "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-            # For PREV and NEXT, allow nested FIRST/LAST functions.
+            # Allow nested FIRST() or LAST() calls inside PREV and NEXT.
             "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?))\s*(?:,\s*\d+)?\s*\)",
             "NEXT":  r"(?:FINAL|RUNNING)?\s*NEXT\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?))\s*(?:,\s*\d+)?\s*\)",
         }
@@ -338,6 +335,26 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                                 f"Invalid usage of {func} in measure: {measure.expression}",
                                 line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
                             )
+                logger.debug(f"Validated function usage for measure: {measure.expression}")
+
+    def validate_pattern_clause(self, ctx):
+        """Perform additional validation of the PATTERN clause syntax."""
+        if self.ast.pattern:
+            pattern_text = self.ast.pattern.pattern.strip()
+            # Allow empty pattern "()"
+            if pattern_text == "()":
+                pass
+            # Ensure balanced parentheses.
+            if pattern_text.count("(") != pattern_text.count(")"):
+                raise ParserError("Unbalanced parentheses in PATTERN clause.",
+                                  line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+            # If exclusion syntax is used with WITH UNMATCHED ROWS, disallow it.
+            if self.ast.rows_per_match and "WITH UNMATCHED ROWS" in self.ast.rows_per_match.mode.upper():
+                if "{-" in pattern_text and "-}" in pattern_text:
+                    raise ParserError("Exclusion syntax is not allowed with ALL ROWS PER MATCH WITH UNMATCHED ROWS.",
+                                      line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+            # (Optional) You might also check for valid quantifiers, grouping, etc.
+
                 # (Optional) Additional validation for aggregates can be inserted here.
                 # For instance, if multiple arguments are used, verify that all refer to the same pattern variable.
                 # Or, disallow navigation functions inside aggregate functions.
