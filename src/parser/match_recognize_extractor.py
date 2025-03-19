@@ -120,9 +120,9 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             self.ast.define = self.extract_define(ctx)
             logger.debug(f"Extracted DEFINE: {self.ast.define}")
         
-        self.validate_clauses(ctx) 
+        self.validate_clauses(ctx)
         self.validate_identifiers(ctx)
-        self.validate_pattern_variables_defined(ctx) 
+        self.validate_pattern_variables_defined(ctx)
         self.validate_function_usage(ctx)
         return self.ast
 
@@ -262,23 +262,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                                       line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         self.validate_pattern_clause(ctx)
 
-    def validate_identifiers(self, ctx):
-        # Compare the base variables from the pattern with the variables defined in DEFINE.
-        if self.ast.pattern:
-            pattern_vars = set(self.ast.pattern.metadata.get("base_variables", []))
-        else:
-            pattern_vars = set()
-        
-        if self.ast.define:
-            for definition in self.ast.define.definitions:
-                # Case-sensitive comparison.
-                if definition.variable not in pattern_vars:
-                    raise ParserError(
-                        f"Define variable '{definition.variable}' not found in pattern variables {pattern_vars}. "
-                        "Hint: Ensure that each variable defined in the DEFINE clause appears in the PATTERN clause.",
-                        line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
-                    )
-
+  
     def validate_function_usage(self, ctx):
         allowed_functions = {
             "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[A-Za-z_][A-Za-z0-9_]*(?:\.\*)?(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\)",
@@ -301,23 +285,54 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 logger.debug(f"Validated function usage for measure: {measure.expression}")
 
     def validate_pattern_clause(self, ctx):
+        """Additional checks for the PATTERN clause syntax."""
         if self.ast.pattern:
             pattern_text = self.ast.pattern.pattern.strip()
+            # Check for an empty pattern.
             if pattern_text == "()":
+                # Empty match is allowed, but later evaluation should produce null values.
                 pass
-            if pattern_text.count("(") != pattern_text.count(")"):
-                raise ParserError("Unbalanced parentheses in PATTERN clause.",
-                                  line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-            if self.ast.rows_per_match and "WITHUNMATCHEDROWS" in self.ast.rows_per_match.mode.upper():
+
+            # Additional Validation: Ensure balanced parentheses.
+            open_parens = pattern_text.count("(")
+            close_parens = pattern_text.count(")")
+            if open_parens != close_parens:
+                raise ParserError(
+                    "Unbalanced parentheses in PATTERN clause.",
+                    line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
+                )
+
+            # Example: if exclusion syntax is used with WITH UNMATCHED ROWS, raise an error.
+            if self.ast.rows_per_match and "WITH UNMATCHED ROWS" in self.ast.rows_per_match.mode.upper():
                 if "{-" in pattern_text and "-}" in pattern_text:
-                    raise ParserError("Exclusion syntax is not allowed with ALL ROWS PER MATCH WITH UNMATCHED ROWS.",
-                                      line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-            logger.debug("PATTERN clause validated successfully.")
+                    raise ParserError(
+                        "Pattern exclusions are not allowed with ALL ROWS PER MATCH WITH UNMATCHED ROWS.",
+                        line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
+                    )
+            # (Optional) Additional checks on quantifiers and grouping could be added here.
+            logger.debug(f"PATTERN clause validated successfully: {pattern_text}")
+
+    def validate_identifiers(self, ctx):
+        # Compare the base variables (from PATTERN) with variables defined in DEFINE.
+        if self.ast.pattern:
+            pattern_vars = set(self.ast.pattern.metadata.get("base_variables", []))
+        else:
+            pattern_vars = set()
+        
+        if self.ast.define:
+            for definition in self.ast.define.definitions:
+                # Do a case-sensitive check.
+                if definition.variable not in pattern_vars:
+                    raise ParserError(
+                        f"Define variable '{definition.variable}' not found in pattern base variables {pattern_vars}. "
+                        "Hint: Ensure that each variable defined in the DEFINE clause appears exactly (case-sensitively) in the PATTERN clause.",
+                        line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
+                    )
 
     def validate_pattern_variables_defined(self, ctx):
         """
-        Validate that every base variable in the PATTERN clause is defined in the DEFINE clause
-        and vice versa. This comparison is case-sensitive.
+        Validate that every base variable in the PATTERN clause is defined in the DEFINE clause,
+        and that there are no extra definitions.
         """
         if self.ast.pattern:
             pattern_vars = set(self.ast.pattern.metadata.get("base_variables", []))

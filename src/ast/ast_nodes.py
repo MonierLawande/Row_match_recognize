@@ -15,16 +15,14 @@ class PartitionByClause(ASTNode):
 
 @dataclass
 class SortItem(ASTNode):
-    """Represents an individual sorting item in ORDER BY clause."""
     column: str
     ordering: str = "ASC"
     nulls_ordering: Optional[str] = None
 
     def __post_init__(self):
-        # Preserve the ordering as provided (but you might still want to standardize if needed).
-        self.ordering = self.ordering  # case-sensitive; do not force upper case.
+        self.ordering = self.ordering.upper()
         if self.nulls_ordering:
-            self.nulls_ordering = self.nulls_ordering
+            self.nulls_ordering = self.nulls_ordering.upper()
 
 @dataclass
 class OrderByClause(ASTNode):
@@ -34,12 +32,12 @@ class OrderByClause(ASTNode):
 class Measure(ASTNode):
     expression: str
     alias: Optional[str] = None
-    metadata: Optional[Dict] = field(default_factory=dict)
+    metadata: Dict = field(default_factory=dict)
     is_classifier: bool = field(init=False)
     is_match_number: bool = field(init=False)
 
     def __post_init__(self):
-        self.is_classifier = re.match(r'CLASSIFIER\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)', self.expression) is not None
+        self.is_classifier = re.match(r'CLASSIFIER\(\s*([A-Za-z][A-Za-z0-9_]*)?\s*\)', self.expression) is not None
         self.is_match_number = re.match(r'MATCH_NUMBER\(\s*\)', self.expression) is not None
 
 @dataclass
@@ -55,7 +53,7 @@ class RowsPerMatchClause(ASTNode):
 
     def __post_init__(self):
         self.raw_mode = self.raw_mode.strip()
-        self.mode = self.raw_mode.replace(" ", "")
+        self.mode = self.raw_mode.replace(" ", "").upper()
 
     @staticmethod
     def one_row_per_match():
@@ -96,44 +94,40 @@ class RowsPerMatchClause(ASTNode):
 class AfterMatchSkipClause(ASTNode):
     value: str
 
+#
+# Updated PatternClause: it extracts tokens using regex and stores both the full token (e.g. "b+")
+# and the base variable (e.g. "b") in the metadata.
+#
 @dataclass
 class PatternClause(ASTNode):
-    """Represents the PATTERN clause in MATCH_RECOGNIZE.
-
-    This implementation extracts two lists:
-      - "variables": the tokens as they appear (e.g. ["A", "b+", "c"])
-      - "base_variables": the base identifiers with any trailing quantifiers removed (e.g. ["A", "b", "c"])
-    The comparison in validation is case‑sensitive.
-    """
+    """Represents the PATTERN clause in MATCH_RECOGNIZE."""
     pattern: str
     metadata: Dict = field(init=False)
 
-    # Reserved keywords that should not be treated as pattern variables.
+    # Reserved keywords that should not be treated as variables.
     RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
 
     def __post_init__(self):
-        # Split the raw pattern by whitespace.
-        tokens = self.pattern.split()
-        variables: List[str] = []
-        base_variables: List[str] = []
-        for token in tokens:
-            token = token.strip()
-            if token in self.RESERVED_KEYWORDS:
+        # Use a regex to find tokens that are identifiers optionally followed by quantifiers.
+        # For example, in "b+", we want to capture:
+        #    full token: "b+"
+        #    base variable: "b"
+        # The regex: ([A-Za-z][A-Za-z0-9_]*)([\*\+\?\{\},0-9]*)?
+        tokens = re.findall(r'([A-Za-z][A-Za-z0-9_]*)([\*\+\?\{\},0-9]*)', self.pattern)
+        full_tokens = []
+        base_tokens = []
+        for base, quant in tokens:
+            # Skip reserved keywords (case-sensitive check)
+            if base in self.RESERVED_KEYWORDS:
                 continue
-            # Use a regex to capture an identifier optionally followed by a quantifier.
-            # For example, "b+" will capture "b" as the base.
-            m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)([\*\+\?\{].*)?$', token)
-            if m:
-                ident = m.group(1)              # the base identifier (case preserved)
-                quantifier = m.group(2) if m.group(2) else ""
-                full_token = ident + quantifier  # preserve original token (e.g., "b+")
-                variables.append(full_token)
-                base_variables.append(ident)
-            else:
-                # If token doesn't match the expected pattern, include it as-is.
-                variables.append(token)
-                base_variables.append(token)
-        self.metadata = {"variables": variables, "base_variables": base_variables}
+            full = base + quant  # full token as it appears
+            full_tokens.append(full)
+            base_tokens.append(base)
+        # Store both in metadata.
+        self.metadata = {
+            "variables": full_tokens,      # tokens as they appear, e.g. ["A", "b+", "c"]
+            "base_variables": base_tokens    # just the identifier, e.g. ["A", "b", "c"]
+        }
 
     def __repr__(self):
         return f"PatternClause(pattern={self.pattern!r}, metadata={self.metadata})"
@@ -174,12 +168,11 @@ class MatchRecognizeClause(ASTNode):
                 f"  define={self.define}\n)")
 
 # --- Full Query AST Nodes ---
-
 @dataclass
 class SelectItem(ASTNode):
     expression: str
     alias: Optional[str] = None
-    metadata: Optional[Dict] = field(default_factory=dict)
+    metadata: Dict = field(default_factory=dict)
 
     def __repr__(self):
         if self.alias:
@@ -199,7 +192,7 @@ class FullQueryAST(ASTNode):
     select_clause: Optional[SelectClause]
     from_clause: Optional[FromClause]
     match_recognize: Optional[MatchRecognizeClause]
-    metadata: Optional[Dict] = field(default_factory=dict)
+    metadata: Dict = field(default_factory=dict)
 
     def __repr__(self):
         return (f"FullQueryAST(\n"
