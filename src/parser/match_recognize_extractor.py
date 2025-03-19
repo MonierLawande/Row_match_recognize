@@ -27,6 +27,7 @@ from src.ast.ast_nodes import (
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
 # Ensure that ParserError is defined before it is used.
 class ParserError(Exception):
     def __init__(self, message, line=None, column=None, snippet=None):
@@ -47,19 +48,17 @@ class CustomErrorListener(ErrorListener):
     def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):
         custom_msg = (f"Syntax error at line {line}, column {column}: {msg}. "
                       "Please verify your MATCH_RECOGNIZE clause syntax according to the specification.")
-        # Raise our ParserError with detailed context.
         raise ParserError(custom_msg, line=line, column=column,
                           snippet=recognizer.getInputStream().getText())
+
 from typing import List, Optional, Dict
 
 def post_process_text(text: Optional[str]) -> Optional[str]:
-    """Normalize whitespace in the given text."""
     if text is None:
         return text
     return re.sub(r'\s+', ' ', text).strip()
 
 def smart_split(raw_text):
-    """Splits raw_text on 'AS', trying to respect parentheses boundaries."""
     parts = None
     if ")" in raw_text:
         parts = re.split(r'(?<=\))\s*AS\s*', raw_text, maxsplit=1, flags=re.IGNORECASE)
@@ -69,10 +68,6 @@ def smart_split(raw_text):
     return parts
 
 def split_select_items(select_text: str) -> list:
-    """
-    Split the SELECT clause into individual items.
-    This function tracks parentheses to avoid splitting on commas that occur inside expressions.
-    """
     items = []
     current = []
     depth = 0
@@ -124,8 +119,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         if ctx.DEFINE_():
             self.ast.define = self.extract_define(ctx)
             logger.debug(f"Extracted DEFINE: {self.ast.define}")
-        self.validate_clauses(ctx)
+        
+        self.validate_clauses(ctx) 
         self.validate_identifiers(ctx)
+        self.validate_pattern_variables_defined(ctx) 
         self.validate_function_usage(ctx)
         return self.ast
 
@@ -133,11 +130,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         columns = [post_process_text(expr.getText()) for expr in ctx.partition]
         return PartitionByClause(columns)
 
-
     def visitRowPattern(self, ctx: TrinoParser.RowPatternContext):
-        """
-        Visit a pattern expression, handling alternation, concatenation, and quantifiers.
-        """
         if isinstance(ctx, TrinoParser.PatternAlternationContext):
             return self.visitPatternAlternation(ctx)
         elif isinstance(ctx, TrinoParser.PatternConcatenationContext):
@@ -145,53 +138,40 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         elif isinstance(ctx, TrinoParser.QuantifiedPrimaryContext):
             return self.visitQuantifiedPrimary(ctx)
         return None
+
     def visitPatternAlternation(self, ctx: TrinoParser.PatternAlternationContext):
-        """
-        Handles pattern alternation (e.g., A | B | C).
-        """
         patterns = [self.visit(p) for p in ctx.rowPattern()]
         return {"type": "alternation", "patterns": patterns}
+
     def visitQuantifiedPrimary(self, ctx: TrinoParser.QuantifiedPrimaryContext):
         pattern = self.visit(ctx.patternPrimary())
         quantifier = ctx.patternQuantifier().getText() if ctx.patternQuantifier() else None
         return {"type": "quantified", "pattern": pattern, "quantifier": quantifier}
 
     def visitPatternVariable(self, ctx: TrinoParser.PatternVariableContext):
-        """
-        Handles pattern variables (e.g., A, B, C).
-        """
         return {"type": "variable", "name": ctx.identifier().getText()}
 
-   
     def extract_order_by(self, ctx: TrinoParser.PatternRecognitionContext) -> OrderByClause:
         sort_items = []
-        
         for si in ctx.sortItem():
-            column = post_process_text(si.getChild(0).getText())  # Extract column name
-            ordering = "ASC"  # Default is ASC
-            nulls_ordering = None  # Default: Unspecified
-
-            # Track tokens and capture NULLS FIRST/LAST in any order
-            child_tokens = [si.getChild(i).getText().upper() for i in range(1, si.getChildCount())]
-
+            column = post_process_text(si.getChild(0).getText())
+            ordering = "ASC"
+            nulls_ordering = None
+            child_tokens = [si.getChild(i).getText() for i in range(1, si.getChildCount())]
             if "DESC" in child_tokens:
                 ordering = "DESC"
             elif "ASC" in child_tokens:
                 ordering = "ASC"
-
             if "NULLS" in child_tokens:
-                nulls_index = child_tokens.index("NULLS")
-                if nulls_index + 1 < len(child_tokens):
-                    next_token = child_tokens[nulls_index + 1]
-                    if next_token == "FIRST":
+                null_index = child_tokens.index("NULLS")
+                if null_index + 1 < len(child_tokens):
+                    next_tok = child_tokens[null_index + 1]
+                    if next_tok.upper() == "FIRST":
                         nulls_ordering = "NULLS FIRST"
-                    elif next_token == "LAST":
+                    elif next_tok.upper() == "LAST":
                         nulls_ordering = "NULLS LAST"
-
             sort_items.append(SortItem(column, ordering, nulls_ordering))
-
         return OrderByClause(sort_items)
-
 
     def extract_measures(self, ctx: TrinoParser.PatternRecognitionContext) -> MeasuresClause:
         measures = []
@@ -204,51 +184,32 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             else:
                 expr = post_process_text(raw_text)
                 alias = None
-
-            # Check for RUNNING or FINAL modifiers
-            semantics = "RUNNING"  # default semantics
-            # Look for prefixes (we assume the measure expression may start with them)
+            semantics = "RUNNING"
             if expr.upper().startswith("RUNNING "):
                 semantics = "RUNNING"
                 expr = expr[len("RUNNING "):].strip()
             elif expr.upper().startswith("FINAL "):
                 semantics = "FINAL"
                 expr = expr[len("FINAL "):].strip()
-
-            # Create the Measure and store the semantics in metadata
-            measure_metadata = {}
-            if semantics:
-                measure_metadata["semantics"] = semantics
-
+            measure_metadata = {"semantics": semantics}
             measure = Measure(expr, alias, measure_metadata)
             measures.append(measure)
         return MeasuresClause(measures)
 
-
-    
     def extract_rows_per_match(self, ctx: TrinoParser.RowsPerMatchContext) -> RowsPerMatchClause:
         text = post_process_text(ctx.getText()).upper()
         normalized_text = text.replace(" ", "")
-
-            #   # Check for ONE ROW PER MATCH
         if "ONEROWPERMATCH" in normalized_text:
             return RowsPerMatchClause("ONE ROW PER MATCH")
-        
-        # Check for ALL ROWS PER MATCH variants
         elif "ALLROWSPERMATCH" in normalized_text:
-            show_empty = True  # Default to showing empty matches
+            show_empty = True
             with_unmatched = False
-            
             if "OMITEMPTYMATCHES" in normalized_text:
                 show_empty = False
             if "WITHUNMATCHEDROWS" in normalized_text:
                 with_unmatched = True
-                
             return RowsPerMatchClause("ALL ROWS PER MATCH", show_empty, with_unmatched)
-                
-        # For any other mode, preserve spaces in the text
         else:
-            # Add spaces between words in camelCase or UPPERCASE text
             spaced_text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
             spaced_text = re.sub(r'([A-Z])([A-Z][a-z])', r'\1 \2', spaced_text)
             return RowsPerMatchClause(spaced_text)
@@ -258,19 +219,11 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         return AfterMatchSkipClause(text)
 
     def extract_pattern(self, ctx: TrinoParser.PatternRecognitionContext) -> PatternClause:
-        """Extracts the PATTERN clause while preserving spaces between tokens."""
-
-        # Get the full input query from the original context
         start_index = ctx.rowPattern().start.start
         stop_index = ctx.rowPattern().stop.stop
         pattern_text = ctx.start.getInputStream().getText(start_index, stop_index)
-
-        # Normalize spaces
         pattern_text = re.sub(r'\s+', ' ', pattern_text.strip())
-
         return PatternClause(pattern_text)
-
-
 
     def extract_subset(self, ctx: TrinoParser.PatternRecognitionContext) -> list:
         subsets = [SubsetClause(post_process_text(sd.getText())) for sd in ctx.subsetDefinition()]
@@ -288,25 +241,19 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             definitions.append(definition)
         return DefineClause(definitions)
 
-
-
     def validate_clauses(self, ctx):
-        # Mandatory: If PARTITION BY is present, an ORDER BY clause is required.
         if self.ast.partition_by and not self.ast.order_by:
             raise ParserError("ORDER BY clause is required when PARTITION BY is used.",
                               line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-        # Mandatory: If a DEFINE clause is provided, then a PATTERN clause must also be present.
         if self.ast.define and not self.ast.pattern:
             raise ParserError("PATTERN clause is required when DEFINE is used.",
                               line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-        # Validate AFTER MATCH SKIP clause if present.
         if self.ast.after_match_skip:
             skip_value = self.ast.after_match_skip.value.upper()
             tokens = skip_value.split()
-            # For cases like "SKIP TO LAST X" or "SKIP TO FIRST Y"
             if "TO" in tokens:
-                target_var = tokens[-1]  # Assume the target variable is the last token.
-                pattern_vars = self.ast.pattern.metadata.get("variables", [])
+                target_var = tokens[-1]
+                pattern_vars = self.ast.pattern.metadata.get("base_variables", [])
                 if target_var not in pattern_vars:
                     raise ParserError(f"AFTER MATCH SKIP target '{target_var}' not found in pattern variables {pattern_vars}.",
                                       line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
@@ -316,11 +263,16 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         self.validate_pattern_clause(ctx)
 
     def validate_identifiers(self, ctx):
-        """Ensure that each identifier in the DEFINE clause appears in the pattern variables."""
-        if self.ast.pattern and self.ast.define:
-            pattern_vars = set(var.upper() for var in self.ast.pattern.metadata.get("variables", []))
+        # Compare the base variables from the pattern with the variables defined in DEFINE.
+        if self.ast.pattern:
+            pattern_vars = set(self.ast.pattern.metadata.get("base_variables", []))
+        else:
+            pattern_vars = set()
+        
+        if self.ast.define:
             for definition in self.ast.define.definitions:
-                if definition.variable.upper() not in pattern_vars:
+                # Case-sensitive comparison.
+                if definition.variable not in pattern_vars:
                     raise ParserError(
                         f"Define variable '{definition.variable}' not found in pattern variables {pattern_vars}. "
                         "Hint: Ensure that each variable defined in the DEFINE clause appears in the PATTERN clause.",
@@ -328,14 +280,12 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     )
 
     def validate_function_usage(self, ctx):
-        """Validate aggregate and navigation function usage in measures."""
         allowed_functions = {
-            "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[A-Z][A-Z0-9]*(?:\.\*)?(?:\.[A-Z][A-Z0-9]*)?)\s*\)",
-            "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-            "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-            # Allow nested FIRST() or LAST() calls inside PREV and NEXT.
-            "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?))\s*(?:,\s*\d+)?\s*\)",
-            "NEXT":  r"(?:FINAL|RUNNING)?\s*NEXT\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?))\s*(?:,\s*\d+)?\s*\)",
+            "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[A-Za-z_][A-Za-z0-9_]*(?:\.\*)?(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\)",
+            "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)(?:\s*,\s*\d+)?\s*\)",
+            "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)(?:\s*,\s*\d+)?\s*\)",
+            "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?))\s*(?:,\s*\d+)?\s*\)",
+            "NEXT":  r"(?:FINAL|RUNNING)?\s*NEXT\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?))\s*(?:,\s*\d+)?\s*\)",
         }
         if self.ast.measures:
             for measure in self.ast.measures.measures:
@@ -351,52 +301,58 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 logger.debug(f"Validated function usage for measure: {measure.expression}")
 
     def validate_pattern_clause(self, ctx):
-        """Perform additional validation of the PATTERN clause syntax."""
         if self.ast.pattern:
             pattern_text = self.ast.pattern.pattern.strip()
-            # Allow empty pattern "()"
             if pattern_text == "()":
                 pass
-            # Ensure balanced parentheses.
             if pattern_text.count("(") != pattern_text.count(")"):
                 raise ParserError("Unbalanced parentheses in PATTERN clause.",
                                   line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-            # If exclusion syntax is used with WITH UNMATCHED ROWS, disallow it.
-            if self.ast.rows_per_match and "WITH UNMATCHED ROWS" in self.ast.rows_per_match.mode.upper():
+            if self.ast.rows_per_match and "WITHUNMATCHEDROWS" in self.ast.rows_per_match.mode.upper():
                 if "{-" in pattern_text and "-}" in pattern_text:
                     raise ParserError("Exclusion syntax is not allowed with ALL ROWS PER MATCH WITH UNMATCHED ROWS.",
                                       line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-            # (Optional) You might also check for valid quantifiers, grouping, etc.
+            logger.debug("PATTERN clause validated successfully.")
 
-                # (Optional) Additional validation for aggregates can be inserted here.
-                # For instance, if multiple arguments are used, verify that all refer to the same pattern variable.
-                # Or, disallow navigation functions inside aggregate functions.
-                # For now, we rely on the regex checks.
-                # End of function usage validation.
-                # Log the successful validation.
-                logger.debug(f"Validated function usage for measure: {measure.expression}")
-
-    def validate_pattern_clause(self, ctx):
-        """Additional checks for the PATTERN clause syntax."""
+    def validate_pattern_variables_defined(self, ctx):
+        """
+        Validate that every base variable in the PATTERN clause is defined in the DEFINE clause
+        and vice versa. This comparison is case-sensitive.
+        """
         if self.ast.pattern:
-            pattern_text = self.ast.pattern.pattern.strip()
-            # Check for an empty pattern.
-            if pattern_text == "()":
-                # Empty match is allowed, but later evaluation should produce null values.
-                pass
-            # Example: if exclusion syntax (e.g., {- ... -}) is used with WITH UNMATCHED ROWS, raise error.
-            if "{" in pattern_text and "WITHUNMATCHEDROWS" in self.ast.rows_per_match.mode.upper():
-                raise ParserError("Pattern exclusions are not allowed with ALL ROWS PER MATCH WITH UNMATCHED ROWS.",
-                                  line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-            # (Optional) More detailed checks on quantifiers and grouping can be added here.
+            pattern_vars = set(self.ast.pattern.metadata.get("base_variables", []))
+        else:
+            pattern_vars = set()
+        
+        defined_vars = set()
+        if self.ast.define:
+            for definition in self.ast.define.definitions:
+                defined_vars.add(definition.variable)
+        
+        missing = pattern_vars - defined_vars
+        extra = defined_vars - pattern_vars
+        
+        if missing:
+            raise ParserError(
+                f"All pattern variables must be explicitly defined. Missing definitions for: {missing}",
+                line=ctx.start.line,
+                column=ctx.start.column,
+                snippet=ctx.getText()
+            )
+        if extra:
+            raise ParserError(
+                f"Defined variable(s) {extra} not found in the PATTERN clause.",
+                line=ctx.start.line,
+                column=ctx.start.column,
+                snippet=ctx.getText()
+            )
 
-    
 ###############################################
 # Full Query extractor visitor for SELECT/FROM/MATCH_RECOGNIZE
 ###############################################
 class FullQueryExtractor(TrinoParserVisitor):
     def __init__(self, original_query: str):
-        self.original_query = original_query  # Preserve original query formatting.
+        self.original_query = original_query
         self.select_clause = None
         self.from_clause = None
         self.match_recognize = None
@@ -408,13 +364,11 @@ class FullQueryExtractor(TrinoParserVisitor):
         full_text = post_process_text(self.original_query)
         logger.debug(f"Full statement text: {full_text}")
 
-        # Use robust splitting for the SELECT clause.
         select_match = re.search(r'(?i)^SELECT\s+(.+?)\s+FROM', full_text)
         if select_match:
             select_text = select_match.group(1)
             items_raw = split_select_items(select_text)
             items = []
-            # Use a regex to check for simple column references (identifiers only).
             simple_column_regex = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
             for item in items_raw:
                 item = post_process_text(item)
@@ -430,7 +384,6 @@ class FullQueryExtractor(TrinoParserVisitor):
         else:
             logger.warning("No SELECT clause found via regex.")
 
-        # Extract FROM clause: look for "FROM" followed by a table name.
         from_match = re.search(r'(?i)FROM\s+(\w+)', full_text)
         if from_match:
             table_name = from_match.group(1)
@@ -439,7 +392,6 @@ class FullQueryExtractor(TrinoParserVisitor):
         else:
             logger.warning("No FROM clause found via regex.")
 
-        # Recursively search for a PatternRecognitionContext.
         self.match_recognize = self.find_pattern_recognition(ctx)
         if self.match_recognize:
             extractor = MatchRecognizeExtractor()
@@ -483,11 +435,8 @@ def parse_full_query(query: str, dialect='default') -> FullQueryAST:
     lexer = TrinoLexer(input_stream)
     token_stream = CommonTokenStream(lexer)
     parser = TrinoParser(token_stream)
-
-    # Remove default error listeners and add our custom listener.
     parser.removeErrorListeners()
     parser.addErrorListener(CustomErrorListener())
-
     tree = parser.parse()
     extractor = FullQueryExtractor(query)
     extractor.visit(tree)

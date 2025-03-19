@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
 import re
+from typing import Dict, List, Optional
 
 # Base AST node
 class ASTNode:
@@ -21,9 +21,10 @@ class SortItem(ASTNode):
     nulls_ordering: Optional[str] = None
 
     def __post_init__(self):
-        self.ordering = self.ordering.upper()  # "ASC" or "DESC"
+        # Preserve the ordering as provided (but you might still want to standardize if needed).
+        self.ordering = self.ordering  # case-sensitive; do not force upper case.
         if self.nulls_ordering:
-            self.nulls_ordering = self.nulls_ordering.upper()  # "NULLS FIRST" or "NULLS LAST"
+            self.nulls_ordering = self.nulls_ordering
 
 @dataclass
 class OrderByClause(ASTNode):
@@ -34,13 +35,12 @@ class Measure(ASTNode):
     expression: str
     alias: Optional[str] = None
     metadata: Optional[Dict] = field(default_factory=dict)
-    # These fields are computed post-initialization:
     is_classifier: bool = field(init=False)
     is_match_number: bool = field(init=False)
 
     def __post_init__(self):
-        self.is_classifier = re.match(r'CLASSIFIER\(\s*([A-Z][A-Z0-9_]*)?\s*\)', self.expression, re.IGNORECASE) is not None
-        self.is_match_number = re.match(r'MATCH_NUMBER\(\s*\)', self.expression, re.IGNORECASE) is not None
+        self.is_classifier = re.match(r'CLASSIFIER\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)', self.expression) is not None
+        self.is_match_number = re.match(r'MATCH_NUMBER\(\s*\)', self.expression) is not None
 
 @dataclass
 class MeasuresClause(ASTNode):
@@ -55,7 +55,7 @@ class RowsPerMatchClause(ASTNode):
 
     def __post_init__(self):
         self.raw_mode = self.raw_mode.strip()
-        self.mode = self.raw_mode.replace(" ", "").upper()  # For comparison
+        self.mode = self.raw_mode.replace(" ", "")
 
     @staticmethod
     def one_row_per_match():
@@ -90,7 +90,6 @@ class RowsPerMatchClause(ASTNode):
             else:
                 return f"RowsPerMatchClause(mode={base})"
         else:
-            # For any other mode, return the raw mode as provided
             return f"RowsPerMatchClause(mode={self.raw_mode})"
 
 @dataclass
@@ -99,34 +98,45 @@ class AfterMatchSkipClause(ASTNode):
 
 @dataclass
 class PatternClause(ASTNode):
-    """Represents the PATTERN clause in MATCH_RECOGNIZE"""
+    """Represents the PATTERN clause in MATCH_RECOGNIZE.
+
+    This implementation extracts two lists:
+      - "variables": the tokens as they appear (e.g. ["A", "b+", "c"])
+      - "base_variables": the base identifiers with any trailing quantifiers removed (e.g. ["A", "b", "c"])
+    The comparison in validation is case‑sensitive.
+    """
     pattern: str
     metadata: Dict = field(init=False)
 
-    # Reserved keywords that should not be extracted as variables
+    # Reserved keywords that should not be treated as pattern variables.
     RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
 
     def __post_init__(self):
-        # Step 1: Remove function-like calls for reserved keywords.
-        # For example, "PERMUTE(A, B, C)" becomes "A, B, C"
-        pattern_no_func = re.sub(
-            r'\b(?:' + '|'.join(self.RESERVED_KEYWORDS) + r')\s*\((.*?)\)',
-            r'\1',
-            self.pattern
-        )
-        # Step 2: Remove punctuation and quantifier symbols.
-        # This converts "A, B, C" (or with braces, etc.) into a space-separated string.
-        cleaned_pattern = re.sub(r'[\{\}\,\+\*\?\(\)]', ' ', pattern_no_func)
-        cleaned_pattern = re.sub(r'\s+', ' ', cleaned_pattern).strip()
-        # Step 3: Extract valid pattern variables from the cleaned string.
-        seen = set()
-        variables = []
-        for match in re.finditer(r'\b([A-Z][A-Z0-9_]*)\b', cleaned_pattern):
-            var_name = match.group(1)
-            if var_name not in seen:
-                variables.append(var_name)
-                seen.add(var_name)
-        self.metadata = {"variables": variables}
+        # Split the raw pattern by whitespace.
+        tokens = self.pattern.split()
+        variables: List[str] = []
+        base_variables: List[str] = []
+        for token in tokens:
+            token = token.strip()
+            if token in self.RESERVED_KEYWORDS:
+                continue
+            # Use a regex to capture an identifier optionally followed by a quantifier.
+            # For example, "b+" will capture "b" as the base.
+            m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)([\*\+\?\{].*)?$', token)
+            if m:
+                ident = m.group(1)              # the base identifier (case preserved)
+                quantifier = m.group(2) if m.group(2) else ""
+                full_token = ident + quantifier  # preserve original token (e.g., "b+")
+                variables.append(full_token)
+                base_variables.append(ident)
+            else:
+                # If token doesn't match the expected pattern, include it as-is.
+                variables.append(token)
+                base_variables.append(token)
+        self.metadata = {"variables": variables, "base_variables": base_variables}
+
+    def __repr__(self):
+        return f"PatternClause(pattern={self.pattern!r}, metadata={self.metadata})"
 
 @dataclass
 class SubsetClause(ASTNode):
@@ -167,7 +177,6 @@ class MatchRecognizeClause(ASTNode):
 
 @dataclass
 class SelectItem(ASTNode):
-    """Represents an individual item (column or expression with an optional alias) in the SELECT clause."""
     expression: str
     alias: Optional[str] = None
     metadata: Optional[Dict] = field(default_factory=dict)
@@ -179,17 +188,14 @@ class SelectItem(ASTNode):
 
 @dataclass
 class SelectClause(ASTNode):
-    """Represents the SELECT clause as a list of SelectItem nodes."""
     items: List[SelectItem]
 
 @dataclass
 class FromClause(ASTNode):
-    """Represents the FROM clause with the table name."""
     table: str
 
 @dataclass
 class FullQueryAST(ASTNode):
-    """Aggregates the SELECT clause, FROM clause, and the MATCH_RECOGNIZE clause."""
     select_clause: Optional[SelectClause]
     from_clause: Optional[FromClause]
     match_recognize: Optional[MatchRecognizeClause]
