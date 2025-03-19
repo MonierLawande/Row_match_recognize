@@ -8,13 +8,3 @@ This will help verify that every aspect of your parsing and AST generation behav
 
 
 
-
-• Enhanced Error Handling:
-Consider enhancing error messages with more context (perhaps by including the exact token or position where parsing fails) and using these errors consistently across all modules.
-
-
- Type Annotations and Use of Modern Python Features:
-Although you already have some type hints, you could leverage Python’s dataclasses for your AST node definitions. This can reduce boilerplate code and make your classes even more concise and self-documenting.
-
-• Regex and String Processing:
-The use of regex in functions like smart_split and in the PatternClause is clever; however, ensure that these regexes cover all complex cases in SQL expressions. Adding unit tests specifically targeting these functions would be beneficial.

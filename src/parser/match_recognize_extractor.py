@@ -262,8 +262,6 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
 
 
 
-
-
     def extract_subset(self, ctx: TrinoParser.PatternRecognitionContext) -> list:
         subsets = [SubsetClause(post_process_text(sd.getText())) for sd in ctx.subsetDefinition()]
         return subsets
@@ -280,34 +278,52 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             definitions.append(definition)
         return DefineClause(definitions)
 
+
+
     def validate_clauses(self, ctx):
+        # Mandatory: If PARTITION BY is used, ORDER BY must be provided.
         if self.ast.partition_by and not self.ast.order_by:
             raise ParserError("ORDER BY clause is required when PARTITION BY is used.",
                               line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+        # Mandatory: If a DEFINE clause is present, a PATTERN clause must be provided.
         if self.ast.define and not self.ast.pattern:
             raise ParserError("PATTERN clause is required when DEFINE is used.",
                               line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+        # Validate the AFTER MATCH SKIP clause, if present.
+        if self.ast.after_match_skip:
+            tokens = self.ast.after_match_skip.value.upper().split()
+            # For tokens like "TO LAST A" or "TO NEXT A"
+            if "TO" in tokens:
+                target_var = tokens[-1]  # Assume last token is the target variable.
+                pattern_vars = self.ast.pattern.metadata.get("variables", [])
+                if target_var not in pattern_vars:
+                    raise ParserError(f"AFTER MATCH SKIP target '{target_var}' not found in pattern variables {pattern_vars}.",
+                                      line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+                # Prevent skipping to the first row (e.g. 'A' if it is the first variable)
+                if pattern_vars and target_var == pattern_vars[0]:
+                    raise ParserError(f"AFTER MATCH SKIP target '{target_var}' cannot be the first element of the match (infinite loop).",
+                                      line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+
+        # Validate pattern clause syntax further.
+        self.validate_pattern_clause(ctx)
 
     def validate_identifiers(self, ctx):
         """Ensure that each identifier used in DEFINE is present in the pattern."""
         if self.ast.pattern:
-            # Use the already extracted variables from the PatternClause metadata.
             pattern_vars = set(self.ast.pattern.metadata.get("variables", []))
-            logger.debug(f"Extracted pattern variables: {pattern_vars}")
             if self.ast.define:
                 for definition in self.ast.define.definitions:
                     if definition.variable not in pattern_vars:
                         raise ParserError(f"Define variable '{definition.variable}' not found in pattern variables {pattern_vars}",
-                                        line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-
+                                          line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
 
     def validate_function_usage(self, ctx):
-        """Validate aggregate and navigation functions in measures."""
+        """Validate aggregate and navigation functions in measure expressions."""
         allowed_functions = {
             "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[A-Z][A-Z0-9]*(?:\.\*)?(?:\.[A-Z][A-Z0-9]*)?)\s*\)",
             "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
             "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-            # Updated patterns for PREV and NEXT to allow nested FIRST or LAST function calls.
+            # For PREV and NEXT, allow nested FIRST/LAST functions.
             "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?))\s*(?:,\s*\d+)?\s*\)",
             "NEXT":  r"(?:FINAL|RUNNING)?\s*NEXT\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?))\s*(?:,\s*\d+)?\s*\)",
         }
@@ -322,8 +338,29 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                                 f"Invalid usage of {func} in measure: {measure.expression}",
                                 line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
                             )
+                # (Optional) Additional validation for aggregates can be inserted here.
+                # For instance, if multiple arguments are used, verify that all refer to the same pattern variable.
+                # Or, disallow navigation functions inside aggregate functions.
+                # For now, we rely on the regex checks.
+                # End of function usage validation.
+                # Log the successful validation.
                 logger.debug(f"Validated function usage for measure: {measure.expression}")
 
+    def validate_pattern_clause(self, ctx):
+        """Additional checks for the PATTERN clause syntax."""
+        if self.ast.pattern:
+            pattern_text = self.ast.pattern.pattern.strip()
+            # Check for an empty pattern.
+            if pattern_text == "()":
+                # Empty match is allowed, but later evaluation should produce null values.
+                pass
+            # Example: if exclusion syntax (e.g., {- ... -}) is used with WITH UNMATCHED ROWS, raise error.
+            if "{" in pattern_text and "WITHUNMATCHEDROWS" in self.ast.rows_per_match.mode.upper():
+                raise ParserError("Pattern exclusions are not allowed with ALL ROWS PER MATCH WITH UNMATCHED ROWS.",
+                                  line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+            # (Optional) More detailed checks on quantifiers and grouping can be added here.
+
+    
 ###############################################
 # Full Query extractor visitor for SELECT/FROM/MATCH_RECOGNIZE
 ###############################################
