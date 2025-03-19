@@ -32,7 +32,13 @@ class ParserError(Exception):
         self.line = line
         self.column = column
         self.snippet = snippet
-        super().__init__(f"{message} (Line: {line}, Column: {column})\nSnippet: {snippet}")
+        details = message
+        if line is not None and column is not None:
+            details += f" (Line: {line}, Column: {column})"
+        if snippet:
+            details += f"\nSnippet: {snippet}"
+        super().__init__(details)
+
 
 from typing import List, Optional, Dict
 
@@ -297,15 +303,14 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
 
     def validate_function_usage(self, ctx):
         """Validate aggregate and navigation functions in measures."""
-        # Updated patterns to allow dot-qualified identifiers (e.g., B.totalprice).
         allowed_functions = {
-        "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[A-Z][A-Z0-9]*(?:\.\*)?(?:\.[A-Z][A-Z0-9]*)?)\s*\)",
-        "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-        "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-        "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-        "NEXT":  r"(?:FINAL|RUNNING)?\s*NEXT\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
-    }
-
+            "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[A-Z][A-Z0-9]*(?:\.\*)?(?:\.[A-Z][A-Z0-9]*)?)\s*\)",
+            "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+            "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*([A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?)(?:\s*,\s*\d+)?\s*\)",
+            # Updated patterns for PREV and NEXT to allow nested FIRST or LAST function calls.
+            "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?))\s*(?:,\s*\d+)?\s*\)",
+            "NEXT":  r"(?:FINAL|RUNNING)?\s*NEXT\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Z][A-Z0-9]*(?:\.[A-Z][A-Z0-9]*)?))\s*(?:,\s*\d+)?\s*\)",
+        }
         if self.ast.measures:
             for measure in self.ast.measures.measures:
                 expr_upper = measure.expression.upper()
@@ -313,9 +318,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     if func in expr_upper:
                         m = re.search(pattern, expr_upper)
                         if not m:
-                            raise ParserError(f"Invalid usage of {func} in measure: {measure.expression}",
-                                              line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-                        # m.group(1) should be a column name; further DataFrame validation is done later.
+                            raise ParserError(
+                                f"Invalid usage of {func} in measure: {measure.expression}",
+                                line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
+                            )
                 logger.debug(f"Validated function usage for measure: {measure.expression}")
 
 ###############################################

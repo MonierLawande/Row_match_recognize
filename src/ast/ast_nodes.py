@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 import re
 
@@ -7,64 +8,54 @@ class ASTNode:
     pass
 
 # --- MATCH_RECOGNIZE Clause AST Nodes ---
+
+@dataclass
 class PartitionByClause(ASTNode):
-    def __init__(self, columns: List[str]):
-        self.columns = columns
+    columns: List[str]
 
-    def __repr__(self):
-        return f"PartitionByClause(columns={self.columns})"
-
-
+@dataclass
 class SortItem(ASTNode):
     """Represents an individual sorting item in ORDER BY clause."""
-    def __init__(self, column: str, ordering: str = "ASC", nulls_ordering: Optional[str] = None):
-        self.column = column
-        self.ordering = ordering.upper()  # "ASC" or "DESC"
-        self.nulls_ordering = nulls_ordering.upper() if nulls_ordering else None  # "NULLS FIRST" or "NULLS LAST"
+    column: str
+    ordering: str = "ASC"
+    nulls_ordering: Optional[str] = None
 
-    def __repr__(self):
-        return f"SortItem(column={self.column}, ordering={self.ordering}, nulls_ordering={self.nulls_ordering})"
+    def __post_init__(self):
+        self.ordering = self.ordering.upper()  # "ASC" or "DESC"
+        if self.nulls_ordering:
+            self.nulls_ordering = self.nulls_ordering.upper()  # "NULLS FIRST" or "NULLS LAST"
 
+@dataclass
 class OrderByClause(ASTNode):
-    def __init__(self, sort_items: List[SortItem]):
-        self.sort_items = sort_items
+    sort_items: List[SortItem]
 
-    def __repr__(self):
-        return f"OrderByClause(sort_items={self.sort_items})"
-
+@dataclass
 class Measure(ASTNode):
-    def __init__(self, expression: str, alias: Optional[str] = None, metadata: Optional[Dict] = None):
-        self.expression = expression
-        self.alias = alias
-        self.metadata = metadata or {}
+    expression: str
+    alias: Optional[str] = None
+    metadata: Optional[Dict] = field(default_factory=dict)
+    # These fields are computed post-initialization:
+    is_classifier: bool = field(init=False)
+    is_match_number: bool = field(init=False)
 
-        # Detect function types
-        self.is_classifier = re.match(r'CLASSIFIER\(\s*([A-Z][A-Z0-9_]*)?\s*\)', expression, re.IGNORECASE) is not None
-        self.is_match_number = re.match(r'MATCH_NUMBER\(\s*\)', expression, re.IGNORECASE) is not None
+    def __post_init__(self):
+        self.is_classifier = re.match(r'CLASSIFIER\(\s*([A-Z][A-Z0-9_]*)?\s*\)', self.expression, re.IGNORECASE) is not None
+        self.is_match_number = re.match(r'MATCH_NUMBER\(\s*\)', self.expression, re.IGNORECASE) is not None
 
-    def __repr__(self):
-        extra_info = []
-        if self.is_classifier:
-            extra_info.append("CLASSIFIER() detected")
-        if self.is_match_number:
-            extra_info.append("MATCH_NUMBER() detected")
-        return f"Measure(expression={self.expression}, alias={self.alias}, metadata={self.metadata}, {' | '.join(extra_info)})"
-
+@dataclass
 class MeasuresClause(ASTNode):
-    def __init__(self, measures: List[Measure]):
-        self.measures = measures
+    measures: List[Measure]
 
-    def __repr__(self):
-        return f"MeasuresClause(measures={self.measures})"
-# Update the RowsPerMatchClause class in src/ast/ast_nodes.py
-
+@dataclass
 class RowsPerMatchClause(ASTNode):
-    def __init__(self, mode: str, show_empty: Optional[bool] = None, with_unmatched: Optional[bool] = None):
-        # Store both the raw mode and a normalized mode for internal checks
-        self.raw_mode = mode.strip()
+    raw_mode: str
+    show_empty: Optional[bool] = None
+    with_unmatched: Optional[bool] = None
+    mode: str = field(init=False)
+
+    def __post_init__(self):
+        self.raw_mode = self.raw_mode.strip()
         self.mode = self.raw_mode.replace(" ", "").upper()  # For comparison
-        self.show_empty = show_empty
-        self.with_unmatched = with_unmatched
 
     @staticmethod
     def one_row_per_match():
@@ -102,38 +93,31 @@ class RowsPerMatchClause(ASTNode):
             # For any other mode, return the raw mode as provided
             return f"RowsPerMatchClause(mode={self.raw_mode})"
 
+@dataclass
 class AfterMatchSkipClause(ASTNode):
-    def __init__(self, value: str):
-        self.value = value
+    value: str
 
-    def __repr__(self):
-        return f"AfterMatchSkipClause(value={self.value})"
-
-
-import re
-
+@dataclass
 class PatternClause(ASTNode):
     """Represents the PATTERN clause in MATCH_RECOGNIZE"""
+    pattern: str
+    metadata: Dict = field(init=False)
 
     # Reserved keywords that should not be extracted as variables
     RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
 
-    def __init__(self, pattern: str):
-        self.pattern = pattern
-
+    def __post_init__(self):
         # Step 1: Remove function-like calls for reserved keywords.
         # For example, "PERMUTE(A, B, C)" becomes "A, B, C"
         pattern_no_func = re.sub(
             r'\b(?:' + '|'.join(self.RESERVED_KEYWORDS) + r')\s*\((.*?)\)',
             r'\1',
-            pattern
+            self.pattern
         )
-
         # Step 2: Remove punctuation and quantifier symbols.
         # This converts "A, B, C" (or with braces, etc.) into a space-separated string.
         cleaned_pattern = re.sub(r'[\{\}\,\+\*\?\(\)]', ' ', pattern_no_func)
         cleaned_pattern = re.sub(r'\s+', ' ', cleaned_pattern).strip()
-
         # Step 3: Extract valid pattern variables from the cleaned string.
         seen = set()
         variables = []
@@ -142,53 +126,31 @@ class PatternClause(ASTNode):
             if var_name not in seen:
                 variables.append(var_name)
                 seen.add(var_name)
-
         self.metadata = {"variables": variables}
 
-    def __repr__(self):
-        return f"PatternClause(pattern={self.pattern}, metadata={self.metadata})"
-
-
+@dataclass
 class SubsetClause(ASTNode):
-    def __init__(self, subset_text: str):
-        self.subset_text = subset_text
+    subset_text: str
 
-    def __repr__(self):
-        return f"SubsetClause(subset_text={self.subset_text})"
-
+@dataclass
 class Define(ASTNode):
-    def __init__(self, variable: str, condition: str):
-        self.variable = variable
-        self.condition = condition
+    variable: str
+    condition: str
 
-    def __repr__(self):
-        return f"Define(variable={self.variable}, condition={self.condition})"
-
+@dataclass
 class DefineClause(ASTNode):
-    def __init__(self, definitions: List[Define]):
-        self.definitions = definitions
+    definitions: List[Define]
 
-    def __repr__(self):
-        return f"DefineClause(definitions={self.definitions})"
-
+@dataclass
 class MatchRecognizeClause(ASTNode):
-    def __init__(self,
-                 partition_by: Optional[PartitionByClause] = None,
-                 order_by: Optional[OrderByClause] = None,
-                 measures: Optional[MeasuresClause] = None,
-                 rows_per_match: Optional[RowsPerMatchClause] = None,
-                 after_match_skip: Optional[AfterMatchSkipClause] = None,
-                 pattern: Optional[PatternClause] = None,
-                 subset: Optional[List[SubsetClause]] = None,
-                 define: Optional[DefineClause] = None):
-        self.partition_by = partition_by
-        self.order_by = order_by
-        self.measures = measures
-        self.rows_per_match = rows_per_match
-        self.after_match_skip = after_match_skip
-        self.pattern = pattern
-        self.subset = subset or []
-        self.define = define
+    partition_by: Optional[PartitionByClause] = None
+    order_by: Optional[OrderByClause] = None
+    measures: Optional[MeasuresClause] = None
+    rows_per_match: Optional[RowsPerMatchClause] = None
+    after_match_skip: Optional[AfterMatchSkipClause] = None
+    pattern: Optional[PatternClause] = None
+    subset: List[SubsetClause] = field(default_factory=list)
+    define: Optional[DefineClause] = None
 
     def __repr__(self):
         return (f"MatchRecognizeClause(\n"
@@ -202,45 +164,36 @@ class MatchRecognizeClause(ASTNode):
                 f"  define={self.define}\n)")
 
 # --- Full Query AST Nodes ---
+
+@dataclass
 class SelectItem(ASTNode):
     """Represents an individual item (column or expression with an optional alias) in the SELECT clause."""
-    def __init__(self, expression: str, alias: Optional[str] = None, metadata: Optional[Dict] = None):
-        self.expression = expression
-        self.alias = alias
-        self.metadata = metadata or {}
+    expression: str
+    alias: Optional[str] = None
+    metadata: Optional[Dict] = field(default_factory=dict)
 
     def __repr__(self):
         if self.alias:
             return f"SelectItem(expression={self.expression}, alias={self.alias}, metadata={self.metadata})"
         return f"SelectItem(expression={self.expression}, metadata={self.metadata})"
 
+@dataclass
 class SelectClause(ASTNode):
     """Represents the SELECT clause as a list of SelectItem nodes."""
-    def __init__(self, items: List[SelectItem]):
-        self.items = items
+    items: List[SelectItem]
 
-    def __repr__(self):
-        return f"SelectClause(items={self.items})"
-
+@dataclass
 class FromClause(ASTNode):
     """Represents the FROM clause with the table name."""
-    def __init__(self, table: str):
-        self.table = table
+    table: str
 
-    def __repr__(self):
-        return f"FromClause(table={self.table})"
-
+@dataclass
 class FullQueryAST(ASTNode):
     """Aggregates the SELECT clause, FROM clause, and the MATCH_RECOGNIZE clause."""
-    def __init__(self,
-                 select_clause: Optional[SelectClause],
-                 from_clause: Optional[FromClause],
-                 match_recognize: Optional[MatchRecognizeClause],
-                 metadata: Optional[Dict] = None):
-        self.select_clause = select_clause
-        self.from_clause = from_clause
-        self.match_recognize = match_recognize
-        self.metadata = metadata or {}
+    select_clause: Optional[SelectClause]
+    from_clause: Optional[FromClause]
+    match_recognize: Optional[MatchRecognizeClause]
+    metadata: Optional[Dict] = field(default_factory=dict)
 
     def __repr__(self):
         return (f"FullQueryAST(\n"
