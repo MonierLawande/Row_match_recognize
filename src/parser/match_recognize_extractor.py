@@ -1,6 +1,8 @@
 from antlr4 import *
 import re
 import logging
+from antlr4.error.ErrorListener import ErrorListener
+from antlr4 import InputStream, CommonTokenStream
 from src.grammar.TrinoParser import TrinoParser
 from src.grammar.TrinoParserVisitor import TrinoParserVisitor
 from src.grammar.TrinoLexer import TrinoLexer
@@ -25,21 +27,29 @@ from src.ast.ast_nodes import (
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-
+# Ensure that ParserError is defined before it is used.
 class ParserError(Exception):
     def __init__(self, message, line=None, column=None, snippet=None):
-        self.message = message
-        self.line = line
-        self.column = column
-        self.snippet = snippet
         details = message
         if line is not None and column is not None:
             details += f" (Line: {line}, Column: {column})"
         if snippet:
             details += f"\nSnippet: {snippet}"
         super().__init__(details)
+        self.line = line
+        self.column = column
+        self.snippet = snippet
 
+class CustomErrorListener(ErrorListener):
+    def __init__(self):
+        super().__init__()
 
+    def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):
+        custom_msg = (f"Syntax error at line {line}, column {column}: {msg}. "
+                      "Please verify your MATCH_RECOGNIZE clause syntax according to the specification.")
+        # Raise our ParserError with detailed context.
+        raise ParserError(custom_msg, line=line, column=column,
+                          snippet=recognizer.getInputStream().getText())
 from typing import List, Optional, Dict
 
 def post_process_text(text: Optional[str]) -> Optional[str]:
@@ -311,8 +321,11 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             pattern_vars = set(var.upper() for var in self.ast.pattern.metadata.get("variables", []))
             for definition in self.ast.define.definitions:
                 if definition.variable.upper() not in pattern_vars:
-                    raise ParserError(f"Define variable '{definition.variable}' not found in pattern variables {pattern_vars}.",
-                                      line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+                    raise ParserError(
+                        f"Define variable '{definition.variable}' not found in pattern variables {pattern_vars}. "
+                        "Hint: Ensure that each variable defined in the DEFINE clause appears in the PATTERN clause.",
+                        line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
+                    )
 
     def validate_function_usage(self, ctx):
         """Validate aggregate and navigation function usage in measures."""
@@ -470,6 +483,11 @@ def parse_full_query(query: str, dialect='default') -> FullQueryAST:
     lexer = TrinoLexer(input_stream)
     token_stream = CommonTokenStream(lexer)
     parser = TrinoParser(token_stream)
+
+    # Remove default error listeners and add our custom listener.
+    parser.removeErrorListeners()
+    parser.addErrorListener(CustomErrorListener())
+
     tree = parser.parse()
     extractor = FullQueryExtractor(query)
     extractor.visit(tree)
