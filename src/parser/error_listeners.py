@@ -15,7 +15,6 @@ class ParserError(Exception):
 class CustomErrorListener(ErrorListener):
     def __init__(self):
         super().__init__()
-
     def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):
         custom_msg = (f"Syntax error at line {line}, column {column}: {msg}. "
                       "Please verify your MATCH_RECOGNIZE clause syntax according to the specification.")

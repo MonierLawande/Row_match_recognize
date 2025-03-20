@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 import re
 from typing import Dict, List, Optional
-
+from src.ast.pattern_tokenizer import tokenize_pattern
 # Base AST node
 class ASTNode:
     """Base class for all AST nodes."""
@@ -108,32 +108,50 @@ class PatternClause(ASTNode):
     RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
 
     def __post_init__(self):
-        # Improved regex:
-        #   ([A-Za-z][A-Za-z0-9_]*)         -> matches an identifier (primary pattern variable)
-        #   (?:                             -> start non-capturing group for quantifier:
-        #       (\{[0-9]+(?:,[0-9]*)?\}\??)  ->   a bounded quantifier, e.g. {2,4} or {2,4}? 
-        #       |([\*\+\?]\??)              ->   OR one of the symbols *, +, ? possibly followed by ? (reluctant)
-        #   )?                              -> end of optional quantifier group.
-        regex = r'([A-Za-z][A-Za-z0-9_]*)(?:(\{[0-9]+(?:,[0-9]*)?\}\??)|([\*\+\?]\??))?'
-        tokens = re.findall(regex, self.pattern)
+        # Clean the raw pattern (remove outer parentheses, commas, PERMUTE keyword, etc.)
+        cleaned = self._clean_pattern(self.pattern)
+        # If the cleaned pattern contains whitespace, split on whitespace;
+        # otherwise, assume each letter (with its following quantifier, if any) is a token.
+        if ' ' in cleaned:
+            raw_tokens = cleaned.split()
+        else:
+            # This regex finds one letter ([A-Za-z]) and then any quantifier symbols (if present).
+            raw_tokens = [base + quant for base, quant in re.findall(r'([A-Za-z])([\*\+\?\{\},0-9]*)', cleaned)]
         full_tokens = []
         base_tokens = []
-        for ident, bounded, simple in tokens:
-            # Skip reserved keywords (case-sensitive check)
-            if ident in self.RESERVED_KEYWORDS:
-                continue
-            quant = bounded if bounded else simple if simple else ""
-            token_full = ident + quant
-            full_tokens.append(token_full)
-            base_tokens.append(ident)
-        # Optionally, you could clean out tokens that are empty (if any)
-        self.metadata = {
-            "variables": full_tokens,      # e.g. ["A", "b+", "c*"]
-            "base_variables": base_tokens    # e.g. ["A", "b", "c"]
-        }
+        for token in raw_tokens:
+            # Use a regex to separate the identifier and its quantifier.
+            m = re.fullmatch(r'([A-Za-z][A-Za-z0-9_]*)([\*\+\?\{\},0-9]*)', token)
+            if m:
+                base, quant = m.groups()
+                if base in self.RESERVED_KEYWORDS:
+                    continue
+                full_tokens.append(base + quant)
+                base_tokens.append(base)
+        self.metadata = {"variables": full_tokens, "base_variables": base_tokens}
+
+    def _clean_pattern(self, pattern: str) -> str:
+        """
+        Clean the pattern string:
+         - Remove outer parentheses if they wrap the entire pattern.
+         - Remove commas (which appear in PERMUTE lists).
+         - Replace PERMUTE(...) with just its inner content.
+         - Collapse multiple whitespace characters.
+        """
+        pattern = pattern.strip()
+        if pattern.startswith('(') and pattern.endswith(')'):
+            pattern = pattern[1:-1].strip()
+        # Remove commas
+        pattern = re.sub(r',', '', pattern)
+        # Replace PERMUTE(...) with its inner content.
+        pattern = re.sub(r'PERMUTE\s*\((.*?)\)', r'\1', pattern, flags=re.IGNORECASE)
+        # Collapse multiple whitespace characters.
+        pattern = re.sub(r'\s+', ' ', pattern).strip()
+        return pattern
 
     def __repr__(self):
         return f"PatternClause(pattern={self.pattern!r}, metadata={self.metadata})"
+    
 @dataclass
 class SubsetClause(ASTNode):
     subset_text: str
