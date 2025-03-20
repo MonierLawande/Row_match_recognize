@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 import re
 from typing import Dict, List, Optional,Tuple
-from src.ast.pattern_tokenizer import tokenize_pattern
 # Base AST node
 class ASTNode:
     """Base class for all AST nodes."""
@@ -99,92 +98,114 @@ class AfterMatchSkipClause(ASTNode):
 # and the base variable (e.g. "b") in the metadata.
 #
 
-def extract_tokens(pattern_str: str) -> Tuple[List[str], List[str]]:
-    """
-    Extract tokens (with quantifiers) and their base identifiers from a pattern string.
-    
-    This function handles:
-      - PERMUTE constructs (e.g. "PERMUTE(A,B,C)")
-      - Tokens with optional quantifiers (e.g. "A", "b+", "c{2,4}?", etc.)
-    
-    Returns a tuple (full_tokens, base_tokens).
-    """
-    # Check if the pattern starts with PERMUTE (case-insensitive)
-    if pattern_str.strip().upper().startswith("PERMUTE"):
-        # Extract text inside parentheses after PERMUTE
-        m = re.search(r'PERMUTE\s*\((.*?)\)', pattern_str, re.IGNORECASE)
-        if m:
-            inner = m.group(1)
-            # Split on commas and remove any extra whitespace
-            tokens = [t.strip() for t in inner.split(',')]
-        else:
-            tokens = []
-    else:
-        # This regex matches an identifier (starting with a letter, followed by letters/digits/underscores)
-        # and an optional quantifier part (which can be a simple quantifier or a bounded quantifier)
-        token_regex = r'([A-Za-z][A-Za-z0-9_]*(?:\{[0-9,\s]+\}|[\*\+\?](?:\?)?)?)'
-        tokens = re.findall(token_regex, pattern_str)
-    
-    # Now compute base_tokens by removing any trailing quantifier characters.
-    base_tokens = []
-    for token in tokens:
-        m = re.match(r'([A-Za-z][A-Za-z0-9_]*)', token)
-        if m:
-            base_tokens.append(m.group(1))
-        else:
-            base_tokens.append(token)
-    return tokens, base_tokens
+def balanced_parentheses(s: str) -> bool:
+    """Simple check to verify that parentheses in s are balanced."""
+    count = 0
+    for ch in s:
+        if ch == '(':
+            count += 1
+        elif ch == ')':
+            count -= 1
+            if count < 0:
+                return False
+    return count == 0
 
-@dataclass
-class PatternClause(ASTNode):
-    """Represents the PATTERN clause in MATCH_RECOGNIZE."""
-    pattern: str
-    metadata: Dict = field(init=False)
-
+class PatternClause:
+    """Represents the PATTERN clause in MATCH_RECOGNIZE.
+    
+    This version first tokenizes the raw pattern string (using a basic regex).
+    Then—if desired—you can call update_from_defined(defined_vars) to re‑tokenize
+    the pattern based on the variable names provided in the DEFINE clause.
+    """
     # Reserved keywords that should not be treated as variables.
     RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
+    
+    def __init__(self, pattern: str):
+        self.pattern = pattern
+        self.metadata = {}
+        self._tokenize_initial()
+    
+    def _clean_pattern(self, pattern: str) -> str:
+        """
+        Clean the pattern string:
+         - Remove outer parentheses if they wrap the entire pattern.
+         - Remove commas.
+         - Replace PERMUTE(...) with its inner content.
+         - Collapse multiple whitespace.
+        """
+        pattern = pattern.strip()
+        if pattern.startswith('(') and pattern.endswith(')') and balanced_parentheses(pattern):
+            pattern = pattern[1:-1].strip()
+        pattern = re.sub(r',', '', pattern)
+        pattern = re.sub(r'PERMUTE\s*\((.*?)\)', r'\1', pattern, flags=re.IGNORECASE)
+        pattern = re.sub(r'\s+', ' ', pattern).strip()
+        return pattern
 
-    def __post_init__(self):
-        # Clean the raw pattern (remove outer parentheses, commas, PERMUTE keyword, etc.)
+    def _tokenize_initial(self):
+        """
+        Initial tokenization.
+        
+        If the cleaned pattern contains whitespace, we simply split on whitespace.
+        Otherwise, we use a regex that (in a greedy way) may merge adjacent letters.
+        """
         cleaned = self._clean_pattern(self.pattern)
-        # If the cleaned pattern contains whitespace, split on whitespace;
-        # otherwise, assume each letter (with its following quantifier, if any) is a token.
         if ' ' in cleaned:
             raw_tokens = cleaned.split()
         else:
-            # This regex finds one letter ([A-Za-z]) and then any quantifier symbols (if present).
-            raw_tokens = [base + quant for base, quant in re.findall(r'([A-Za-z])([\*\+\?\{\},0-9]*)', cleaned)]
+            # This regex will match a token as one identifier (letters/digits/underscores)
+            # followed by an optional quantifier (e.g. +, *, ?, {2,4}, etc.)
+            # The lookahead ensures we cut before the next token.
+            raw_tokens = re.findall(r'([A-Za-z][A-Za-z0-9_]*[\*\+\?\{\}0-9]*)(?=[A-Za-z]|$)', cleaned)
         full_tokens = []
         base_tokens = []
         for token in raw_tokens:
-            # Use a regex to separate the identifier and its quantifier.
-            m = re.fullmatch(r'([A-Za-z][A-Za-z0-9_]*)([\*\+\?\{\},0-9]*)', token)
+            m = re.fullmatch(r'([A-Za-z][A-Za-z0-9_]*)([\*\+\?\{\}0-9]*)', token)
             if m:
                 base, quant = m.groups()
+                # Skip reserved keywords if needed.
                 if base in self.RESERVED_KEYWORDS:
                     continue
                 full_tokens.append(base + quant)
                 base_tokens.append(base)
         self.metadata = {"variables": full_tokens, "base_variables": base_tokens}
 
-    def _clean_pattern(self, pattern: str) -> str:
+    def update_from_defined(self, defined_vars: List[str]):
         """
-        Clean the pattern string:
-         - Remove outer parentheses if they wrap the entire pattern.
-         - Remove commas (which appear in PERMUTE lists).
-         - Replace PERMUTE(...) with just its inner content.
-         - Collapse multiple whitespace characters.
+        Re-tokenize the pattern string using the defined variable names.
+        
+        This method scans the cleaned pattern from left to right and tries to match
+        one of the defined variable names (case-sensitively) at each position.
+        If a match is found, it then consumes any following quantifier characters.
+        This way, a pattern like "Ab+c*" with defined variables ["A", "b", "c"]
+        will be re-tokenized as ["A", "b+", "c*"].
+        
+        If no defined variable matches at a given position, the method will
+        consume one character (to avoid infinite loops) and include it as a token.
         """
-        pattern = pattern.strip()
-        if pattern.startswith('(') and pattern.endswith(')'):
-            pattern = pattern[1:-1].strip()
-        # Remove commas
-        pattern = re.sub(r',', '', pattern)
-        # Replace PERMUTE(...) with its inner content.
-        pattern = re.sub(r'PERMUTE\s*\((.*?)\)', r'\1', pattern, flags=re.IGNORECASE)
-        # Collapse multiple whitespace characters.
-        pattern = re.sub(r'\s+', ' ', pattern).strip()
-        return pattern
+        cleaned = self._clean_pattern(self.pattern)
+        tokens = []
+        i = 0
+        while i < len(cleaned):
+            match_found = False
+            for var in defined_vars:
+                # If the pattern at position i starts with the defined variable...
+                if cleaned.startswith(var, i):
+                    j = i + len(var)
+                    # Check for an attached quantifier (which can be +, *, ?, or bounded like {2,4} with optional ?)
+                    quant_match = re.match(r'([\*\+\?]|(\{[0-9,\s]+\})(\?)?)', cleaned[j:])
+                    quant = quant_match.group(0) if quant_match else ""
+                    j += len(quant)
+                    tokens.append(var + quant)
+                    match_found = True
+                    i = j
+                    break
+            if not match_found:
+                # Consume a single character if no defined variable matches.
+                tokens.append(cleaned[i])
+                i += 1
+        # Derive base tokens by removing trailing quantifier parts.
+        base_tokens = [re.sub(r'([\*\+\?]|(\{[0-9,\s]+\})(\?)?)$', '', token) for token in tokens]
+        self.metadata = {"variables": tokens, "base_variables": base_tokens}
 
     def __repr__(self):
         return f"PatternClause(pattern={self.pattern!r}, metadata={self.metadata})"
