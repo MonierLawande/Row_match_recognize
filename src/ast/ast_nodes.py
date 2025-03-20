@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional,Tuple
 from src.ast.pattern_tokenizer import tokenize_pattern
 # Base AST node
 class ASTNode:
@@ -98,6 +98,43 @@ class AfterMatchSkipClause(ASTNode):
 # Updated PatternClause: it extracts tokens using regex and stores both the full token (e.g. "b+")
 # and the base variable (e.g. "b") in the metadata.
 #
+
+def extract_tokens(pattern_str: str) -> Tuple[List[str], List[str]]:
+    """
+    Extract tokens (with quantifiers) and their base identifiers from a pattern string.
+    
+    This function handles:
+      - PERMUTE constructs (e.g. "PERMUTE(A,B,C)")
+      - Tokens with optional quantifiers (e.g. "A", "b+", "c{2,4}?", etc.)
+    
+    Returns a tuple (full_tokens, base_tokens).
+    """
+    # Check if the pattern starts with PERMUTE (case-insensitive)
+    if pattern_str.strip().upper().startswith("PERMUTE"):
+        # Extract text inside parentheses after PERMUTE
+        m = re.search(r'PERMUTE\s*\((.*?)\)', pattern_str, re.IGNORECASE)
+        if m:
+            inner = m.group(1)
+            # Split on commas and remove any extra whitespace
+            tokens = [t.strip() for t in inner.split(',')]
+        else:
+            tokens = []
+    else:
+        # This regex matches an identifier (starting with a letter, followed by letters/digits/underscores)
+        # and an optional quantifier part (which can be a simple quantifier or a bounded quantifier)
+        token_regex = r'([A-Za-z][A-Za-z0-9_]*(?:\{[0-9,\s]+\}|[\*\+\?](?:\?)?)?)'
+        tokens = re.findall(token_regex, pattern_str)
+    
+    # Now compute base_tokens by removing any trailing quantifier characters.
+    base_tokens = []
+    for token in tokens:
+        m = re.match(r'([A-Za-z][A-Za-z0-9_]*)', token)
+        if m:
+            base_tokens.append(m.group(1))
+        else:
+            base_tokens.append(token)
+    return tokens, base_tokens
+
 @dataclass
 class PatternClause(ASTNode):
     """Represents the PATTERN clause in MATCH_RECOGNIZE."""
@@ -151,7 +188,6 @@ class PatternClause(ASTNode):
 
     def __repr__(self):
         return f"PatternClause(pattern={self.pattern!r}, metadata={self.metadata})"
-    
 @dataclass
 class SubsetClause(ASTNode):
     subset_text: str
