@@ -6,11 +6,3 @@ Complex pattern expressions with nested functions or unconventional whitespace.
 Error conditions where clauses are missing or incorrectly formed.
 This will help verify that every aspect of your parsing and AST generation behaves as expected.
 
-
-
-vaildate select * or columns ...etc
-and data types also 
-
-
-
-

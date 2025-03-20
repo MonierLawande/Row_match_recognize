@@ -68,23 +68,65 @@ def smart_split(raw_text):
     return parts
 
 def split_select_items(select_text: str) -> list:
+    """
+    Split the SELECT clause into individual items.
+    This function tracks parentheses and quotes to avoid splitting on commas that
+    occur inside expressions.
+    """
     items = []
     current = []
     depth = 0
-    for char in select_text:
-        if char == '(':
-            depth += 1
-        elif char == ')':
-            depth -= 1
-        if char == ',' and depth == 0:
-            items.append("".join(current).strip())
-            current = []
+    in_single_quote = False
+    in_double_quote = False
+    i = 0
+    while i < len(select_text):
+        char = select_text[i]
+        if char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(char)
+        elif char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(char)
+        elif not in_single_quote and not in_double_quote:
+            if char == '(':
+                depth += 1
+                current.append(char)
+            elif char == ')':
+                depth -= 1
+                current.append(char)
+            elif char == ',' and depth == 0:
+                # End of current select item.
+                item = "".join(current).strip()
+                if item:
+                    items.append(item)
+                current = []
+            else:
+                current.append(char)
         else:
             current.append(char)
+        i += 1
+    # Append the last item
     if current:
-        items.append("".join(current).strip())
+        item = "".join(current).strip()
+        if item:
+            items.append(item)
     return items
-
+def parse_select_expression(item: str) -> SelectItem:
+    """
+    Parse a select item into its expression and alias.
+    This function uses a regex to split by 'AS' at the top level.
+    If no alias is found, the entire item is taken as the expression.
+    """
+    # This regex splits on top-level 'AS' (case-insensitive)
+    # We use a simple approach assuming that the alias is not within parentheses.
+    parts = re.split(r'\s+AS\s+', item, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) == 2:
+        expr = parts[0].strip()
+        alias = parts[1].strip()
+    else:
+        expr = item.strip()
+        alias = None
+    return SelectItem(expression=expr, alias=alias)
 ###########################################
 # MATCH_RECOGNIZE clause extractor visitor
 ###########################################
@@ -376,47 +418,40 @@ class FullQueryExtractor(TrinoParserVisitor):
         return self.visitChildren(ctx)
 
     def visitSingleStatement(self, ctx: TrinoParser.SingleStatementContext):
-        full_text = post_process_text(self.original_query)
-        logger.debug(f"Full statement text: {full_text}")
+            full_text = post_process_text(self.original_query)
+            logger.debug(f"Full statement text: {full_text}")
 
-        select_match = re.search(r'(?i)^SELECT\s+(.+?)\s+FROM', full_text)
-        if select_match:
-            select_text = select_match.group(1)
-            items_raw = split_select_items(select_text)
-            items = []
-            simple_column_regex = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
-            for item in items_raw:
-                item = post_process_text(item)
-                alias_match = re.search(r'(?i)^(.+?)\s+AS\s+(.+)$', item)
-                if alias_match:
-                    expr = post_process_text(alias_match.group(1))
-                    alias = post_process_text(alias_match.group(2))
-                    items.append(SelectItem(expr, alias))
-                else:
-                    items.append(SelectItem(item))
-            self.select_clause = SelectClause(items)
-            logger.debug(f"Extracted SELECT clause via robust splitting: {self.select_clause}")
-        else:
-            logger.warning("No SELECT clause found via regex.")
+            # Extract SELECT clause by finding text between SELECT and FROM
+            select_match = re.search(r'(?i)^SELECT\s+(.+?)\s+FROM', full_text, re.DOTALL)
+            if select_match:
+                select_text = select_match.group(1)
+                items_raw = split_select_items(select_text)
+                items = [parse_select_expression(item) for item in items_raw]
+                self.select_clause = SelectClause(items)
+                logger.debug(f"Extracted SELECT clause via robust splitting: {self.select_clause}")
+            else:
+                logger.warning("No SELECT clause found via regex.")
 
-        from_match = re.search(r'(?i)FROM\s+(\w+)', full_text)
-        if from_match:
-            table_name = from_match.group(1)
-            self.from_clause = FromClause(table_name)
-            logger.debug(f"Extracted FROM clause via regex: {self.from_clause}")
-        else:
-            logger.warning("No FROM clause found via regex.")
+            # (The rest of the extraction for FROM and MATCH_RECOGNIZE remains as before)
+            from_match = re.search(r'(?i)FROM\s+(\w+)', full_text)
+            if from_match:
+                table_name = from_match.group(1)
+                self.from_clause = FromClause(table_name)
+                logger.debug(f"Extracted FROM clause via regex: {self.from_clause}")
+            else:
+                logger.warning("No FROM clause found via regex.")
 
-        self.match_recognize = self.find_pattern_recognition(ctx)
-        if self.match_recognize:
-            extractor = MatchRecognizeExtractor()
-            extractor.visit(self.match_recognize)
-            self.match_recognize = extractor.ast
-            logger.debug("Extracted MATCH_RECOGNIZE clause via recursive search.")
-        else:
-            logger.debug("No MATCH_RECOGNIZE clause found.")
+            # Recursively search for a PatternRecognitionContext.
+            self.match_recognize = self.find_pattern_recognition(ctx)
+            if self.match_recognize:
+                extractor = MatchRecognizeExtractor()
+                extractor.visit(self.match_recognize)
+                self.match_recognize = extractor.ast
+                logger.debug("Extracted MATCH_RECOGNIZE clause via recursive search.")
+            else:
+                logger.debug("No MATCH_RECOGNIZE clause found.")
 
-        return FullQueryAST(self.select_clause, self.from_clause, self.match_recognize)
+            return FullQueryAST(self.select_clause, self.from_clause, self.match_recognize)
 
     def find_pattern_recognition(self, ctx):
         if not hasattr(ctx, "getChildren"):
@@ -428,6 +463,11 @@ class FullQueryExtractor(TrinoParserVisitor):
             if result is not None:
                 return result
         return None
+
+
+
+
+
 
 def parse_match_recognize_query(query: str, dialect='default') -> MatchRecognizeClause:
     query = query.strip()
