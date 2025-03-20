@@ -100,34 +100,82 @@ class AfterMatchSkipClause(ASTNode):
 #
 @dataclass
 class PatternClause(ASTNode):
-    """Represents the PATTERN clause in MATCH_RECOGNIZE."""
+    """Represents the PATTERN clause in MATCH_RECOGNIZE.
+    
+    This implementation tokenizes the pattern text in a manner similar to how a regex engine would.
+    It supports alternate forms (using '|' as alternation), grouping (outer parentheses),
+    and tokens with quantifiers (like A+, A*, A{2,4} or A{2,4}?).
+    
+    The metadata dictionary will include:
+      - 'variables': a list of tokens as they appear (including quantifiers)
+      - 'base_variables': a list of the base variable identifiers (without quantifiers)
+    """
     pattern: str
     metadata: Dict = field(init=False)
 
-    # Reserved keywords that should not be treated as variables.
-    RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
+    # Reserved keywords that should not be considered as pattern variable names.
+    RESERVED_KEYWORDS = {"AND", "OR", "NOT"}
 
     def __post_init__(self):
-        # Use a regex to find tokens that are identifiers optionally followed by quantifiers.
-        # For example, in "b+", we want to capture:
-        #    full token: "b+"
-        #    base variable: "b"
-        # The regex: ([A-Za-z][A-Za-z0-9_]*)([\*\+\?\{\},0-9]*)?
-        tokens = re.findall(r'([A-Za-z][A-Za-z0-9_]*)([\*\+\?\{\},0-9]*)', self.pattern)
-        full_tokens = []
-        base_tokens = []
-        for base, quant in tokens:
-            # Skip reserved keywords (case-sensitive check)
-            if base in self.RESERVED_KEYWORDS:
+        raw = self.pattern.strip()
+        # If the pattern starts with PERMUTE( and ends with ), handle it separately.
+        if raw.upper().startswith("PERMUTE(") and raw.endswith(")"):
+            inner_text = raw[len("PERMUTE("):-1].strip()
+            # Split on commas (ignore extra whitespace)
+            tokens = re.split(r'\s*,\s*', inner_text)
+            variables, base_variables = self._tokenize_tokens(tokens)
+        else:
+            # For alternate forms, replace the alternation operator '|' with whitespace.
+            raw = raw.replace("|", " ")
+            # Remove outer parentheses if they wrap the entire string and are balanced.
+            if raw.startswith("(") and raw.endswith(")") and self._balanced_parentheses(raw[1:-1]):
+                raw = raw[1:-1].strip()
+            # Split by whitespace.
+            tokens = raw.split()
+            variables, base_variables = self._tokenize_tokens(tokens)
+        self.metadata = {"variables": variables, "base_variables": base_variables}
+
+    def _tokenize_tokens(self, tokens: List[str]) -> (List[str], List[str]):
+        """
+        For each token from the pattern, remove any trailing punctuation (such as commas)
+        and use a regex to capture an identifier and an optional quantifier.
+        Returns a tuple (variables, base_variables).
+        """
+        variables = []
+        base_variables = []
+        # Regex that matches an identifier followed by an optional quantifier.
+        # The quantifier can be one of: *, +, ?, or a bounded quantifier like {2,4} or {2,4}? (with optional spaces)
+        token_regex = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)(\s*\{\s*\d+(?:\s*,\s*\d*)?\s*\}\??|[\*\+\?])?$')
+        for token in tokens:
+            token = token.strip(",()")
+            # Skip reserved keywords.
+            if token.upper() in self.RESERVED_KEYWORDS:
                 continue
-            full = base + quant  # full token as it appears
-            full_tokens.append(full)
-            base_tokens.append(base)
-        # Store both in metadata.
-        self.metadata = {
-            "variables": full_tokens,      # tokens as they appear, e.g. ["A", "b+", "c"]
-            "base_variables": base_tokens    # just the identifier, e.g. ["A", "b", "c"]
-        }
+            m = token_regex.fullmatch(token)
+            if m:
+                ident = m.group(1)
+                quant = m.group(2)
+                quant_str = quant.strip() if quant else ""
+                variables.append(ident + quant_str)
+                base_variables.append(ident)
+            else:
+                # If the token does not match the expected pattern,
+                # include it as-is (this might trigger validation errors later).
+                variables.append(token)
+                base_variables.append(token)
+        return variables, base_variables
+
+    def _balanced_parentheses(self, s: str) -> bool:
+        """Check that the string s has balanced parentheses."""
+        count = 0
+        for char in s:
+            if char == '(':
+                count += 1
+            elif char == ')':
+                count -= 1
+                if count < 0:
+                    return False
+        return count == 0
 
     def __repr__(self):
         return f"PatternClause(pattern={self.pattern!r}, metadata={self.metadata})"
