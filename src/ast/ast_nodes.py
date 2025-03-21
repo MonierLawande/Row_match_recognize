@@ -110,12 +110,34 @@ def balanced_parentheses(s: str) -> bool:
                 return False
     return count == 0
 
+def remove_commas_outside_curly(pattern: str) -> str:
+    """
+    Remove commas that are not inside curly braces.
+    """
+    result = []
+    in_curly = False
+    for ch in pattern:
+        if ch == '{':
+            in_curly = True
+            result.append(ch)
+        elif ch == '}':
+            in_curly = False
+            result.append(ch)
+        elif ch == ',' and not in_curly:
+            continue
+        else:
+            result.append(ch)
+    return ''.join(result)
+@dataclass
 class PatternClause:
-    """Represents the PATTERN clause in MATCH_RECOGNIZE.
+    """
+    Represents the PATTERN clause in MATCH_RECOGNIZE.
     
-    This version first tokenizes the raw pattern string (using a basic regex).
-    Then—if desired—you can call update_from_defined(defined_vars) to re‑tokenize
-    the pattern based on the variable names provided in the DEFINE clause.
+    Initially tokenizes the raw pattern string (using a basic regex).
+    Later, if variable definitions are provided (via the DEFINE clause),
+    the update_from_defined method re‑tokenizes the pattern based on the
+    defined variable names. This method attaches any following quantifier
+    (e.g. +, *, ?, {2,4} with optional ?) without altering their format.
     """
     # Reserved keywords that should not be treated as variables.
     RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
@@ -129,32 +151,31 @@ class PatternClause:
         """
         Clean the pattern string:
          - Remove outer parentheses if they wrap the entire pattern.
-         - Remove commas.
-         - Replace PERMUTE(...) with its inner content.
-         - Collapse multiple whitespace.
+         - If the pattern starts with PERMUTE(...), remove commas entirely.
+           Otherwise, remove commas only outside of curly braces.
+         - Collapse multiple whitespace characters.
         """
         pattern = pattern.strip()
         if pattern.startswith('(') and pattern.endswith(')') and balanced_parentheses(pattern):
             pattern = pattern[1:-1].strip()
-        pattern = re.sub(r',', '', pattern)
-        pattern = re.sub(r'PERMUTE\s*\((.*?)\)', r'\1', pattern, flags=re.IGNORECASE)
+        if pattern.upper().startswith("PERMUTE("):
+            pattern = re.sub(r',', '', pattern)
+            pattern = re.sub(r'PERMUTE\s*\((.*?)\)', r'\1', pattern, flags=re.IGNORECASE)
+        else:
+            pattern = remove_commas_outside_curly(pattern)
         pattern = re.sub(r'\s+', ' ', pattern).strip()
         return pattern
 
     def _tokenize_initial(self):
         """
-        Initial tokenization.
-        
-        If the cleaned pattern contains whitespace, we simply split on whitespace.
-        Otherwise, we use a regex that (in a greedy way) may merge adjacent letters.
+        Initial tokenization:
+         - If the cleaned pattern contains whitespace, split on whitespace.
+         - Otherwise, use a regex with a lookahead to capture tokens along with any attached quantifier.
         """
         cleaned = self._clean_pattern(self.pattern)
         if ' ' in cleaned:
             raw_tokens = cleaned.split()
         else:
-            # This regex will match a token as one identifier (letters/digits/underscores)
-            # followed by an optional quantifier (e.g. +, *, ?, {2,4}, etc.)
-            # The lookahead ensures we cut before the next token.
             raw_tokens = re.findall(r'([A-Za-z][A-Za-z0-9_]*[\*\+\?\{\}0-9]*)(?=[A-Za-z]|$)', cleaned)
         full_tokens = []
         base_tokens = []
@@ -162,7 +183,6 @@ class PatternClause:
             m = re.fullmatch(r'([A-Za-z][A-Za-z0-9_]*)([\*\+\?\{\}0-9]*)', token)
             if m:
                 base, quant = m.groups()
-                # Skip reserved keywords if needed.
                 if base in self.RESERVED_KEYWORDS:
                     continue
                 full_tokens.append(base + quant)
@@ -173,25 +193,27 @@ class PatternClause:
         """
         Re-tokenize the pattern string using the defined variable names.
         
-        This method scans the cleaned pattern from left to right and tries to match
-        one of the defined variable names (case-sensitively) at each position.
-        If a match is found, it then consumes any following quantifier characters.
-        This way, a pattern like "Ab+c*" with defined variables ["A", "b", "c"]
-        will be re-tokenized as ["A", "b+", "c*"].
-        
-        If no defined variable matches at a given position, the method will
-        consume one character (to avoid infinite loops) and include it as a token.
+        This method scans the cleaned pattern from left to right and attempts to match
+        one of the defined variable names (sorted by length descending to prioritize
+        multi‑letter names). If a match is found, it consumes any attached quantifier
+        (such as +, *, ?, or bounded quantifiers like {2,4} possibly followed by a ?)
+        and appends the token. If no defined variable matches at the current position,
+        it skips over whitespace (instead of appending it) and consumes a single character otherwise.
         """
         cleaned = self._clean_pattern(self.pattern)
         tokens = []
         i = 0
+        # Sort defined variables by length (longest first)
+        sorted_vars = sorted(defined_vars, key=len, reverse=True)
         while i < len(cleaned):
+            # Skip any whitespace characters.
+            if cleaned[i].isspace():
+                i += 1
+                continue
             match_found = False
-            for var in defined_vars:
-                # If the pattern at position i starts with the defined variable...
+            for var in sorted_vars:
                 if cleaned.startswith(var, i):
                     j = i + len(var)
-                    # Check for an attached quantifier (which can be +, *, ?, or bounded like {2,4} with optional ?)
                     quant_match = re.match(r'([\*\+\?]|(\{[0-9,\s]+\})(\?)?)', cleaned[j:])
                     quant = quant_match.group(0) if quant_match else ""
                     j += len(quant)
@@ -200,10 +222,9 @@ class PatternClause:
                     i = j
                     break
             if not match_found:
-                # Consume a single character if no defined variable matches.
+                # Consume one non-whitespace character.
                 tokens.append(cleaned[i])
                 i += 1
-        # Derive base tokens by removing trailing quantifier parts.
         base_tokens = [re.sub(r'([\*\+\?]|(\{[0-9,\s]+\})(\?)?)$', '', token) for token in tokens]
         self.metadata = {"variables": tokens, "base_variables": base_tokens}
 

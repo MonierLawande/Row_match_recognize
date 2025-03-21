@@ -153,10 +153,13 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             logger.debug(f"Extracted DEFINE: {self.ast.define}")
           # --- New step: re-tokenize the pattern if no whitespace ---
         if self.ast.define and self.ast.pattern:
-            defined_vars = [d.variable for d in self.ast.define.definitions]
-            # Update the pattern tokens using the defined variable names.
-            self.ast.pattern.update_from_defined(defined_vars)
-            logger.debug(f"Updated Pattern tokens: {self.ast.pattern.metadata}")
+                defined_vars = [d.variable for d in self.ast.define.definitions]
+                self.ast.pattern.update_from_defined(defined_vars)
+                logger.debug(f"Updated Pattern tokens: {self.ast.pattern.metadata}")
+
+
+
+
         self.validate_clauses(ctx)
         self.validate_identifiers(ctx)
         self.validate_pattern_variables_defined(ctx)
