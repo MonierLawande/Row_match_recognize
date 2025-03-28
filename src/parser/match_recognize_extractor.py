@@ -305,7 +305,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
   
     def validate_function_usage(self, ctx):
         allowed_functions = {
-            "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[A-Za-z_][A-Za-z0-9_]*(?:\.\*)?(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\)",
+            "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[A-Za-z_][A-Za-z0-9_]*(?:\.\*)?(?:\.[A-Za-z_][A-Za-z0-9_]*)?\)\s*\)",
             "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)(?:\s*,\s*\d+)?\s*\)",
             "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)(?:\s*,\s*\d+)?\s*\)",
             "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*((?:(?:FIRST|LAST)\([^()]+\))|(?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?))\s*(?:,\s*\d+)?\s*\)",

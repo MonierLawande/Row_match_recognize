@@ -98,6 +98,7 @@ class AfterMatchSkipClause(ASTNode):
 # and the base variable (e.g. "b") in the metadata.
 #
 
+
 def balanced_parentheses(s: str) -> bool:
     """Simple check to verify that parentheses in s are balanced."""
     count = 0
@@ -128,6 +129,9 @@ def remove_commas_outside_curly(pattern: str) -> str:
         else:
             result.append(ch)
     return ''.join(result)
+
+# --- AST Node for PatternClause ---
+
 @dataclass
 class PatternClause:
     """
@@ -137,22 +141,24 @@ class PatternClause:
     Later, if variable definitions are provided (via the DEFINE clause),
     the update_from_defined method re‑tokenizes the pattern based on the
     defined variable names. This method attaches any following quantifier
-    (e.g. +, *, ?, {2,4} with optional ?) without altering their format.
+    (e.g. +, *, ?, {2,4} with optional ?) without altering their original format.
     """
+    pattern: str
+    metadata: Dict = field(init=False)
+
     # Reserved keywords that should not be treated as variables.
     RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
-    
-    def __init__(self, pattern: str):
-        self.pattern = pattern
+
+    def __post_init__(self):
         self.metadata = {}
         self._tokenize_initial()
-    
+
     def _clean_pattern(self, pattern: str) -> str:
         """
         Clean the pattern string:
          - Remove outer parentheses if they wrap the entire pattern.
-         - If the pattern starts with PERMUTE(...), remove commas entirely.
-           Otherwise, remove commas only outside of curly braces.
+         - If the pattern starts with PERMUTE(...), remove commas entirely;
+           otherwise, remove commas only outside of curly braces.
          - Collapse multiple whitespace characters.
         """
         pattern = pattern.strip()
@@ -168,15 +174,18 @@ class PatternClause:
 
     def _tokenize_initial(self):
         """
-        Initial tokenization:
-         - If the cleaned pattern contains whitespace, split on whitespace.
-         - Otherwise, use a regex with a lookahead to capture tokens along with any attached quantifier.
+        Perform an initial tokenization of the cleaned pattern.
+        If whitespace is present, a simple split is used; otherwise, a regex with a lookahead is used.
         """
         cleaned = self._clean_pattern(self.pattern)
+        # Allow empty patterns (empty match)
+        if cleaned == "":
+            self.metadata = {"variables": [], "base_variables": []}
+            return
         if ' ' in cleaned:
             raw_tokens = cleaned.split()
         else:
-            raw_tokens = re.findall(r'([A-Za-z][A-Za-z0-9_]*[\*\+\?\{\}0-9]*)(?=[A-Za-z]|$)', cleaned)
+             raw_tokens = re.findall(r'([A-Za-z][A-Za-z0-9_]*[\\*\\+\\?\\{\\}0-9]*)(?=[A-Za-z]|$)', cleaned)
         full_tokens = []
         base_tokens = []
         for token in raw_tokens:
@@ -197,39 +206,67 @@ class PatternClause:
         one of the defined variable names (sorted by length descending to prioritize
         multi‑letter names). If a match is found, it consumes any attached quantifier
         (such as +, *, ?, or bounded quantifiers like {2,4} possibly followed by a ?)
-        and appends the token. If no defined variable matches at the current position,
-        it skips over whitespace (instead of appending it) and consumes a single character otherwise.
+        and appends the token. Grouping symbols (parentheses) and whitespace are skipped.
+        If no defined variable matches at the current position and the character is a quantifier,
+        it is attached to the previous token. Otherwise, unexpected literals are skipped.
         """
         cleaned = self._clean_pattern(self.pattern)
+        if cleaned == "":
+            self.metadata = {"variables": [], "base_variables": []}
+            return
         tokens = []
         i = 0
-        # Sort defined variables by length (longest first)
+        # Sort defined variables by length descending (longest first)
         sorted_vars = sorted(defined_vars, key=len, reverse=True)
+        # Define quantifier starting characters
+        quant_chars = set("*+?")
         while i < len(cleaned):
-            # Skip any whitespace characters.
-            if cleaned[i].isspace():
+            ch = cleaned[i]
+            # Skip whitespace and grouping symbols
+            if ch.isspace() or ch in "()":
                 i += 1
                 continue
             match_found = False
             for var in sorted_vars:
                 if cleaned.startswith(var, i):
-                    j = i + len(var)
-                    quant_match = re.match(r'([\*\+\?]|(\{[0-9,\s]+\})(\?)?)', cleaned[j:])
-                    quant = quant_match.group(0) if quant_match else ""
-                    j += len(quant)
-                    tokens.append(var + quant)
+                    token = var
+                    i += len(var)
+                    quant = ""
+                    # Check for bounded quantifier starting with '{'
+                    if i < len(cleaned) and cleaned[i] == '{':
+                        start_quant = i
+                        while i < len(cleaned) and cleaned[i] != '}':
+                            i += 1
+                        if i < len(cleaned) and cleaned[i] == '}':
+                            i += 1
+                            quant = cleaned[start_quant:i]
+                            if i < len(cleaned) and cleaned[i] == '?':
+                                quant += '?'
+                                i += 1
+                    else:
+                        while i < len(cleaned) and cleaned[i] in quant_chars:
+                            quant += cleaned[i]
+                            i += 1
+                    token += quant
+                    tokens.append(token)
                     match_found = True
-                    i = j
                     break
             if not match_found:
-                # Consume one non-whitespace character.
-                tokens.append(cleaned[i])
+                # If the character is a quantifier, attach it to the last token if available.
+                if ch in quant_chars:
+                    if tokens:
+                        tokens[-1] += ch
+                    i += 1
+                    continue
+                # Skip any unexpected literal character.
                 i += 1
         base_tokens = [re.sub(r'([\*\+\?]|(\{[0-9,\s]+\})(\?)?)$', '', token) for token in tokens]
         self.metadata = {"variables": tokens, "base_variables": base_tokens}
 
     def __repr__(self):
         return f"PatternClause(pattern={self.pattern!r}, metadata={self.metadata})"
+
+
 @dataclass
 class SubsetClause(ASTNode):
     subset_text: str
