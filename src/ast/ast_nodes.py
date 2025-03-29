@@ -70,9 +70,9 @@ class RowsPerMatchClause(ASTNode):
     def all_rows_per_match_with_unmatched():
         return RowsPerMatchClause("ALL ROWS PER MATCH", show_empty=True, with_unmatched=True)
 
-    def __repr__(self):
+    def __str__(self):
         if self.mode == "ONEROWPERMATCH":
-            return "RowsPerMatchClause(mode=ONE ROW PER MATCH)"
+            return "ONE ROW PER MATCH"
         elif self.mode.startswith("ALLROWSPERMATCH"):
             base = "ALL ROWS PER MATCH"
             modifiers = []
@@ -82,12 +82,12 @@ class RowsPerMatchClause(ASTNode):
                 modifiers.append("SHOW EMPTY MATCHES")
             if self.with_unmatched or "WITHUNMATCHEDROWS" in self.mode:
                 modifiers.append("WITH UNMATCHED ROWS")
-            if modifiers:
-                return f"RowsPerMatchClause(mode={base}, {', '.join(modifiers)})"
-            else:
-                return f"RowsPerMatchClause(mode={base})"
+            return f"{base} {' '.join(modifiers)}".strip()
         else:
-            return f"RowsPerMatchClause(mode={self.raw_mode})"
+            return self.raw_mode
+
+    def __repr__(self):
+        return f"RowsPerMatchClause(raw_mode='{self.__str__()}')"
 
 @dataclass
 class AfterMatchSkipClause(ASTNode):
@@ -129,41 +129,26 @@ def remove_commas_outside_curly(pattern: str) -> str:
         else:
             result.append(ch)
     return ''.join(result)
-
-# --- AST Node for PatternClause ---
-
 @dataclass
 class PatternClause:
     """
     Represents the PATTERN clause in MATCH_RECOGNIZE.
-    
-    Initially tokenizes the raw pattern string (using a basic regex).
-    Later, if variable definitions are provided (via the DEFINE clause),
-    the update_from_defined method re‑tokenizes the pattern based on the
-    defined variable names. This method attaches any following quantifier
-    (e.g. +, *, ?, {2,4} with optional ?) without altering their original format.
     """
-    pattern: str
-    metadata: Dict = field(init=False)
-
-    # Reserved keywords that should not be treated as variables.
     RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
-
-    def __post_init__(self):
+    pattern: str
+    metadata: Dict = field(default_factory=dict)
+    def __init__(self, pattern: str):
+        self.pattern = pattern
         self.metadata = {}
         self._tokenize_initial()
-
+    
     def _clean_pattern(self, pattern: str) -> str:
-        """
-        Clean the pattern string:
-         - Remove outer parentheses if they wrap the entire pattern.
-         - If the pattern starts with PERMUTE(...), remove commas entirely;
-           otherwise, remove commas only outside of curly braces.
-         - Collapse multiple whitespace characters.
-        """
+        """Clean the pattern string."""
         pattern = pattern.strip()
+        # Remove outer parentheses if they wrap the entire pattern
         if pattern.startswith('(') and pattern.endswith(')') and balanced_parentheses(pattern):
             pattern = pattern[1:-1].strip()
+        # Handle PERMUTE patterns
         if pattern.upper().startswith("PERMUTE("):
             pattern = re.sub(r',', '', pattern)
             pattern = re.sub(r'PERMUTE\s*\((.*?)\)', r'\1', pattern, flags=re.IGNORECASE)
@@ -172,101 +157,161 @@ class PatternClause:
         pattern = re.sub(r'\s+', ' ', pattern).strip()
         return pattern
 
-    def _tokenize_initial(self):
+    def _tokenize_pattern(self, pattern: str, defined_vars: List[str] = None) -> List[Tuple[str, str]]:
         """
-        Perform an initial tokenization of the cleaned pattern.
-        If whitespace is present, a simple split is used; otherwise, a regex with a lookahead is used.
+        Tokenize a pattern string into a list of (variable, quantifier) tuples.
+        If defined_vars is provided, use it to guide tokenization.
         """
-        cleaned = self._clean_pattern(self.pattern)
-        # Allow empty patterns (empty match)
-        if cleaned == "":
-            self.metadata = {"variables": [], "base_variables": []}
-            return
-        if ' ' in cleaned:
-            raw_tokens = cleaned.split()
-        else:
-             raw_tokens = re.findall(r'([A-Za-z][A-Za-z0-9_]*[\\*\\+\\?\\{\\}0-9]*)(?=[A-Za-z]|$)', cleaned)
-        full_tokens = []
-        base_tokens = []
-        for token in raw_tokens:
-            m = re.fullmatch(r'([A-Za-z][A-Za-z0-9_]*)([\*\+\?\{\}0-9]*)', token)
-            if m:
-                base, quant = m.groups()
-                if base in self.RESERVED_KEYWORDS:
-                    continue
-                full_tokens.append(base + quant)
-                base_tokens.append(base)
-        self.metadata = {"variables": full_tokens, "base_variables": base_tokens}
-
-    def update_from_defined(self, defined_vars: List[str]):
-        """
-        Re-tokenize the pattern string using the defined variable names.
-        
-        This method scans the cleaned pattern from left to right and attempts to match
-        one of the defined variable names (sorted by length descending to prioritize
-        multi‑letter names). If a match is found, it consumes any attached quantifier
-        (such as +, *, ?, or bounded quantifiers like {2,4} possibly followed by a ?)
-        and appends the token. Grouping symbols (parentheses) and whitespace are skipped.
-        If no defined variable matches at the current position and the character is a quantifier,
-        it is attached to the previous token. Otherwise, unexpected literals are skipped.
-        """
-        cleaned = self._clean_pattern(self.pattern)
-        if cleaned == "":
-            self.metadata = {"variables": [], "base_variables": []}
-            return
         tokens = []
         i = 0
-        # Sort defined variables by length descending (longest first)
-        sorted_vars = sorted(defined_vars, key=len, reverse=True)
-        # Define quantifier starting characters
-        quant_chars = set("*+?")
-        while i < len(cleaned):
-            ch = cleaned[i]
-            # Skip whitespace and grouping symbols
-            if ch.isspace() or ch in "()":
+        pattern = pattern.strip()
+        
+        # If we have defined variables, sort them by length (longest first)
+        # to prioritize matching longer variable names
+        if defined_vars:
+            sorted_vars = sorted(defined_vars, key=len, reverse=True)
+        else:
+            sorted_vars = None
+        
+        while i < len(pattern):
+            # Skip whitespace and special characters
+            if pattern[i].isspace() or pattern[i] in {'|', '&', '!', '(', ')', ','}:
                 i += 1
                 continue
-            match_found = False
-            for var in sorted_vars:
-                if cleaned.startswith(var, i):
-                    token = var
-                    i += len(var)
-                    quant = ""
-                    # Check for bounded quantifier starting with '{'
-                    if i < len(cleaned) and cleaned[i] == '{':
-                        start_quant = i
-                        while i < len(cleaned) and cleaned[i] != '}':
-                            i += 1
-                        if i < len(cleaned) and cleaned[i] == '}':
-                            i += 1
-                            quant = cleaned[start_quant:i]
-                            if i < len(cleaned) and cleaned[i] == '?':
-                                quant += '?'
-                                i += 1
-                    else:
-                        while i < len(cleaned) and cleaned[i] in quant_chars:
-                            quant += cleaned[i]
-                            i += 1
-                    token += quant
-                    tokens.append(token)
-                    match_found = True
-                    break
-            if not match_found:
-                # If the character is a quantifier, attach it to the last token if available.
-                if ch in quant_chars:
-                    if tokens:
-                        tokens[-1] += ch
-                    i += 1
-                    continue
-                # Skip any unexpected literal character.
+            
+            # Try to match defined variables first (if available)
+            matched = False
+            if sorted_vars:
+                for var in sorted_vars:
+                    if pattern[i:].startswith(var) and (i + len(var) >= len(pattern) or 
+                                                       not pattern[i + len(var)].isalnum() and 
+                                                       pattern[i + len(var)] != '_'):
+                        var_name = var
+                        i += len(var)
+                        matched = True
+                        break
+            
+            # If no defined variable matched, try to match a single character variable
+            if not matched and pattern[i].isalpha():
+                var_name = pattern[i]
                 i += 1
-        base_tokens = [re.sub(r'([\*\+\?]|(\{[0-9,\s]+\})(\?)?)$', '', token) for token in tokens]
-        self.metadata = {"variables": tokens, "base_variables": base_tokens}
+                matched = True
+            
+            # If we matched a variable, look for a quantifier
+            if matched:
+                quant = ""
+                if i < len(pattern):
+                    if pattern[i] in {'*', '+', '?'}:
+                        quant = pattern[i]
+                        i += 1
+                        # Check for reluctant quantifier
+                        if i < len(pattern) and pattern[i] == '?':
+                            quant += '?'
+                            i += 1
+                    elif pattern[i] == '{':
+                        # Handle range quantifier
+                        j = pattern.find('}', i)
+                        if j != -1:
+                            quant = pattern[i:j+1]
+                            if j+1 < len(pattern) and pattern[j+1] == '?':
+                                quant += '?'
+                                j += 1
+                            i = j + 1
+                
+                # Add token if it's not a reserved keyword
+                if var_name.upper() not in self.RESERVED_KEYWORDS:
+                    tokens.append((var_name, quant))
+            else:
+                # Skip any character we couldn't match
+                i += 1
+        
+        return tokens
 
+    def _tokenize_initial(self):
+        """Initial tokenization of the pattern."""
+        cleaned = self._clean_pattern(self.pattern)
+        # For initial tokenization, we don't have defined variables yet
+        # So we tokenize character by character
+        tokens = []
+        i = 0
+        while i < len(cleaned):
+            if cleaned[i].isspace() or cleaned[i] in {'|', '&', '!', '(', ')', ','}:
+                i += 1
+                continue
+            
+            if cleaned[i].isalpha():
+                var_name = cleaned[i]
+                i += 1
+                
+                # Look for quantifier
+                quant = ""
+                if i < len(cleaned):
+                    if cleaned[i] in {'*', '+', '?'}:
+                        quant = cleaned[i]
+                        i += 1
+                        if i < len(cleaned) and cleaned[i] == '?':
+                            quant += '?'
+                            i += 1
+                    elif cleaned[i] == '{':
+                        j = cleaned.find('}', i)
+                        if j != -1:
+                            quant = cleaned[i:j+1]
+                            if j+1 < len(cleaned) and cleaned[j+1] == '?':
+                                quant += '?'
+                                j += 1
+                            i = j + 1
+                
+                if var_name.upper() not in self.RESERVED_KEYWORDS:
+                    tokens.append((var_name, quant))
+            else:
+                i += 1
+        
+        # Extract base variables and full variables
+        base_variables = []
+        full_variables = []
+        
+        for var, quant in tokens:
+            if var not in base_variables:
+                base_variables.append(var)
+            full_token = var + quant
+            if full_token not in full_variables:
+                full_variables.append(full_token)
+        
+        self.metadata = {
+            "variables": full_variables,
+            "base_variables": base_variables
+        }
+
+    def update_from_defined(self, defined_vars: List[str]):
+        """Update pattern metadata based on defined variables."""
+        # Re-tokenize with defined variables as guidance
+        cleaned = self._clean_pattern(self.pattern)
+        tokens = self._tokenize_pattern(cleaned, defined_vars)
+        
+        # Extract base variables and full variables
+        base_variables = []
+        full_variables = []
+        
+        for var, quant in tokens:
+            if var not in base_variables and var.upper() not in self.RESERVED_KEYWORDS:
+                base_variables.append(var)
+            full_token = var + quant
+            if full_token not in full_variables:
+                full_variables.append(full_token)
+        
+        # Verify defined variables exist in pattern
+        defined_set = set(defined_vars)
+        current_base_vars = set(base_variables)
+        if not defined_set.issubset(current_base_vars):
+            extra_vars = defined_set - current_base_vars
+            raise ValueError(f"Defined variables {extra_vars} not found in pattern")
+        
+        self.metadata = {
+            "variables": full_variables,
+            "base_variables": base_variables
+        }
     def __repr__(self):
-        return f"PatternClause(pattern={self.pattern!r}, metadata={self.metadata})"
-
-
+        return f"PatternClause(pattern='{self.pattern}', metadata={self.metadata})"
 @dataclass
 class SubsetClause(ASTNode):
     subset_text: str
@@ -291,12 +336,13 @@ class MatchRecognizeClause(ASTNode):
     subset: List[SubsetClause] = field(default_factory=list)
     define: Optional[DefineClause] = None
 
+
     def __repr__(self):
         return (f"MatchRecognizeClause(\n"
                 f"  partition_by={self.partition_by},\n"
                 f"  order_by={self.order_by},\n"
                 f"  measures={self.measures},\n"
-                f"  rows_per_match={self.rows_per_match},\n"
+                f"  rows_per_match={str(self.rows_per_match) if self.rows_per_match else None},\n"
                 f"  after_match_skip={self.after_match_skip},\n"
                 f"  pattern={self.pattern},\n"
                 f"  subset={self.subset},\n"
