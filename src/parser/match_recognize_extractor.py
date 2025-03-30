@@ -239,12 +239,18 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         # Get the raw pattern text
         pattern_text = None
         if ctx.rowPattern():
-            # Get the text between parentheses
-            pattern_text = ctx.rowPattern().getText()
-            if pattern_text.startswith('(') and pattern_text.endswith(')'):
-                pattern_text = pattern_text[1:-1].strip()
+            # Get the original text directly from the input stream
+            start = ctx.rowPattern().start.start
+            stop = ctx.rowPattern().stop.stop
+            original_pattern = ctx.rowPattern().start.getInputStream().getText(start, stop)
             
-            # Create the pattern clause with the cleaned pattern text
+            # Remove only the outer parentheses if they exist
+            if original_pattern.startswith('(') and original_pattern.endswith(')'):
+                pattern_text = original_pattern[1:-1]
+            else:
+                pattern_text = original_pattern
+            
+            # Create the pattern clause with the original pattern text
             pattern_clause = PatternClause(pattern_text)
             
             # If we have a DEFINE clause, use it to guide tokenization
@@ -262,7 +268,6 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             
             return pattern_clause
         return PatternClause("")  # Return empty pattern clause if no pattern found
-
 
     def extract_subset(self, ctx):
         return [SubsetClause(post_process_text(sd.getText())) for sd in ctx.subsetDefinition()]

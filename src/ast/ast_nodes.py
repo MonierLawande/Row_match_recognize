@@ -137,13 +137,15 @@ class PatternClause:
     RESERVED_KEYWORDS = {"PERMUTE", "AND", "OR", "NOT"}
     pattern: str
     metadata: Dict = field(default_factory=dict)
+    
     def __init__(self, pattern: str):
+        # Store the original pattern exactly as entered
         self.pattern = pattern
         self.metadata = {}
         self._tokenize_initial()
     
     def _clean_pattern(self, pattern: str) -> str:
-        """Clean the pattern string."""
+        """Clean the pattern string for tokenization purposes only."""
         pattern = pattern.strip()
         # Remove outer parentheses if they wrap the entire pattern
         if pattern.startswith('(') and pattern.endswith(')') and balanced_parentheses(pattern):
@@ -154,9 +156,9 @@ class PatternClause:
             pattern = re.sub(r'PERMUTE\s*\((.*?)\)', r'\1', pattern, flags=re.IGNORECASE)
         else:
             pattern = remove_commas_outside_curly(pattern)
-        pattern = re.sub(r'\s+', ' ', pattern).strip()
+        # Don't remove spaces here to preserve the original pattern format
         return pattern
-
+    
     def _tokenize_pattern(self, pattern: str, defined_vars: List[str] = None) -> List[Tuple[str, str]]:
         """
         Tokenize a pattern string into a list of (variable, quantifier) tuples.
@@ -174,8 +176,11 @@ class PatternClause:
             sorted_vars = None
         
         while i < len(pattern):
-            # Skip whitespace and special characters
-            if pattern[i].isspace() or pattern[i] in {'|', '&', '!', '(', ')', ','}:
+            # Skip special characters but preserve spaces in the original pattern
+            if pattern[i] in {'|', '&', '!', '(', ')', ','}:
+                i += 1
+                continue
+            elif pattern[i].isspace():
                 i += 1
                 continue
             
@@ -229,13 +234,17 @@ class PatternClause:
 
     def _tokenize_initial(self):
         """Initial tokenization of the pattern."""
+        # Use the original pattern for metadata extraction
         cleaned = self._clean_pattern(self.pattern)
         # For initial tokenization, we don't have defined variables yet
         # So we tokenize character by character
         tokens = []
         i = 0
         while i < len(cleaned):
-            if cleaned[i].isspace() or cleaned[i] in {'|', '&', '!', '(', ')', ','}:
+            if cleaned[i] in {'|', '&', '!', '(', ')', ','}:
+                i += 1
+                continue
+            elif cleaned[i].isspace():
                 i += 1
                 continue
             
@@ -310,6 +319,7 @@ class PatternClause:
             "variables": full_variables,
             "base_variables": base_variables
         }
+        
     def __repr__(self):
         return f"PatternClause(pattern='{self.pattern}', metadata={self.metadata})"
 @dataclass
