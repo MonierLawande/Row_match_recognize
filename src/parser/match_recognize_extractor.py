@@ -249,9 +249,70 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         stop = ctx.stop.stop
         return ctx.start.getInputStream().getText(start, stop)
 
+    
     def extract_after_match_skip(self, ctx):
-        return AfterMatchSkipClause(post_process_text(" ".join(child.getText() for child in ctx.skipTo().getChildren())))
+        """Extract and parse the AFTER MATCH SKIP clause."""
+        # Get the skipTo context
+        skip_to_ctx = ctx.skipTo()
+        if not skip_to_ctx:
+            return None
+        
+        # Use direct input stream access to get text
+        start = skip_to_ctx.start.start
+        stop = skip_to_ctx.stop.stop
+        skip_to_text = skip_to_ctx.start.getInputStream().getText(start, stop)
+        skip_to_text = post_process_text(skip_to_text)
+        
+        # Use regex to completely remove SKIP keyword at the beginning (case-insensitive)
+        skip_to_text = re.sub(r'^\s*SKIP\s+', '', skip_to_text, flags=re.IGNORECASE)
+        
+        # Add the prefix properly
+        raw_text = f"AFTER MATCH SKIP {skip_to_text}"
+        logger.debug(f"Extracting AFTER MATCH SKIP clause: {raw_text}")
+        
+        # Check for each type of skip clause
+        lower_text = raw_text.upper()
+        
+        if "PAST LAST ROW" in lower_text:
+            return AfterMatchSkipClause('PAST LAST ROW', raw_value=raw_text)
+        
+        elif "TO NEXT ROW" in lower_text:
+            return AfterMatchSkipClause('TO NEXT ROW', raw_value=raw_text)
+        
+        elif "TO FIRST" in lower_text:
+            # Extract the variable after "TO FIRST"
+            match = re.search(r'TO\s+FIRST\s+([A-Za-z_][A-Za-z0-9_]*)', raw_text, re.IGNORECASE)
+            if match:
+                return AfterMatchSkipClause('TO FIRST', match.group(1), raw_value=raw_text)
+            else:
+                raise ParserError("Invalid AFTER MATCH SKIP TO FIRST clause", snippet=raw_text)
+        
+        elif "TO LAST" in lower_text:
+            # Extract the variable after "TO LAST"
+            match = re.search(r'TO\s+LAST\s+([A-Za-z_][A-Za-z0-9_]*)', raw_text, re.IGNORECASE)
+            if match:
+                return AfterMatchSkipClause('TO LAST', match.group(1), raw_value=raw_text)
+            else:
+                raise ParserError("Invalid AFTER MATCH SKIP TO LAST clause", snippet=raw_text)
+        
+        elif "TO" in lower_text:
+            # Handle "TO" without FIRST/LAST or with NEXT ROW
+            match = re.search(r'TO\s+([A-Za-z_][A-Za-z0-9_]*)', raw_text, re.IGNORECASE)
+            if match:
+                target_var = match.group(1)
+                if target_var.upper() == "NEXT" and "ROW" in lower_text.split(target_var.upper(), 1)[1]:
+                    return AfterMatchSkipClause('TO NEXT ROW', raw_value=raw_text)
+                else:
+                    return AfterMatchSkipClause('TO LAST', target_var, raw_value=raw_text)
+            else:
+                raise ParserError("Invalid AFTER MATCH SKIP TO clause", snippet=raw_text)
+        
+        else:
+            # Custom or unrecognized mode
+            logger.warning(f"Using raw AFTER MATCH SKIP value: {raw_text}")
+            return AfterMatchSkipClause(raw_text, raw_value=raw_text)
 
+    
     def extract_pattern(self, ctx: TrinoParser.PatternRecognitionContext) -> PatternClause:
         """
         Extract the pattern from the pattern recognition context.
@@ -304,19 +365,37 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 definitions.append(Define(post_process_text(raw_text), ""))
         return DefineClause(definitions)
 
+    # Updated validation method for src/parser/match_recognize_extractor.py
     def validate_clauses(self, ctx):
         if self.ast.define and not self.ast.pattern:
-            raise ParserError("PATTERN clause is required when DEFINE is used.", line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-        if self.ast.after_match_skip:
-            skip_value = self.ast.after_match_skip.value.upper().split()
-            if "TO" in skip_value:
-                target_var = skip_value[-1]
+            raise ParserError("PATTERN clause is required when DEFINE is used.", 
+                            line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+        
+        if self.ast.after_match_skip and self.ast.pattern:
+            mode = self.ast.after_match_skip.mode
+            target_var = self.ast.after_match_skip.target_variable
+            
+            if mode in ['TO FIRST', 'TO LAST'] and target_var:
                 pattern_vars = self.ast.pattern.metadata.get("base_variables", [])
+                
+                # Check if the target variable exists in the pattern
                 if target_var not in pattern_vars:
-                    raise ParserError(f"AFTER MATCH SKIP target '{target_var}' not found in pattern variables {pattern_vars}.", line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+                    raise ParserError(
+                        f"AFTER MATCH SKIP target '{target_var}' not found in pattern variables {pattern_vars}.",
+                        line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
+                    )
+                
+                # Check for infinite loop - cannot skip to the first variable in the pattern
                 if pattern_vars and target_var == pattern_vars[0]:
-                    raise ParserError(f"AFTER MATCH SKIP target '{target_var}' cannot be the first element (infinite loop).", line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+                    if mode == 'TO FIRST' or (mode == 'TO LAST' and len(pattern_vars) == 1):
+                        raise ParserError(
+                            f"AFTER MATCH SKIP {mode} {target_var} would create an infinite loop "
+                            f"because {target_var} is the first pattern variable.",
+                            line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
+                        )
+        
         self.validate_pattern_clause(ctx)
+
 
     def validate_pattern_clause(self, ctx):
         if not self.ast.pattern:
@@ -408,16 +487,19 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     logger.debug(f"Extracted variables from subset '{subset_clause.subset_text}': {subset_elements}")
         
         # 3. Check variables used in AFTER MATCH SKIP
+        # In validate_pattern_variables_defined method:
+        # For AFTER MATCH SKIP handling
         if self.ast.after_match_skip:
-            skip_text = self.ast.after_match_skip.value.upper()
-            if "TO" in skip_text:
-                # Extract variable after "TO"
-                skip_match = re.search(r'TO\s+([A-Za-z_][A-Za-z0-9_]*)', skip_text)
-                if skip_match:
-                    target_var = skip_match.group(1)
+            # Skip keywords that aren't pattern variables
+            skip_keywords = {"FIRST", "LAST", "NEXT", "ROW", "PAST", "TO"}
+            
+            if self.ast.after_match_skip.mode in ['TO FIRST', 'TO LAST'] and self.ast.after_match_skip.target_variable:
+                # Only add the target variable if it's not a keyword
+                target_var = self.ast.after_match_skip.target_variable
+                if target_var.upper() not in skip_keywords:
                     referenced_vars.add(target_var)
                     logger.debug(f"Extracted variable from AFTER MATCH SKIP: {target_var}")
-        
+
         # 4. Check variables used in DEFINE conditions
         if self.ast.define:
             for define in self.ast.define.definitions:

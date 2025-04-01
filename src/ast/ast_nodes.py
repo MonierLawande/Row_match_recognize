@@ -89,14 +89,75 @@ class RowsPerMatchClause(ASTNode):
     def __repr__(self):
         return f"RowsPerMatchClause(raw_mode='{self.__str__()}')"
 
+# First, update the AfterMatchSkipClause class in src/ast/ast_nodes.py
 @dataclass
 class AfterMatchSkipClause(ASTNode):
-    value: str
+    """
+    Represents the AFTER MATCH SKIP clause in MATCH_RECOGNIZE.
+    
+    The options are:
+    - AFTER MATCH SKIP PAST LAST ROW (default)
+    - AFTER MATCH SKIP TO NEXT ROW 
+    - AFTER MATCH SKIP TO FIRST pattern_variable
+    - AFTER MATCH SKIP TO LAST pattern_variable
+    """
+    mode: str  # 'PAST LAST ROW', 'TO NEXT ROW', 'TO FIRST', 'TO LAST'
+    target_variable: Optional[str] = None  # Used with 'TO FIRST' and 'TO LAST' modes
+    raw_value: Optional[str] = None  # Original text (for debugging/display)
+    
+    def __post_init__(self):
+        # Store original text if not provided
+        if self.raw_value is None:
+            if self.mode == 'PAST LAST ROW':
+                self.raw_value = "AFTER MATCH SKIP PAST LAST ROW"
+            elif self.mode == 'TO NEXT ROW':
+                self.raw_value = "AFTER MATCH SKIP TO NEXT ROW"
+            elif self.mode in ['TO FIRST', 'TO LAST']:
+                position = "FIRST" if self.mode == 'TO FIRST' else "LAST"
+                self.raw_value = f"AFTER MATCH SKIP TO {position} {self.target_variable}"
+            else:
+                # Custom mode
+                self.raw_value = f"AFTER MATCH SKIP {self.mode}"
+    
+    @property
+    def value(self):
+        """Get the full text representation (for backward compatibility)"""
+        return self.raw_value
+    
+    @staticmethod
+    def past_last_row():
+        """Create an AFTER MATCH SKIP PAST LAST ROW clause (default)"""
+        return AfterMatchSkipClause('PAST LAST ROW')
+    
+    @staticmethod
+    def to_next_row():
+        """Create an AFTER MATCH SKIP TO NEXT ROW clause"""
+        return AfterMatchSkipClause('TO NEXT ROW')
+    
+    @staticmethod
+    def to_first(variable):
+        """Create an AFTER MATCH SKIP TO FIRST variable clause"""
+        return AfterMatchSkipClause('TO FIRST', variable)
+    
+    @staticmethod
+    def to_last(variable):
+        """Create an AFTER MATCH SKIP TO LAST variable clause"""
+        return AfterMatchSkipClause('TO LAST', variable)
+    
+    def __str__(self):
+        return self.raw_value
+    
+    def __repr__(self):
+        return f"AfterMatchSkipClause(mode='{self.mode}', target_variable={repr(self.target_variable)})"
 
-#
-# Updated PatternClause: it extracts tokens using regex and stores both the full token (e.g. "b+")
-# and the base variable (e.g. "b") in the metadata.
-#
+
+
+
+
+
+
+
+
 
 
 def balanced_parentheses(s: str) -> bool:
