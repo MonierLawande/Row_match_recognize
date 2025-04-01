@@ -180,13 +180,33 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         measures = []
         for md in ctx.measureDefinition():
             raw_text = md.getText()
-            semantics = "RUNNING"
+            semantics = "RUNNING"  # Default semantics
             raw_expr = raw_text.strip()
-            if raw_expr.upper().startswith("RUNNING "):
-                raw_expr = raw_expr[len("RUNNING "):].strip()
-            elif raw_expr.upper().startswith("FINAL "):
+            
+            # Use regex to match RUNNING or FINAL with flexible whitespace
+            running_match = re.match(r'(?i)RUNNING\s+', raw_expr)
+            final_match = re.match(r'(?i)FINAL\s+', raw_expr)
+            
+            if running_match:
+                raw_expr = raw_expr[running_match.end():].strip()
+            elif final_match:
                 semantics = "FINAL"
-                raw_expr = raw_expr[len("FINAL "):].strip()
+                raw_expr = raw_expr[final_match.end():].strip()
+            
+            # Alternative: If the expression is already concatenated (e.g., "FINALLAST")
+            elif raw_expr.upper().startswith("RUNNING"):
+                # Extract function name after "RUNNING"
+                function_match = re.match(r'(?i)RUNNING([A-Z]+)', raw_expr)
+                if function_match:
+                    func_name = function_match.group(1)
+                    raw_expr = func_name + raw_expr[len("RUNNING" + func_name):]
+            elif raw_expr.upper().startswith("FINAL"):
+                semantics = "FINAL"
+                # Extract function name after "FINAL"
+                function_match = re.match(r'(?i)FINAL([A-Z]+)', raw_expr)
+                if function_match:
+                    func_name = function_match.group(1)
+                    raw_expr = func_name + raw_expr[len("FINAL" + func_name):]
 
             parts = smart_split(raw_expr)
             if len(parts) == 2:
@@ -197,6 +217,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             measure_metadata = {"semantics": semantics}
             measures.append(Measure(expr, alias, measure_metadata))
         return MeasuresClause(measures)
+
 
     def extract_rows_per_match(self, ctx):
         """Extract the ROWS PER MATCH clause."""
@@ -335,7 +356,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         if not self.ast.pattern:
             return
         
-        # Get pattern variables and defined variables
+        # Get pattern variables and defined variables (case-sensitive)
         pattern_vars = set(self.ast.pattern.metadata.get("base_variables", []))
         defined_vars = {d.variable for d in self.ast.define.definitions} if self.ast.define else set()
         
@@ -350,7 +371,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     subset_vars[subset_name] = subset_elements
                     logger.debug(f"Extracted subset mapping: {subset_name} -> {subset_elements}")
         
-        # Track all referenced variables
+        # Track all referenced variables (keeping existing code for 1-4)
         referenced_vars = set()
         
         # 1. Check variables used in MEASURES
@@ -365,7 +386,8 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 func_pattern = r'(?:FIRST|LAST|PREV|NEXT)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)(?:\s*(?:,|\))\s*)'
                 func_refs = re.findall(func_pattern, measure.expression, re.IGNORECASE)
                 # Filter out variables that are part of column references
-                func_refs = [v for v in func_refs if not re.search(f'{v}\\.[A-Za-z_]', measure.expression)]
+                func_refs = [v for v in func_refs if not re.search(fr'{v}\.[A-Za-z_]', measure.expression)]
+
                 referenced_vars.update(func_refs)
                 
                 # Extract variables from CLASSIFIER function
@@ -415,8 +437,29 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 extracted_vars = list(set(column_refs + func_refs))
                 logger.debug(f"Extracted variables from define condition '{define.condition}': {extracted_vars}")
         
-        # Check for missing definitions and extra definitions
-        # Subset variables should be considered as valid references
+        # NEW: Determine which pattern variables REQUIRE definition
+        required_vars = set()
+        for var in pattern_vars:
+            # Check if variable has optional quantifier (* or ?)
+            is_optional = False
+            for full_var in self.ast.pattern.metadata.get("variables", []):
+                if full_var.startswith(var) and (full_var.endswith('*') or full_var.endswith('?')):
+                    is_optional = True
+                    break
+            
+            # Variables are required if:
+            # 1. They're referenced in measures, conditions, etc. OR
+            # 2. They're mandatory in the pattern (no * or ? quantifier)
+            if var in referenced_vars or not is_optional:
+                required_vars.add(var)
+        
+        # Check for missing required definitions
+        missing_required = required_vars - defined_vars
+        if missing_required:
+            raise ParserError(f"Pattern variables that require definition: {missing_required} are not defined in the DEFINE clause.", 
+                            line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+        
+        # Check for missing definitions and extra definitions (keeping existing checks)
         missing = referenced_vars - pattern_vars - set(subset_vars.keys())
         extra = defined_vars - pattern_vars
         
@@ -435,11 +478,13 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             raise ParserError(f"Defined variable(s) {extra} not found in the PATTERN clause.", 
                             line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         
-        # Log the validation results
+        # Enhanced logging
         logger.debug(f"Pattern variables: {pattern_vars}")
         logger.debug(f"Referenced variables: {referenced_vars}")
+        logger.debug(f"Required variables: {required_vars}")  # New log line
         logger.debug(f"Defined variables: {defined_vars}")
         logger.debug(f"Subset variables: {subset_vars}")
+
 
 
 
