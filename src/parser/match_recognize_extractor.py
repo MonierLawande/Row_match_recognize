@@ -139,18 +139,30 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         if ctx.DEFINE_():
             self.ast.define = self.extract_define(ctx)
             logger.debug(f"Extracted DEFINE: {self.ast.define}")
+
+        # Extract subset information for pattern variable validation
+        subset_vars = {}
+        if self.ast.subset:
+            for subset_clause in self.ast.subset:
+                subset_text = subset_clause.subset_text
+                match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\((.*?)\)', subset_text)
+                if match:
+                    subset_name = match.group(1)
+                    components = [c.strip() for c in match.group(2).split(',')]
+                    subset_vars[subset_name] = components
+        
+        # Now pass subset_vars to update_from_defined
         if self.ast.define and self.ast.pattern:
             defined_vars = [d.variable for d in self.ast.define.definitions]
-            self.ast.pattern.update_from_defined(defined_vars)
+            self.ast.pattern.update_from_defined(defined_vars, subset_vars)
             logger.debug(f"Updated Pattern tokens: {self.ast.pattern.metadata}")
-           
-            
+        
         self.validate_clauses(ctx)
         self.validate_identifiers(ctx)
         self.validate_pattern_variables_defined(ctx)
         self.validate_function_usage(ctx)
         return self.ast
-    
+
     def extract_partition_by(self, ctx):
         return PartitionByClause([post_process_text(expr.getText()) for expr in ctx.partition])
 
@@ -335,6 +347,18 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             # Create the pattern clause with the original pattern text
             pattern_clause = PatternClause(pattern_text)
             
+            # Extract subset definitions
+            subset_vars = {}
+            if ctx.SUBSET_():
+                for sd in ctx.subsetDefinition():
+                    subset_text = sd.getText()
+                    # Parse subset definition (e.g. "MOVE = (UP, DOWN)")
+                    match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\((.*?)\)', subset_text)
+                    if match:
+                        subset_name = match.group(1)
+                        components = [c.strip() for c in match.group(2).split(',')]
+                        subset_vars[subset_name] = components
+            
             # If we have a DEFINE clause, use it to guide tokenization
             if ctx.DEFINE_():
                 defined_vars = []
@@ -342,9 +366,9 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     var_name = vd.identifier().getText()
                     defined_vars.append(var_name)
                 
-                # Update pattern tokenization with defined variables
+                # Update pattern tokenization with defined variables and subsets
                 if defined_vars:
-                    pattern_clause.update_from_defined(defined_vars)
+                    pattern_clause.update_from_defined(defined_vars, subset_vars)
                     logger.debug(f"Updated Pattern tokens: {pattern_clause.metadata}")
                     logger.debug(f"PATTERN clause validated successfully: {pattern_text}")
             
@@ -426,12 +450,35 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             logger.debug(f"Validated function usage for measure: {measure.expression}")
 
     def validate_identifiers(self, ctx):
+        """Validate that all defined variables are found in the pattern or as subset components."""
         pattern_vars = set(self.ast.pattern.metadata.get("base_variables", [])) if self.ast.pattern else set()
+        
+        # Extract subset component variables
+        subset_components = set()
+        if self.ast.subset:
+            for subset_clause in self.ast.subset:
+                subset_text = subset_clause.subset_text
+                match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\((.*?)\)', subset_text)
+                if match:
+                    subset_name = match.group(1)
+                    components = [c.strip() for c in match.group(2).split(',')]
+                    # If the subset union variable is in the pattern, its components are valid
+                    if subset_name in pattern_vars:
+                        subset_components.update(components)
+        
+        # All valid variables: direct pattern variables + subset components
+        valid_vars = pattern_vars.union(subset_components)
+        
+        # Check that all defined variables are valid
         for definition in self.ast.define.definitions if self.ast.define else []:
-            if definition.variable not in pattern_vars:
-                raise ParserError(f"Define variable '{definition.variable}' not found in pattern base variables {pattern_vars}.", line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-    
+            if definition.variable not in valid_vars:
+                raise ParserError(
+                    f"Define variable '{definition.variable}' not found in pattern or subset components.", 
+                    line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
+                )
+
     def validate_pattern_variables_defined(self, ctx):
+        """Validate pattern variable definitions and references."""
         if not self.ast.pattern:
             return
         
@@ -441,6 +488,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         
         # Get subset variables and their mappings
         subset_vars = {}
+        subset_components = set()
         if self.ast.subset:
             for subset_clause in self.ast.subset:
                 subset_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\((.*?)\)', subset_clause.subset_text)
@@ -448,38 +496,37 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     subset_name = subset_match.group(1)
                     subset_elements = [v.strip() for v in subset_match.group(2).split(',')]
                     subset_vars[subset_name] = subset_elements
+                    if subset_name in pattern_vars:
+                        # If the union variable is in the pattern, its components are valid
+                        subset_components.update(subset_elements)
                     logger.debug(f"Extracted subset mapping: {subset_name} -> {subset_elements}")
         
-        # Track all referenced variables (keeping existing code for 1-4)
+        # Track all referenced variables
         referenced_vars = set()
         
         # 1. Check variables used in MEASURES
         if self.ast.measures:
             for measure in self.ast.measures.measures:
                 # Extract variables from column references like A.totalprice
-                column_refs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_][A-Za-z0-9_]*', measure.expression)
-                referenced_vars.update(column_refs)
+                column_refs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', measure.expression)
+                referenced_vars.update([ref[0] for ref in column_refs])
                 
-                # Extract variables from functions like FIRST(A), LAST(A), etc.
-                # Only match standalone variables, not those in column references
-                func_pattern = r'(?:FIRST|LAST|PREV|NEXT)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)(?:\s*(?:,|\))\s*)'
+                # Extract variables from functions
+                func_pattern = r'(?:FIRST|LAST|PREV|NEXT)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)'
                 func_refs = re.findall(func_pattern, measure.expression, re.IGNORECASE)
-                # Filter out variables that are part of column references
-                func_refs = [v for v in func_refs if not re.search(fr'{v}\.[A-Za-z_]', measure.expression)]
-
                 referenced_vars.update(func_refs)
                 
-                # Extract variables from CLASSIFIER function
-                classifier_refs = re.findall(r'CLASSIFIER\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', 
-                                        measure.expression, re.IGNORECASE)
-                referenced_vars.update(classifier_refs)
+                extracted_vars = []
+                if column_refs:
+                    extracted_vars.extend([ref[0] for ref in column_refs])
+                if func_refs:
+                    extracted_vars.extend(func_refs)
                 
-                logger.debug(f"Extracted variables from measure '{measure.expression}': {list(set(column_refs + func_refs + classifier_refs))}")
+                logger.debug(f"Extracted variables from measure '{measure.expression}': {extracted_vars}")
         
         # 2. Check variables used in SUBSET
         if self.ast.subset:
             for subset_clause in self.ast.subset:
-                # Extract the subset elements
                 subset_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\((.*?)\)', subset_clause.subset_text)
                 if subset_match:
                     subset_elements = [v.strip() for v in subset_match.group(2).split(',')]
@@ -487,87 +534,34 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     logger.debug(f"Extracted variables from subset '{subset_clause.subset_text}': {subset_elements}")
         
         # 3. Check variables used in AFTER MATCH SKIP
-        # In validate_pattern_variables_defined method:
-        # For AFTER MATCH SKIP handling
-        if self.ast.after_match_skip:
-            # Skip keywords that aren't pattern variables
-            skip_keywords = {"FIRST", "LAST", "NEXT", "ROW", "PAST", "TO"}
-            
-            if self.ast.after_match_skip.mode in ['TO FIRST', 'TO LAST'] and self.ast.after_match_skip.target_variable:
-                # Only add the target variable if it's not a keyword
-                target_var = self.ast.after_match_skip.target_variable
-                if target_var.upper() not in skip_keywords:
-                    referenced_vars.add(target_var)
-                    logger.debug(f"Extracted variable from AFTER MATCH SKIP: {target_var}")
-
-        # 4. Check variables used in DEFINE conditions
-        if self.ast.define:
-            for define in self.ast.define.definitions:
-                # Extract variables from column references in conditions (pattern variables)
-                column_refs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_][A-Za-z0-9_]*', define.condition)
-                referenced_vars.update(column_refs)
-                
-                # Extract variables from functions in conditions
-                # Only match pattern variables in functions, not column names
-                func_pattern = r'(?:FIRST|LAST|PREV|NEXT)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_][A-Za-z0-9_]*\s*\)'
-                func_refs = re.findall(func_pattern, define.condition, re.IGNORECASE)
-                referenced_vars.update(func_refs)
-                
-                # For PREV/NEXT without explicit variable, the current row variable is implied
-                # We don't need to add anything to referenced_vars in this case
-                
-                extracted_vars = list(set(column_refs + func_refs))
-                logger.debug(f"Extracted variables from define condition '{define.condition}': {extracted_vars}")
+        if self.ast.after_match_skip and self.ast.after_match_skip.target_variable:
+            referenced_vars.add(self.ast.after_match_skip.target_variable)
         
-        # NEW: Determine which pattern variables REQUIRE definition
-        required_vars = set()
-        for var in pattern_vars:
-            # Check if variable has optional quantifier (* or ?)
-            is_optional = False
-            for full_var in self.ast.pattern.metadata.get("variables", []):
-                if full_var.startswith(var) and (full_var.endswith('*') or full_var.endswith('?')):
-                    is_optional = True
-                    break
-            
-            # Variables are required if:
-            # 1. They're referenced in measures, conditions, etc. OR
-            # 2. They're mandatory in the pattern (no * or ? quantifier)
-            if var in referenced_vars or not is_optional:
-                required_vars.add(var)
-        
-        # Check for missing required definitions
-        missing_required = required_vars - defined_vars
-        if missing_required:
-            raise ParserError(f"Pattern variables that require definition: {missing_required} are not defined in the DEFINE clause.", 
-                            line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-        
-        # Check for missing definitions and extra definitions (keeping existing checks)
-        missing = referenced_vars - pattern_vars - set(subset_vars.keys())
-        extra = defined_vars - pattern_vars
-        
-        # Also verify that all subset elements are valid pattern variables
+        # Verify subset components are defined
         for subset_name, elements in subset_vars.items():
-            invalid_elements = set(elements) - pattern_vars
+            invalid_elements = set(elements) - defined_vars
             if invalid_elements:
-                raise ParserError(f"Subset '{subset_name}' contains undefined pattern variables: {invalid_elements}", 
+                raise ParserError(f"Subset '{subset_name}' contains undefined variables: {invalid_elements}", 
                                 line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         
+        # Check for missing references
+        all_valid_vars = pattern_vars.union(subset_components)
+        missing = referenced_vars - all_valid_vars
         if missing:
             raise ParserError(f"Referenced variable(s) {missing} not found in the PATTERN clause or SUBSET definitions.", 
                             line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         
+        # Check for extra definitions
+        extra = defined_vars - pattern_vars - subset_components
         if extra:
-            raise ParserError(f"Defined variable(s) {extra} not found in the PATTERN clause.", 
+            raise ParserError(f"Defined variable(s) {extra} not found in the PATTERN clause or as subset components.", 
                             line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         
         # Enhanced logging
         logger.debug(f"Pattern variables: {pattern_vars}")
         logger.debug(f"Referenced variables: {referenced_vars}")
-        logger.debug(f"Required variables: {required_vars}")  # New log line
         logger.debug(f"Defined variables: {defined_vars}")
         logger.debug(f"Subset variables: {subset_vars}")
-
-
 
 
 class FullQueryExtractor(TrinoParserVisitor):

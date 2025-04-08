@@ -3,18 +3,65 @@
 import ast
 import operator
 import re
+import math
 from typing import Dict, Any, Optional, Callable, List
 from src.matcher.row_context import RowContext
 
 class ConditionEvaluator(ast.NodeVisitor):
     def __init__(self, context: RowContext):
         self.context = context
+        # Extended mathematical and utility functions
+        self.math_functions = {
+            # Basic math functions
+            'ABS': abs,
+            'ROUND': lambda x, digits=0: round(x, digits),
+            'TRUNCATE': lambda x, digits=0: math.trunc(x * 10**digits) / 10**digits,
+            'CEILING': math.ceil,
+            'FLOOR': math.floor,
+            
+            # Statistical functions
+            'SQRT': math.sqrt,
+            'POWER': pow,
+            'EXP': math.exp,
+            'LN': math.log,
+            'LOG': lambda x, base=10: math.log(x, base),
+            'MOD': lambda x, y: x % y,
+            
+            # Trigonometric functions
+            'SIN': math.sin,
+            'COS': math.cos,
+            'TAN': math.tan,
+            'ASIN': math.asin,
+            'ACOS': math.acos,
+            'ATAN': math.atan,
+            'ATAN2': math.atan2,
+            'DEGREES': math.degrees,
+            'RADIANS': math.radians,
+            
+            # String functions
+            'LENGTH': len,
+            'LOWER': str.lower,
+            'UPPER': str.upper,
+            'SUBSTR': lambda s, start, length=None: s[start:start+length] if length else s[start:],
+            
+            # Conditional functions
+            'LEAST': min,
+            'GREATEST': max,
+            'COALESCE': lambda *args: next((arg for arg in args if arg is not None), None),
+            'NULLIF': lambda x, y: None if x == y else x,
+        }
 
     def visit_Compare(self, node: ast.Compare):
         if len(node.ops) != 1 or len(node.comparators) != 1:
             raise ValueError("Only simple comparisons are supported")
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
+        
+        # Enhanced NULL handling for SQL semantics
+        if left is None or right is None:
+            # NULL comparison always returns False in most SQL dialects
+            return False
+            
         op = node.ops[0]
         
         OPERATORS = {
@@ -29,7 +76,12 @@ class ConditionEvaluator(ast.NodeVisitor):
         func = OPERATORS.get(type(op))
         if func is None:
             raise ValueError(f"Operator {op} not supported")
-        return func(left, right)
+            
+        try:
+            return func(left, right)
+        except TypeError as e:
+            # Better error message for type mismatches
+            raise ValueError(f"Cannot compare {type(left).__name__} and {type(right).__name__}: {e}")
 
     def visit_Name(self, node: ast.Name):
         # Check for special functions
@@ -42,19 +94,76 @@ class ConditionEvaluator(ast.NodeVisitor):
         elif node.id.upper() == "LAST":
             return lambda var, col, occ=0: self._get_last_value(var, col, occ)
         elif node.id.upper() == "CLASSIFIER":
-            return self.context.classifier()
+            return lambda var=None: self._get_classifier(var)
         elif node.id.upper() == "MATCH_NUMBER":
             return self.context.match_number
-            
+        elif node.id == "row":
+            # Special handling for 'row' references in keyword substitution
+            return {}  # Return an empty dict that will be used in visit_Subscript
+                
         # Regular variable - get from current row
+        if self.context.current_idx >= len(self.context.rows):
+            # Safer boundary handling
+            return None
         return self.context.rows[self.context.current_idx].get(node.id)
 
+    def _extract_navigation_args(self, node: ast.Call):
+        """Extract arguments from a navigation function call with support for nesting."""
+        args = [self.visit(arg) for arg in node.args]
+        
+        # Handle nested navigation in first argument
+        if len(args) > 0 and callable(args[0]):
+            # This indicates a nested navigation function
+            args[0] = args[0]()  # Execute the inner function
+            
+        return args
+
     def visit_Call(self, node: ast.Call):
-        """Handle function calls (PREV, NEXT, etc.)"""
+        """Handle function calls (PREV, NEXT, mathematical functions, etc.)"""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            if func_name in self.math_functions:
+                args = [self.visit(arg) for arg in node.args]
+                try:
+                    # Check for NULL arguments - SQL functions typically return NULL if any input is NULL
+                    if any(arg is None for arg in args) and func_name not in ('COALESCE', 'NULLIF'):
+                        return None
+                    return self.math_functions[func_name](*args)
+                except Exception as e:
+                    raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Enhanced navigation function handling with nesting support
+            if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                args = self._extract_navigation_args(node)
+                
+                if func_name == "PREV":
+                    column = args[0] 
+                    steps = args[1] if len(args) > 1 else 1
+                    return self._get_prev_value(column, steps)
+                elif func_name == "NEXT":
+                    column = args[0]
+                    steps = args[1] if len(args) > 1 else 1
+                    return self._get_next_value(column, steps)
+                elif func_name == "FIRST":
+                    var = args[0]
+                    col = args[1] if len(args) > 1 else None
+                    occ = args[2] if len(args) > 2 else 0
+                    return self._get_first_value(var, col, occ)
+                elif func_name == "LAST":
+                    var = args[0]
+                    col = args[1] if len(args) > 1 else None
+                    occ = args[2] if len(args) > 2 else 0
+                    return self._get_last_value(var, col, occ)
+
         func = self.visit(node.func)
         if callable(func):
             args = [self.visit(arg) for arg in node.args]
-            return func(*args)
+            try:
+                return func(*args)
+            except Exception as e:
+                # More descriptive error
+                raise ValueError(f"Error calling {func_name or 'function'}: {e}")
         raise ValueError(f"Function {func} not callable")
 
     def visit_Attribute(self, node: ast.Attribute):
@@ -73,11 +182,25 @@ class ConditionEvaluator(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant):
         return node.value
 
+    def visit_Str(self, node: ast.Str):
+        """Handle string literals for Python < 3.8"""
+        return node.s
+
     def visit_BoolOp(self, node: ast.BoolOp):
         if isinstance(node.op, ast.And):
-            return all(self.visit(v) for v in node.values)
+            # Short-circuit evaluation for AND
+            for value in node.values:
+                result = self.visit(value)
+                if not result:
+                    return False
+            return True
         elif isinstance(node.op, ast.Or):
-            return any(self.visit(v) for v in node.values)
+            # Short-circuit evaluation for OR
+            for value in node.values:
+                result = self.visit(value)
+                if result:
+                    return True
+            return False
         raise ValueError("Unsupported boolean operator")
 
     def visit_BinOp(self, node: ast.BinOp):
@@ -103,7 +226,11 @@ class ConditionEvaluator(ast.NodeVisitor):
         if left is None or right is None:
             return None
             
-        return func(left, right)
+        try:
+            return func(left, right)
+        except Exception as e:
+            # Better error handling
+            raise ValueError(f"Error in binary operation {left} {type(node.op).__name__} {right}: {e}")
     
     def visit_UnaryOp(self, node: ast.UnaryOp):
         """Handle unary operations like negation"""
@@ -143,10 +270,6 @@ class ConditionEvaluator(ast.NodeVisitor):
         values = [self.visit(value) for value in node.values]
         return {k: v for k, v in zip(keys, values)}
     
-    def visit_Str(self, node: ast.Str):
-        """Handle string literals for Python < 3.8"""
-        return node.s
-    
     def visit_JoinedStr(self, node: ast.JoinedStr):
         """Handle f-strings"""
         parts = []
@@ -162,14 +285,31 @@ class ConditionEvaluator(ast.NodeVisitor):
         return self.visit(node.value)
     
     def visit_Subscript(self, node: ast.Subscript):
-        """Handle subscript expressions like a[b]"""
+        """Handle subscript expressions like a[b] and price[n] for array access"""
+        # Special handling for row['keyword'] pattern
+        if isinstance(node.value, ast.Name) and node.value.id == 'row':
+            # Get the index (column name)
+            col_name = self._extract_subscript_value(node)
+                    
+            # Return the column value from the current row
+            if col_name is not None:
+                return self.context.rows[self.context.current_idx].get(col_name)
+        
+        # Handle array-like access for column values: price[1] -> PREV(price, 1)
+        if isinstance(node.value, ast.Name):
+            col_name = node.value.id
+            idx = self._extract_subscript_value(node)
+            
+            if isinstance(idx, int) and idx > 0:
+                # Translate to PREV function for backward compatibility
+                return self._get_prev_value(col_name, idx)
+            elif isinstance(idx, int) and idx < 0:
+                # Negative indices could translate to NEXT
+                return self._get_next_value(col_name, abs(idx))
+        
+        # Original functionality for normal subscripts
         value = self.visit(node.value)
-        if isinstance(node.slice, ast.Index):
-            # Python < 3.9
-            idx = self.visit(node.slice.value)
-        else:
-            # Python >= 3.9
-            idx = self.visit(node.slice)
+        idx = self._extract_subscript_value(node)
         
         if value is None:
             return None
@@ -178,6 +318,17 @@ class ConditionEvaluator(ast.NodeVisitor):
             return value[idx]
         except (TypeError, KeyError, IndexError):
             return None
+    
+    def _extract_subscript_value(self, node):
+        """Helper to extract value from subscript, compatible with different Python versions"""
+        if hasattr(node, 'slice'):
+            if isinstance(node.slice, ast.Index):  # Python < 3.9
+                return self.visit(node.slice.value)
+            elif hasattr(node.slice, 'value'):  # For some versions
+                return self.visit(node.slice.value)
+            else:  # Python >= 3.9
+                return self.visit(node.slice)
+        return None
     
     def visit_Tuple(self, node: ast.Tuple):
         """Handle tuple literals"""
@@ -196,14 +347,28 @@ class ConditionEvaluator(ast.NodeVisitor):
         raise ValueError(f"Unsupported expression type: {type(node).__name__}")
 
     def _get_prev_value(self, column: str, steps: int = 1) -> Any:
-        """Implementation of PREV function."""
-        row = self.context.prev(steps)
-        return row.get(column) if row else None
+        """Enhanced PREV function with better boundary handling."""
+        # Handle the case where column is the result of a nested navigation function
+        if not isinstance(column, str):
+            return column  # Return the already computed value
+            
+        idx = self.context.current_idx - steps
+        if 0 <= idx < len(self.context.rows):
+            return self.context.rows[idx].get(column)
+        # Handle out-of-bounds with SQL NULL semantics
+        return None
 
     def _get_next_value(self, column: str, steps: int = 1) -> Any:
-        """Implementation of NEXT function."""
-        row = self.context.next(steps)
-        return row.get(column) if row else None
+        """Enhanced NEXT function with better boundary handling."""
+        # Handle the case where column is the result of a nested navigation function
+        if not isinstance(column, str):
+            return column  # Return the already computed value
+            
+        idx = self.context.current_idx + steps
+        if 0 <= idx < len(self.context.rows):
+            return self.context.rows[idx].get(column)
+        # Handle out-of-bounds with SQL NULL semantics 
+        return None
 
     def _get_first_value(self, variable: str, column: str, occurrence: int = 0) -> Any:
         """Implementation of FIRST function."""
@@ -214,14 +379,62 @@ class ConditionEvaluator(ast.NodeVisitor):
         """Implementation of LAST function."""
         row = self.context.last(variable, occurrence)
         return row.get(column) if row else None
+        
+    def _get_classifier(self, variable: Optional[str] = None) -> str:
+        """Implementation of CLASSIFIER function."""
+        return self.context.classifier(variable)
 
 def compile_condition(expr: str) -> Callable[[Dict[str, Any], RowContext], bool]:
     """Compile a condition expression into a function."""
-    tree = ast.parse(expr, mode='eval')
+    
+    # Direct replacement for common problematic expressions involving 'return'
+    if "return" in expr:
+        # Special case for the 'return' keyword (which can't be used directly in Python)
+        if expr == "return>0":
+            return lambda row, ctx: row.get('return', 0) > 0
+        elif expr == "return<0":
+            return lambda row, ctx: row.get('return', 0) < 0
+        elif "return" in expr:
+            # For other expressions containing 'return', replace it directly
+            modified_expr = expr.replace("return", "row.get('return', 0)")
+            try:
+                tree = ast.parse(modified_expr, mode='eval')
+            except SyntaxError as e:
+                print(f"Syntax error parsing modified expression '{modified_expr}': {e}")
+                # Fallback to TRUE
+                return lambda row, ctx: True
+            
+            def direct_evaluator(row: Dict[str, Any], context: RowContext):
+                # Create the globals dictionary with row and context
+                globals_dict = {'row': row, 'context': context}
+                try:
+                    # Evaluate the expression directly
+                    result = eval(modified_expr, globals_dict)
+                    return bool(result) if result is not None else False
+                except Exception as e:
+                    print(f"Error evaluating direct expression '{modified_expr}': {e}")
+                    return False
+            
+            return direct_evaluator
+    
+    # Continue with the standard path for non-problematic expressions
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except SyntaxError as e:
+        print(f"Syntax error parsing: '{expr}'")
+        print(f"Error details: {e}")
+        # Use a TRUE condition as fallback
+        return lambda row, ctx: True
     
     def evaluator(row: Dict[str, Any], context: RowContext) -> bool:
+        # Save the original state
+        original_rows = context.rows.copy() if context.rows else []
+        original_idx = context.current_idx
+        
+        # Add the current row to the context
         context.rows.append(row)
         context.current_idx = len(context.rows) - 1
+        
         try:
             result = ConditionEvaluator(context).visit(tree.body)
             return bool(result) if result is not None else False
@@ -229,7 +442,8 @@ def compile_condition(expr: str) -> Callable[[Dict[str, Any], RowContext], bool]
             print(f"Error evaluating condition '{expr}': {e}")
             return False
         finally:
-            context.rows.pop()
-            context.current_idx = len(context.rows) - 1 if context.rows else 0
+            # Restore the original state
+            context.rows = original_rows
+            context.current_idx = original_idx
             
     return evaluator

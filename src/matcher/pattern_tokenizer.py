@@ -46,9 +46,10 @@ def parse_quantifier(quant: str) -> Tuple[int, Optional[int], bool]:
     return (1, 1, True)
 
 def tokenize_pattern(pattern: str) -> List[PatternToken]:
-    """Enhanced tokenizer with full syntax support."""
+    """Enhanced tokenizer with full syntax support and better handling of nested structures."""
     tokens = []
     i = 0
+    paren_depth = 0  # Track parenthesis depth for proper nesting
     
     # Handle start anchor
     if pattern.startswith('^'):
@@ -73,6 +74,7 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
                 
             # Collect variables in permutation
             if i < len(pattern) and pattern[i] == '(':
+                paren_depth += 1  # Track opening paren
                 i += 1  # Skip opening parenthesis
                 variables = []
                 
@@ -80,8 +82,13 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
                     # Skip whitespace
                     while i < len(pattern) and pattern[i].isspace():
                         i += 1
+                    
+                    if i >= len(pattern):
+                        raise ValueError("Unterminated PERMUTE expression in pattern")
                         
                     if pattern[i] == ')':
+                        paren_depth -= 1  # Track closing paren
+                        i += 1  # Move past the closing parenthesis
                         break
                         
                     # Collect variable name
@@ -99,21 +106,37 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
                 # Add variables as LITERAL tokens
                 for var in variables:
                     tokens.append(PatternToken(PatternTokenType.LITERAL, var))
-                
-                i += 1  # Skip closing parenthesis
             continue
             
         # Handle grouping
         elif char == '(':
             tokens.append(PatternToken(PatternTokenType.GROUP_START, '('))
+            paren_depth += 1
             i += 1
             
         elif char == ')':
+            if paren_depth <= 0:
+                raise ValueError(f"Unbalanced parentheses in pattern: unexpected closing parenthesis at position {i}")
+                
+            paren_depth -= 1
             token = PatternToken(PatternTokenType.GROUP_END, ')')
+            
             # Check for quantifiers after group
             next_pos = i + 1
             while next_pos < len(pattern) and pattern[next_pos] in '+*?{':
                 next_pos += 1
+                
+                # If we encounter a '{', we need to find the matching '}'
+                if pattern[next_pos-1] == '{':
+                    brace_pos = pattern.find('}', next_pos)
+                    if brace_pos == -1:
+                        raise ValueError(f"Unterminated quantifier at position {next_pos-1}")
+                    next_pos = brace_pos + 1
+                    
+                # Check for reluctant quantifier
+                if next_pos < len(pattern) and pattern[next_pos] == '?':
+                    next_pos += 1
+                    
             if next_pos > i + 1:
                 quant = pattern[i+1:next_pos]
                 min_rep, max_rep, greedy = parse_quantifier(quant)
@@ -155,8 +178,24 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
             greedy = True
             if i < len(pattern) and pattern[i] in '+*?{':
                 quant_start = i
-                while i < len(pattern) and pattern[i] not in ' |)':
+                
+                # Parse the quantifier
+                if pattern[i] in '+*?':
                     i += 1
+                    # Check for reluctant quantifier
+                    if i < len(pattern) and pattern[i] == '?':
+                        i += 1
+                elif pattern[i] == '{':
+                    # Find matching closing brace
+                    brace_pos = pattern.find('}', i)
+                    if brace_pos == -1:
+                        raise ValueError(f"Unterminated quantifier at position {i}")
+                    i = brace_pos + 1
+                    
+                    # Check for reluctant quantifier after brace
+                    if i < len(pattern) and pattern[i] == '?':
+                        i += 1
+                
                 quant = pattern[quant_start:i]
                 min_rep, max_rep, greedy = parse_quantifier(quant)
             
@@ -168,7 +207,12 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
             ))
             
         else:
+            # Skip characters we don't recognize
             i += 1
+            
+    # Check for unbalanced parentheses at the end
+    if paren_depth > 0:
+        raise ValueError(f"Unbalanced parentheses in pattern: missing {paren_depth} closing parentheses")
             
     # Handle end anchor at the end of the pattern
     if pattern.endswith('$') and tokens and tokens[-1].type != PatternTokenType.ANCHOR_END:

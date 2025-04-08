@@ -352,7 +352,7 @@ class PatternClause:
             "base_variables": base_variables
         }
 
-    def update_from_defined(self, defined_vars: List[str]):
+    def update_from_defined(self, defined_vars: List[str], subset_vars: Dict[str, List[str]] = None):
         """Update pattern metadata based on defined variables."""
         # Re-tokenize with defined variables as guidance
         cleaned = self._clean_pattern(self.pattern)
@@ -369,17 +369,30 @@ class PatternClause:
             if full_token not in full_variables:
                 full_variables.append(full_token)
         
-        # Verify defined variables exist in pattern
+        # Verify defined variables exist in pattern or in a subset
         defined_set = set(defined_vars)
         current_base_vars = set(base_variables)
+        
+        # Add subset components to valid variables if their union variable is in the pattern
+        if subset_vars:
+            for subset_name, components in subset_vars.items():
+                if subset_name in current_base_vars:  # If the union variable is in the pattern
+                    # Add the subset name and its components to valid variables
+                    current_base_vars.update(components)
+                    # Also add the subset name itself if it's defined
+                    if subset_name in defined_set:
+                        current_base_vars.add(subset_name)
+        
+        # Check for undefined variables
         if not defined_set.issubset(current_base_vars):
             extra_vars = defined_set - current_base_vars
-            raise ValueError(f"Defined variables {extra_vars} not found in pattern")
+            raise ValueError(f"Defined variables {extra_vars} not found in pattern or subsets")
         
         self.metadata = {
             "variables": full_variables,
             "base_variables": base_variables
         }
+
         
     def __repr__(self):
         return f"PatternClause(pattern='{self.pattern}', metadata={self.metadata})"

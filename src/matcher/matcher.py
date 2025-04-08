@@ -193,12 +193,24 @@ class EnhancedMatcher:
         return result
     
     def _process_all_rows_match(self,
-                              match: Dict[str, Any],
-                              rows: List[Dict[str, Any]],
-                              measures: Dict[str, str],
-                              match_number: int,
-                              exclude_ranges: List = None) -> List[Dict[str, Any]]:
-        """Process a match in ALL ROWS PER MATCH mode."""
+                            match: Dict[str, Any],
+                            rows: List[Dict[str, Any]],
+                            measures: Dict[str, str],
+                            match_number: int,
+                            exclude_ranges: List = None) -> List[Dict[str, Any]]:
+        """
+        Process a match in ALL ROWS PER MATCH mode.
+        
+        Args:
+            match: Match information including start/end indices and variables
+            rows: The full list of input rows
+            measures: Measure expressions to evaluate
+            match_number: The sequential match number
+            exclude_ranges: List of (start, end) tuples for excluded segments
+            
+        Returns:
+            List of result rows for this match
+        """
         start_idx = match["start"]
         end_idx = match["end"]
         results = []
@@ -210,18 +222,24 @@ class EnhancedMatcher:
         # Adjust indices to be relative to the current match section
         adjusted_variables = {}
         for var, indices in match["variables"].items():
-            adjusted_variables[var] = [idx - start_idx for idx in indices if start_idx <= idx <= end_idx]
+            adjusted_indices = [idx - start_idx for idx in indices if start_idx <= idx <= end_idx]
+            if adjusted_indices:  # Only add variables with actual rows
+                adjusted_variables[var] = adjusted_indices
         
         context.variables = adjusted_variables
         context.match_number = match_number
+        
+        # Process SUBSET info if available
+        if hasattr(self, "subsets") and self.subsets:
+            for subset_name, component_vars in self.subsets.items():
+                context.subsets[subset_name] = component_vars
         
         # Process each row in the match
         for i in range(start_idx, end_idx + 1):
             rel_idx = i - start_idx  # Relative position in match
             
-            # Skip excluded rows
-            if exclude_ranges and any(start <= rel_idx <= end 
-                                    for start, end in exclude_ranges):
+            # Skip excluded rows based on pattern exclusion syntax
+            if exclude_ranges and any(start <= rel_idx <= end for start, end in exclude_ranges):
                 continue
             
             # Update context for current row
@@ -230,17 +248,38 @@ class EnhancedMatcher:
             # Start with the current row's values
             result = rows[i].copy()
             
-            # Add measures using RUNNING semantics
-            evaluator = MeasureEvaluator(context, final=False)
+            # Add measures with appropriate semantics
+            evaluator = MeasureEvaluator(context, final=False)  # Default to RUNNING semantics
             for alias, expr in measures.items():
-                result[alias] = evaluator.evaluate(expr)
+                try:
+                    # Check if the expression has explicit FINAL semantics
+                    if expr.upper().startswith("FINAL "):
+                        # Use FINAL semantics only for this expression
+                        final_evaluator = MeasureEvaluator(context, final=True)
+                        result[alias] = final_evaluator.evaluate(expr)
+                    else:
+                        # Use RUNNING semantics (default)
+                        result[alias] = evaluator.evaluate(expr)
+                except Exception as e:
+                    print(f"Error evaluating measure {alias} with expression '{expr}': {e}")
+                    result[alias] = None  # Set to NULL on error
+            
+            # Add pattern variable classification for current row
+            for var, indices in context.variables.items():
+                if rel_idx in indices:
+                    result["__PATTERN_VAR"] = var  # Can be used for debugging or filtering
+                    break
             
             # Add match metadata
             result["MATCH_NUMBER"] = match_number
             
+            # Add row position in match (can be useful for filtering/analysis)
+            result["__ROW_IDX_IN_MATCH"] = rel_idx
+            
             results.append(result)
         
         return results
+
     
     def _process_empty_match(self,
                            start_idx: int,
