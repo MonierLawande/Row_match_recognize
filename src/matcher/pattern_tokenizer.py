@@ -3,26 +3,25 @@
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
-import itertools
 
 class PatternTokenType(Enum):
-    LITERAL = "LITERAL"             # A, B, C
-    ALTERNATION = "ALTERNATION"     # |
-    PERMUTE = "PERMUTE"             # PERMUTE
-    GROUP_START = "GROUP_START"     # (
-    GROUP_END = "GROUP_END"         # )
-    ANCHOR_START = "ANCHOR_START"   # ^
-    ANCHOR_END = "ANCHOR_END"       # $
-    EXCLUSION_START = "EXCL_START"  # {-
-    EXCLUSION_END = "EXCL_END"      # -}
+    LITERAL = "LITERAL"             
+    ALTERNATION = "ALTERNATION"     
+    PERMUTE = "PERMUTE"             
+    GROUP_START = "GROUP_START"     
+    GROUP_END = "GROUP_END"         
+    ANCHOR_START = "ANCHOR_START"   
+    ANCHOR_END = "ANCHOR_END"       
+    EXCLUSION_START = "EXCL_START"  
+    EXCLUSION_END = "EXCL_END"      
 
 @dataclass
 class PatternToken:
     type: PatternTokenType
     value: str
-    quantifier: Optional[str] = None  # *, +, ?, {n}, {m,n}
-    greedy: bool = True              # True for greedy, False for reluctant
-    
+    quantifier: Optional[str] = None
+    greedy: bool = True
+
 def parse_quantifier(quant: str) -> Tuple[int, Optional[int], bool]:
     """Parse quantifier into (min, max, greedy) tuple."""
     greedy = not quant.endswith('?')
@@ -44,10 +43,10 @@ def parse_quantifier(quant: str) -> Tuple[int, Optional[int], bool]:
             min_bound = int(bounds[0]) if bounds[0] else 0
             max_bound = int(bounds[1]) if bounds[1] else None
             return (min_bound, max_bound, greedy)
-    return (1, 1, True)  # Default: exactly one occurrence
+    return (1, 1, True)
 
 def tokenize_pattern(pattern: str) -> List[PatternToken]:
-    """Tokenize pattern with full syntax support."""
+    """Enhanced tokenizer with full syntax support."""
     tokens = []
     i = 0
     
@@ -63,10 +62,45 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
             i += 1
             continue
             
-        # Handle PERMUTE keyword
+        # Enhanced PERMUTE handling
         if i+7 <= len(pattern) and pattern[i:i+7].upper() == 'PERMUTE':
             tokens.append(PatternToken(PatternTokenType.PERMUTE, 'PERMUTE'))
-            i += 7  # Skip 'PERMUTE'
+            i += 7
+            
+            # Skip whitespace after PERMUTE
+            while i < len(pattern) and pattern[i].isspace():
+                i += 1
+                
+            # Collect variables in permutation
+            if i < len(pattern) and pattern[i] == '(':
+                i += 1  # Skip opening parenthesis
+                variables = []
+                
+                while i < len(pattern):
+                    # Skip whitespace
+                    while i < len(pattern) and pattern[i].isspace():
+                        i += 1
+                        
+                    if pattern[i] == ')':
+                        break
+                        
+                    # Collect variable name
+                    var_start = i
+                    while i < len(pattern) and (pattern[i].isalnum() or pattern[i] == '_'):
+                        i += 1
+                    
+                    if i > var_start:
+                        variables.append(pattern[var_start:i])
+                    
+                    # Skip comma and whitespace
+                    while i < len(pattern) and (pattern[i].isspace() or pattern[i] == ','):
+                        i += 1
+                
+                # Add variables as LITERAL tokens
+                for var in variables:
+                    tokens.append(PatternToken(PatternTokenType.LITERAL, var))
+                
+                i += 1  # Skip closing parenthesis
             continue
             
         # Handle grouping

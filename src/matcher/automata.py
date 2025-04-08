@@ -1,10 +1,13 @@
 # src/matcher/automata.py
-
 from typing import Callable, List, Optional, Dict, Any, Set, Tuple
 from dataclasses import dataclass
-from src.matcher.pattern_tokenizer import PatternToken, PatternTokenType
+from src.matcher.pattern_tokenizer import PatternToken, PatternTokenType, parse_quantifier
 from src.matcher.condition_evaluator import compile_condition
 import itertools
+
+# src/matcher/automata.py - Add parse_quantifier to the import
+from src.matcher.pattern_tokenizer import PatternToken, PatternTokenType, parse_quantifier
+
 
 # A condition function: given a row and current match context, return True if the row qualifies.
 ConditionFn = Callable[[Dict[str, Any], Any], bool]

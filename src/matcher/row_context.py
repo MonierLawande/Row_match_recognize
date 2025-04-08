@@ -21,15 +21,16 @@ class RowContext:
             self.variables[variable].append(len(self.rows) - 1)
     
     def var_rows(self, variable: str) -> List[Dict[str, Any]]:
-        """Get all rows matched to a variable or subset."""
-        indices = []
+        """Get all rows matched to a variable."""
+        print(f"Getting rows for variable: {variable}")
+        print(f"Available variables: {self.variables}")
+        print(f"Total rows: {len(self.rows)}")
+        
         if variable in self.variables:
-            indices = self.variables[variable]
-        elif variable in self.subsets:
-            for comp in self.subsets[variable]:
-                if comp in self.variables:
-                    indices.extend(self.variables.get(comp, []))
-        return [self.rows[i] for i in sorted(indices)]
+            indices = sorted(self.variables[variable])
+            print(f"Found indices: {indices}")
+            return [self.rows[idx] for idx in indices]
+        return []
     
     def var_row_indices(self, variable: str) -> List[int]:
         """Get indices of rows matched to a variable or subset."""

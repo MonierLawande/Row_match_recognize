@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from src.matcher.dfa import DFA, FAIL_STATE
 from src.matcher.row_context import RowContext
 from src.matcher.measure_evaluator import MeasureEvaluator
+from src.matcher.pattern_tokenizer import PatternTokenType
 
 class SkipMode(Enum):
     PAST_LAST_ROW = "PAST_LAST_ROW"
@@ -94,13 +95,16 @@ class EnhancedMatcher:
         return results
 
     def _find_single_match(self, 
-                          rows: List[Dict[str, Any]], 
-                          start_idx: int,
-                          context: RowContext) -> Optional[Dict[str, Any]]:
+                        rows: List[Dict[str, Any]], 
+                        start_idx: int,
+                        context: RowContext) -> Optional[Dict[str, Any]]:
         """Find a single match starting at the given index."""
         state = self.start_state
         current_idx = start_idx
         var_assignments = {}
+        
+        # Keep track of the longest match found so far
+        longest_match = None
         
         while current_idx < len(rows):
             row = rows[current_idx]
@@ -132,30 +136,42 @@ class EnhancedMatcher:
             state = next_state
             current_idx += 1
             
-            # Check if we've reached an accepting state
+            # If we've reached an accepting state, update the longest match
+            # but continue matching (for greedy quantifiers)
             if self.dfa.states[state].is_accept:
-                return {
+                longest_match = {
                     "start": start_idx,
                     "end": current_idx - 1,
-                    "variables": var_assignments,
+                    "variables": {k: v[:] for k, v in var_assignments.items()},  # Deep copy
                     "state": state
                 }
         
-        # No match found
-        return None
+        # Return the longest match found
+        return longest_match
+
 
     def _process_one_row_match(self,
-                             match: Dict[str, Any],
-                             rows: List[Dict[str, Any]],
-                             measures: Dict[str, str],
-                             match_number: int) -> Dict[str, Any]:
+                            match: Dict[str, Any],
+                            rows: List[Dict[str, Any]],
+                            measures: Dict[str, str],
+                            match_number: int) -> Dict[str, Any]:
         """Process a match in ONE ROW PER MATCH mode."""
         start_idx = match["start"]
         end_idx = match["end"]
         
+        # Create context with the matched rows
         context = RowContext()
         context.rows = rows[start_idx:end_idx+1]
-        context.variables = match["variables"]
+        
+        # Adjust indices to be relative to the current match section
+        adjusted_variables = {}
+        for var, indices in match["variables"].items():
+            # Convert absolute indices to relative indices
+            adjusted_indices = [idx - start_idx for idx in indices if start_idx <= idx <= end_idx]
+            if adjusted_indices:  # Only add if we have valid indices
+                adjusted_variables[var] = adjusted_indices
+        
+        context.variables = adjusted_variables
         context.match_number = match_number
         context.current_idx = len(context.rows) - 1  # Position at final row
         
@@ -165,8 +181,12 @@ class EnhancedMatcher:
         # Add measures using FINAL semantics
         evaluator = MeasureEvaluator(context, final=True)
         for alias, expr in measures.items():
-            result[alias] = evaluator.evaluate(expr)
-            
+            try:
+                result[alias] = evaluator.evaluate(expr)
+            except Exception as e:
+                print(f"Error evaluating measure {alias}: {e}")
+                result[alias] = None
+        
         # Add match metadata
         result["MATCH_NUMBER"] = match_number
         
@@ -186,7 +206,13 @@ class EnhancedMatcher:
         # Create base context
         context = RowContext()
         context.rows = rows[start_idx:end_idx+1]
-        context.variables = match["variables"]
+        
+        # Adjust indices to be relative to the current match section
+        adjusted_variables = {}
+        for var, indices in match["variables"].items():
+            adjusted_variables[var] = [idx - start_idx for idx in indices if start_idx <= idx <= end_idx]
+        
+        context.variables = adjusted_variables
         context.match_number = match_number
         
         # Process each row in the match
@@ -360,3 +386,16 @@ class EnhancedMatcher:
             **self._create_empty_measures(measures)
         })
         return result
+
+    def _check_anchors(self, state: int, row_idx: int, total_rows: int) -> bool:
+        """Check if anchor conditions are satisfied."""
+        state_info = self.dfa.states[state]
+        
+        if state_info.is_anchor:
+            if state_info.anchor_type == PatternTokenType.ANCHOR_START:
+                # ^ anchor must match at partition start
+                return row_idx == 0
+            elif state_info.anchor_type == PatternTokenType.ANCHOR_END:
+                # $ anchor must match at partition end
+                return row_idx == total_rows - 1
+        return True

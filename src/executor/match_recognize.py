@@ -137,27 +137,3 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
     
     return pd.DataFrame(results)
-
-def evaluate_measure(expr: str, context: RowContext, running: bool = False) -> Any:
-    """
-    Evaluate a measure expression with support for RUNNING and FINAL semantics.
-    """
-    # Parse for RUNNING/FINAL prefix
-    expr = expr.strip()
-    is_running = running
-    if expr.upper().startswith("RUNNING "):
-        is_running = True
-        expr = expr[8:].strip()
-    elif expr.upper().startswith("FINAL "):
-        is_running = False
-        expr = expr[6:].strip()
-
-    # Create evaluator for the expression
-    evaluator = compile_condition(expr)
-    
-    if is_running:
-        # Evaluate from current row's perspective
-        return evaluator(context.rows[-1], context)
-    else:
-        # Evaluate with access to all rows in the match
-        return evaluator(context.rows[-1], context)
