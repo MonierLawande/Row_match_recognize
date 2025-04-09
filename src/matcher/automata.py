@@ -5,10 +5,6 @@ from src.matcher.pattern_tokenizer import PatternToken, PatternTokenType, parse_
 from src.matcher.condition_evaluator import compile_condition
 import itertools
 
-# src/matcher/automata.py - Add parse_quantifier to the import
-from src.matcher.pattern_tokenizer import PatternToken, PatternTokenType, parse_quantifier
-
-
 # A condition function: given a row and current match context, return True if the row qualifies.
 ConditionFn = Callable[[Dict[str, Any], Any], bool]
 
@@ -162,34 +158,12 @@ class NFABuilder:
                 current = perm_end
                 
             elif token.type == PatternTokenType.EXCLUSION_START:
-                # Remember exclusion start position
-                exclusion_start = len(self.states)
-                self.current_exclusion = True
-                
-                # Skip exclusion start token
-                idx[0] += 1
-                
-                # Process tokens inside exclusion
-                excl_start, excl_end = self._process_sequence(tokens, idx, define)
-                
-                # Mark exclusion end
-                exclusion_end = len(self.states) - 1
-                self.exclusion_ranges.append((exclusion_start, exclusion_end))
-                
-                # Mark all states in this range as excluded
-                for i in range(exclusion_start, exclusion_end + 1):
-                    self.states[i].is_excluded = True
-                
-                # Reset exclusion flag
-                self.current_exclusion = False
-                
-                # Skip exclusion end token if present
-                if idx[0] < len(tokens) and tokens[idx[0]].type == PatternTokenType.EXCLUSION_END:
-                    idx[0] += 1
+                # Enhanced exclusion handling
+                exclusion_start, exclusion_end = self._process_exclusion(tokens, idx, define)
                 
                 # Connect exclusion fragment to current NFA
-                self.add_epsilon(current, excl_start)
-                current = excl_end
+                self.add_epsilon(current, exclusion_start)
+                current = exclusion_end
                 
             elif token.type in (PatternTokenType.ANCHOR_START, PatternTokenType.ANCHOR_END):
                 # Create anchor state
@@ -231,6 +205,38 @@ class NFABuilder:
         
         return start, end
     
+    def _process_exclusion(self, tokens: List[PatternToken], idx: List[int], define: Dict[str, str]) -> Tuple[int, int]:
+        """Process an exclusion pattern fragment."""
+        # Remember exclusion start position
+        exclusion_start = len(self.states)
+        
+        # Track original exclusion state and set current to true
+        previous_exclusion_state = self.current_exclusion
+        self.current_exclusion = True
+        
+        # Skip exclusion start token
+        idx[0] += 1
+        
+        # Process tokens inside exclusion
+        excl_start, excl_end = self._process_sequence(tokens, idx, define)
+        
+        # Mark exclusion end
+        exclusion_end = len(self.states) - 1
+        self.exclusion_ranges.append((exclusion_start, exclusion_end))
+        
+        # Mark all states in this range as excluded
+        for i in range(exclusion_start, exclusion_end + 1):
+            self.states[i].is_excluded = True
+        
+        # Restore previous exclusion state
+        self.current_exclusion = previous_exclusion_state
+        
+        # Skip exclusion end token if present
+        if idx[0] < len(tokens) and tokens[idx[0]].type == PatternTokenType.EXCLUSION_END:
+            idx[0] += 1
+        
+        return excl_start, excl_end
+    
     def create_var_states(self, var: str, define: Dict[str, str]) -> Tuple[int, int]:
         """Create states for a pattern variable."""
         start = self.new_state()
@@ -255,7 +261,23 @@ class NFABuilder:
         """Apply quantifier to a subpattern."""
         new_start = self.new_state()
         new_end = self.new_state()
-        
+        # Handle {n,n} case (exactly n repetitions)
+        if min_rep == max_rep and min_rep > 0:
+            # Create a chain of exactly min_rep copies
+            current = new_start
+            for _ in range(min_rep):
+                next_state = self.new_state()
+                # Copy the original transition
+                for trans in self.states[start].transitions:
+                    self.states[current].add_transition(
+                        trans.condition,
+                        next_state if trans.target == end else trans.target,
+                        trans.variable
+                    )
+                current = next_state
+            # Connect the last state to new_end
+            self.add_epsilon(current, new_end)
+            return new_start, new_end
         # Handle different quantifier types
         if min_rep == 0 and max_rep is None:  # *
             if greedy:

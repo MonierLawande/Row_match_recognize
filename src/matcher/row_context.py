@@ -31,43 +31,53 @@ class RowContext:
             print(f"Found indices: {indices}")
             return [self.rows[idx] for idx in indices]
         return []
-    
-    def var_row_indices(self, variable: str) -> List[int]:
-        """Get indices of rows matched to a variable or subset."""
-        indices = []
-        if variable in self.variables:
-            indices = self.variables[variable]
-        elif variable in self.subsets:
-            for comp in self.subsets[variable]:
-                if comp in self.variables:
-                    indices.extend(self.variables.get(comp, []))
-        return sorted(indices)
-    
+
     def prev(self, steps: int = 1) -> Optional[Dict[str, Any]]:
-        """Get previous row within partition."""
-        if self.current_idx - steps >= 0:
+        """Get previous row within partition with robust boundary handling."""
+        if self.current_idx - steps >= 0 and self.current_idx - steps < len(self.rows):
             return self.rows[self.current_idx - steps]
         return None
-    
+
     def next(self, steps: int = 1) -> Optional[Dict[str, Any]]:
-        """Get next row within partition."""
-        if self.current_idx + steps < len(self.rows):
+        """Get next row within partition with robust boundary handling."""
+        if self.current_idx + steps >= 0 and self.current_idx + steps < len(self.rows):
             return self.rows[self.current_idx + steps]
         return None
         
     def first(self, variable: str, occurrence: int = 0) -> Optional[Dict[str, Any]]:
-        """Get first occurrence of a pattern variable."""
+        """Get first occurrence of a pattern variable with robust handling."""
         indices = self.var_row_indices(variable)
-        if occurrence < len(indices):
+        if indices and occurrence >= 0 and occurrence < len(indices):
             return self.rows[indices[occurrence]]
         return None
         
     def last(self, variable: str, occurrence: int = 0) -> Optional[Dict[str, Any]]:
-        """Get last occurrence of a pattern variable."""
+        """Get last occurrence of a pattern variable with robust handling."""
         indices = self.var_row_indices(variable)
-        if occurrence < len(indices):
+        if indices and occurrence >= 0 and occurrence < len(indices):
             return self.rows[indices[-(occurrence+1)]]
         return None
+        
+    def var_row_indices(self, variable: str) -> List[int]:
+        """Get indices of rows matched to a variable or subset with better error handling."""
+        indices = []
+        
+        # Check if this is a direct variable
+        if variable in self.variables:
+            indices = self.variables[variable]
+        
+        # Check if this is a subset variable
+        elif variable in self.subsets:
+            for comp in self.subsets[variable]:
+                if comp in self.variables:
+                    indices.extend(self.variables.get(comp, []))
+        
+        # Return sorted indices (ensures correct navigation order)
+        return sorted(indices)
+
+
+
+
 
     def classifier(self, variable: Optional[str] = None) -> str:
         """Return pattern variable for current row or specified set."""

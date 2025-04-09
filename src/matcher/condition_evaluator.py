@@ -51,17 +51,21 @@ class ConditionEvaluator(ast.NodeVisitor):
             'NULLIF': lambda x, y: None if x == y else x,
         }
 
+    def _safe_compare(self, left, right, op):
+        """Perform SQL-style comparison with NULL handling."""
+        # If either operand is NULL, comparison is False
+        if left is None or right is None:
+            return False
+            
+        return op(left, right)
+
     def visit_Compare(self, node: ast.Compare):
         if len(node.ops) != 1 or len(node.comparators) != 1:
             raise ValueError("Only simple comparisons are supported")
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         
-        # Enhanced NULL handling for SQL semantics
-        if left is None or right is None:
-            # NULL comparison always returns False in most SQL dialects
-            return False
-            
+        # Use safe comparison with NULL handling
         op = node.ops[0]
         
         OPERATORS = {
@@ -77,11 +81,7 @@ class ConditionEvaluator(ast.NodeVisitor):
         if func is None:
             raise ValueError(f"Operator {op} not supported")
             
-        try:
-            return func(left, right)
-        except TypeError as e:
-            # Better error message for type mismatches
-            raise ValueError(f"Cannot compare {type(left).__name__} and {type(right).__name__}: {e}")
+        return self._safe_compare(left, right, func)
 
     def visit_Name(self, node: ast.Name):
         # Check for special functions
@@ -385,65 +385,235 @@ class ConditionEvaluator(ast.NodeVisitor):
         return self.context.classifier(variable)
 
 def compile_condition(expr: str) -> Callable[[Dict[str, Any], RowContext], bool]:
-    """Compile a condition expression into a function."""
+    """Compile a condition expression into a function with improved compound expression handling."""
+    import math
     
-    # Direct replacement for common problematic expressions involving 'return'
+    # First handle simple condition with "return" keyword
     if "return" in expr:
-        # Special case for the 'return' keyword (which can't be used directly in Python)
         if expr == "return>0":
             return lambda row, ctx: row.get('return', 0) > 0
         elif expr == "return<0":
             return lambda row, ctx: row.get('return', 0) < 0
-        elif "return" in expr:
-            # For other expressions containing 'return', replace it directly
-            modified_expr = expr.replace("return", "row.get('return', 0)")
-            try:
-                tree = ast.parse(modified_expr, mode='eval')
-            except SyntaxError as e:
-                print(f"Syntax error parsing modified expression '{modified_expr}': {e}")
-                # Fallback to TRUE
-                return lambda row, ctx: True
-            
-            def direct_evaluator(row: Dict[str, Any], context: RowContext):
-                # Create the globals dictionary with row and context
-                globals_dict = {'row': row, 'context': context}
-                try:
-                    # Evaluate the expression directly
-                    result = eval(modified_expr, globals_dict)
-                    return bool(result) if result is not None else False
-                except Exception as e:
-                    print(f"Error evaluating direct expression '{modified_expr}': {e}")
-                    return False
-            
-            return direct_evaluator
     
-    # Continue with the standard path for non-problematic expressions
+    # Handle IS NULL and IS NOT NULL conditions
+    is_null_match = re.match(r'(.*?)\s+IS\s+NULL$', expr, re.IGNORECASE)
+    if is_null_match:
+        col = is_null_match.group(1).strip()
+        return lambda row, ctx: row.get(col) is None
+    
+    is_not_null_match = re.match(r'(.*?)\s+IS\s+NOT\s+NULL$', expr, re.IGNORECASE)
+    if is_not_null_match:
+        col = is_not_null_match.group(1).strip()
+        return lambda row, ctx: row.get(col) is not None
+    
+    # Check for compound expressions with AND
+    if " AND " in expr:
+        parts = expr.split(" AND ")
+        left_condition = compile_condition(parts[0])
+        right_condition = compile_condition(parts[1])
+        return lambda row, ctx: left_condition(row, ctx) and right_condition(row, ctx)
+    
+    # Check for compound expressions with OR
+    if " OR " in expr:
+        parts = expr.split(" OR ")
+        left_condition = compile_condition(parts[0])
+        right_condition = compile_condition(parts[1])
+        return lambda row, ctx: left_condition(row, ctx) or right_condition(row, ctx)
+    
+    # Special handling for common function patterns
+    
+    # ABS function
+    abs_match = re.match(r'ABS\((.*?)\)\s*([<>=!]+)\s*([\d.]+)', expr)
+    if abs_match:
+        col, op, val = abs_match.groups()
+        val = float(val)
+        if op == ">=":
+            return lambda row, ctx: abs(row.get(col.strip(), 0)) >= val
+        elif op == ">":
+            return lambda row, ctx: abs(row.get(col.strip(), 0)) > val
+        elif op == "<=":
+            return lambda row, ctx: abs(row.get(col.strip(), 0)) <= val
+        elif op == "<":
+            return lambda row, ctx: abs(row.get(col.strip(), 0)) < val
+        elif op == "==" or op == "=":
+            return lambda row, ctx: abs(row.get(col.strip(), 0)) == val
+        elif op == "!=":
+            return lambda row, ctx: abs(row.get(col.strip(), 0)) != val
+    
+    # PREV function
+       # PREV function with NULL handling
+    prev_match = re.match(r'(.*?)\s*([<>=!]+)\s*PREV\((.*?),?\s*(\d+)?\)', expr)
+    if prev_match:
+        col1, op, col2, steps = prev_match.groups()
+        steps = int(steps) if steps else 1
+        
+        def prev_condition(row, ctx):
+            left_val = row.get(col1.strip(), 0)
+            prev_row = ctx.prev(steps)
+            right_val = prev_row.get(col2.strip()) if prev_row else None
+            
+            # Handle NULL comparison
+            if right_val is None:
+                return False  # SQL NULL semantics
+                
+            if op == ">=":
+                return left_val >= right_val
+            elif op == ">":
+                return left_val > right_val
+            elif op == "<=":
+                return left_val <= right_val
+            elif op == "<":
+                return left_val < right_val
+            elif op == "==" or op == "=":
+                return left_val == right_val
+            elif op == "!=":
+                return left_val != right_val
+            return False
+            
+        return prev_condition
+    
+    # NEXT function with NULL handling
+    next_match = re.match(r'(.*?)\s*([<>=!]+)\s*NEXT\((.*?),?\s*(\d+)?\)', expr)
+    if next_match:
+        col1, op, col2, steps = next_match.groups()
+        steps = int(steps) if steps else 1
+        
+        def next_condition(row, ctx):
+            left_val = row.get(col1.strip(), 0)
+            next_row = ctx.next(steps)
+            right_val = next_row.get(col2.strip()) if next_row else None
+            
+            # Handle NULL comparison
+            if right_val is None:
+                return False
+                
+            # Use the appropriate comparison operator
+            if op == ">=":
+                return left_val >= right_val
+            elif op == ">":
+                return left_val > right_val
+            elif op == "<=":
+                return left_val <= right_val
+            elif op == "<":
+                return left_val < right_val
+            elif op == "==" or op == "=":
+                return left_val == right_val
+            elif op == "!=":
+                return left_val != right_val
+            return False
+            
+        return next_condition
+    
+    # ... rest of method ...
+
+    # FIRST function
+    first_match = re.match(r'(.*?)\s*([<>=!]+)\s*FIRST\((.*?)\)', expr)
+    if first_match:
+        col1, op, arg = first_match.groups()
+        var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.(.*)', arg)
+        if var_col_match:
+            var, col2 = var_col_match.groups()
+            
+            def first_condition(row, ctx):
+                left_val = row.get(col1.strip(), 0)
+                first_row = ctx.first(var)
+                right_val = first_row.get(col2) if first_row else None
+                
+                # Handle NULL comparison
+                if right_val is None:
+                    return False
+                    
+                if op == ">=":
+                    return left_val >= right_val
+                elif op == ">":
+                    return left_val > right_val
+                elif op == "<=":
+                    return left_val <= right_val
+                elif op == "<":
+                    return left_val < right_val
+                elif op == "==" or op == "=":
+                    return left_val == right_val
+                elif op == "!=":
+                    return left_val != right_val
+                return False
+                
+            return first_condition
+    
+    # Handle simple comparisons
+    simple_comp_match = re.match(r'(.*?)\s*([<>=!]+)\s*([\d.]+)', expr)
+    if simple_comp_match:
+        col, op, val = simple_comp_match.groups()
+        val = float(val)
+        if op == ">=":
+            return lambda row, ctx: row.get(col.strip(), 0) >= val
+        elif op == ">":
+            return lambda row, ctx: row.get(col.strip(), 0) > val
+        elif op == "<=":
+            return lambda row, ctx: row.get(col.strip(), 0) <= val
+        elif op == "<":
+            return lambda row, ctx: row.get(col.strip(), 0) < val
+        elif op == "==" or op == "=":
+            return lambda row, ctx: row.get(col.strip(), 0) == val
+        elif op == "!=":
+            return lambda row, ctx: row.get(col.strip(), 0) != val
+    
+    # If all else fails, try AST parsing with added support for functions
     try:
-        tree = ast.parse(expr, mode='eval')
+        modified_expr = expr
+        
+        # Replace return with row access
+        if "return" in modified_expr:
+            modified_expr = modified_expr.replace("return", "row.get('return', 0)")
+        
+        tree = ast.parse(modified_expr, mode='eval')
+        
+        def evaluator(row: Dict[str, Any], context: RowContext) -> bool:
+            # Create globals with math functions
+            import math
+            
+            # Helper functions with NULL handling
+            def safe_prev(col, steps=1):
+                prev_row = context.prev(steps)
+                return prev_row.get(col) if prev_row else None
+                
+            def safe_next(col, steps=1):
+                next_row = context.next(steps)
+                return next_row.get(col) if next_row else None
+                
+            def safe_first(var, col):
+                first_row = context.first(var)
+                return first_row.get(col) if first_row else None
+                
+            def safe_last(var, col):
+                last_row = context.last(var)
+                return last_row.get(col) if last_row else None
+            
+            globals_dict = {
+                'row': row, 
+                'context': context,
+                'ABS': abs,
+                'ROUND': round,
+                'SQRT': math.sqrt,
+                'POWER': pow,
+                'CEILING': math.ceil,
+                'FLOOR': math.floor,
+                'MOD': lambda x, y: x % y,
+                'PREV': safe_prev,
+                'NEXT': safe_next,
+                'FIRST': safe_first,
+                'LAST': safe_last
+            }
+            
+            try:
+                result = eval(modified_expr, globals_dict)
+                return bool(result) if result is not None else False
+            except Exception as e:
+                print(f"Error evaluating expression '{modified_expr}': {e}")
+                return False
+                
+        return evaluator
     except SyntaxError as e:
         print(f"Syntax error parsing: '{expr}'")
         print(f"Error details: {e}")
-        # Use a TRUE condition as fallback
+        # Fallback to TRUE
         return lambda row, ctx: True
-    
-    def evaluator(row: Dict[str, Any], context: RowContext) -> bool:
-        # Save the original state
-        original_rows = context.rows.copy() if context.rows else []
-        original_idx = context.current_idx
-        
-        # Add the current row to the context
-        context.rows.append(row)
-        context.current_idx = len(context.rows) - 1
-        
-        try:
-            result = ConditionEvaluator(context).visit(tree.body)
-            return bool(result) if result is not None else False
-        except Exception as e:
-            print(f"Error evaluating condition '{expr}': {e}")
-            return False
-        finally:
-            # Restore the original state
-            context.rows = original_rows
-            context.current_idx = original_idx
-            
-    return evaluator

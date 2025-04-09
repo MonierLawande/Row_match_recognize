@@ -13,3 +13,25 @@ Code Modularity: Split functionality into dedicated modules and add comprehensiv
 Additional Validations: Add checks for exclusion syntax, grouping, and consistency of navigation/aggregate function arguments.
 SELECT Clause Parsing: Integrate a more robust parser for the SELECT clause and provide detailed error messages.
 Documentation: Enrich code comments and provide usage examples.
+
+
+
+
+
+
+Fix Nested Navigation - Resolve the NULL handling issues in PREV(FIRST()) and similar constructs
+
+Complete ALL ROWS PER MATCH Modifiers - Add tests for:
+
+ALL ROWS PER MATCH SHOW EMPTY MATCHES
+ALL ROWS PER MATCH OMIT EMPTY MATCHES
+ALL ROWS PER MATCH WITH UNMATCHED ROWS
+Expand PERMUTE Testing - Create a comprehensive test that shows all permutations working
+
+Ensure Empty Match Semantics - Verify that empty matches follow the specification:
+
+All column references return null
+Navigation operations return null
+CLASSIFIER returns null
+MATCH_NUMBER returns sequential match number
+Aggregate functions evaluate over empty set

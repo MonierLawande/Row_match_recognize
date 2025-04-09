@@ -103,6 +103,9 @@ class EnhancedMatcher:
         current_idx = start_idx
         var_assignments = {}
         
+        # Debug output 
+        print(f"Starting match at index {start_idx}, state: {state}")
+        
         # Keep track of the longest match found so far
         longest_match = None
         
@@ -116,15 +119,20 @@ class EnhancedMatcher:
             
             for transition in self.dfa.states[state].transitions:
                 try:
+                    print(f"Testing row {current_idx}, evaluating condition for var: {transition.variable}")
                     if transition.condition(row, context):
+                        print(f"  Condition passed for {transition.variable}")
                         next_state = transition.target
                         matched_var = transition.variable
                         break
+                    else:
+                        print(f"  Condition failed for {transition.variable}")
                 except Exception as e:
                     print(f"Error evaluating condition: {e}")
                     continue
             
             if next_state is None:
+                print(f"No valid transition from state {state} at row {current_idx}, breaking")
                 break
                 
             # Record variable assignment
@@ -137,8 +145,8 @@ class EnhancedMatcher:
             current_idx += 1
             
             # If we've reached an accepting state, update the longest match
-            # but continue matching (for greedy quantifiers)
             if self.dfa.states[state].is_accept:
+                print(f"Reached accepting state {state} at row {current_idx-1}")
                 longest_match = {
                     "start": start_idx,
                     "end": current_idx - 1,
@@ -147,8 +155,11 @@ class EnhancedMatcher:
                 }
         
         # Return the longest match found
+        if longest_match:
+            print(f"Found match: {longest_match}")
+        else:
+            print(f"No match found starting at index {start_idx}")
         return longest_match
-
 
     def _process_one_row_match(self,
                             match: Dict[str, Any],
@@ -159,21 +170,14 @@ class EnhancedMatcher:
         start_idx = match["start"]
         end_idx = match["end"]
         
-        # Create context with the matched rows
+        # Create context with ALL rows, not just matched rows!
         context = RowContext()
-        context.rows = rows[start_idx:end_idx+1]
+        context.rows = rows  # Use the entire dataset for navigation
         
-        # Adjust indices to be relative to the current match section
-        adjusted_variables = {}
-        for var, indices in match["variables"].items():
-            # Convert absolute indices to relative indices
-            adjusted_indices = [idx - start_idx for idx in indices if start_idx <= idx <= end_idx]
-            if adjusted_indices:  # Only add if we have valid indices
-                adjusted_variables[var] = adjusted_indices
-        
-        context.variables = adjusted_variables
+        # Use the original indices from the match
+        context.variables = match["variables"]
         context.match_number = match_number
-        context.current_idx = len(context.rows) - 1  # Position at final row
+        context.current_idx = end_idx  # Position at final row
         
         # Start with first row values
         result = rows[start_idx].copy()
@@ -191,7 +195,7 @@ class EnhancedMatcher:
         result["MATCH_NUMBER"] = match_number
         
         return result
-    
+
     def _process_all_rows_match(self,
                             match: Dict[str, Any],
                             rows: List[Dict[str, Any]],
@@ -234,12 +238,30 @@ class EnhancedMatcher:
             for subset_name, component_vars in self.subsets.items():
                 context.subsets[subset_name] = component_vars
         
+        # Track excluded indices based on pattern exclusion
+        excluded_indices = set()
+        if exclude_ranges:
+            for start, end in exclude_ranges:
+                # Convert exclusion ranges to absolute row indices
+                excluded_indices.update(range(start_idx + start, start_idx + end + 1))
+        
+        # Pre-compute measure values with FINAL semantics
+        final_measures = {}
+        final_evaluator = MeasureEvaluator(context, final=True)
+        for alias, expr in measures.items():
+            if expr.upper().startswith("FINAL "):
+                try:
+                    final_measures[alias] = final_evaluator.evaluate(expr)
+                except Exception as e:
+                    print(f"Error evaluating FINAL measure {alias} with expression '{expr}': {e}")
+                    final_measures[alias] = None  # Set to NULL on error
+        
         # Process each row in the match
         for i in range(start_idx, end_idx + 1):
             rel_idx = i - start_idx  # Relative position in match
             
             # Skip excluded rows based on pattern exclusion syntax
-            if exclude_ranges and any(start <= rel_idx <= end for start, end in exclude_ranges):
+            if i in excluded_indices:
                 continue
             
             # Update context for current row
@@ -252,11 +274,9 @@ class EnhancedMatcher:
             evaluator = MeasureEvaluator(context, final=False)  # Default to RUNNING semantics
             for alias, expr in measures.items():
                 try:
-                    # Check if the expression has explicit FINAL semantics
-                    if expr.upper().startswith("FINAL "):
-                        # Use FINAL semantics only for this expression
-                        final_evaluator = MeasureEvaluator(context, final=True)
-                        result[alias] = final_evaluator.evaluate(expr)
+                    if alias in final_measures:
+                        # Use pre-computed FINAL value
+                        result[alias] = final_measures[alias]
                     else:
                         # Use RUNNING semantics (default)
                         result[alias] = evaluator.evaluate(expr)

@@ -381,13 +381,22 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
     def extract_define(self, ctx):
         definitions = []
         for vd in ctx.variableDefinition():
-            raw_text = vd.getText()
-            parts = smart_split(raw_text)
-            if len(parts) == 2:
-                definitions.append(Define(post_process_text(parts[0]), post_process_text(parts[1])))
+            # Get the full text of the variable definition with spaces preserved
+            var_start = vd.start.start
+            var_stop = vd.stop.stop
+            full_text = vd.start.getInputStream().getText(var_start, var_stop)
+            
+            # Extract variable name and condition
+            var_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s+AS\s+(.*)', full_text, re.IGNORECASE)
+            if var_match:
+                var_name = var_match.group(1).strip()
+                condition = var_match.group(2).strip()
+                definitions.append(Define(var_name, condition))
             else:
-                definitions.append(Define(post_process_text(raw_text), ""))
+                definitions.append(Define(full_text.strip(), ""))
+        
         return DefineClause(definitions)
+
 
     # Updated validation method for src/parser/match_recognize_extractor.py
     def validate_clauses(self, ctx):
@@ -486,6 +495,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         pattern_vars = set(self.ast.pattern.metadata.get("base_variables", []))
         defined_vars = {d.variable for d in self.ast.define.definitions} if self.ast.define else set()
         
+        # Define known functions that should NOT be considered as pattern variables
+        known_functions = {'FIRST', 'LAST', 'PREV', 'NEXT', 'CLASSIFIER', 'MATCH_NUMBER', 
+                        'ABS', 'ROUND', 'SQRT', 'POWER', 'CEILING', 'FLOOR', 'MOD'}
+        
         # Get subset variables and their mappings
         subset_vars = {}
         subset_components = set()
@@ -508,10 +521,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         if self.ast.measures:
             for measure in self.ast.measures.measures:
                 # Extract variables from column references like A.totalprice
-                column_refs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', measure.expression)
+                column_refs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', measure.expression)
                 referenced_vars.update([ref[0] for ref in column_refs])
                 
-                # Extract variables from functions
+                # Extract variables from functions but exclude known function names
                 func_pattern = r'(?:FIRST|LAST|PREV|NEXT)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)'
                 func_refs = re.findall(func_pattern, measure.expression, re.IGNORECASE)
                 referenced_vars.update(func_refs)
@@ -524,25 +537,8 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 
                 logger.debug(f"Extracted variables from measure '{measure.expression}': {extracted_vars}")
         
-        # 2. Check variables used in SUBSET
-        if self.ast.subset:
-            for subset_clause in self.ast.subset:
-                subset_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\((.*?)\)', subset_clause.subset_text)
-                if subset_match:
-                    subset_elements = [v.strip() for v in subset_match.group(2).split(',')]
-                    referenced_vars.update(subset_elements)
-                    logger.debug(f"Extracted variables from subset '{subset_clause.subset_text}': {subset_elements}")
-        
-        # 3. Check variables used in AFTER MATCH SKIP
-        if self.ast.after_match_skip and self.ast.after_match_skip.target_variable:
-            referenced_vars.add(self.ast.after_match_skip.target_variable)
-        
-        # Verify subset components are defined
-        for subset_name, elements in subset_vars.items():
-            invalid_elements = set(elements) - defined_vars
-            if invalid_elements:
-                raise ParserError(f"Subset '{subset_name}' contains undefined variables: {invalid_elements}", 
-                                line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+        # Filter out any known functions from referenced variables
+        referenced_vars = referenced_vars - known_functions
         
         # Check for missing references
         all_valid_vars = pattern_vars.union(subset_components)
@@ -562,6 +558,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         logger.debug(f"Referenced variables: {referenced_vars}")
         logger.debug(f"Defined variables: {defined_vars}")
         logger.debug(f"Subset variables: {subset_vars}")
+
 
 
 class FullQueryExtractor(TrinoParserVisitor):

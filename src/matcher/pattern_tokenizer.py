@@ -38,12 +38,13 @@ def parse_quantifier(quant: str) -> Tuple[int, Optional[int], bool]:
         bounds = quant[1:-1].split(',')
         if len(bounds) == 1:
             n = int(bounds[0])
-            return (n, n, greedy)
+            return (n, n, greedy)  # {n} means exactly n
         else:
             min_bound = int(bounds[0]) if bounds[0] else 0
             max_bound = int(bounds[1]) if bounds[1] else None
             return (min_bound, max_bound, greedy)
     return (1, 1, True)
+
 
 def tokenize_pattern(pattern: str) -> List[PatternToken]:
     """Enhanced tokenizer with full syntax support and better handling of nested structures."""
