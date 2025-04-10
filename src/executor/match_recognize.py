@@ -1,7 +1,7 @@
 # src/executor/match_recognize.py
 
 import pandas as pd
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Set
 
 from src.parser.match_recognize_extractor import parse_full_query
 from src.matcher.pattern_tokenizer import tokenize_pattern
@@ -27,10 +27,23 @@ def process_subset_clause(subsets, row_context):
             components = [v.strip() for v in components_str[1:-1].split(',')]
             row_context.subsets[subset_name] = components
 
+def extract_subset_dict(subsets):
+    """Extract subset definitions into a dictionary for the matcher."""
+    subset_dict = {}
+    for subset in subsets:
+        parts = subset.subset_text.split('=')
+        if len(parts) == 2:
+            subset_name = parts[0].strip()
+            components_str = parts[1].strip()
+            if components_str.startswith('(') and components_str.endswith(')'):
+                components = [v.strip() for v in components_str[1:-1].split(',')]
+                subset_dict[subset_name] = components
+    return subset_dict
+
 def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     """
     Execute a MATCH_RECOGNIZE query against a Pandas DataFrame.
-    Enhanced with support for all MATCH_RECOGNIZE features.
+    Enhanced with support for all MATCH_RECOGNIZE features, including empty matches.
     """
     # Parse the query and build the AST
     ast = parse_full_query(query)
@@ -69,19 +82,42 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             skip_var = mr_clause.after_match_skip.target_variable
 
     # Extract measures and other clauses
-    measures = {m.alias: m.expression for m in mr_clause.measures.measures} if mr_clause.measures else {}
+    measures = {}
+    if mr_clause.measures:
+        for m in mr_clause.measures.measures:
+            # Handle special functions
+            if m.expression.upper() == "CLASSIFIER()":
+                measures[m.alias] = "CLASSIFIER()"
+            elif m.expression.upper() == "MATCH_NUMBER()":
+                measures[m.alias] = "MATCH_NUMBER()"
+            else:
+                # Handle RUNNING/FINAL prefixes
+                if m.metadata and 'semantics' in m.metadata:
+                    if m.metadata['semantics'] == 'RUNNING':
+                        measures[m.alias] = f"RUNNING {m.expression}"
+                    elif m.metadata['semantics'] == 'FINAL':
+                        measures[m.alias] = f"FINAL {m.expression}"
+                    else:
+                        measures[m.alias] = m.expression
+                else:
+                    measures[m.alias] = m.expression
+
     define = {d.variable: d.condition for d in mr_clause.define.definitions} if mr_clause.define else {}
     subsets = mr_clause.subset if mr_clause.subset else []
+    
+    # Extract subset definitions for matcher configuration
+    subset_dict = extract_subset_dict(subsets)
 
     # Create match configuration
+    show_empty = rows_per_match != RowsPerMatch.ALL_ROWS  # True except for OMIT EMPTY MATCHES
     config = MatchConfig(
         rows_per_match=rows_per_match,
         skip_mode=skip_mode,
         skip_var=skip_var,
-        show_empty=True,  # Could be configured based on rows_per_match
+        show_empty=show_empty,
         include_unmatched=(rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED)
     )
-
+    
     # Process partitions
     results = []
     
@@ -114,12 +150,24 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         dfa_builder = DFABuilder(nfa)
         dfa = dfa_builder.build()
         
-        # Create matcher and find matches
-        matcher = EnhancedMatcher(dfa)
-        partition_results = matcher.find_matches(rows, config, measures)
+        # Create matcher with all necessary parameters
+        matcher = EnhancedMatcher(
+            dfa=dfa,
+            measures=measures,
+            exclusion_ranges=nfa.exclusion_ranges,
+            after_match_skip=skip_mode,
+            subsets=subset_dict
+        )
+        
+        # Find matches
+        partition_results = matcher.find_matches(
+            rows=rows,
+            config=config,
+            measures=measures  # Pass measures explicitly
+        )
         
         # Add partition columns if needed
-        if partition_by:
+        if partition_by and rows:
             for result in partition_results:
                 for col in partition_by:
                     result[col] = rows[0][col]  # Use values from first row of partition
@@ -129,11 +177,10 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     # Create output DataFrame
     if not results:
         # Create empty DataFrame with appropriate columns
-        columns = []
-        if ast.select_clause:
-            columns.extend(item.expression for item in ast.select_clause.items)
+        columns = list(df.columns)  # Include original columns
         if measures:
-            columns.extend(measures.keys())
+            columns.extend(measures.keys())  # Add measure columns
+        columns.extend(['MATCH_NUMBER', 'IS_EMPTY_MATCH'])  # Add metadata columns
         return pd.DataFrame(columns=columns)
     
     return pd.DataFrame(results)

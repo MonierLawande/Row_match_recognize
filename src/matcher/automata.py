@@ -39,7 +39,7 @@ class NFABuilder:
     
     def add_epsilon(self, from_state: int, to_state: int):
         self.states[from_state].epsilon.append(to_state)
-    
+ 
     def build(self, tokens: List[PatternToken], define: Dict[str, str]) -> 'NFA':
         """Build NFA from pattern tokens."""
         start = self.new_state()
@@ -50,16 +50,27 @@ class NFABuilder:
             self.add_epsilon(start, accept)
             return NFA(start, accept, self.states, [])
         
-        # Process tokens recursively
-        current_idx = [0]
-        pattern_start, pattern_end = self._process_sequence(tokens, current_idx, define)
+        # Process pattern with optional components (like Z?)
+        pattern_start, pattern_end = self._process_sequence(tokens, [0], define)
         
         # Connect pattern to start and accept states
         self.add_epsilon(start, pattern_start)
         self.add_epsilon(pattern_end, accept)
         
+        # Check for patterns that allow empty matches
+        allows_empty = False
+        for token in tokens:
+            if token.quantifier in ['?', '*', '{0}', '{0,}']:
+                allows_empty = True
+                break
+            
+        # For patterns like Z?, add direct path to allow empty matches
+        if allows_empty:
+            print("Pattern allows empty matches - adding epsilon transition")
+            self.add_epsilon(start, accept)  # Critical change for empty match support
+        
         return NFA(start, accept, self.states, self.exclusion_ranges)
-    
+
     def _process_sequence(self, tokens: List[PatternToken], idx: List[int], define: Dict[str, str]) -> Tuple[int, int]:
         """Process a sequence of tokens until the end or until a GROUP_END."""
         start = self.new_state()
@@ -253,14 +264,15 @@ class NFABuilder:
         return start, end
     
     def _apply_quantifier(self, 
-                         start: int, 
-                         end: int, 
-                         min_rep: int, 
-                         max_rep: Optional[int],
-                         greedy: bool) -> Tuple[int, int]:
+                        start: int, 
+                        end: int, 
+                        min_rep: int, 
+                        max_rep: Optional[int],
+                        greedy: bool) -> Tuple[int, int]:
         """Apply quantifier to a subpattern."""
         new_start = self.new_state()
         new_end = self.new_state()
+        
         # Handle {n,n} case (exactly n repetitions)
         if min_rep == max_rep and min_rep > 0:
             # Create a chain of exactly min_rep copies
@@ -278,13 +290,14 @@ class NFABuilder:
             # Connect the last state to new_end
             self.add_epsilon(current, new_end)
             return new_start, new_end
+        
         # Handle different quantifier types
         if min_rep == 0 and max_rep is None:  # *
             if greedy:
                 self.add_epsilon(new_start, start)  # Try to match
-                self.add_epsilon(new_start, new_end)  # Or skip
+                self.add_epsilon(new_start, new_end)  # Or skip - allows empty match
             else:
-                self.add_epsilon(new_start, new_end)  # Try to skip
+                self.add_epsilon(new_start, new_end)  # Try to skip - allows empty match
                 self.add_epsilon(new_start, start)  # Or match
             self.add_epsilon(end, start)  # Loop back
             self.add_epsilon(end, new_end)  # Or finish
@@ -297,15 +310,21 @@ class NFABuilder:
         elif min_rep == 0 and max_rep == 1:  # ?
             if greedy:
                 self.add_epsilon(new_start, start)  # Try to match
-                self.add_epsilon(new_start, new_end)  # Or skip
+                self.add_epsilon(new_start, new_end)  # Or skip - allows empty match
             else:
-                self.add_epsilon(new_start, new_end)  # Try to skip
+                self.add_epsilon(new_start, new_end)  # Try to skip - allows empty match
                 self.add_epsilon(new_start, start)  # Or match
             self.add_epsilon(end, new_end)
+            print(f"Added epsilon transition for ? quantifier - allows empty match")
             
         else:  # {m,n} bounds
             # Create chain for minimum repetitions
             current = new_start
+            if min_rep == 0:
+                # Direct path for empty match
+                self.add_epsilon(new_start, new_end)
+                print(f"Added epsilon transition for {min_rep},{max_rep} quantifier - allows empty match")
+                
             for _ in range(min_rep):
                 next_start = self.new_state()
                 next_end = self.new_state()
@@ -329,6 +348,7 @@ class NFABuilder:
                 self.add_epsilon(current, new_end)  # Or finish
         
         return new_start, new_end
+
     
     def _copy_subpattern(self, 
                         orig_start: int, 

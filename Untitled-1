@@ -17,21 +17,21 @@ Documentation: Enrich code comments and provide usage examples.
 
 
 
+Areas That Need More Work:
 
+Empty Match Semantics: Our implementation has issues generating proper empty matches with the ? quantifier. This needs to be fixed in the matcher core logic.
 
-Fix Nested Navigation - Resolve the NULL handling issues in PREV(FIRST()) and similar constructs
+PERMUTE Testing: While PERMUTE is implemented, our test suggests it needs to be verified more thoroughly with different combinations.
 
-Complete ALL ROWS PER MATCH Modifiers - Add tests for:
-
+ALL ROWS PER MATCH Modifiers: We need to finalize testing for:
 ALL ROWS PER MATCH SHOW EMPTY MATCHES
 ALL ROWS PER MATCH OMIT EMPTY MATCHES
 ALL ROWS PER MATCH WITH UNMATCHED ROWS
-Expand PERMUTE Testing - Create a comprehensive test that shows all permutations working
+Pattern Exclusion Syntax: The {- pattern -} exclusion syntax is mentioned but not thoroughly tested yet.
 
-Ensure Empty Match Semantics - Verify that empty matches follow the specification:
 
-All column references return null
-Navigation operations return null
-CLASSIFIER returns null
-MATCH_NUMBER returns sequential match number
-Aggregate functions evaluate over empty set
+
+SUBSET/Union Variables: We've implemented basic support but need more testing scenarios.
+
+
+
