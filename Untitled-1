@@ -51,3 +51,54 @@ Edge Cases:
 
 Empty matches handling needs verification
 WITH UNMATCHED ROWS option needs testing
+
+
+
+These improvements add:
+
+Better error handling
+
+More efficient processing
+Performance optimizations
+
+Memory management for large datasets
+
+
+
+
+Enhanced debugging capabilities
+
+Support for complex exclusion patterns
+
+CLASSIFIER function CLASSIFIER function 
+
+
+
+CLASSIFIER function (most commonly used)
+Pattern anchors (important for precise matching)
+PERMUTE syntax (useful for flexible patterns)
+Better error handling
+Performance optimizations
+Documentation and testing
+
+
+
+These optimizations are now integrated into your existing code without creating redundancy. The changes maintain the same functionality but improve performance through:
+
+Indexed transitions
+Cached evaluators
+Efficient exclusion handling
+Performance tracking
+Reduced object creation
+Better memory management
+
+
+
+These changes:
+
+Add performance tracking
+Optimize transition lookups
+Improve exclusion handling
+Add caching for measure evaluators
+Reduce object creation
+Optimize memory usage

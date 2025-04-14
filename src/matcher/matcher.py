@@ -1,5 +1,6 @@
 # src/matcher/matcher.py
-
+from collections import defaultdict
+import time
 from typing import List, Dict, Any, Optional, Set, Tuple
 from enum import Enum
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from src.matcher.dfa import DFA, FAIL_STATE
 from src.matcher.row_context import RowContext
 from src.matcher.measure_evaluator import MeasureEvaluator
 from src.matcher.pattern_tokenizer import PatternTokenType
+import re
 
 class SkipMode(Enum):
     PAST_LAST_ROW = "PAST_LAST_ROW"
@@ -45,7 +47,7 @@ class MatchConfig:
 
 class EnhancedMatcher:
     def __init__(self, dfa, measures=None, measure_semantics=None, exclusion_ranges=None, 
-             after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None):
+                 after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None):
         """Initialize the enhanced matcher."""
         self.dfa = dfa
         self.start_state = dfa.start
@@ -54,66 +56,80 @@ class EnhancedMatcher:
         self.exclusion_ranges = exclusion_ranges or []
         self.after_match_skip = after_match_skip
         self.subsets = subsets or {}
-        self.original_pattern = original_pattern or ""
-    
+        self.original_pattern = original_pattern
+
+        # Add performance tracking
+        self.timing = defaultdict(float)
+        
+        # Add optimization structures
+        self.transition_index = self._build_transition_index()
+        self.excluded_vars = self._analyze_exclusions()
+
+    def _build_transition_index(self):
+        """Build index of transitions for faster lookups."""
+        index = defaultdict(list)
+        for i, state in enumerate(self.dfa.states):
+            for transition in state.transitions:
+                index[i].append((transition.variable, transition.target, transition.condition))
+        return index
+
+    def _analyze_exclusions(self):
+        """Pre-analyze pattern for excluded variables."""
+        excluded_vars = set()
+        if self.original_pattern and "{-" in self.original_pattern and "-}" in self.original_pattern:
+            parts = self.original_pattern.split("{-")
+            for part in parts[1:]:
+                if "-}" in part:
+                    excluded = part.split("-}")[0].strip()
+                    for var_name in self.dfa.states[0].variables:
+                        if var_name in excluded:
+                            excluded_vars.add(var_name)
+        return excluded_vars
+
     def find_matches(self, rows, config=None, measures=None):
-        """Find all matches with proper ALL ROWS PER MATCH handling."""
+        """Find all matches with optimized processing."""
+        start_time = time.time()
         results = []
         match_number = 1
         start_idx = 0
-        unmatched_indices = set(range(len(rows)))  # Track unmatched rows
+        unmatched_indices = set(range(len(rows)))
         
         # Get configuration
-        all_rows = False
-        show_empty = True
-        include_unmatched = False  # Initialize the variable
-        
-        if config:
-            all_rows = config.rows_per_match != RowsPerMatch.ONE_ROW
-            show_empty = config.show_empty
-            include_unmatched = config.include_unmatched  # Extract from config
+        all_rows = config.rows_per_match != RowsPerMatch.ONE_ROW if config else False
+        show_empty = config.show_empty if config else True
+        include_unmatched = config.include_unmatched if config else False
         
         print(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
         
         while start_idx < len(rows):
-            # Create context for pattern matching
-            context = RowContext()
-            context.rows = rows
-            
-            # Find next match
-            match = self._find_single_match(rows, start_idx, context)
+            # Find next match using optimized transitions
+            match = self._find_single_match(rows, start_idx, RowContext(rows=rows))
             if not match:
                 start_idx += 1
                 continue
                 
             # Process the match
             if all_rows:
+                match_time_start = time.time()
                 print(f"Processing match {match_number} with ALL ROWS PER MATCH")
-                # Process ALL rows in the match
                 match_rows = self._process_all_rows_match(match, rows, measures, match_number)
                 results.extend(match_rows)
+                self.timing["process_match"] += time.time() - match_time_start
                 
-                # Remove matched indices from unmatched set
+                # Update unmatched indices efficiently
                 if match.get("variables"):
-                    for indices in match["variables"].values():
-                        unmatched_indices -= set(indices)
+                    unmatched_indices -= set(sum(match["variables"].values(), []))
             else:
-                print(f"Processing match {match_number} with ONE ROW PER MATCH")
-                # Process just one row per match
                 match_row = self._process_one_row_match(match, rows, measures, match_number)
                 if match_row:
                     results.append(match_row)
-                    
-                    # Remove matched indices from unmatched set
                     if match.get("variables"):
-                        for indices in match["variables"].values():
-                            unmatched_indices -= set(indices)
+                        unmatched_indices -= set(sum(match["variables"].values(), []))
             
-            # Update start index based on after match skip mode
+            # Update start index based on skip mode
             if match.get("is_empty", False):
                 start_idx = match["start"] + 1
             else:
-                # Use the appropriate skip mode
                 if config and config.skip_mode:
                     start_idx = self._get_skip_position(config.skip_mode, config.skip_var, match)
                 else:
@@ -122,92 +138,117 @@ class EnhancedMatcher:
             match_number += 1
         
         # Add unmatched rows if requested
-        if include_unmatched:  # Now this variable is defined
+        if include_unmatched:
             for idx in sorted(unmatched_indices):
                 unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
                 results.append(unmatched_row)
-            
+        
+        self.timing["total"] = time.time() - start_time
+        print(f"Find matches completed in {self.timing['total']:.6f} seconds")
         return results
 
+
+        # src/matcher/matcher.py
+    # (Inside EnhancedMatcher class)
+
     def _process_all_rows_match(self, match, rows, measures, match_number):
-        """Process ALL rows in a match with proper handling for multiple rows and exclusions."""
+        """
+        Process ALL rows in a match with proper handling for multiple rows and exclusions.
+        
+        Args:
+            match: The match information
+            rows: All input rows
+            measures: Dictionary of measure expressions
+            match_number: The sequential match number
+            
+        Returns:
+            List of output rows for this match
+        """
+        process_start = time.time()
+        classifier_start = time.time()
         results = []
         
-        # Get all matched row indices
-        matched_indices = []
-        excluded_indices = set()
+        # Check if CLASSIFIER is already requested in measures
+        has_classifier_measure = any(
+            re.match(r'CLASSIFIER\(\s*([A-Za-z][A-Za-z0-9_]*)?\s*\)', expr, re.IGNORECASE)
+            for expr in measures.values()
+        )
         
-        # Create a mapping of pattern variables to excluded status
+        # Direct string-based exclusion extraction
         excluded_vars = set()
-        
-        # First, identify excluded variables based on pattern exclusions
-        pattern_text = None
-        for var_name in match["variables"].keys():
-            # Check if this variable appears in an exclusion range in the pattern
-            if "{-" in self.original_pattern and "-}" in self.original_pattern:
-                # Simple check: if the variable is between {- and -}
-                # For a more robust implementation, use the exclusion_ranges from NFA
-                exclusion_parts = self.original_pattern.split("{-")
-                for part in exclusion_parts[1:]:  # Skip the first part (before any {-)
-                    if "-}" in part:
-                        excluded_pattern = part.split("-}")[0].strip()
-                        # Check if var_name is in the excluded pattern
-                        if var_name in excluded_pattern:
-                            excluded_vars.add(var_name)
+        if self.original_pattern:
+            # Look for the B+ part between {- and -}
+            pattern = self.original_pattern
+            if "{-" in pattern and "-}" in pattern:
+                # Extract the part between exclusion markers
+                start_idx = pattern.find("{-")
+                end_idx = pattern.find("-}", start_idx)
+                if start_idx != -1 and end_idx != -1:
+                    excluded_content = pattern[start_idx + 2:end_idx].strip()
+                    print(f"Exclusion content: '{excluded_content}'")
+                    
+                    # Look for variables directly in the exclusion content
+                    for var in match["variables"].keys():
+                        # Simple check if the variable is in the exclusion (as a whole word)
+                        if re.search(r'\b' + var + r'\b', excluded_content):
+                            excluded_vars.add(var)
+                        # Or with quantifier
+                        elif re.search(r'\b' + var + r'[+*?]', excluded_content):
+                            excluded_vars.add(var)
         
         print(f"Variables in exclusion pattern: {excluded_vars}")
         
-        # Now separate matched indices from excluded indices
+        # Separate included indices from excluded indices
+        matched_indices = []
+        excluded_indices = set()
         for var, indices in match["variables"].items():
             if var in excluded_vars:
                 excluded_indices.update(indices)
             else:
                 matched_indices.extend(indices)
         
-        matched_indices = sorted(set(matched_indices))  # Use set to remove duplicates
-        excluded_indices = sorted(excluded_indices)
+        matched_indices = sorted(set(matched_indices))
         
         print(f"Processing match {match_number}, included indices: {matched_indices}")
         if excluded_indices:
-            print(f"Excluded indices: {excluded_indices}")
+            print(f"Excluded indices: {sorted(excluded_indices)}")
         
-        # Create context for the match - includes ALL rows for measure calculation
+        # Create context once for all rows
         context = RowContext()
         context.rows = rows
         context.variables = match["variables"]
         context.match_number = match_number
+        context.subsets = self.subsets.copy() if self.subsets else {}
         
-        # Add subset information if available
-        if hasattr(self, "subsets") and self.subsets:
-            for subset_name, component_vars in self.subsets.items():
-                context.subsets[subset_name] = component_vars
+        # Create a single evaluator for better caching
+        measure_evaluator = MeasureEvaluator(context)
         
-        # Process each matched row individually (excluding excluded rows)
+        # Track individual measure timing
+        measure_timings = defaultdict(float)
+        
+        # Process each matched row (excluding excluded rows)
         for idx in matched_indices:
-            if idx >= len(rows):
+            if idx >= len(rows) or idx in excluded_indices:
                 continue
                 
             # Create result row from original data
-            result = rows[idx].copy()
-            
-            # Set context position for measure calculation
+            result = dict(rows[idx])
             context.current_idx = idx
             
-            # Calculate measures for this specific row
+            # Store the classifier value for debugging
+            if not has_classifier_measure:
+                result["_CLASSIFIER"] = context.classifier()
+            
+            # Calculate measures with performance tracking
             for alias, expr in measures.items():
+                measure_start = time.time()
                 try:
-                    # Create new evaluator for each row
-                    evaluator = MeasureEvaluator(context)
-                    
-                    # Get measure semantics - ALWAYS use RUNNING for ALL ROWS PER MATCH
-                    semantics = "RUNNING"
-                    
-                    # Evaluate measure
-                    result[alias] = evaluator.evaluate(expr, semantics)
+                    result[alias] = measure_evaluator.evaluate(expr, "RUNNING")
                     print(f"Evaluated measure {alias} for row {idx} with RUNNING semantics: {result[alias]}")
                 except Exception as e:
                     print(f"Error evaluating measure {alias} for row {idx}: {e}")
                     result[alias] = None
+                measure_timings[alias] += time.time() - measure_start
             
             # Add match metadata
             result["MATCH_NUMBER"] = match_number
@@ -216,7 +257,28 @@ class EnhancedMatcher:
             results.append(result)
             print(f"Added row {idx} to results")
         
+        # Add timing information
+        self.timing["classifier_total"] = time.time() - classifier_start
+        self.timing["process_match_rows"] = time.time() - process_start
+        
+        # Log performance stats for debugging
+        if hasattr(measure_evaluator, 'stats') and measure_evaluator.stats["total_evaluations"] > 0:
+            print("CLASSIFIER performance stats:")
+            print(f"  Cache hits: {measure_evaluator.stats['cache_hits']}")
+            print(f"  Cache misses: {measure_evaluator.stats['cache_misses']}")
+            print(f"  Hit ratio: {measure_evaluator.stats['cache_hits']/measure_evaluator.stats['total_evaluations']:.2%}")
+            print(f"  Total evaluations: {measure_evaluator.stats['total_evaluations']}")
+        
+        # Log individual measure timings
+        if measure_timings:
+            print("Measure evaluation timings:")
+            for alias, duration in measure_timings.items():
+                print(f"  {alias}: {duration:.6f} seconds")
+        
         return results
+
+
+
 
     
     def _is_excluded(self, row_idx: int, match_start: int, exclude_ranges: List[Tuple[int, int]]) -> bool:
@@ -268,56 +330,50 @@ class EnhancedMatcher:
         return result
 
     def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> Optional[Dict[str, Any]]:
-        """Find a single match starting from the given index with enhanced debugging."""
+        """Find a single match using optimized transitions."""
+        match_start_time = time.time()
         state = self.start_state
         current_idx = start_idx
         var_assignments = {}
         
         print(f"Starting match at index {start_idx}, state: {state}")
         
-        # Check if start state is accepting - this would be an empty match
+        # Check for empty match
         if self.dfa.states[state].is_accept:
             print(f"Found empty match at index {start_idx} - start state is accepting")
-            empty_match = {
+            self.timing["find_match"] += time.time() - match_start_time
+            return {
                 "start": start_idx,
-                "end": start_idx - 1,  # Empty match ends before it starts
-                "variables": {},        # Empty match has no variable assignments
+                "end": start_idx - 1,
+                "variables": {},
                 "state": state,
                 "is_empty": True
             }
-            return empty_match
         
         longest_match = None
+        trans_index = self.transition_index[state]
         
         while current_idx < len(rows):
             row = rows[current_idx]
             context.current_idx = current_idx
             
-            # Debug output before evaluating transitions
             print(f"Testing row {current_idx}, data: {row}")
             
-            # Debug transitions available
-            transitions = self.dfa.states[state].transitions
-            if transitions:
-                print(f"  Available transitions: {[t.variable for t in transitions]}")
-            else:
-                print(f"  No transitions available from state {state}")
-                break
-            
+            # Use indexed transitions for faster lookups
             next_state = None
             matched_var = None
             
-            for transition in transitions:
+            for var, target, condition in trans_index:
+                print(f"  Evaluating condition for var: {var}")
                 try:
-                    print(f"  Evaluating condition for var: {transition.variable}")
-                    result = transition.condition(row, context)
-                    print(f"    Condition {'passed' if result else 'failed'} for {transition.variable}")
+                    result = condition(row, context)
+                    print(f"    Condition {'passed' if result else 'failed'} for {var}")
                     if result:
-                        next_state = transition.target
-                        matched_var = transition.variable
+                        next_state = target
+                        matched_var = var
                         break
                 except Exception as e:
-                    print(f"  Error evaluating condition for {transition.variable}: {str(e)}")
+                    print(f"  Error evaluating condition for {var}: {str(e)}")
                     import traceback
                     traceback.print_exc()
                     continue
@@ -335,8 +391,9 @@ class EnhancedMatcher:
             
             state = next_state
             current_idx += 1
+            trans_index = self.transition_index[state]
             
-            # If we've reached an accepting state, update the longest match
+            # Update longest match if accepting state
             if self.dfa.states[state].is_accept:
                 print(f"Reached accepting state {state} at row {current_idx-1}")
                 longest_match = {
@@ -353,7 +410,9 @@ class EnhancedMatcher:
         else:
             print(f"No match found starting at index {start_idx}")
         
+        self.timing["find_match"] += time.time() - match_start_time
         return longest_match
+
     
     def _process_empty_match(self,
                            start_idx: int,
