@@ -44,7 +44,8 @@ class MatchConfig:
         return self._config_dict.get(key, default)
 
 class EnhancedMatcher:
-    def __init__(self, dfa, measures=None, measure_semantics=None, exclusion_ranges=None, after_match_skip="PAST LAST ROW", subsets=None):
+    def __init__(self, dfa, measures=None, measure_semantics=None, exclusion_ranges=None, 
+             after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None):
         """Initialize the enhanced matcher."""
         self.dfa = dfa
         self.start_state = dfa.start
@@ -53,6 +54,7 @@ class EnhancedMatcher:
         self.exclusion_ranges = exclusion_ranges or []
         self.after_match_skip = after_match_skip
         self.subsets = subsets or {}
+        self.original_pattern = original_pattern or ""
     
     def find_matches(self, rows, config=None, measures=None):
         """Find all matches with proper ALL ROWS PER MATCH handling."""
@@ -127,21 +129,49 @@ class EnhancedMatcher:
             
         return results
 
-
-        # Fix for EnhancedMatcher._process_all_rows_match
     def _process_all_rows_match(self, match, rows, measures, match_number):
-        """Process ALL rows in a match with proper handling for multiple rows."""
+        """Process ALL rows in a match with proper handling for multiple rows and exclusions."""
         results = []
         
         # Get all matched row indices
         matched_indices = []
-        for var_indices in match["variables"].values():
-            matched_indices.extend(var_indices)
+        excluded_indices = set()
+        
+        # Create a mapping of pattern variables to excluded status
+        excluded_vars = set()
+        
+        # First, identify excluded variables based on pattern exclusions
+        pattern_text = None
+        for var_name in match["variables"].keys():
+            # Check if this variable appears in an exclusion range in the pattern
+            if "{-" in self.original_pattern and "-}" in self.original_pattern:
+                # Simple check: if the variable is between {- and -}
+                # For a more robust implementation, use the exclusion_ranges from NFA
+                exclusion_parts = self.original_pattern.split("{-")
+                for part in exclusion_parts[1:]:  # Skip the first part (before any {-)
+                    if "-}" in part:
+                        excluded_pattern = part.split("-}")[0].strip()
+                        # Check if var_name is in the excluded pattern
+                        if var_name in excluded_pattern:
+                            excluded_vars.add(var_name)
+        
+        print(f"Variables in exclusion pattern: {excluded_vars}")
+        
+        # Now separate matched indices from excluded indices
+        for var, indices in match["variables"].items():
+            if var in excluded_vars:
+                excluded_indices.update(indices)
+            else:
+                matched_indices.extend(indices)
+        
         matched_indices = sorted(set(matched_indices))  # Use set to remove duplicates
+        excluded_indices = sorted(excluded_indices)
         
-        print(f"Processing match {match_number}, indices: {matched_indices}")
+        print(f"Processing match {match_number}, included indices: {matched_indices}")
+        if excluded_indices:
+            print(f"Excluded indices: {excluded_indices}")
         
-        # Create context for the match
+        # Create context for the match - includes ALL rows for measure calculation
         context = RowContext()
         context.rows = rows
         context.variables = match["variables"]
@@ -152,15 +182,7 @@ class EnhancedMatcher:
             for subset_name, component_vars in self.subsets.items():
                 context.subsets[subset_name] = component_vars
         
-        # Handle empty match case
-        if match.get("is_empty", False) and not matched_indices:
-            if match["start"] < len(rows):
-                empty_result = self._process_empty_match(match["start"], rows, measures, match_number)
-                results.append(empty_result)
-                print(f"Added empty match at index {match['start']}")
-            return results
-        
-        # Process each matched row individually
+        # Process each matched row individually (excluding excluded rows)
         for idx in matched_indices:
             if idx >= len(rows):
                 continue
@@ -195,6 +217,15 @@ class EnhancedMatcher:
             print(f"Added row {idx} to results")
         
         return results
+
+    
+    def _is_excluded(self, row_idx: int, match_start: int, exclude_ranges: List[Tuple[int, int]]) -> bool:
+        """Check if a row is in an excluded range."""
+        if not exclude_ranges:
+            return False
+            
+        rel_idx = row_idx - match_start
+        return any(start <= rel_idx <= end for start, end in exclude_ranges)
 
 
     def _process_one_row_match(self, match, rows, measures, match_number):

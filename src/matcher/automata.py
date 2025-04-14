@@ -14,15 +14,17 @@ class Transition:
     target: int
     variable: Optional[str] = None
 
+# In NFAState class (src/matcher/automata.py):
 class NFAState:
+
     def __init__(self):
         self.transitions: List[Transition] = []
-        self.epsilon: List[int] = []  # Epsilon transitions (no input consumed)
-        self.variable: Optional[str] = None
+        self.epsilon: List[int] = []
+        self.variable: Optional[str] = None  # Initialize as None
         self.is_excluded: bool = False
         self.is_anchor: bool = False
         self.anchor_type: Optional[PatternTokenType] = None
-        
+    
     def add_transition(self, condition: ConditionFn, target: int, variable: Optional[str] = None):
         self.transitions.append(Transition(condition, target, variable))
 
@@ -216,6 +218,9 @@ class NFABuilder:
         
         return start, end
     
+    # In NFABuilder class (src/matcher/automata.py):
+
+        # In NFABuilder._process_exclusion method
     def _process_exclusion(self, tokens: List[PatternToken], idx: List[int], define: Dict[str, str]) -> Tuple[int, int]:
         """Process an exclusion pattern fragment."""
         # Remember exclusion start position
@@ -247,6 +252,7 @@ class NFABuilder:
             idx[0] += 1
         
         return excl_start, excl_end
+
     
     # In src/matcher/automata.py
     def create_var_states(self, var: str, define: Dict[str, str]) -> Tuple[int, int]:
@@ -373,7 +379,7 @@ class NFA:
         self.accept = accept
         self.states = states
         self.exclusion_ranges = exclusion_ranges or []
-
+    
     def epsilon_closure(self, state_indices: List[int]) -> List[int]:
         """Compute epsilon closure for given states."""
         closure = set(state_indices)

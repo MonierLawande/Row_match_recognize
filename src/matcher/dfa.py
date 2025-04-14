@@ -1,8 +1,9 @@
 # src/matcher/dfa.py
 
-from typing import List, Dict, FrozenSet, Set, Any, Optional
-from collections import deque
+from typing import List, Dict, FrozenSet, Set, Any, Optional, Tuple
+from dataclasses import dataclass, field
 from src.matcher.automata import NFA, NFAState, Transition
+from src.matcher.pattern_tokenizer import PatternTokenType
 
 FAIL_STATE = -1
 
@@ -12,12 +13,12 @@ class DFAState:
         self.is_accept = is_accept
         self.transitions: List[Transition] = []
         self.variables: Set[str] = set()
-        self.excluded_variables: Set[str] = set()
+        self.excluded_variables: Set[str] = set()  # Initialize as empty set
         self.is_anchor: bool = False
         self.anchor_type = None
 
 class DFA:
-    def __init__(self, start: int, states: List[DFAState], exclusion_ranges: List = None):
+    def __init__(self, start: int, states: List[DFAState], exclusion_ranges: List[Tuple[int, int]] = None):
         self.start = start
         self.states = states
         self.exclusion_ranges = exclusion_ranges or []
@@ -48,16 +49,17 @@ class DFABuilder:
         # Add variables and anchors from NFA states
         for nfa_state in start_set:
             if hasattr(self.nfa.states[nfa_state], 'variable') and self.nfa.states[nfa_state].variable:
-                start_dfa.variables.add(self.nfa.states[nfa_state].variable)
+                var_name = self.nfa.states[nfa_state].variable
+                if var_name is not None:  # Only add non-None variables
+                    start_dfa.variables.add(var_name)
+                    # Copy exclusion status
+                    if hasattr(self.nfa.states[nfa_state], 'is_excluded') and self.nfa.states[nfa_state].is_excluded:
+                        start_dfa.excluded_variables.add(var_name)
             
             # Copy anchor information
             if hasattr(self.nfa.states[nfa_state], 'is_anchor') and self.nfa.states[nfa_state].is_anchor:
                 start_dfa.is_anchor = True
                 start_dfa.anchor_type = self.nfa.states[nfa_state].anchor_type
-            
-            # Copy exclusion status
-            if hasattr(self.nfa.states[nfa_state], 'is_excluded') and self.nfa.states[nfa_state].is_excluded:
-                start_dfa.excluded_variables.add(self.nfa.states[nfa_state].variable)
         
         dfa_states.append(start_dfa)
         state_map[start_set] = 0
@@ -81,7 +83,7 @@ class DFABuilder:
             
             # For each variable, create a DFA transition
             for var, transitions in var_transitions.items():
-                # Create a transition function that combines all conditions using closure to avoid late binding issues
+                # Create a transition function that combines all conditions
                 def make_condition(transitions_list):
                     return lambda row, ctx: any(t.condition(row, ctx) for t in transitions_list)
                 
@@ -105,19 +107,20 @@ class DFABuilder:
                     
                     target_dfa = DFAState(target_set, is_accept)
                     
-                    # Copy variables and anchors from NFA states
+                    # Copy variables, anchors, and exclusion info from NFA states
                     for nfa_state in target_set:
                         if hasattr(self.nfa.states[nfa_state], 'variable') and self.nfa.states[nfa_state].variable:
-                            target_dfa.variables.add(self.nfa.states[nfa_state].variable)
+                            var_name = self.nfa.states[nfa_state].variable
+                            if var_name is not None:  # Only add non-None variables
+                                target_dfa.variables.add(var_name)
+                                # Copy exclusion status
+                                if hasattr(self.nfa.states[nfa_state], 'is_excluded') and self.nfa.states[nfa_state].is_excluded:
+                                    target_dfa.excluded_variables.add(var_name)
                         
                         # Copy anchor information
                         if hasattr(self.nfa.states[nfa_state], 'is_anchor') and self.nfa.states[nfa_state].is_anchor:
                             target_dfa.is_anchor = True
                             target_dfa.anchor_type = self.nfa.states[nfa_state].anchor_type
-                        
-                        # Copy exclusion information
-                        if hasattr(self.nfa.states[nfa_state], 'is_excluded') and self.nfa.states[nfa_state].is_excluded:
-                            target_dfa.excluded_variables.add(self.nfa.states[nfa_state].variable)
                     
                     dfa_states.append(target_dfa)
                     queue.append(target_set)
@@ -133,7 +136,8 @@ class DFABuilder:
         for i, state in enumerate(dfa_states):
             transitions_str = ", ".join([f"{t.variable} → {t.target}" for t in state.transitions])
             acceptance_str = "Accept" if state.is_accept else "Non-accept"
-            vars_str = ", ".join(state.variables) if state.variables else "None"
-            print(f"  State {i}: {acceptance_str}, Variables: {vars_str}, Transitions: {transitions_str}")
+            vars_str = ", ".join(sorted(state.variables)) if state.variables else "None"
+            excl_str = ", ".join(sorted(state.excluded_variables)) if state.excluded_variables else "None"
+            print(f"  State {i}: {acceptance_str}, Variables: {vars_str}, Excluded: {excl_str}, Transitions: {transitions_str}")
         
         return DFA(0, dfa_states, self.nfa.exclusion_ranges)

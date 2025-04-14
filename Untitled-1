@@ -35,3 +35,19 @@ SUBSET/Union Variables: We've implemented basic support but need more testing sc
 
 
 
+CLASSIFIER Function: The spec mentions the CLASSIFIER() function, which returns the pattern variable associated with a row. This doesn't appear to be fully implemented yet.
+
+Pattern Exclusion Syntax: The {- pattern -} syntax for excluding parts of a match from output with ALL ROWS PER MATCH isn't evident in the implementation.
+
+Nested Navigation Functions: While there's code to support nested functions like PREV(FIRST(A.val)), the debug output doesn't show this being used, so additional testing might be needed.
+
+PERMUTE Syntax: The specification mentions PERMUTE(A, B, C) for matching components in any order, which might need implementation or testing.
+
+Pattern Anchors: The ^ and $ anchors for matching at partition start/end should be verified.
+
+Row Pattern Count Aggregation: Special syntax like count(A.*) for counting rows matched to a specific variable might need verification.
+
+Edge Cases:
+
+Empty matches handling needs verification
+WITH UNMATCHED ROWS option needs testing

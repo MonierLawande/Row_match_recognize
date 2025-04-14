@@ -56,7 +56,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     partition_by = mr_clause.partition_by.columns if mr_clause.partition_by else []
     order_by = [si.column for si in mr_clause.order_by.sort_items] if mr_clause.order_by else []
 
-    # Extract rows per match configuration - IMPROVED FIX HERE
+# Extract rows per match configuration
     rows_per_match = RowsPerMatch.ONE_ROW  # Default
     if mr_clause.rows_per_match:
         # Get the raw mode text
@@ -67,7 +67,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         clean_text = rows_per_match_text.upper().replace(" ", "")
         
         # Robust detection of ALL ROWS PER MATCH
-        if clean_text.startswith("ALL"):
+        if "ALL" in clean_text:
             if "WITHUNMATCHED" in clean_text:
                 rows_per_match = RowsPerMatch.ALL_ROWS_WITH_UNMATCHED
             elif "OMITEMPTY" in clean_text:
@@ -77,7 +77,12 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     
     print(f"Using rows_per_match mode: {rows_per_match}")
     
-    # Rest of the function remains the same...
+    # Validate pattern exclusion usage
+    if rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED:
+        pattern_text = mr_clause.pattern.pattern
+        if "{-" in pattern_text and "-}" in pattern_text:
+            raise ValueError("Pattern exclusions are not allowed with ALL ROWS PER MATCH WITH UNMATCHED ROWS")
+
    
     # Extract after match skip configuration
     skip_mode = SkipMode.PAST_LAST_ROW  # Default
@@ -182,13 +187,14 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         # Create matcher with all necessary parameters
         matcher = EnhancedMatcher(
-            dfa=dfa,
-            measures=measures,
-            measure_semantics=measure_semantics,  # Pass semantics to matcher
-            exclusion_ranges=nfa.exclusion_ranges,
-            after_match_skip=skip_mode,
-            subsets=subset_dict
-        )
+        dfa=dfa,
+        measures=measures,
+        measure_semantics=measure_semantics,
+        exclusion_ranges=nfa.exclusion_ranges,
+        after_match_skip=skip_mode,
+        subsets=subset_dict,
+        original_pattern=mr_clause.pattern.pattern  # Pass the original pattern
+    )
         
         # Find matches
         partition_results = matcher.find_matches(
