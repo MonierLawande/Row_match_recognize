@@ -354,6 +354,24 @@ class PatternClause:
 
     def update_from_defined(self, defined_vars: List[str], subset_vars: Dict[str, List[str]] = None):
         """Update pattern metadata based on defined variables."""
+        # Print the exact pattern value for debugging
+        print(f"Pattern value: '{self.pattern}'")
+        
+        # More robust check for empty pattern - handles whitespace variations
+        is_empty_pattern = self.pattern.strip() == "()" or re.match(r'^\s*\(\s*\)\s*$', self.pattern)
+        
+        # Add special handling for empty patterns
+        if is_empty_pattern:
+            print("Empty pattern detected - allowing any variable definition")
+            # For empty patterns, any variable is valid since empty patterns don't have variables
+            self.metadata = {
+                "variables": [],
+                "base_variables": [],
+                "empty_pattern": True,
+                "allows_any_variable": True  # Special flag for validation
+            }
+            return
+        
         # Re-tokenize with defined variables as guidance
         cleaned = self._clean_pattern(self.pattern)
         tokens = self._tokenize_pattern(cleaned, defined_vars)
@@ -383,17 +401,32 @@ class PatternClause:
                     if subset_name in defined_set:
                         current_base_vars.add(subset_name)
         
-        # Check for undefined variables
+        # Print debug info
+        print(f"Defined variables: {defined_set}")
+        print(f"Current base variables: {current_base_vars}")
+        
+        # Check for undefined variables - skip this check for empty patterns
         if not defined_set.issubset(current_base_vars):
+            # Double-check if pattern might be empty but not caught by our regex
+            if len(cleaned) == 0 or cleaned == "()":
+                print("Pattern determined to be empty after cleaning - allowing any variable definition")
+                self.metadata = {
+                    "variables": [],
+                    "base_variables": [],
+                    "empty_pattern": True,
+                    "allows_any_variable": True
+                }
+                return
+                
             extra_vars = defined_set - current_base_vars
             raise ValueError(f"Defined variables {extra_vars} not found in pattern or subsets")
-        
+
         self.metadata = {
             "variables": full_variables,
             "base_variables": base_variables
         }
 
-        
+
     def __repr__(self):
         return f"PatternClause(pattern='{self.pattern}', metadata={self.metadata})"
 @dataclass

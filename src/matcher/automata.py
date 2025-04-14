@@ -248,6 +248,7 @@ class NFABuilder:
         
         return excl_start, excl_end
     
+    # In src/matcher/automata.py
     def create_var_states(self, var: str, define: Dict[str, str]) -> Tuple[int, int]:
         """Create states for a pattern variable."""
         start = self.new_state()
@@ -255,13 +256,15 @@ class NFABuilder:
         
         # Get condition from DEFINE clause or use TRUE
         condition = define.get(var, "TRUE")
+        print(f"Creating transition for variable '{var}' with condition: '{condition}'")
         condition_fn = compile_condition(condition)
         
         # Create transition with condition
         self.states[start].add_transition(condition_fn, end, var)
-        self.states[start].is_excluded = self.current_exclusion
+        self.states[start].variable = var  # Mark state with variable name
         
         return start, end
+
     
     def _apply_quantifier(self, 
                         start: int, 

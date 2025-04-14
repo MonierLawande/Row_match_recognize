@@ -9,49 +9,81 @@ class MeasureEvaluator:
     def __init__(self, context: RowContext, final: bool = True):
         self.context = context
         self.final = final
+        self.original_expr = None
 
-    def evaluate(self, expr: str) -> Any:
-        """Evaluate a measure expression with running/final semantics."""
-        print(f"Evaluating expression: {expr}")
+    def evaluate(self, expr: str, semantics: str = None) -> Any:
+        """Evaluate a measure expression with proper RUNNING/FINAL semantics."""
+        # Use passed semantics or instance default
+        is_running = (semantics == 'RUNNING') if semantics else not self.final
+        
+        print(f"Evaluating expression: {expr} with {('FINAL' if not is_running else 'RUNNING')} semantics")
         print(f"Context variables: {self.context.variables}")
         print(f"Number of rows: {len(self.context.rows)}")
+        print(f"Current index: {self.context.current_idx}")
         
-        # Check for RUNNING/FINAL keywords
-        is_running = not self.final
+        # Store original expression for reference
+        self.original_expr = expr
+        
+        # Ensure current_idx is always defined and valid
+        if not hasattr(self.context, 'current_idx') or self.context.current_idx is None:
+            self.context.current_idx = 0
+        
+        if len(self.context.rows) > 0 and self.context.current_idx >= len(self.context.rows):
+            self.context.current_idx = len(self.context.rows) - 1
+            
+        # Special handling for MATCH_NUMBER
+        if expr.upper().strip() == "MATCH_NUMBER()":
+            return self.context.match_number
+
+        # Remove RUNNING/FINAL prefix if present in the expression
         if expr.upper().startswith("RUNNING "):
             is_running = True
             expr = expr[8:].strip()
         elif expr.upper().startswith("FINAL "):
             is_running = False
             expr = expr[6:].strip()
+            
+        # Handle non-aggregation column references
+        if not any(func in expr.upper() for func in ["COUNT", "SUM", "AVG", "MIN", "MAX", "FIRST", "LAST", "PREV", "NEXT"]):
+            # Simple column reference
+            if not any(c in expr for c in "().*+-/"):
+                # In FINAL mode or ONE ROW PER MATCH, use the final row's value
+                if not is_running:
+                    # Use the final row's value from the pattern variables
+                    for var, indices in self.context.variables.items():
+                        if indices:
+                            # Get the last row matched to any variable
+                            last_idx = max(indices)
+                            if last_idx < len(self.context.rows):
+                                return self.context.rows[last_idx].get(expr)
+                # In RUNNING mode, use the current row's value
+                return self.context.rows[self.context.current_idx].get(expr)
         
-        # Check for navigation functions first
+        # Check for navigation functions
         if any(expr.upper().startswith(f"{func}(") for func in ["FIRST", "LAST", "PREV", "NEXT"]):
             return self._evaluate_navigation(expr, is_running)
-        
-        # Check for nested navigation functions
-        nested_pattern = r'(PREV|NEXT)\s*\(\s*(FIRST|LAST)\s*\('
-        if re.match(nested_pattern, expr.upper()):
-            return self._evaluate_navigation(expr, is_running)
-        
+            
         # Check for aggregate functions
         agg_match = re.match(r'([A-Z]+)\((.+)\)', expr, re.IGNORECASE)
         if agg_match:
             func_name = agg_match.group(1).lower()
             args_str = agg_match.group(2)
             return self._evaluate_aggregate(func_name, args_str, is_running)
-        
-        # Direct column reference from current row
-        if self.context.rows:
+            
+        # Try to evaluate as a raw expression (for math expressions)
+        try:
+            # Use a simple formula evaluator or fall back to the current row value
             return self.context.rows[self.context.current_idx].get(expr)
-        
-        return None
+        except Exception as e:
+            print(f"Error evaluating expression '{expr}': {e}")
+            return None
+
 
     def _evaluate_navigation(self, expr: str, is_running: bool) -> Any:
-        """Evaluate navigation functions like FIRST(), LAST(), PREV(), NEXT() with robust nested support"""
+        """Evaluate navigation functions with comprehensive support."""
         print(f"Evaluating navigation function: {expr}")
         
-        # Check for nested navigation pattern: PREV(FIRST(...))/NEXT(LAST(...))
+        # Handle nested navigation functions (e.g., PREV(FIRST(A.val)))
         nested_pattern = r'(PREV|NEXT)\s*\(\s*(FIRST|LAST)\s*\('
         if re.match(nested_pattern, expr.upper()):
             match = re.match(r'(PREV|NEXT)\s*\(\s*(FIRST|LAST)\s*\(([^)]+)\)\s*(?:,\s*(\d+))?\s*\)', expr, re.IGNORECASE)
@@ -61,54 +93,38 @@ class MeasureEvaluator:
                 
                 print(f"Processing nested navigation: {outer_func}({inner_func}({inner_args}), {steps})")
                 
-                # First evaluate the inner function to get the value
-                var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', inner_args)
+                # Parse the inner args - expecting pattern_var.column
+                var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', inner_args)
                 if var_col_match:
                     var = var_col_match.group(1)
                     col = var_col_match.group(2)
                     
-                    # Get indices of rows matching the variable
-                    var_indices = self.context.variables.get(var, [])
+                    # Get all rows matched to the pattern variable
+                    var_indices = self._get_var_indices(var)
                     
                     if var_indices:
                         target_idx = None
-                        if inner_func.upper() == "FIRST":
-                            target_idx = min(var_indices)  # First index
-                        elif inner_func.upper() == "LAST":
-                            target_idx = max(var_indices)  # Last index
-                        
-                        if target_idx is not None:
-                            # Navigate from the appropriate index
-                            if outer_func.upper() == "PREV":
-                                nav_idx = target_idx - steps
-                                if 0 <= nav_idx < len(self.context.rows):
-                                    return self.context.rows[nav_idx].get(col)
-                            elif outer_func.upper() == "NEXT":
-                                nav_idx = target_idx + steps
-                                if 0 <= nav_idx < len(self.context.rows):
-                                    return self.context.rows[nav_idx].get(col)
-                    
-                    # Debug info
-                    print(f"  var: {var}, col: {col}, var_indices: {var_indices}")
-                    if var_indices:
+                        # Use first or last matched row
                         if inner_func.upper() == "FIRST":
                             target_idx = min(var_indices)
-                        else:
+                        elif inner_func.upper() == "LAST":
                             target_idx = max(var_indices)
-                        print(f"  target_idx: {target_idx}")
                         
-                        if outer_func.upper() == "PREV":
-                            nav_idx = target_idx - steps
-                            print(f"  nav_idx: {nav_idx}, valid: {0 <= nav_idx < len(self.context.rows)}")
-                        else:
-                            nav_idx = target_idx + steps
-                            print(f"  nav_idx: {nav_idx}, valid: {0 <= nav_idx < len(self.context.rows)}")
-            
-            # If we get here, the nested function call didn't match the expected format
-            print(f"Warning: Failed to evaluate nested function: {expr}")
-            return None
+                        if target_idx is not None:
+                            # Navigate relative to the target row
+                            if outer_func.upper() == "PREV":
+                                nav_idx = target_idx - steps
+                            else:  # NEXT
+                                nav_idx = target_idx + steps
+                            
+                            # Check bounds
+                            if 0 <= nav_idx < len(self.context.rows):
+                                return self.context.rows[nav_idx].get(col)
+                    
+                    # Debug info for troubleshooting
+                    print(f"  var: {var}, col: {col}, var_indices: {var_indices}")
         
-        # Regular navigation functions
+        # Regular (non-nested) navigation functions
         func_match = re.match(r'([A-Z]+)\((.*?)\)', expr, re.IGNORECASE)
         if not func_match:
             return None
@@ -123,34 +139,100 @@ class MeasureEvaluator:
             if not args:
                 return None
                 
-            var_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.(.*)', args[0])
-            if var_match:
-                var = var_match.group(1)
-                col = var_match.group(2)
+            # Handle both A.col and just col formats
+            var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', args[0])
+            if var_col_match:
+                var = var_col_match.group(1)
+                col = var_col_match.group(2)
                 occurrence = int(args[1]) if len(args) > 1 else 0
                 
+                # Get indices of rows matched to the variable
+                var_indices = self._get_var_indices(var)
+                if not var_indices:
+                    return None
+                    
+                # Sort indices
+                var_indices = sorted(var_indices)
+                
+                # For RUNNING semantics, only consider rows up to current_idx
+                if is_running:
+                    var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+                    if not var_indices:
+                        return None
+                
                 if func_name == "FIRST":
-                    row = self.context.first(var, occurrence)
-                    return row.get(col) if row else None
+                    if occurrence < len(var_indices):
+                        row_idx = var_indices[occurrence]
+                        return self.context.rows[row_idx].get(col)
                 else:  # LAST
-                    row = self.context.last(var, occurrence)
-                    return row.get(col) if row else None
+                    if occurrence < len(var_indices):
+                        row_idx = var_indices[-(occurrence+1)]
+                        return self.context.rows[row_idx].get(col)
+                        
+            # If not var.col format, treat as a universal column
+            else:
+                col = args[0]
+                occurrence = int(args[1]) if len(args) > 1 else 0
+                
+                # Get all matched rows
+                matched_indices = []
+                for indices in self.context.variables.values():
+                    matched_indices.extend(indices)
+                
+                # Sort indices
+                matched_indices = sorted(matched_indices)
+                
+                # For RUNNING semantics, only consider rows up to current_idx
+                if is_running:
+                    matched_indices = [idx for idx in matched_indices if idx <= self.context.current_idx]
+                    if not matched_indices:
+                        return None
+                
+                if matched_indices:
+                    if func_name == "FIRST":
+                        if occurrence < len(matched_indices):
+                            row_idx = matched_indices[occurrence]
+                            return self.context.rows[row_idx].get(col)
+                    else:  # LAST
+                        if occurrence < len(matched_indices):
+                            row_idx = matched_indices[-(occurrence+1)]
+                            return self.context.rows[row_idx].get(col)
         
         elif func_name in ("PREV", "NEXT"):
             if not args:
                 return None
-                
+            
+            # Default to navigation relative to current row
+            current_idx = self.context.current_idx
             column = args[0]
             steps = int(args[1]) if len(args) > 1 else 1
             
             if func_name == "PREV":
-                row = self.context.prev(steps)
-                return row.get(column) if row else None
+                nav_idx = current_idx - steps
+                if 0 <= nav_idx < len(self.context.rows):
+                    return self.context.rows[nav_idx].get(column)
             else:  # NEXT
-                row = self.context.next(steps)
-                return row.get(column) if row else None
+                nav_idx = current_idx + steps
+                if 0 <= nav_idx < len(self.context.rows):
+                    return self.context.rows[nav_idx].get(column)
         
         return None
+
+    def _get_var_indices(self, var: str) -> List[int]:
+        """Get indices of rows matched to a variable or subset."""
+        # Direct variable
+        if var in self.context.variables:
+            return sorted(self.context.variables[var])
+        
+        # Check for subset variable
+        if hasattr(self.context, 'subsets') and var in self.context.subsets:
+            indices = []
+            for comp_var in self.context.subsets[var]:
+                if comp_var in self.context.variables:
+                    indices.extend(self.context.variables[comp_var])
+            return sorted(indices)
+        
+        return []
 
     def _evaluate_aggregate(self, func_name: str, args_str: str, is_running: bool) -> Any:
         """Evaluate aggregate functions like SUM, COUNT, etc."""
@@ -158,7 +240,12 @@ class MeasureEvaluator:
         
         # Handle COUNT(*) special case
         if func_name.lower() == 'count' and args_str.strip() in ('*', ''):
-            return len(self.context.rows)
+            if is_running:
+                # For RUNNING semantics, count rows up to current position
+                return self.context.current_idx + 1
+            else:
+                # For FINAL semantics, count all rows
+                return len(self.context.rows)
         
         # Parse variable and column references
         var_scope = None
@@ -177,8 +264,9 @@ class MeasureEvaluator:
             # Get rows matched to specific variable
             indices = self.context.variables.get(var_scope, [])
             if is_running:
+                # For RUNNING semantics, only consider rows up to current_idx
                 indices = [idx for idx in indices if idx <= self.context.current_idx]
-            rows_to_use = [self.context.rows[idx] for idx in sorted(indices)]
+            rows_to_use = [self.context.rows[idx] for idx in sorted(indices) if idx < len(self.context.rows)]
         else:
             # Use all rows up to current position if running
             if is_running:

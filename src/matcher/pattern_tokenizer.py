@@ -46,6 +46,8 @@ def parse_quantifier(quant: str) -> Tuple[int, Optional[int], bool]:
     return (1, 1, True)
 
 
+# src/matcher/pattern_tokenizer.py
+
 def tokenize_pattern(pattern: str) -> List[PatternToken]:
     """Enhanced tokenizer with full syntax support and better handling of nested structures."""
     tokens = []
@@ -109,6 +111,15 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
                     tokens.append(PatternToken(PatternTokenType.LITERAL, var))
             continue
             
+        # Handle pattern exclusions
+        elif i+1 < len(pattern) and pattern[i:i+2] == '{-':
+            tokens.append(PatternToken(PatternTokenType.EXCLUSION_START, '{-'))
+            i += 2
+            
+        elif i+1 < len(pattern) and pattern[i:i+2] == '-}':
+            tokens.append(PatternToken(PatternTokenType.EXCLUSION_END, '-}'))
+            i += 2
+            
         # Handle grouping
         elif char == '(':
             tokens.append(PatternToken(PatternTokenType.GROUP_START, '('))
@@ -140,9 +151,8 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
                     
             if next_pos > i + 1:
                 quant = pattern[i+1:next_pos]
-                min_rep, max_rep, greedy = parse_quantifier(quant)
                 token.quantifier = quant
-                token.greedy = greedy
+                token.greedy = not quant.endswith('?')
                 i = next_pos
             else:
                 i += 1
@@ -152,15 +162,6 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
         elif char == '|':
             tokens.append(PatternToken(PatternTokenType.ALTERNATION, '|'))
             i += 1
-            
-        # Handle exclusion
-        elif i+1 < len(pattern) and pattern[i:i+2] == '{-':
-            tokens.append(PatternToken(PatternTokenType.EXCLUSION_START, '{-'))
-            i += 2
-            
-        elif i+1 < len(pattern) and pattern[i:i+2] == '-}':
-            tokens.append(PatternToken(PatternTokenType.EXCLUSION_END, '-}'))
-            i += 2
             
         # Handle end anchor
         elif char == '$':
@@ -185,6 +186,7 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
                     i += 1
                     # Check for reluctant quantifier
                     if i < len(pattern) and pattern[i] == '?':
+                        greedy = False
                         i += 1
                 elif pattern[i] == '{':
                     # Find matching closing brace
@@ -195,10 +197,10 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
                     
                     # Check for reluctant quantifier after brace
                     if i < len(pattern) and pattern[i] == '?':
+                        greedy = False
                         i += 1
                 
                 quant = pattern[quant_start:i]
-                min_rep, max_rep, greedy = parse_quantifier(quant)
             
             tokens.append(PatternToken(
                 PatternTokenType.LITERAL,

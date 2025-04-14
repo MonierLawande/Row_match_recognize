@@ -114,54 +114,92 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         self.ast = MatchRecognizeClause()
 
     def visitPatternRecognition(self, ctx: TrinoParser.PatternRecognitionContext):
+        """Extract pattern recognition components in the correct order."""
         logger.debug("Visiting PatternRecognition context")
-        if ctx.PARTITION_():
+        
+        # 1. PARTITION BY (optional)
+        if hasattr(ctx, 'PARTITION_') and ctx.PARTITION_():
             self.ast.partition_by = self.extract_partition_by(ctx)
             logger.debug(f"Extracted PARTITION BY: {self.ast.partition_by}")
-        if ctx.ORDER_():
+        
+        # 2. ORDER BY (optional)
+        if hasattr(ctx, 'ORDER_') and ctx.ORDER_():
             self.ast.order_by = self.extract_order_by(ctx)
             logger.debug(f"Extracted ORDER BY: {self.ast.order_by}")
-        if ctx.MEASURES_():
+        
+        # 3. MEASURES (optional)
+        if hasattr(ctx, 'MEASURES_') and ctx.MEASURES_():
             self.ast.measures = self.extract_measures(ctx)
             logger.debug(f"Extracted MEASURES: {self.ast.measures}")
-        if ctx.rowsPerMatch():
+        
+        # 4. ROWS PER MATCH (optional)
+        if hasattr(ctx, 'rowsPerMatch') and ctx.rowsPerMatch():
             self.ast.rows_per_match = self.extract_rows_per_match(ctx.rowsPerMatch())
             logger.debug(f"Extracted ROWS PER MATCH: {self.ast.rows_per_match}")
-        if ctx.AFTER_():
+        
+        # 5. AFTER MATCH SKIP (optional)
+        if hasattr(ctx, 'AFTER_') and ctx.AFTER_():
             self.ast.after_match_skip = self.extract_after_match_skip(ctx)
             logger.debug(f"Extracted AFTER MATCH SKIP: {self.ast.after_match_skip}")
+        
+        # 6. PATTERN (required)
         if ctx.PATTERN_():
             self.ast.pattern = self.extract_pattern(ctx)
             logger.debug(f"Extracted Pattern: {self.ast.pattern}")
-        if ctx.SUBSET_():
+        else:
+            raise ParserError("PATTERN clause is required in MATCH_RECOGNIZE",
+                            line=ctx.start.line, column=ctx.start.column)
+        
+        # 7. SUBSET (optional)
+        if hasattr(ctx, 'SUBSET_') and ctx.SUBSET_():
             self.ast.subset = self.extract_subset(ctx)
             logger.debug(f"Extracted SUBSET: {self.ast.subset}")
-        if ctx.DEFINE_():
+        
+        # 8. DEFINE (optional)
+        if hasattr(ctx, 'DEFINE_') and ctx.DEFINE_():
             self.ast.define = self.extract_define(ctx)
             logger.debug(f"Extracted DEFINE: {self.ast.define}")
-
-        # Extract subset information for pattern variable validation
-        subset_vars = {}
-        if self.ast.subset:
-            for subset_clause in self.ast.subset:
-                subset_text = subset_clause.subset_text
-                match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\((.*?)\)', subset_text)
-                if match:
-                    subset_name = match.group(1)
-                    components = [c.strip() for c in match.group(2).split(',')]
-                    subset_vars[subset_name] = components
         
-        # Now pass subset_vars to update_from_defined
+        # Update pattern with definitions if needed
         if self.ast.define and self.ast.pattern:
             defined_vars = [d.variable for d in self.ast.define.definitions]
-            self.ast.pattern.update_from_defined(defined_vars, subset_vars)
+            self.ast.pattern.update_from_defined(defined_vars)
             logger.debug(f"Updated Pattern tokens: {self.ast.pattern.metadata}")
         
+        # Run validations
         self.validate_clauses(ctx)
         self.validate_identifiers(ctx)
         self.validate_pattern_variables_defined(ctx)
         self.validate_function_usage(ctx)
+        
         return self.ast
+
+    def _parse_skip_text(self, skip_text: str) -> AfterMatchSkipClause:
+        """Parse the AFTER MATCH SKIP clause text extracted from raw SQL."""
+        skip_text = skip_text.strip().upper()
+        
+        if "PAST LAST ROW" in skip_text:
+            return AfterMatchSkipClause('PAST LAST ROW', raw_value=f"AFTER MATCH SKIP {skip_text}")
+        
+        elif "TO NEXT ROW" in skip_text:
+            return AfterMatchSkipClause('TO NEXT ROW', raw_value=f"AFTER MATCH SKIP {skip_text}")
+        
+        elif "TO FIRST" in skip_text:
+            # Extract the variable after "TO FIRST"
+            match = re.search(r'TO\s+FIRST\s+([A-Za-z_][A-Za-z0-9_]*)', skip_text)
+            if match:
+                target_var = match.group(1)
+                return AfterMatchSkipClause('TO FIRST', target_var, raw_value=f"AFTER MATCH SKIP {skip_text}")
+        
+        elif "TO LAST" in skip_text:
+            # Extract the variable after "TO LAST" 
+            match = re.search(r'TO\s+LAST\s+([A-Za-z_][A-Za-z0-9_]*)', skip_text)
+            if match:
+                target_var = match.group(1)
+                return AfterMatchSkipClause('TO LAST', target_var, raw_value=f"AFTER MATCH SKIP {skip_text}")
+        
+        # Default to PAST LAST ROW if we can't determine the mode
+        return AfterMatchSkipClause('PAST LAST ROW', raw_value=f"AFTER MATCH SKIP {skip_text}")
 
     def extract_partition_by(self, ctx):
         return PartitionByClause([post_process_text(expr.getText()) for expr in ctx.partition])
@@ -324,7 +362,33 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             logger.warning(f"Using raw AFTER MATCH SKIP value: {raw_text}")
             return AfterMatchSkipClause(raw_text, raw_value=raw_text)
 
-    
+    def extract_define(self, ctx: TrinoParser.PatternRecognitionContext) -> DefineClause:
+        """Extract and parse the DEFINE clause from pattern recognition context."""
+        definitions = []
+        
+        # Check if DEFINE clause exists
+        if ctx.DEFINE_() and ctx.variableDefinition():
+            for var_def in ctx.variableDefinition():
+                # Get variable name
+                variable = var_def.identifier().getText() if var_def.identifier() else None
+                
+                # Get condition expression
+                if var_def.expression():
+                    # Get the original condition text directly from the input stream
+                    start = var_def.expression().start.start
+                    stop = var_def.expression().stop.stop
+                    condition = var_def.expression().start.getInputStream().getText(start, stop)
+                    
+                    # Special handling for TRUE/FALSE constants - normalize casing
+                    if condition.upper() == "TRUE" or condition.upper() == "FALSE":
+                        condition = condition.upper()
+                    
+                    # Add to definitions if both variable and condition are present
+                    if variable and condition:
+                        definitions.append(Define(variable, condition))
+        
+        return DefineClause(definitions)
+  
     def extract_pattern(self, ctx: TrinoParser.PatternRecognitionContext) -> PatternClause:
         """
         Extract the pattern from the pattern recognition context.
@@ -338,6 +402,17 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             stop = ctx.rowPattern().stop.stop
             original_pattern = ctx.rowPattern().start.getInputStream().getText(start, stop)
             
+            # Check for empty pattern '()'
+            if original_pattern.strip() == '()':
+                pattern_clause = PatternClause(original_pattern)
+                pattern_clause.metadata = {
+                    "variables": [],
+                    "base_variables": [],
+                    "empty_pattern": True,
+                    "allows_any_variable": True
+                }
+                return pattern_clause
+                
             # Remove only the outer parentheses if they exist
             if original_pattern.startswith('(') and original_pattern.endswith(')'):
                 pattern_text = original_pattern[1:-1]
@@ -375,36 +450,14 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             return pattern_clause
         return PatternClause("")  # Return empty pattern clause if no pattern found
 
-    def extract_subset(self, ctx):
-        return [SubsetClause(post_process_text(sd.getText())) for sd in ctx.subsetDefinition()]
 
-    def extract_define(self, ctx):
-        definitions = []
-        for vd in ctx.variableDefinition():
-            # Get the full text of the variable definition with spaces preserved
-            var_start = vd.start.start
-            var_stop = vd.stop.stop
-            full_text = vd.start.getInputStream().getText(var_start, var_stop)
-            
-            # Extract variable name and condition
-            var_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s+AS\s+(.*)', full_text, re.IGNORECASE)
-            if var_match:
-                var_name = var_match.group(1).strip()
-                condition = var_match.group(2).strip()
-                definitions.append(Define(var_name, condition))
-            else:
-                definitions.append(Define(full_text.strip(), ""))
-        
-        return DefineClause(definitions)
-
-
-    # Updated validation method for src/parser/match_recognize_extractor.py
     def validate_clauses(self, ctx):
+        """Validate required clauses and relationships between clauses."""
         if self.ast.define and not self.ast.pattern:
             raise ParserError("PATTERN clause is required when DEFINE is used.", 
                             line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         
-        if self.ast.after_match_skip and self.ast.pattern:
+        if self.ast.after_match_skip and self.ast.pattern and not self.ast.pattern.metadata.get("empty_pattern", False):
             mode = self.ast.after_match_skip.mode
             target_var = self.ast.after_match_skip.target_variable
             
@@ -427,6 +480,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                             line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
                         )
         
+        # Skip some validations for empty patterns
+        if not self.ast.pattern or self.ast.pattern.metadata.get("empty_pattern", False):
+            return
+            
         self.validate_pattern_clause(ctx)
 
 
@@ -460,6 +517,12 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
 
     def validate_identifiers(self, ctx):
         """Validate that all defined variables are found in the pattern or as subset components."""
+        # Special case for empty patterns - skip validation
+        if self.ast.pattern and (self.ast.pattern.metadata.get("empty_pattern", False) or 
+                                self.ast.pattern.pattern.strip() == "()"):
+            logger.debug("Empty pattern detected in validate_identifiers - skipping validation")
+            return
+            
         pattern_vars = set(self.ast.pattern.metadata.get("base_variables", [])) if self.ast.pattern else set()
         
         # Extract subset component variables
@@ -481,20 +544,34 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         # Check that all defined variables are valid
         for definition in self.ast.define.definitions if self.ast.define else []:
             if definition.variable not in valid_vars:
+                # Skip this check for empty pattern
+                if self.ast.pattern and (self.ast.pattern.pattern.strip() == "()" or 
+                                        self.ast.pattern.metadata.get("empty_pattern", False)):
+                    return
+                    
                 raise ParserError(
                     f"Define variable '{definition.variable}' not found in pattern or subset components.", 
                     line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
                 )
+
 
     def validate_pattern_variables_defined(self, ctx):
         """Validate pattern variable definitions and references."""
         if not self.ast.pattern:
             return
         
+        # Special case for empty patterns - skip validation using robust detection
+        pattern_text = self.ast.pattern.pattern.strip()
+        is_empty_pattern = pattern_text == "()" or re.match(r'^\s*\(\s*\)\s*$', pattern_text)
+        
+        if is_empty_pattern or self.ast.pattern.metadata.get("empty_pattern", False):
+            logger.debug("Empty pattern detected - skipping variable validation")
+            return
+            
         # Get pattern variables and defined variables (case-sensitive)
         pattern_vars = set(self.ast.pattern.metadata.get("base_variables", []))
         defined_vars = {d.variable for d in self.ast.define.definitions} if self.ast.define else set()
-        
+
         # Define known functions that should NOT be considered as pattern variables
         known_functions = {'FIRST', 'LAST', 'PREV', 'NEXT', 'CLASSIFIER', 'MATCH_NUMBER', 
                         'ABS', 'ROUND', 'SQRT', 'POWER', 'CEILING', 'FLOOR', 'MOD'}
@@ -550,6 +627,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         # Check for extra definitions
         extra = defined_vars - pattern_vars - subset_components
         if extra:
+            # Special case for empty pattern: allow any definition variables
+            if self.ast.pattern and self.ast.pattern.pattern.strip() == "()":
+                return
+            # Otherwise raise error
             raise ParserError(f"Defined variable(s) {extra} not found in the PATTERN clause or as subset components.", 
                             line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         
@@ -558,9 +639,6 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         logger.debug(f"Referenced variables: {referenced_vars}")
         logger.debug(f"Defined variables: {defined_vars}")
         logger.debug(f"Subset variables: {subset_vars}")
-
-
-
 class FullQueryExtractor(TrinoParserVisitor):
     def __init__(self, original_query: str):
         self.original_query = original_query

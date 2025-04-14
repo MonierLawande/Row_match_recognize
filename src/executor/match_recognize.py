@@ -40,6 +40,7 @@ def extract_subset_dict(subsets):
                 subset_dict[subset_name] = components
     return subset_dict
 
+# Fix for the rows_per_match detection in match_recognize function
 def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     """
     Execute a MATCH_RECOGNIZE query against a Pandas DataFrame.
@@ -55,18 +56,29 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     partition_by = mr_clause.partition_by.columns if mr_clause.partition_by else []
     order_by = [si.column for si in mr_clause.order_by.sort_items] if mr_clause.order_by else []
 
-    # Extract rows per match configuration
+    # Extract rows per match configuration - IMPROVED FIX HERE
     rows_per_match = RowsPerMatch.ONE_ROW  # Default
     if mr_clause.rows_per_match:
-        rows_per_match_text = mr_clause.rows_per_match.raw_mode.upper()
-        if "ALL ROWS PER MATCH" in rows_per_match_text:
-            if "WITH UNMATCHED ROWS" in rows_per_match_text:
+        # Get the raw mode text
+        rows_per_match_text = mr_clause.rows_per_match.raw_mode
+        print(f"Raw rows_per_match text: {rows_per_match_text}")
+        
+        # Convert to uppercase and remove spaces for consistent comparison
+        clean_text = rows_per_match_text.upper().replace(" ", "")
+        
+        # Robust detection of ALL ROWS PER MATCH
+        if clean_text.startswith("ALL"):
+            if "WITHUNMATCHED" in clean_text:
                 rows_per_match = RowsPerMatch.ALL_ROWS_WITH_UNMATCHED
-            elif "OMIT EMPTY MATCHES" in rows_per_match_text:
+            elif "OMITEMPTY" in clean_text:
                 rows_per_match = RowsPerMatch.ALL_ROWS
             else:
                 rows_per_match = RowsPerMatch.ALL_ROWS_SHOW_EMPTY
-
+    
+    print(f"Using rows_per_match mode: {rows_per_match}")
+    
+    # Rest of the function remains the same...
+   
     # Extract after match skip configuration
     skip_mode = SkipMode.PAST_LAST_ROW  # Default
     skip_var = None
@@ -83,24 +95,39 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
 
     # Extract measures and other clauses
     measures = {}
+    measure_semantics = {}  # Store semantics separately
+    
     if mr_clause.measures:
         for m in mr_clause.measures.measures:
             # Handle special functions
             if m.expression.upper() == "CLASSIFIER()":
                 measures[m.alias] = "CLASSIFIER()"
+                # Default semantics for CLASSIFIER
+                measure_semantics[m.alias] = "RUNNING" if rows_per_match != RowsPerMatch.ONE_ROW else "FINAL"
             elif m.expression.upper() == "MATCH_NUMBER()":
                 measures[m.alias] = "MATCH_NUMBER()"
+                # Default semantics for MATCH_NUMBER
+                measure_semantics[m.alias] = "RUNNING" if rows_per_match != RowsPerMatch.ONE_ROW else "FINAL"
             else:
-                # Handle RUNNING/FINAL prefixes
-                if m.metadata and 'semantics' in m.metadata:
-                    if m.metadata['semantics'] == 'RUNNING':
-                        measures[m.alias] = f"RUNNING {m.expression}"
-                    elif m.metadata['semantics'] == 'FINAL':
-                        measures[m.alias] = f"FINAL {m.expression}"
-                    else:
-                        measures[m.alias] = m.expression
+                # Store the expression without prefix
+                expr = m.expression
+                # Remove any RUNNING/FINAL prefix from the expression
+                if expr.upper().startswith("RUNNING "):
+                    expr = expr[8:].strip()
+                    measure_semantics[m.alias] = "RUNNING"
+                elif expr.upper().startswith("FINAL "):
+                    expr = expr[6:].strip()
+                    measure_semantics[m.alias] = "FINAL"
+                elif m.metadata and 'semantics' in m.metadata:
+                    measure_semantics[m.alias] = m.metadata['semantics']
                 else:
-                    measures[m.alias] = m.expression
+                    # Default semantics based on rows_per_match
+                    measure_semantics[m.alias] = "RUNNING" if rows_per_match != RowsPerMatch.ONE_ROW else "FINAL"
+                
+                measures[m.alias] = expr
+    
+    # Print measure semantics for debugging
+    print(f"Measure semantics: {measure_semantics}")
 
     define = {d.variable: d.condition for d in mr_clause.define.definitions} if mr_clause.define else {}
     subsets = mr_clause.subset if mr_clause.subset else []
@@ -115,9 +142,12 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         skip_mode=skip_mode,
         skip_var=skip_var,
         show_empty=show_empty,
-        include_unmatched=(rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED)
+        include_unmatched=(rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED),
     )
-    
+
+    # Debug output to check configuration
+    print(f"Match config: rows_per_match={rows_per_match}, all_rows={rows_per_match != RowsPerMatch.ONE_ROW}")
+
     # Process partitions
     results = []
     
@@ -154,6 +184,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         matcher = EnhancedMatcher(
             dfa=dfa,
             measures=measures,
+            measure_semantics=measure_semantics,  # Pass semantics to matcher
             exclusion_ranges=nfa.exclusion_ranges,
             after_match_skip=skip_mode,
             subsets=subset_dict
@@ -183,4 +214,16 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         columns.extend(['MATCH_NUMBER', 'IS_EMPTY_MATCH'])  # Add metadata columns
         return pd.DataFrame(columns=columns)
     
-    return pd.DataFrame(results)
+    # Return the results with columns in the original order plus measure columns
+    # This preserves column ordering from the input DataFrame
+    result_df = pd.DataFrame(results)
+    
+    # Re-order columns to put original columns first, then measures, then metadata
+    original_cols = [col for col in df.columns if col in result_df.columns]
+    measure_cols = [col for col in measures.keys() if col in result_df.columns]
+    meta_cols = ["MATCH_NUMBER", "IS_EMPTY_MATCH"]
+    other_cols = [col for col in result_df.columns 
+                 if col not in original_cols and col not in measure_cols and col not in meta_cols]
+    
+    ordered_cols = original_cols + measure_cols + meta_cols + other_cols
+    return result_df[ordered_cols]
