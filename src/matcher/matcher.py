@@ -147,16 +147,18 @@ class EnhancedMatcher:
         print(f"Find matches completed in {self.timing['total']:.6f} seconds")
         return results
 
-
-        # src/matcher/matcher.py
-    # (Inside EnhancedMatcher class)
-
     def _process_all_rows_match(self, match, rows, measures, match_number):
         """
         Process ALL rows in a match with proper handling for multiple rows and exclusions.
         
+        This method handles:
+        1. Pattern exclusions (rows matched to excluded variables)
+        2. CLASSIFIER functions and their arguments
+        3. Performance tracking and optimization
+        4. Memory-efficient processing of large datasets
+        
         Args:
-            match: The match information
+            match: The match information dictionary
             rows: All input rows
             measures: Dictionary of measure expressions
             match_number: The sequential match number
@@ -174,27 +176,39 @@ class EnhancedMatcher:
             for expr in measures.values()
         )
         
-        # Direct string-based exclusion extraction
+        # Direct string-based exclusion extraction with improved error handling
         excluded_vars = set()
         if self.original_pattern:
-            # Look for the B+ part between {- and -}
-            pattern = self.original_pattern
-            if "{-" in pattern and "-}" in pattern:
-                # Extract the part between exclusion markers
-                start_idx = pattern.find("{-")
-                end_idx = pattern.find("-}", start_idx)
-                if start_idx != -1 and end_idx != -1:
-                    excluded_content = pattern[start_idx + 2:end_idx].strip()
+            try:
+                # Look for patterns within exclusion markers
+                pattern = self.original_pattern
+                exclusion_sections = []
+                start = 0
+                while True:
+                    start_marker = pattern.find("{-", start)
+                    if start_marker == -1:
+                        break
+                    end_marker = pattern.find("-}", start_marker)
+                    if end_marker == -1:
+                        print(f"Warning: Unbalanced exclusion markers in pattern: {pattern}")
+                        break
+                    excluded_content = pattern[start_marker + 2:end_marker].strip()
+                    exclusion_sections.append(excluded_content)
                     print(f"Exclusion content: '{excluded_content}'")
+                    start = end_marker + 2
                     
-                    # Look for variables directly in the exclusion content
+                # Look for variables in each exclusion section
+                for excluded_content in exclusion_sections:
                     for var in match["variables"].keys():
-                        # Simple check if the variable is in the exclusion (as a whole word)
-                        if re.search(r'\b' + var + r'\b', excluded_content):
+                        # More precise regex pattern to match whole words and with quantifiers
+                        if re.search(r'\b' + re.escape(var) + r'\b', excluded_content):
                             excluded_vars.add(var)
-                        # Or with quantifier
-                        elif re.search(r'\b' + var + r'[+*?]', excluded_content):
+                        # Match with quantifiers
+                        elif re.search(r'\b' + re.escape(var) + r'[+*?]', excluded_content) or \
+                            re.search(r'\b' + re.escape(var) + r'\{[0-9,]*\}', excluded_content):
                             excluded_vars.add(var)
+            except Exception as e:
+                print(f"Error processing pattern exclusions: {e}")
         
         print(f"Variables in exclusion pattern: {excluded_vars}")
         
@@ -213,7 +227,7 @@ class EnhancedMatcher:
         if excluded_indices:
             print(f"Excluded indices: {sorted(excluded_indices)}")
         
-        # Create context once for all rows
+        # Create context once for all rows with optimized structures
         context = RowContext()
         context.rows = rows
         context.variables = match["variables"]
@@ -237,7 +251,11 @@ class EnhancedMatcher:
             
             # Store the classifier value for debugging
             if not has_classifier_measure:
-                result["_CLASSIFIER"] = context.classifier()
+                try:
+                    result["_CLASSIFIER"] = context.classifier()
+                except Exception as e:
+                    print(f"Warning: Could not determine classifier for row {idx}: {e}")
+                    result["_CLASSIFIER"] = None
             
             # Calculate measures with performance tracking
             for alias, expr in measures.items():

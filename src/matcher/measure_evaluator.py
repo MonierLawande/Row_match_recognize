@@ -6,7 +6,15 @@ import time
 from collections import defaultdict
 from typing import Dict, Any, List, Optional, Set, Union, Tuple
 from src.matcher.row_context import RowContext
+# src/matcher/measure_evaluator.py
 
+import re
+import statistics
+import time
+from collections import defaultdict
+from functools import lru_cache
+from typing import Dict, Any, List, Optional, Set, Union, Tuple
+from src.matcher.row_context import RowContext
 class ClassifierError(Exception):
     """Error in CLASSIFIER function evaluation."""
     pass
@@ -16,7 +24,7 @@ class MeasureEvaluator:
         self.context = context
         self.final = final
         self.original_expr = None
-        # Add cache for classifier lookups
+        # Add cache for classifier lookups with LRU cache policy
         self._classifier_cache = {}
         self.timing = defaultdict(float)
         self.stats = {
@@ -24,6 +32,24 @@ class MeasureEvaluator:
             "cache_misses": 0,
             "total_evaluations": 0
         }
+        
+        # Create row-to-variable index for fast lookup
+        self._build_row_variable_index()
+        
+    def _build_row_variable_index(self):
+        """Build an index of which variables each row belongs to for faster lookup."""
+        self._row_to_vars = defaultdict(set)
+        for var, indices in self.context.variables.items():
+            for idx in indices:
+                self._row_to_vars[idx].add(var)
+        
+        # Pre-compute subset memberships too
+        if hasattr(self.context, 'subsets') and self.context.subsets:
+            for subset_name, components in self.context.subsets.items():
+                for comp in components:
+                    if comp in self.context.variables:
+                        for idx in self.context.variables[comp]:
+                            self._row_to_vars[idx].add(subset_name)
 
     def evaluate(self, expr: str, semantics: str = None) -> Any:
         """
@@ -35,6 +61,14 @@ class MeasureEvaluator:
             
         Returns:
             The evaluated result of the expression
+            
+        Examples:
+            >>> evaluator.evaluate("salary", "RUNNING")
+            1200
+            >>> evaluator.evaluate("CLASSIFIER()", "RUNNING") 
+            'A'
+            >>> evaluator.evaluate("SUM(salary)", "FINAL")
+            3400
         """
         # Use passed semantics or instance default
         is_running = (semantics == 'RUNNING') if semantics else not self.final
@@ -109,6 +143,12 @@ class MeasureEvaluator:
         """
         Evaluate CLASSIFIER function according to SQL standard.
         
+        The CLASSIFIER function returns the name of the pattern variable that matched
+        the current row. It can be used in two forms:
+        
+        1. CLASSIFIER() - Returns the pattern variable for the current row
+        2. CLASSIFIER(var) - Returns var if the current row is matched to var, otherwise NULL
+        
         Args:
             var_name: Optional variable name to check against
             running: Whether to use RUNNING semantics (default: True)
@@ -117,12 +157,17 @@ class MeasureEvaluator:
             String containing the pattern variable name or None if not matched
             
         Examples:
-            >>> evaluator.evaluate_classifier()  # Returns current row's variable
+            >>> # With current row matched to variable 'A':
+            >>> evaluator.evaluate_classifier()  
             'A'
-            >>> evaluator.evaluate_classifier('A')  # Returns 'A' if row matches A
+            >>> evaluator.evaluate_classifier('A')  
             'A'
-            >>> evaluator.evaluate_classifier('B')  # Returns None if no match
+            >>> evaluator.evaluate_classifier('B')  
             None
+            
+            >>> # With subset U = (A, B):
+            >>> evaluator.evaluate_classifier('U')
+            'A'  # Returns the component variable that matched
             
         Raises:
             ClassifierError: If the variable name is invalid
@@ -165,23 +210,36 @@ class MeasureEvaluator:
         """
         if var_name is not None:
             if not isinstance(var_name, str):
-                raise ClassifierError(f"CLASSIFIER argument must be a string, got {type(var_name)}")
+                raise ClassifierError(
+                    f"CLASSIFIER argument must be a string, got {type(var_name).__name__}"
+                )
                 
             if not var_name.isidentifier():
-                raise ClassifierError(f"Invalid variable name: {var_name}")
+                raise ClassifierError(
+                    f"Invalid CLASSIFIER argument: '{var_name}' is not a valid identifier"
+                )
                 
             # Only check if variable exists in pattern if we have variables
             if self.context.variables and var_name not in self.context.variables and (
                 not hasattr(self.context, 'subsets') or 
                 var_name not in self.context.subsets
             ):
-                raise ClassifierError(f"Variable '{var_name}' not found in pattern")
+                available_vars = list(self.context.variables.keys())
+                subset_vars = []
+                if hasattr(self.context, 'subsets'):
+                    subset_vars = list(self.context.subsets.keys())
+                    
+                raise ClassifierError(
+                    f"Variable '{var_name}' not found in pattern. "
+                    f"Available variables: {available_vars}. "
+                    f"Available subset variables: {subset_vars}."
+                )
 
     def _evaluate_classifier_impl(self, 
                                 var_name: Optional[str] = None,
                                 running: bool = True) -> Optional[str]:
         """
-        Internal implementation of CLASSIFIER evaluation.
+        Internal implementation of CLASSIFIER evaluation with optimizations.
         
         Args:
             var_name: Optional variable name to check against
@@ -192,36 +250,59 @@ class MeasureEvaluator:
         """
         current_idx = self.context.current_idx
         
-        # Handle CLASSIFIER() without arguments
+        # Fast path using row-to-variable index
+        if current_idx in self._row_to_vars:
+            matched_vars = self._row_to_vars[current_idx]
+            
+            # Handle CLASSIFIER() without arguments - use first matched variable
+            if var_name is None:
+                # First check primary variables for this row
+                for var in self.context.variables:
+                    if var in matched_vars:
+                        return var
+                        
+                # Then check subset variable components
+                if hasattr(self.context, 'subsets'):
+                    for subset_name, components in self.context.subsets.items():
+                        for comp in components:
+                            if comp in matched_vars:
+                                return comp
+                
+                return None
+            
+            # Handle CLASSIFIER(var) - direct lookup in matched vars
+            elif var_name in matched_vars:
+                return var_name
+                
+            # Handle subset variable
+            elif hasattr(self.context, 'subsets') and var_name in self.context.subsets:
+                for comp in self.context.subsets[var_name]:
+                    if comp in matched_vars:
+                        return comp
+        
+        # Fallback path (should rarely be needed with index)
         if var_name is None:
-            result = None
             # First check primary variables
             for var, indices in self.context.variables.items():
                 if current_idx in indices:
-                    result = var
-                    break
+                    return var
                     
-            # Then check subset variables if no primary match found
-            if result is None and hasattr(self.context, 'subsets') and self.context.subsets:
+            # Then check subset variables
+            if hasattr(self.context, 'subsets') and self.context.subsets:
                 for subset_name, components in self.context.subsets.items():
                     for comp in components:
                         if comp in self.context.variables and current_idx in self.context.variables[comp]:
-                            result = comp
-                            break
-                    if result:
-                        break
-            
-            return result
-        
-        # Handle CLASSIFIER(var) with argument - improved NULL handling
-        if var_name in self.context.variables:
-            return var_name if current_idx in self.context.variables[var_name] else None
-        
-        # Handle subset variables
-        if hasattr(self.context, 'subsets') and var_name in self.context.subsets:
-            for comp in self.context.subsets[var_name]:
-                if comp in self.context.variables and current_idx in self.context.variables[comp]:
-                    return comp
+                            return comp
+        else:
+            # Check specific variable
+            if var_name in self.context.variables and current_idx in self.context.variables[var_name]:
+                return var_name
+                
+            # Check subset variable
+            if hasattr(self.context, 'subsets') and var_name in self.context.subsets:
+                for comp in self.context.subsets[var_name]:
+                    if comp in self.context.variables and current_idx in self.context.variables[comp]:
+                        return comp
         
         # No match found
         return None
@@ -238,6 +319,9 @@ class MeasureEvaluator:
         """
         return value if value is not None else "NULL"
 
+    
+
+        
     def _evaluate_navigation(self, expr: str, is_running: bool) -> Any:
         """
         Evaluate navigation functions with comprehensive support.

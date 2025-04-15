@@ -1,12 +1,18 @@
 # src/matcher/row_context.py
 
+
+
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Set, Tuple, Union
-
+from collections import defaultdict
+import time
 @dataclass
 class RowContext:
     """
     Maintains context for row pattern matching and navigation functions.
+    
+    This class provides an efficient interface for accessing matching rows,
+    variables, and handling pattern variables.
     
     Attributes:
         rows: The input rows
@@ -16,14 +22,28 @@ class RowContext:
         match_number: Sequential match number
     """
     rows: List[Dict[str, Any]] = field(default_factory=list)
-    variables: Dict[str, List[int]] = field(default_factory=dict)  # Variable -> row indices
-    subsets: Dict[str, List[str]] = field(default_factory=dict)    # Subset -> component vars
+    variables: Dict[str, List[int]] = field(default_factory=dict)
+    subsets: Dict[str, List[str]] = field(default_factory=dict)
     current_idx: int = 0
     match_number: int = 1
     
+    def __post_init__(self):
+        """Build optimized lookup structures."""
+        self._build_indices()
+        
+    def _build_indices(self):
+        """Build indices for faster variable and row lookups."""
+        # Row index -> variables mapping
+        self._row_var_index = defaultdict(set)
+        for var, indices in self.variables.items():
+            for idx in indices:
+                self._row_var_index[idx].add(var)
+        
     def classifier(self, variable: Optional[str] = None) -> str:
         """
         Return pattern variable for current row or specified set.
+        
+        This function implements the CLASSIFIER functionality of SQL:2016 standard.
         
         Args:
             variable: Optional variable name to check against
@@ -32,29 +52,51 @@ class RowContext:
             String containing the pattern variable name or empty string if not matched
             
         Examples:
-            >>> context.classifier()  # Returns variable for current row
+            >>> # When current row is matched to variable 'A':
+            >>> context.classifier()
             'A'
-            >>> context.classifier('A')  # Check if row matches 'A'
-            'A'  # or '' if not matched
-        """
-        if variable:
-            # Check if current row is in the specified variable's rows
-            indices = self.var_row_indices(variable)
+            >>> context.classifier('A')
+            'A'
+            >>> context.classifier('B')
+            ''
             
-            if self.current_idx in indices:
-                # For subsets, need to determine which component variable matched
-                if variable in self.subsets:
-                    for comp in self.subsets[variable]:
-                        if comp in self.variables and self.current_idx in self.variables[comp]:
-                            return comp
-                return variable
-            return ""
+            >>> # When using subset variables:
+            >>> # (with subset U = (A, B))
+            >>> context.classifier('U')
+            'A'  # If current row is matched to A
+        """
+        start_time = time.time()
         
-        # No variable specified - return the matching variable for current row
-        for var, indices in self.variables.items():
-            if self.current_idx in indices:
-                return var
-        return ""
+        try:
+            if variable:
+                # Check if current row is in the specified variable's rows
+                indices = self.var_row_indices(variable)
+                
+                if self.current_idx in indices:
+                    # For subsets, need to determine which component variable matched
+                    if variable in self.subsets:
+                        for comp in self.subsets[variable]:
+                            if comp in self.variables and self.current_idx in self.variables[comp]:
+                                return comp
+                    return variable
+                return ""
+            
+            # No variable specified - return the matching variable for current row
+            # Use the optimized index if available
+            if hasattr(self, '_row_var_index') and self.current_idx in self._row_var_index:
+                vars_for_row = self._row_var_index[self.current_idx]
+                if vars_for_row:
+                    return next(iter(vars_for_row))  # Return first variable in set
+                    
+            # Fallback to standard lookup
+            for var, indices in self.variables.items():
+                if self.current_idx in indices:
+                    return var
+            return ""
+        finally:
+            classifier_time = time.time() - start_time
+            if hasattr(self, 'timing'):
+                self.timing['classifier'] = classifier_time
 
     def var_rows(self, variable: str) -> List[Dict[str, Any]]:
         """
@@ -65,6 +107,12 @@ class RowContext:
             
         Returns:
             List of rows matched to the variable
+            
+        Example:
+            >>> # Get all rows matched to variable 'A'
+            >>> a_rows = context.var_rows('A')
+            >>> # Get rows matched to subset 'U'
+            >>> u_rows = context.var_rows('U')
         """
         indices = self.var_row_indices(variable)
         return [self.rows[idx] for idx in indices if 0 <= idx < len(self.rows)]
@@ -78,6 +126,11 @@ class RowContext:
             
         Returns:
             List of row indices matched to the variable
+            
+        Example:
+            >>> # Get indices of rows matched to 'A'
+            >>> context.var_row_indices('A')
+            [0, 3, 5]
         """
         indices = []
         
@@ -93,6 +146,7 @@ class RowContext:
         
         return sorted(indices)
     
+       
     def prev(self, steps: int = 1) -> Optional[Dict[str, Any]]:
         """
         Get previous row within partition with robust boundary handling.
