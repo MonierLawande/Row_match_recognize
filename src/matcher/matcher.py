@@ -65,13 +65,6 @@ class EnhancedMatcher:
         self.transition_index = self._build_transition_index()
         self.excluded_vars = self._analyze_exclusions()
 
-    def _build_transition_index(self):
-        """Build index of transitions for faster lookups."""
-        index = defaultdict(list)
-        for i, state in enumerate(self.dfa.states):
-            for transition in state.transitions:
-                index[i].append((transition.variable, transition.target, transition.condition))
-        return index
 
     def _analyze_exclusions(self):
         """Pre-analyze pattern for excluded variables."""
@@ -354,11 +347,16 @@ class EnhancedMatcher:
         current_idx = start_idx
         var_assignments = {}
         
-        print(f"Starting match at index {start_idx}, state: {state}")
+        print(f"Starting match at index {start_idx}, state: {self._get_state_description(state)}")
+        
+        # Optional early filtering based on anchor constraints
+        if hasattr(self, '_anchor_metadata') and not self._can_satisfy_anchors(len(rows)):
+            print(f"Partition cannot satisfy anchor constraints")
+            self.timing["find_match"] += time.time() - match_start_time
+            return None
         
         # Check start anchor constraints for the start state
-        # This handles the ^ anchor properly
-        if not self._check_start_anchor(state, start_idx):
+        if not self._check_anchors(state, start_idx, len(rows), "start"):
             print(f"Start state anchor check failed at index {start_idx}")
             self.timing["find_match"] += time.time() - match_start_time
             return None
@@ -366,7 +364,7 @@ class EnhancedMatcher:
         # Check for empty match
         if self.dfa.states[state].is_accept:
             # For empty matches, also verify end anchor if present
-            if not self._check_end_anchor(state, start_idx, len(rows)):
+            if not self._check_anchors(state, start_idx, len(rows), "end"):
                 print(f"End anchor check failed for empty match at index {start_idx}")
                 self.timing["find_match"] += time.time() - match_start_time
                 return None
@@ -399,7 +397,7 @@ class EnhancedMatcher:
                 try:
                     # First check if target state's START anchor constraints are satisfied
                     # We don't check end anchors here, only at match acceptance time
-                    if not self._check_start_anchor(target, current_idx):
+                    if not self._check_anchors(target, current_idx, len(rows), "start"):
                         print(f"  Start anchor check failed for transition to state {target} with var {var}")
                         continue
                         
@@ -434,7 +432,7 @@ class EnhancedMatcher:
             # Update longest match if accepting state
             if self.dfa.states[state].is_accept:
                 # Check end anchor constraints ONLY when we reach an accepting state
-                if not self._check_end_anchor(state, current_idx - 1, len(rows)):
+                if not self._check_anchors(state, current_idx - 1, len(rows), "end"):
                     print(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
                     # Continue to next row, but don't update longest_match
                     continue
@@ -456,38 +454,6 @@ class EnhancedMatcher:
         
         self.timing["find_match"] += time.time() - match_start_time
         return longest_match
-
-    def _check_start_anchor(self, state: int, row_idx: int) -> bool:
-        """Check only start anchor constraints for a state."""
-        if state == FAIL_STATE or state >= len(self.dfa.states):
-            return True
-            
-        state_info = self.dfa.states[state]
-        
-        if hasattr(state_info, 'is_anchor') and state_info.is_anchor:
-            if state_info.anchor_type == PatternTokenType.ANCHOR_START:
-                # ^ anchor must match at partition start
-                if row_idx != 0:
-                    print(f"Start anchor failed: row_idx={row_idx} is not at partition start")
-                    return False
-        
-        return True
-
-    def _check_end_anchor(self, state: int, row_idx: int, total_rows: int) -> bool:
-        """Check only end anchor constraints for a state."""
-        if state == FAIL_STATE or state >= len(self.dfa.states):
-            return True
-            
-        state_info = self.dfa.states[state]
-        
-        if hasattr(state_info, 'is_anchor') and state_info.is_anchor:
-            if state_info.anchor_type == PatternTokenType.ANCHOR_END:
-                # $ anchor must match at partition end
-                if row_idx != total_rows - 1:
-                    print(f"End anchor failed: row_idx={row_idx} is not at partition end")
-                    return False
-        
-        return True
 
 
     
@@ -649,9 +615,18 @@ class EnhancedMatcher:
         })
         return result
 
-    def _check_anchors(self, state: int, row_idx: int, total_rows: int) -> bool:
+    def _check_anchors(self, state: int, row_idx: int, total_rows: int, check_type: str = "both") -> bool:
         """
-        Check if anchor conditions are satisfied for the given state and row.
+        Unified method to check anchor constraints based on context.
+        
+        Args:
+            state: State ID to check
+            row_idx: Current row index
+            total_rows: Total number of rows in the partition
+            check_type: Type of check to perform ("start", "end", or "both")
+            
+        Returns:
+            True if anchor constraints are satisfied, False otherwise
         """
         # Skip check for invalid state
         if state == FAIL_STATE or state >= len(self.dfa.states):
@@ -659,22 +634,79 @@ class EnhancedMatcher:
             
         state_info = self.dfa.states[state]
         
-        if hasattr(state_info, 'is_anchor') and state_info.is_anchor:
-            if state_info.anchor_type == PatternTokenType.ANCHOR_START:
-                # ^ anchor must match at partition start
-                if row_idx != 0:
-                    print(f"Start anchor failed: row_idx={row_idx} is not at partition start")
-                    return False
-            elif state_info.anchor_type == PatternTokenType.ANCHOR_END:
-                # $ anchor must match at partition end
-                # BUT ONLY if this is an accepting state
-                if state_info.is_accept and row_idx != total_rows - 1:
-                    print(f"End anchor failed: row_idx={row_idx} is not at partition end")
-                    return False
+        if not hasattr(state_info, 'is_anchor') or not state_info.is_anchor:
+            return True
+            
+        # Check start anchor if requested
+        if check_type in ("start", "both") and state_info.anchor_type == PatternTokenType.ANCHOR_START:
+            if row_idx != 0:
+                print(f"Start anchor failed: row_idx={row_idx} is not at partition start")
+                return False
+                
+        # Check end anchor if requested and only for accepting states
+        if check_type in ("end", "both") and state_info.anchor_type == PatternTokenType.ANCHOR_END:
+            if state_info.is_accept and row_idx != total_rows - 1:
+                print(f"End anchor failed: row_idx={row_idx} is not at partition end")
+                return False
                     
         return True
 
+    def _build_transition_index(self):
+        """Build index of transitions with enhanced anchor metadata."""
+        index = defaultdict(list)
+        
+        # Add anchor information to the index for faster checking
+        anchor_start_states = set()
+        anchor_end_accepting_states = set()
+        
+        # Identify states with anchors
+        for i, state in enumerate(self.dfa.states):
+            if hasattr(state, 'is_anchor') and state.is_anchor:
+                if state.anchor_type == PatternTokenType.ANCHOR_START:
+                    anchor_start_states.add(i)
+                elif state.anchor_type == PatternTokenType.ANCHOR_END and state.is_accept:
+                    anchor_end_accepting_states.add(i)
+        
+        # Build normal transition index
+        for i, state in enumerate(self.dfa.states):
+            for transition in state.transitions:
+                index[i].append((transition.variable, transition.target, transition.condition))
+        
+        # Store anchor metadata for quick reference
+        self._anchor_metadata = {
+            "has_start_anchor": bool(anchor_start_states),
+            "has_end_anchor": bool(anchor_end_accepting_states),
+            "start_anchor_states": anchor_start_states,
+            "end_anchor_accepting_states": anchor_end_accepting_states,
+            "spans_partition": bool(anchor_start_states and anchor_end_accepting_states)
+        }
+        
+        return index
 
+    def _can_satisfy_anchors(self, partition_size: int) -> bool:
+        """
+        Quick check if a partition of given size can potentially satisfy anchor constraints.
+        
+        Args:
+            partition_size: Size of the partition
+            
+        Returns:
+            False if we know anchors can't be satisfied, True otherwise
+        """
+        # If there are no rows, we can only match empty patterns
+        if partition_size == 0:
+            return self.dfa.states[self.start_state].is_accept
+            
+        # If no anchors in pattern, all partitions can potentially match
+        if not hasattr(self, "_anchor_metadata"):
+            return True
+            
+        # For patterns with both start and end anchors (^...$), check if partition is viable
+        if self._anchor_metadata.get("spans_partition", False):
+            # Additional validation could be added here based on pattern needs
+            pass
+            
+        return True
 
 
 
