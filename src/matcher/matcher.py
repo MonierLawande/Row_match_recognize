@@ -356,8 +356,21 @@ class EnhancedMatcher:
         
         print(f"Starting match at index {start_idx}, state: {state}")
         
+        # Check start anchor constraints for the start state
+        # This handles the ^ anchor properly
+        if not self._check_start_anchor(state, start_idx):
+            print(f"Start state anchor check failed at index {start_idx}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return None
+        
         # Check for empty match
         if self.dfa.states[state].is_accept:
+            # For empty matches, also verify end anchor if present
+            if not self._check_end_anchor(state, start_idx, len(rows)):
+                print(f"End anchor check failed for empty match at index {start_idx}")
+                self.timing["find_match"] += time.time() - match_start_time
+                return None
+                
             print(f"Found empty match at index {start_idx} - start state is accepting")
             self.timing["find_match"] += time.time() - match_start_time
             return {
@@ -384,6 +397,13 @@ class EnhancedMatcher:
             for var, target, condition in trans_index:
                 print(f"  Evaluating condition for var: {var}")
                 try:
+                    # First check if target state's START anchor constraints are satisfied
+                    # We don't check end anchors here, only at match acceptance time
+                    if not self._check_start_anchor(target, current_idx):
+                        print(f"  Start anchor check failed for transition to state {target} with var {var}")
+                        continue
+                        
+                    # Then evaluate the condition
                     result = condition(row, context)
                     print(f"    Condition {'passed' if result else 'failed'} for {var}")
                     if result:
@@ -413,6 +433,12 @@ class EnhancedMatcher:
             
             # Update longest match if accepting state
             if self.dfa.states[state].is_accept:
+                # Check end anchor constraints ONLY when we reach an accepting state
+                if not self._check_end_anchor(state, current_idx - 1, len(rows)):
+                    print(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
+                    # Continue to next row, but don't update longest_match
+                    continue
+                    
                 print(f"Reached accepting state {state} at row {current_idx-1}")
                 longest_match = {
                     "start": start_idx,
@@ -430,6 +456,39 @@ class EnhancedMatcher:
         
         self.timing["find_match"] += time.time() - match_start_time
         return longest_match
+
+    def _check_start_anchor(self, state: int, row_idx: int) -> bool:
+        """Check only start anchor constraints for a state."""
+        if state == FAIL_STATE or state >= len(self.dfa.states):
+            return True
+            
+        state_info = self.dfa.states[state]
+        
+        if hasattr(state_info, 'is_anchor') and state_info.is_anchor:
+            if state_info.anchor_type == PatternTokenType.ANCHOR_START:
+                # ^ anchor must match at partition start
+                if row_idx != 0:
+                    print(f"Start anchor failed: row_idx={row_idx} is not at partition start")
+                    return False
+        
+        return True
+
+    def _check_end_anchor(self, state: int, row_idx: int, total_rows: int) -> bool:
+        """Check only end anchor constraints for a state."""
+        if state == FAIL_STATE or state >= len(self.dfa.states):
+            return True
+            
+        state_info = self.dfa.states[state]
+        
+        if hasattr(state_info, 'is_anchor') and state_info.is_anchor:
+            if state_info.anchor_type == PatternTokenType.ANCHOR_END:
+                # $ anchor must match at partition end
+                if row_idx != total_rows - 1:
+                    print(f"End anchor failed: row_idx={row_idx} is not at partition end")
+                    return False
+        
+        return True
+
 
     
     def _process_empty_match(self,
@@ -591,14 +650,65 @@ class EnhancedMatcher:
         return result
 
     def _check_anchors(self, state: int, row_idx: int, total_rows: int) -> bool:
-        """Check if anchor conditions are satisfied."""
+        """
+        Check if anchor conditions are satisfied for the given state and row.
+        """
+        # Skip check for invalid state
+        if state == FAIL_STATE or state >= len(self.dfa.states):
+            return True
+            
         state_info = self.dfa.states[state]
         
-        if state_info.is_anchor:
+        if hasattr(state_info, 'is_anchor') and state_info.is_anchor:
             if state_info.anchor_type == PatternTokenType.ANCHOR_START:
                 # ^ anchor must match at partition start
-                return row_idx == 0
+                if row_idx != 0:
+                    print(f"Start anchor failed: row_idx={row_idx} is not at partition start")
+                    return False
             elif state_info.anchor_type == PatternTokenType.ANCHOR_END:
                 # $ anchor must match at partition end
-                return row_idx == total_rows - 1
+                # BUT ONLY if this is an accepting state
+                if state_info.is_accept and row_idx != total_rows - 1:
+                    print(f"End anchor failed: row_idx={row_idx} is not at partition end")
+                    return False
+                    
         return True
+
+
+
+
+
+
+    
+    def _get_state_description(self, state: int) -> str:
+        """
+        Get a descriptive string for a state, including its anchor information.
+        
+        Args:
+            state: State ID
+            
+        Returns:
+            String description of the state
+        """
+        if state == FAIL_STATE:
+            return "FAIL_STATE"
+            
+        if state >= len(self.dfa.states):
+            return f"Invalid state {state}"
+            
+        state_info = self.dfa.states[state]
+        desc = f"State {state}"
+        
+        if state_info.is_accept:
+            desc += " (accepting)"
+            
+        if hasattr(state_info, 'is_anchor') and state_info.is_anchor:
+            if state_info.anchor_type == PatternTokenType.ANCHOR_START:
+                desc += " (start anchor ^)"
+            elif state_info.anchor_type == PatternTokenType.ANCHOR_END:
+                desc += " (end anchor $)"
+                
+        if state_info.variables:
+            desc += f" vars: {sorted(list(state_info.variables))}"
+            
+        return desc

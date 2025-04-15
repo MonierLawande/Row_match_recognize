@@ -8,10 +8,15 @@ This will help verify that every aspect of your parsing and AST generation behav
 
 Summary of Enhancements
 Token Cleanup: Enhance regex to capture all pattern constructs and clean tokens more thoroughly.
+
 Error Reporting: Improve error messages with more context and consider structured logging.
+
 Code Modularity: Split functionality into dedicated modules and add comprehensive unit tests.
+
 Additional Validations: Add checks for exclusion syntax, grouping, and consistency of navigation/aggregate function arguments.
+
 SELECT Clause Parsing: Integrate a more robust parser for the SELECT clause and provide detailed error messages.
+
 Documentation: Enrich code comments and provide usage examples.
 
 
@@ -72,11 +77,9 @@ Support for complex exclusion patterns
 
 CLASSIFIER function CLASSIFIER function 
 
+PERMUTE
 
 
-CLASSIFIER function (most commonly used)
-Pattern anchors (important for precise matching)
-PERMUTE syntax (useful for flexible patterns)
 Better error handling
 Performance optimizations
 Documentation and testing
