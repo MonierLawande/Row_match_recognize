@@ -78,6 +78,113 @@ class EnhancedMatcher:
                         if var_name in excluded:
                             excluded_vars.add(var_name)
         return excluded_vars
+    def _get_skip_position(self, skip_mode: SkipMode, skip_var: Optional[str], match: Dict[str, Any]) -> int:
+        """
+        Determine the next position to start matching based on skip mode.
+        """
+        start_idx = match["start"]
+        end_idx = match["end"]
+        
+        if skip_mode == SkipMode.PAST_LAST_ROW:
+            return end_idx + 1
+            
+        elif skip_mode == SkipMode.TO_NEXT_ROW:
+            return start_idx + 1
+            
+        elif skip_mode in (SkipMode.TO_FIRST, SkipMode.TO_LAST) and skip_var:
+            if skip_var in match["variables"]:
+                var_indices = match["variables"][skip_var]
+                if skip_mode == SkipMode.TO_FIRST:
+                    return min(var_indices) + 1
+                else:  # TO_LAST
+                    return max(var_indices) + 1
+                    
+        # Default: move to next position
+        return start_idx + 1
+    def _process_empty_match(self, start_idx: int, rows: List[Dict[str, Any]], measures: Dict[str, str], match_number: int) -> Dict[str, Any]:
+        """Process an empty match."""
+        # Start with the starting row's values
+        if start_idx >= len(rows):
+            return None
+            
+        result = rows[start_idx].copy()
+        
+        # Create context for empty match
+        context = RowContext()
+        context.rows = rows
+        context.variables = {}
+        context.match_number = match_number
+        context.current_idx = start_idx
+        
+        # Add measures as NULL values or evaluate them if possible
+        for alias, expr in measures.items():
+            try:
+                # For special measures like MATCH_NUMBER(), try to evaluate
+                if expr.upper() == "MATCH_NUMBER()":
+                    result[alias] = match_number
+                else:
+                    # For other measures, use NULL
+                    result[alias] = None
+            except Exception:
+                result[alias] = None
+            
+        # Add match metadata
+        result["MATCH_NUMBER"] = match_number
+        result["IS_EMPTY_MATCH"] = True
+        
+        return result
+
+    def _process_one_row_match(self, match, rows, measures, match_number):
+        """Process one row per match."""
+        if match["start"] >= len(rows):
+            return None
+        
+        # Handle empty match case
+        if match.get("is_empty", False):
+            return self._process_empty_match(match["start"], rows, measures, match_number)
+            
+        # Use first row of match
+        result = rows[match["start"]].copy()
+        
+        # Create context
+        context = RowContext()
+        context.rows = rows
+        context.variables = match["variables"]
+        context.match_number = match_number
+        
+        # Add subset information if available
+        if hasattr(self, "subsets") and self.subsets:
+            for subset_name, component_vars in self.subsets.items():
+                context.subsets[subset_name] = component_vars
+        
+        # Add measures with FINAL semantics
+        evaluator = MeasureEvaluator(context, final=True)
+        for alias, expr in measures.items():
+            try:
+                semantics = "FINAL"  # Always use FINAL for ONE ROW PER MATCH
+                result[alias] = evaluator.evaluate(expr, semantics)
+            except Exception as e:
+                print(f"Error evaluating measure {alias}: {e}")
+                result[alias] = None
+        
+        # Add match metadata
+        result["MATCH_NUMBER"] = match_number
+        result["IS_EMPTY_MATCH"] = match.get("is_empty", False)
+        
+        return result
+    def _handle_unmatched_row(self, row: Dict[str, Any], measures: Dict[str, str]) -> Dict[str, Any]:
+        """Create output row for unmatched input row."""
+        result = row.copy()
+        
+        # Add NULL values for all measures
+        for alias in measures:
+            result[alias] = None
+        
+        # Add match metadata
+        result["MATCH_NUMBER"] = None
+        result["IS_EMPTY_MATCH"] = False
+        
+        return result
 
     def find_matches(self, rows, config=None, measures=None):
         """Find all matches with optimized processing."""
@@ -85,6 +192,7 @@ class EnhancedMatcher:
         results = []
         match_number = 1
         start_idx = 0
+        processed_indices = set()  # Track processed indices to prevent infinite loops
         unmatched_indices = set(range(len(rows)))
         
         # Get configuration
@@ -94,70 +202,294 @@ class EnhancedMatcher:
         
         print(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
         
-        while start_idx < len(rows):
-            # Find next match using optimized transitions
-            match = self._find_single_match(rows, start_idx, RowContext(rows=rows))
-            if not match:
+        # Safety counter to prevent infinite loops
+        max_iterations = len(rows) * 2  # Allow at most 2 iterations per row
+        iteration_count = 0
+        
+        while start_idx < len(rows) and iteration_count < max_iterations:
+            iteration_count += 1
+            
+            # Skip already processed indices
+            if start_idx in processed_indices:
                 start_idx += 1
                 continue
                 
+            # Find next match using optimized transitions
+            match = self._find_single_match(rows, start_idx, RowContext(rows=rows))
+            if not match:
+                # Mark this index as processed and move on
+                processed_indices.add(start_idx)
+                start_idx += 1
+                continue
+                    
             # Process the match
             if all_rows:
                 match_time_start = time.time()
                 print(f"Processing match {match_number} with ALL ROWS PER MATCH")
-                match_rows = self._process_all_rows_match(match, rows, measures, match_number)
+                match_rows = self._process_all_rows_match(match, rows, measures, match_number, config)
                 results.extend(match_rows)
                 self.timing["process_match"] += time.time() - match_time_start
                 
                 # Update unmatched indices efficiently
                 if match.get("variables"):
-                    unmatched_indices -= set(sum(match["variables"].values(), []))
+                    matched_indices = set(sum(match["variables"].values(), []))
+                    unmatched_indices -= matched_indices
+                    processed_indices.update(matched_indices)
             else:
                 match_row = self._process_one_row_match(match, rows, measures, match_number)
                 if match_row:
                     results.append(match_row)
                     if match.get("variables"):
-                        unmatched_indices -= set(sum(match["variables"].values(), []))
+                        matched_indices = set(sum(match["variables"].values(), []))
+                        unmatched_indices -= matched_indices
+                        processed_indices.update(matched_indices)
             
             # Update start index based on skip mode
             if match.get("is_empty", False):
-                start_idx = match["start"] + 1
+                # For empty matches, always move to the next position
+                processed_indices.add(start_idx)
+                start_idx += 1
             else:
+                # For non-empty matches, use the skip mode
+                old_start_idx = start_idx
                 if config and config.skip_mode:
                     start_idx = self._get_skip_position(config.skip_mode, config.skip_var, match)
                 else:
                     start_idx = match["end"] + 1
-                
+                    
+                # Mark all indices in the match as processed
+                for idx in range(old_start_idx, match["end"] + 1):
+                    processed_indices.add(idx)
+                    
             match_number += 1
         
+        # Check if we hit the iteration limit
+        if iteration_count >= max_iterations:
+            print(f"WARNING: Reached maximum iteration count ({max_iterations}). Possible infinite loop detected.")
+        
         # Add unmatched rows if requested
-        if include_unmatched:
+        if include_unmatched or config.rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED:
             for idx in sorted(unmatched_indices):
-                unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
-                results.append(unmatched_row)
+                if idx not in processed_indices:  # Avoid duplicates
+                    unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
+                    results.append(unmatched_row)
+                    processed_indices.add(idx)
         
         self.timing["total"] = time.time() - start_time
         print(f"Find matches completed in {self.timing['total']:.6f} seconds")
         return results
 
-    def _process_all_rows_match(self, match, rows, measures, match_number):
-        """
-        Process ALL rows in a match with proper handling for multiple rows and exclusions.
+    def _get_state_description(self, state_idx):
+        """Get a human-readable description of a state."""
+        if state_idx == FAIL_STATE:
+            return "FAIL_STATE"
         
-        This method handles:
-        1. Pattern exclusions (rows matched to excluded variables)
-        2. CLASSIFIER functions and their arguments
-        3. Performance tracking and optimization
-        4. Memory-efficient processing of large datasets
+        if state_idx >= len(self.dfa.states):
+            return f"Invalid state {state_idx}"
+        
+        state = self.dfa.states[state_idx]
+        accept_str = "Accept" if state.is_accept else "Non-accept"
+        vars_str = ", ".join(sorted(state.variables)) if state.variables else "None"
+        
+        return f"State {state_idx} ({accept_str}, Vars: {vars_str})"
+    def _check_anchors(self, state: int, row_idx: int, total_rows: int, check_type: str = "both") -> bool:
+        """
+        Unified method to check anchor constraints based on context.
         
         Args:
-            match: The match information dictionary
-            rows: All input rows
-            measures: Dictionary of measure expressions
-            match_number: The sequential match number
+            state: State ID to check
+            row_idx: Current row index
+            total_rows: Total number of rows in the partition
+            check_type: Type of check to perform ("start", "end", or "both")
             
         Returns:
-            List of output rows for this match
+            True if anchor constraints are satisfied, False otherwise
+        """
+        # Skip check for invalid state
+        if state == FAIL_STATE or state >= len(self.dfa.states):
+            return True
+            
+        state_info = self.dfa.states[state]
+        
+        if not hasattr(state_info, 'is_anchor') or not state_info.is_anchor:
+            return True
+            
+        # Check start anchor if requested
+        if check_type in ("start", "both") and state_info.anchor_type == PatternTokenType.ANCHOR_START:
+            if row_idx != 0:
+                print(f"Start anchor failed: row_idx={row_idx} is not at partition start")
+                return False
+                
+        # Check end anchor if requested and only for accepting states
+        if check_type in ("end", "both") and state_info.anchor_type == PatternTokenType.ANCHOR_END:
+            if state_info.is_accept and row_idx != total_rows - 1:
+                print(f"End anchor failed: row_idx={row_idx} is not at partition end")
+                return False
+                    
+        return True
+
+    def _can_satisfy_anchors(self, partition_size: int) -> bool:
+        """
+        Quick check if a partition of given size can potentially satisfy anchor constraints.
+        
+        Args:
+            partition_size: Size of the partition
+            
+        Returns:
+            False if we know anchors can't be satisfied, True otherwise
+        """
+        # If there are no rows, we can only match empty patterns
+        if partition_size == 0:
+            return self.dfa.states[self.start_state].is_accept
+            
+        # If no anchors in pattern, all partitions can potentially match
+        if not hasattr(self, "_anchor_metadata"):
+            return True
+            
+        # For patterns with both start and end anchors (^...$), check if partition is viable
+        if self._anchor_metadata.get("spans_partition", False):
+            # Additional validation could be added here based on pattern needs
+            pass
+            
+        return True
+
+    
+    def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> Optional[Dict[str, Any]]:
+        """Find a single match using optimized transitions with greedy matching."""
+        match_start_time = time.time()
+        state = self.start_state
+        current_idx = start_idx
+        var_assignments = {}
+        
+        print(f"Starting match at index {start_idx}, state: {self._get_state_description(state)}")
+        
+        # Optional early filtering based on anchor constraints
+        if hasattr(self, '_anchor_metadata') and not self._can_satisfy_anchors(len(rows)):
+            print(f"Partition cannot satisfy anchor constraints")
+            self.timing["find_match"] += time.time() - match_start_time
+            return None
+        
+        # Check start anchor constraints for the start state
+        if not self._check_anchors(state, start_idx, len(rows), "start"):
+            print(f"Start state anchor check failed at index {start_idx}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return None
+        
+        # Check for empty match - but only use it if we can't find a non-empty match
+        empty_match = None
+        if self.dfa.states[state].is_accept:
+            # For empty matches, also verify end anchor if present
+            if self._check_anchors(state, start_idx, len(rows), "end"):
+                print(f"Found potential empty match at index {start_idx} - start state is accepting")
+                empty_match = {
+                    "start": start_idx,
+                    "end": start_idx - 1,
+                    "variables": {},
+                    "state": state,
+                    "is_empty": True
+                }
+                # Don't return immediately - try to find a non-empty match first
+        
+        longest_match = None
+        trans_index = self.transition_index[state]
+        
+        while current_idx < len(rows):
+            row = rows[current_idx]
+            context.current_idx = current_idx
+            
+            print(f"Testing row {current_idx}, data: {row}")
+            
+            # Use indexed transitions for faster lookups
+            next_state = None
+            matched_var = None
+            
+            for var, target, condition in trans_index:
+                print(f"  Evaluating condition for var: {var}")
+                try:
+                    # First check if target state's START anchor constraints are satisfied
+                    # We don't check end anchors here, only at match acceptance time
+                    if not self._check_anchors(target, current_idx, len(rows), "start"):
+                        print(f"  Start anchor check failed for transition to state {target} with var {var}")
+                        continue
+                        
+                    # Then evaluate the condition
+                    result = condition(row, context)
+                    print(f"    Condition {'passed' if result else 'failed'} for {var}")
+                    if result:
+                        next_state = target
+                        matched_var = var
+                        break
+                except Exception as e:
+                    print(f"  Error evaluating condition for {var}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+            
+            # For star patterns, we need to handle the case where no transition matches
+            # but we're in an accepting state
+            if next_state is None and self.dfa.states[state].is_accept:
+                print(f"No valid transition from accepting state {state} at row {current_idx}")
+                # Update longest match to include all rows up to this point
+                if current_idx > start_idx:  # Only if we've matched at least one row
+                    longest_match = {
+                        "start": start_idx,
+                        "end": current_idx - 1,
+                        "variables": {k: v[:] for k, v in var_assignments.items()},
+                        "state": state,
+                        "is_empty": False
+                    }
+                break
+            
+            if next_state is None:
+                print(f"No valid transition from state {state} at row {current_idx}")
+                break
+                
+            # Record variable assignment
+            if matched_var:
+                if matched_var not in var_assignments:
+                    var_assignments[matched_var] = []
+                var_assignments[matched_var].append(current_idx)
+                print(f"  Assigned row {current_idx} to variable {matched_var}")
+            
+            state = next_state
+            current_idx += 1
+            trans_index = self.transition_index[state]
+            
+            # Update longest match if accepting state
+            if self.dfa.states[state].is_accept:
+                # Check end anchor constraints ONLY when we reach an accepting state
+                if not self._check_anchors(state, current_idx - 1, len(rows), "end"):
+                    print(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
+                    # Continue to next row, but don't update longest_match
+                    continue
+                    
+                print(f"Reached accepting state {state} at row {current_idx-1}")
+                longest_match = {
+                    "start": start_idx,
+                    "end": current_idx - 1,
+                    "variables": {k: v[:] for k, v in var_assignments.items()},
+                    "state": state,
+                    "is_empty": False
+                }
+                print(f"  Current longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+        
+        # Prefer non-empty match over empty match
+        if longest_match and longest_match["end"] >= longest_match["start"]:  # Ensure it's a valid match
+            print(f"Found non-empty match: {longest_match}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return longest_match
+        elif empty_match:
+            print(f"Using empty match as fallback: {empty_match}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return empty_match
+        else:
+            print(f"No match found starting at index {start_idx}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return None
+
+    def _process_all_rows_match(self, match, rows, measures, match_number, config=None):
+        """
+        Process ALL rows in a match with proper handling for multiple rows and exclusions.
         """
         process_start = time.time()
         classifier_start = time.time()
@@ -242,14 +574,6 @@ class EnhancedMatcher:
             result = dict(rows[idx])
             context.current_idx = idx
             
-            # Store the classifier value for debugging
-            if not has_classifier_measure:
-                try:
-                    result["_CLASSIFIER"] = context.classifier()
-                except Exception as e:
-                    print(f"Warning: Could not determine classifier for row {idx}: {e}")
-                    result["_CLASSIFIER"] = None
-            
             # Calculate measures with performance tracking
             for alias, expr in measures.items():
                 measure_start = time.time()
@@ -267,6 +591,11 @@ class EnhancedMatcher:
             
             results.append(result)
             print(f"Added row {idx} to results")
+        
+        # Handle empty matches if requested
+        if match.get("is_empty", False) and config and config.show_empty:
+            empty_result = self._process_empty_match(match["start"], rows, measures, match_number)
+            results.append(empty_result)
         
         # Add timing information
         self.timing["classifier_total"] = time.time() - classifier_start
@@ -288,368 +617,8 @@ class EnhancedMatcher:
         
         return results
 
-
-
-
     
-    def _is_excluded(self, row_idx: int, match_start: int, exclude_ranges: List[Tuple[int, int]]) -> bool:
-        """Check if a row is in an excluded range."""
-        if not exclude_ranges:
-            return False
-            
-        rel_idx = row_idx - match_start
-        return any(start <= rel_idx <= end for start, end in exclude_ranges)
 
-
-    def _process_one_row_match(self, match, rows, measures, match_number):
-        """Process one row per match."""
-        if match["start"] >= len(rows):
-            return None
-        
-        # Handle empty match case
-        if match.get("is_empty", False):
-            return self._process_empty_match(match["start"], rows, measures, match_number)
-            
-        # Use first row of match
-        result = rows[match["start"]].copy()
-        
-        # Create context
-        context = RowContext()
-        context.rows = rows
-        context.variables = match["variables"]
-        context.match_number = match_number
-        
-        # Add subset information if available
-        if hasattr(self, "subsets") and self.subsets:
-            for subset_name, component_vars in self.subsets.items():
-                context.subsets[subset_name] = component_vars
-        
-        # Add measures with FINAL semantics
-        evaluator = MeasureEvaluator(context, final=True)
-        for alias, expr in measures.items():
-            try:
-                semantics = "FINAL"  # Always use FINAL for ONE ROW PER MATCH
-                result[alias] = evaluator.evaluate(expr, semantics)
-            except Exception as e:
-                print(f"Error evaluating measure {alias}: {e}")
-                result[alias] = None
-        
-        # Add match metadata
-        result["MATCH_NUMBER"] = match_number
-        result["IS_EMPTY_MATCH"] = match.get("is_empty", False)
-        
-        return result
-
-    def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> Optional[Dict[str, Any]]:
-        """Find a single match using optimized transitions."""
-        match_start_time = time.time()
-        state = self.start_state
-        current_idx = start_idx
-        var_assignments = {}
-        
-        print(f"Starting match at index {start_idx}, state: {self._get_state_description(state)}")
-        
-        # Optional early filtering based on anchor constraints
-        if hasattr(self, '_anchor_metadata') and not self._can_satisfy_anchors(len(rows)):
-            print(f"Partition cannot satisfy anchor constraints")
-            self.timing["find_match"] += time.time() - match_start_time
-            return None
-        
-        # Check start anchor constraints for the start state
-        if not self._check_anchors(state, start_idx, len(rows), "start"):
-            print(f"Start state anchor check failed at index {start_idx}")
-            self.timing["find_match"] += time.time() - match_start_time
-            return None
-        
-        # Check for empty match
-        if self.dfa.states[state].is_accept:
-            # For empty matches, also verify end anchor if present
-            if not self._check_anchors(state, start_idx, len(rows), "end"):
-                print(f"End anchor check failed for empty match at index {start_idx}")
-                self.timing["find_match"] += time.time() - match_start_time
-                return None
-                
-            print(f"Found empty match at index {start_idx} - start state is accepting")
-            self.timing["find_match"] += time.time() - match_start_time
-            return {
-                "start": start_idx,
-                "end": start_idx - 1,
-                "variables": {},
-                "state": state,
-                "is_empty": True
-            }
-        
-        longest_match = None
-        trans_index = self.transition_index[state]
-        
-        while current_idx < len(rows):
-            row = rows[current_idx]
-            context.current_idx = current_idx
-            
-            print(f"Testing row {current_idx}, data: {row}")
-            
-            # Use indexed transitions for faster lookups
-            next_state = None
-            matched_var = None
-            
-            for var, target, condition in trans_index:
-                print(f"  Evaluating condition for var: {var}")
-                try:
-                    # First check if target state's START anchor constraints are satisfied
-                    # We don't check end anchors here, only at match acceptance time
-                    if not self._check_anchors(target, current_idx, len(rows), "start"):
-                        print(f"  Start anchor check failed for transition to state {target} with var {var}")
-                        continue
-                        
-                    # Then evaluate the condition
-                    result = condition(row, context)
-                    print(f"    Condition {'passed' if result else 'failed'} for {var}")
-                    if result:
-                        next_state = target
-                        matched_var = var
-                        break
-                except Exception as e:
-                    print(f"  Error evaluating condition for {var}: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
-            
-            if next_state is None:
-                print(f"No valid transition from state {state} at row {current_idx}")
-                break
-                
-            # Record variable assignment
-            if matched_var:
-                if matched_var not in var_assignments:
-                    var_assignments[matched_var] = []
-                var_assignments[matched_var].append(current_idx)
-                print(f"  Assigned row {current_idx} to variable {matched_var}")
-            
-            state = next_state
-            current_idx += 1
-            trans_index = self.transition_index[state]
-            
-            # Update longest match if accepting state
-            if self.dfa.states[state].is_accept:
-                # Check end anchor constraints ONLY when we reach an accepting state
-                if not self._check_anchors(state, current_idx - 1, len(rows), "end"):
-                    print(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
-                    # Continue to next row, but don't update longest_match
-                    continue
-                    
-                print(f"Reached accepting state {state} at row {current_idx-1}")
-                longest_match = {
-                    "start": start_idx,
-                    "end": current_idx - 1,
-                    "variables": {k: v[:] for k, v in var_assignments.items()},
-                    "state": state,
-                    "is_empty": False
-                }
-                print(f"  Current longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
-        
-        if longest_match:
-            print(f"Found match: {longest_match}")
-        else:
-            print(f"No match found starting at index {start_idx}")
-        
-        self.timing["find_match"] += time.time() - match_start_time
-        return longest_match
-
-
-    
-    def _process_empty_match(self,
-                           start_idx: int,
-                           rows: List[Dict[str, Any]],
-                           measures: Dict[str, str],
-                           match_number: int) -> Dict[str, Any]:
-        """Process an empty match."""
-        # Start with the starting row's values
-        if start_idx >= len(rows):
-            return None
-            
-        result = rows[start_idx].copy()
-        
-        # Create context for empty match
-        context = RowContext()
-        context.rows = rows
-        context.variables = {}
-        context.match_number = match_number
-        context.current_idx = start_idx
-        
-        # Add measures as NULL values or evaluate them if possible
-        for alias, expr in measures.items():
-            try:
-                # For special measures like MATCH_NUMBER(), try to evaluate
-                if expr.upper() == "MATCH_NUMBER()":
-                    result[alias] = match_number
-                else:
-                    # For other measures, use NULL
-                    result[alias] = None
-            except Exception:
-                result[alias] = None
-            
-        # Add match metadata
-        result["MATCH_NUMBER"] = match_number
-        result["IS_EMPTY_MATCH"] = True
-        
-        return result
-
-    def _validate_skip_target(self, 
-                            skip_var: str, 
-                            match: Dict[str, Any]) -> bool:
-        """
-        Validate that skipping to the specified variable is allowed.
-        Prevents infinite loops and invalid skip targets.
-        """
-        if not skip_var:
-            return True
-            
-        # Get indices for the skip target variable
-        var_indices = match["variables"].get(skip_var, [])
-        if not var_indices:
-            return False  # Variable not present in match
-            
-        # Check if skipping would create an infinite loop
-        start_idx = match["start"]
-        skip_idx = min(var_indices)  # For TO_FIRST
-        
-        # Can't skip to or before the start of current match
-        return skip_idx > start_idx
-
-    def _get_skip_position(self,
-                          skip_mode: SkipMode,
-                          skip_var: Optional[str],
-                          match: Dict[str, Any]) -> int:
-        """
-        Determine the next position to start matching based on skip mode.
-        """
-        start_idx = match["start"]
-        end_idx = match["end"]
-        
-        if skip_mode == SkipMode.PAST_LAST_ROW:
-            return end_idx + 1
-            
-        elif skip_mode == SkipMode.TO_NEXT_ROW:
-            return start_idx + 1
-            
-        elif skip_mode in (SkipMode.TO_FIRST, SkipMode.TO_LAST) and skip_var:
-            if skip_var in match["variables"]:
-                var_indices = match["variables"][skip_var]
-                if skip_mode == SkipMode.TO_FIRST:
-                    return min(var_indices) + 1
-                else:  # TO_LAST
-                    return max(var_indices) + 1
-                    
-        # Default: move to next position
-        return start_idx + 1
-
-    def _is_excluded(self, 
-                    row_idx: int, 
-                    match_start: int,
-                    exclude_ranges: List[Tuple[int, int]]) -> bool:
-        """Check if a row is in an excluded range."""
-        if not exclude_ranges:
-            return False
-            
-        rel_idx = row_idx - match_start
-        return any(start <= rel_idx <= end for start, end in exclude_ranges)
-
-    def _get_match_variables(self, 
-                           match: Dict[str, Any], 
-                           context: RowContext) -> Set[str]:
-        """Get all variables (primary and union) present in the match."""
-        variables = set(match["variables"].keys())
-        
-        # Add union variables that are present
-        for subset_name, components in context.subsets.items():
-            if any(comp in variables for comp in components):
-                variables.add(subset_name)
-                
-        return variables
-
-    def _evaluate_running_measure(self,
-                                expr: str,
-                                context: RowContext,
-                                current_idx: int) -> Any:
-        """
-        Evaluate a measure with running semantics from the perspective
-        of the row at current_idx.
-        """
-        # Save current context state
-        original_idx = context.current_idx
-        
-        try:
-            # Set context to evaluate from current row's perspective
-            context.current_idx = current_idx
-            
-            evaluator = MeasureEvaluator(context, final=False)
-            return evaluator.evaluate(expr)
-            
-        finally:
-            # Restore original context state
-            context.current_idx = original_idx
-
-    def _evaluate_final_measure(self,
-                              expr: str,
-                              context: RowContext) -> Any:
-        """
-        Evaluate a measure with final semantics using the complete match.
-        """
-        evaluator = MeasureEvaluator(context, final=True)
-        return evaluator.evaluate(expr)
-
-    def _create_empty_measures(self,
-                             measures: Dict[str, str]) -> Dict[str, None]:
-        """Create NULL values for all measures."""
-        return {alias: None for alias in measures}
-
-    def _handle_unmatched_row(self,
-                             row: Dict[str, Any],
-                             measures: Dict[str, str]) -> Dict[str, Any]:
-        """Create output row for unmatched input row."""
-        result = row.copy()
-        result.update({
-            "MATCH_NUMBER": None,
-            "IS_EMPTY_MATCH": False,
-            **self._create_empty_measures(measures)
-        })
-        return result
-
-    def _check_anchors(self, state: int, row_idx: int, total_rows: int, check_type: str = "both") -> bool:
-        """
-        Unified method to check anchor constraints based on context.
-        
-        Args:
-            state: State ID to check
-            row_idx: Current row index
-            total_rows: Total number of rows in the partition
-            check_type: Type of check to perform ("start", "end", or "both")
-            
-        Returns:
-            True if anchor constraints are satisfied, False otherwise
-        """
-        # Skip check for invalid state
-        if state == FAIL_STATE or state >= len(self.dfa.states):
-            return True
-            
-        state_info = self.dfa.states[state]
-        
-        if not hasattr(state_info, 'is_anchor') or not state_info.is_anchor:
-            return True
-            
-        # Check start anchor if requested
-        if check_type in ("start", "both") and state_info.anchor_type == PatternTokenType.ANCHOR_START:
-            if row_idx != 0:
-                print(f"Start anchor failed: row_idx={row_idx} is not at partition start")
-                return False
-                
-        # Check end anchor if requested and only for accepting states
-        if check_type in ("end", "both") and state_info.anchor_type == PatternTokenType.ANCHOR_END:
-            if state_info.is_accept and row_idx != total_rows - 1:
-                print(f"End anchor failed: row_idx={row_idx} is not at partition end")
-                return False
-                    
-        return True
 
     def _build_transition_index(self):
         """Build index of transitions with enhanced anchor metadata."""
@@ -682,65 +651,3 @@ class EnhancedMatcher:
         }
         
         return index
-
-    def _can_satisfy_anchors(self, partition_size: int) -> bool:
-        """
-        Quick check if a partition of given size can potentially satisfy anchor constraints.
-        
-        Args:
-            partition_size: Size of the partition
-            
-        Returns:
-            False if we know anchors can't be satisfied, True otherwise
-        """
-        # If there are no rows, we can only match empty patterns
-        if partition_size == 0:
-            return self.dfa.states[self.start_state].is_accept
-            
-        # If no anchors in pattern, all partitions can potentially match
-        if not hasattr(self, "_anchor_metadata"):
-            return True
-            
-        # For patterns with both start and end anchors (^...$), check if partition is viable
-        if self._anchor_metadata.get("spans_partition", False):
-            # Additional validation could be added here based on pattern needs
-            pass
-            
-        return True
-
-
-
-
-    
-    def _get_state_description(self, state: int) -> str:
-        """
-        Get a descriptive string for a state, including its anchor information.
-        
-        Args:
-            state: State ID
-            
-        Returns:
-            String description of the state
-        """
-        if state == FAIL_STATE:
-            return "FAIL_STATE"
-            
-        if state >= len(self.dfa.states):
-            return f"Invalid state {state}"
-            
-        state_info = self.dfa.states[state]
-        desc = f"State {state}"
-        
-        if state_info.is_accept:
-            desc += " (accepting)"
-            
-        if hasattr(state_info, 'is_anchor') and state_info.is_anchor:
-            if state_info.anchor_type == PatternTokenType.ANCHOR_START:
-                desc += " (start anchor ^)"
-            elif state_info.anchor_type == PatternTokenType.ANCHOR_END:
-                desc += " (end anchor $)"
-                
-        if state_info.variables:
-            desc += f" vars: {sorted(list(state_info.variables))}"
-            
-        return desc

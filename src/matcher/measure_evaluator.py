@@ -552,7 +552,16 @@ class MeasureEvaluator:
         else:
             # Use all rows up to current position if running
             if is_running:
-                rows_to_use = self.context.rows[:self.context.current_idx + 1]
+                # For RUNNING semantics with no variable scope, use only the current match
+                # Get all matched rows in the current match
+                matched_indices = []
+                for var, indices in self.context.variables.items():
+                    matched_indices.extend(indices)
+                matched_indices = sorted(matched_indices)
+                
+                # Only include rows up to current_idx
+                matched_indices = [idx for idx in matched_indices if idx <= self.context.current_idx]
+                rows_to_use = [self.context.rows[idx] for idx in matched_indices if idx < len(self.context.rows)]
             else:
                 rows_to_use = self.context.rows
         
