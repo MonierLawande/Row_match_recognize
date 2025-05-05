@@ -211,12 +211,19 @@ class PatternClause:
         # Remove outer parentheses if they wrap the entire pattern
         if pattern.startswith('(') and pattern.endswith(')') and balanced_parentheses(pattern):
             pattern = pattern[1:-1].strip()
+            
         # Handle PERMUTE patterns
-        if pattern.upper().startswith("PERMUTE("):
-            pattern = re.sub(r',', '', pattern)
-            pattern = re.sub(r'PERMUTE\s*\((.*?)\)', r'\1', pattern, flags=re.IGNORECASE)
-        else:
-            pattern = remove_commas_outside_curly(pattern)
+        if pattern.upper().startswith("PERMUTE"):
+            # Special handling for PERMUTE - preserve the structure for proper tokenization
+            # Look for the PERMUTE expression with its parentheses
+            permute_match = re.match(r'PERMUTE\s*\((.*?)\)', pattern, re.IGNORECASE | re.DOTALL)
+            if permute_match:
+                # Keep the original structure including commas for proper parsing
+                return pattern
+        
+        # For non-PERMUTE patterns, remove commas outside curly braces
+        pattern = remove_commas_outside_curly(pattern)
+        
         # Don't remove spaces here to preserve the original pattern format
         return pattern
     
@@ -224,6 +231,8 @@ class PatternClause:
         """
         Tokenize a pattern string into a list of (variable, quantifier) tuples.
         If defined_vars is provided, use it to guide tokenization.
+        
+        This updated version properly handles PERMUTE expressions and nested PERMUTEs.
         """
         tokens = []
         i = 0
@@ -236,6 +245,78 @@ class PatternClause:
         else:
             sorted_vars = None
         
+        # Special handling for PERMUTE expressions
+        if pattern.upper().startswith("PERMUTE"):
+            # This is a PERMUTE pattern - find its contents by counting parentheses
+            p_depth = 0
+            end_pos = -1
+            start_pos = pattern.find("(")
+            
+            if start_pos == -1:
+                # Malformed PERMUTE without parentheses
+                return []
+            
+            # Find the matching closing parenthesis
+            for j in range(start_pos, len(pattern)):
+                if pattern[j] == '(':
+                    p_depth += 1
+                elif pattern[j] == ')':
+                    p_depth -= 1
+                    if p_depth == 0:
+                        end_pos = j
+                        break
+            
+            if end_pos == -1:
+                # Unbalanced parentheses
+                return []
+                
+            # Extract variables from within the PERMUTE
+            permute_content = pattern[start_pos+1:end_pos]
+            variables = []
+            
+            # Split by commas, but handle nested PERMUTEs carefully
+            var_start = 0
+            p_depth = 0
+            
+            for j in range(len(permute_content)):
+                if permute_content[j] == '(':
+                    p_depth += 1
+                elif permute_content[j] == ')':
+                    p_depth -= 1
+                elif permute_content[j] == ',' and p_depth == 0:
+                    var = permute_content[var_start:j].strip()
+                    if var:
+                        variables.append(var)
+                    var_start = j + 1
+            
+            # Add the last variable
+            if var_start < len(permute_content):
+                var = permute_content[var_start:].strip()
+                if var:
+                    variables.append(var)
+            
+            # Handle each variable, including nested PERMUTEs
+            for var in variables:
+                if var.upper().startswith("PERMUTE"):
+                    # Recursively tokenize this nested PERMUTE
+                    nested_tokens = self._tokenize_pattern(var, defined_vars)
+                    if nested_tokens:
+                        tokens.extend(nested_tokens)
+                elif var and var.upper() not in self.RESERVED_KEYWORDS:
+                    tokens.append((var, ""))  # No quantifier for individual PERMUTE components
+            
+            # Check for quantifier on the entire PERMUTE
+            remainder = pattern[end_pos+1:]
+            quant_match = re.match(r'\s*([+*?]|\{\s*\d+(?:\s*,\s*\d*)?\s*\})', remainder)
+            if quant_match:
+                # Apply the quantifier to the last variable
+                if tokens:
+                    last_var, _ = tokens[-1]
+                    tokens[-1] = (last_var, quant_match.group(1).strip())
+            
+            return tokens
+
+        # Standard tokenization for non-PERMUTE patterns
         while i < len(pattern):
             # Skip special characters but preserve spaces in the original pattern
             if pattern[i] in {'|', '&', '!', '(', ')', ','}:
@@ -250,8 +331,8 @@ class PatternClause:
             if sorted_vars:
                 for var in sorted_vars:
                     if pattern[i:].startswith(var) and (i + len(var) >= len(pattern) or 
-                                                       not pattern[i + len(var)].isalnum() and 
-                                                       pattern[i + len(var)] != '_'):
+                                                    not pattern[i + len(var)].isalnum() and 
+                                                    pattern[i + len(var)] != '_'):
                         var_name = var
                         i += len(var)
                         matched = True
@@ -293,10 +374,38 @@ class PatternClause:
         
         return tokens
 
+
     def _tokenize_initial(self):
         """Initial tokenization of the pattern."""
         # Use the original pattern for metadata extraction
         cleaned = self._clean_pattern(self.pattern)
+        
+        # Check for PERMUTE expressions - they require special handling
+        if cleaned.upper().startswith("PERMUTE"):
+            permute_match = re.match(r'PERMUTE\s*\((.*?)\)', cleaned, re.IGNORECASE | re.DOTALL)
+            if permute_match:
+                permute_vars = [v.strip() for v in permute_match.group(1).split(',')]
+                base_variables = [var for var in permute_vars if var and var.upper() not in self.RESERVED_KEYWORDS]
+                
+                # Check for quantifier on the entire PERMUTE
+                remainder = cleaned[permute_match.end():]
+                quant_match = re.match(r'\s*([+*?]|\{\s*\d+(?:\s*,\s*\d*)?\s*\})', remainder)
+                quantifier = quant_match.group(1).strip() if quant_match else ""
+                
+                # Create list of full tokens with quantifiers
+                full_variables = []
+                for var in base_variables:
+                    full_token = var + quantifier if var == base_variables[-1] else var
+                    full_variables.append(full_token)
+                
+                self.metadata = {
+                    "variables": full_variables,
+                    "base_variables": base_variables,
+                    "permute": True,
+                    "permute_vars": permute_vars
+                }
+                return
+        
         # For initial tokenization, we don't have defined variables yet
         # So we tokenize character by character
         tokens = []
@@ -372,6 +481,62 @@ class PatternClause:
             }
             return
         
+        # Special handling for nested PERMUTE expressions
+        # Check if pattern contains any PERMUTE keyword (including nested ones)
+        if "PERMUTE" in self.pattern.upper():
+            # Extract all possible variables that might be referenced in the pattern
+            potential_variables = set()
+            
+            # First extract top level variables
+            main_pattern = self._clean_pattern(self.pattern)
+            
+            # Get all variables mentioned in PERMUTE clauses
+            permute_vars = re.findall(r'PERMUTE\s*\(\s*(.*?)\s*\)', main_pattern, re.IGNORECASE | re.DOTALL)
+            for vars_str in permute_vars:
+                # Split by comma, but respect nested parentheses
+                depth = 0
+                current_var = []
+                for char in vars_str + ',':  # Add trailing comma for easy processing
+                    if char == '(' and depth == 0:
+                        depth += 1
+                        continue
+                    elif char == '(' and depth > 0:
+                        depth += 1
+                        current_var.append(char)
+                    elif char == ')' and depth > 1:
+                        depth -= 1
+                        current_var.append(char)
+                    elif char == ')' and depth == 1:
+                        depth -= 1
+                        continue
+                    elif char == ',' and depth == 0:
+                        var = ''.join(current_var).strip()
+                        if var:
+                            potential_variables.add(var)
+                        current_var = []
+                    else:
+                        current_var.append(char)
+            
+            # Add all defined variables to the potential set
+            for var in defined_vars:
+                potential_variables.add(var)
+            
+            # For subset variables, add their components too
+            if subset_vars:
+                for subset_name, components in subset_vars.items():
+                    for comp in components:
+                        potential_variables.add(comp)
+            
+            # Create optimistic metadata
+            self.metadata = {
+                "variables": list(potential_variables),
+                "base_variables": list(potential_variables),
+                "permute": True,
+                "nested_permute": "PERMUTE" in main_pattern[8:].upper() if main_pattern.upper().startswith("PERMUTE") else False
+            }
+            return
+        
+        # Rest of original implementation for non-nested cases...
         # Re-tokenize with defined variables as guidance
         cleaned = self._clean_pattern(self.pattern)
         tokens = self._tokenize_pattern(cleaned, defined_vars)
@@ -401,10 +566,6 @@ class PatternClause:
                     if subset_name in defined_set:
                         current_base_vars.add(subset_name)
         
-        # Print debug info
-        print(f"Defined variables: {defined_set}")
-        print(f"Current base variables: {current_base_vars}")
-        
         # Check for undefined variables - skip this check for empty patterns
         if not defined_set.issubset(current_base_vars):
             # Double-check if pattern might be empty but not caught by our regex
@@ -425,7 +586,6 @@ class PatternClause:
             "variables": full_variables,
             "base_variables": base_variables
         }
-
 
     def __repr__(self):
         return f"PatternClause(pattern='{self.pattern}', metadata={self.metadata})"

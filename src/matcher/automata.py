@@ -28,6 +28,8 @@ class NFAState:
     def add_transition(self, condition: ConditionFn, target: int, variable: Optional[str] = None):
         self.transitions.append(Transition(condition, target, variable))
 
+# Updated NFABuilder class for src/matcher/automata.py
+
 class NFABuilder:
     def __init__(self):
         self.states: List[NFAState] = []
@@ -131,44 +133,15 @@ class NFABuilder:
                 current = group_end
                 
             elif token.type == PatternTokenType.PERMUTE:
-                # Handle PERMUTE(A,B,C)
-                idx[0] += 1  # Skip PERMUTE token
-                
-                # Collect variables in the permutation
-                variables = []
-                if idx[0] < len(tokens) and tokens[idx[0]].type == PatternTokenType.GROUP_START:
-                    idx[0] += 1  # Skip opening parenthesis
-                    
-                    # Collect all variables until GROUP_END
-                    while idx[0] < len(tokens) and tokens[idx[0]].type != PatternTokenType.GROUP_END:
-                        if tokens[idx[0]].type == PatternTokenType.LITERAL:
-                            variables.append(tokens[idx[0]].value)
-                        idx[0] += 1
-                    
-                    # Skip closing parenthesis
-                    if idx[0] < len(tokens) and tokens[idx[0]].type == PatternTokenType.GROUP_END:
-                        idx[0] += 1
-                
-                # Generate all permutations of variables
-                perm_start = self.new_state()
-                perm_end = self.new_state()
-                
-                for perm in itertools.permutations(variables):
-                    branch_start = self.new_state()
-                    branch_current = branch_start
-                    
-                    for var in perm:
-                        var_start, var_end = self.create_var_states(var, define)
-                        self.add_epsilon(branch_current, var_start)
-                        branch_current = var_end
-                    
-                    # Connect this permutation branch
-                    self.add_epsilon(perm_start, branch_start)
-                    self.add_epsilon(branch_current, perm_end)
+                # Use the enhanced PERMUTE processing
+                perm_start, perm_end = self._process_permute(token, define)
                 
                 # Connect permutation fragment to current NFA
                 self.add_epsilon(current, perm_start)
                 current = perm_end
+                
+                # Skip the PERMUTE token
+                idx[0] += 1
                 
             elif token.type == PatternTokenType.EXCLUSION_START:
                 # Enhanced exclusion handling
@@ -217,10 +190,77 @@ class NFABuilder:
         self.add_epsilon(current, end)
         
         return start, end
+
+   
+    def _process_permute(self, token: PatternToken, define: Dict[str, str]) -> Tuple[int, int]:
+        """
+        Process a PERMUTE token with enhanced functionality for nesting support.
+        
+        This method handles:
+        1. Basic permutation of variables
+        2. Quantifiers applied to the entire PERMUTE
+        3. Nested PERMUTE expressions
+        4. Variable-based lexicographical ordering
+        
+        Args:
+            token: The PERMUTE token with metadata
+            define: Dictionary of variable definitions
+                
+        Returns:
+            Tuple of (start_state, end_state)
+        """
+        # Extract permute variables, ensuring nested PERMUTE tokens are processed
+        variables = token.metadata.get("variables", [])
+        
+        # Create states for the permutation
+        perm_start = self.new_state()
+        perm_end = self.new_state()
+        
+        # Process variables to handle nested PERMUTE expressions
+        processed_vars = []
+        for var in variables:
+            if isinstance(var, PatternToken) and var.type == PatternTokenType.PERMUTE:
+                # Handle nested PERMUTE recursively
+                nested_start, nested_end = self._process_permute(var, define)
+                # Connect nested permutation to our permutation structure
+                self.add_epsilon(perm_start, nested_start)
+                self.add_epsilon(nested_end, perm_end)
+            else:
+                # Regular variable
+                processed_vars.append(var)
+        
+        # Generate all permutations of regular variables
+        import itertools
+        all_perms = list(itertools.permutations(processed_vars))
+        
+        # Sort permutations lexicographically based on original order
+        var_index = {var: idx for idx, var in enumerate(processed_vars)}
+        all_perms.sort(key=lambda p: tuple(var_index.get(var, 999) for var in p))
+        
+        # Process each permutation
+        for perm in all_perms:
+            branch_start = self.new_state()
+            branch_current = branch_start
+            
+            for var in perm:
+                var_start, var_end = self.create_var_states(var, define)
+                self.add_epsilon(branch_current, var_start)
+                branch_current = var_end
+            
+            # Connect this permutation branch
+            self.add_epsilon(perm_start, branch_start)
+            self.add_epsilon(branch_current, perm_end)
+        
+        # Apply quantifiers to the entire PERMUTE if present
+        if token.quantifier:
+            min_rep, max_rep, greedy = parse_quantifier(token.quantifier)
+            perm_start, perm_end = self._apply_quantifier(
+                perm_start, perm_end, min_rep, max_rep, greedy)
+        
+        return perm_start, perm_end
+
     
     # In NFABuilder class (src/matcher/automata.py):
-
-        # In NFABuilder._process_exclusion method
     def _process_exclusion(self, tokens: List[PatternToken], idx: List[int], define: Dict[str, str]) -> Tuple[int, int]:
         """Process an exclusion pattern fragment."""
         # Remember exclusion start position
@@ -253,32 +293,63 @@ class NFABuilder:
         
         return excl_start, excl_end
 
-    
-    # In src/matcher/automata.py
+        # src/matcher/automata.py
+    # Update the create_var_states method in NFABuilder class
+
     def create_var_states(self, var: str, define: Dict[str, str]) -> Tuple[int, int]:
-        """Create states for a pattern variable."""
+        """Create states for a pattern variable with proper quantifier handling."""
         start = self.new_state()
         end = self.new_state()
         
+        # Extract any quantifier from the variable name
+        var_base = var
+        quantifier = None
+        
+        # Check for optional element (var?)
+        if var.endswith('?'):
+            var_base = var[:-1]
+            quantifier = '?'
+        # Check for one or more (var+)
+        elif var.endswith('+'):
+            var_base = var[:-1]
+            quantifier = '+'
+        # Check for zero or more (var*)
+        elif var.endswith('*'):
+            var_base = var[:-1]
+            quantifier = '*'
+        # Check for count quantifier (var{n} or var{m,n})
+        elif '{' in var and var.endswith('}'):
+            open_idx = var.find('{')
+            var_base = var[:open_idx]
+            quantifier = var[open_idx:]
+        
         # Get condition from DEFINE clause or use TRUE
-        condition = define.get(var, "TRUE")
-        print(f"Creating transition for variable '{var}' with condition: '{condition}'")
+        condition = define.get(var_base, "TRUE")
+        print(f"Creating transition for variable '{var_base}' with condition: '{condition}'")
         condition_fn = compile_condition(condition)
         
         # Create transition with condition
-        self.states[start].add_transition(condition_fn, end, var)
-        self.states[start].variable = var  # Mark state with variable name
+        self.states[start].add_transition(condition_fn, end, var_base)
+        self.states[start].variable = var_base  # Mark state with variable name
+        
+        # Apply quantifier if present
+        if quantifier:
+            min_rep, max_rep, greedy = parse_quantifier(quantifier)
+            start, end = self._apply_quantifier(start, end, min_rep, max_rep, greedy)
         
         return start, end
 
-    
+
+        # src/matcher/automata.py
+    # Update the _apply_quantifier method in NFABuilder class
+
     def _apply_quantifier(self, 
-                        start: int, 
-                        end: int, 
-                        min_rep: int, 
-                        max_rep: Optional[int],
-                        greedy: bool) -> Tuple[int, int]:
-        """Apply quantifier to a subpattern."""
+                    start: int, 
+                    end: int, 
+                    min_rep: int, 
+                    max_rep: Optional[int],
+                    greedy: bool) -> Tuple[int, int]:
+        """Apply quantifier to a subpattern with improved optional handling."""
         new_start = self.new_state()
         new_end = self.new_state()
         
@@ -302,14 +373,19 @@ class NFABuilder:
         
         # Handle different quantifier types
         if min_rep == 0 and max_rep is None:  # *
+            # Allow empty matches
+            self.add_epsilon(new_start, new_end)
+            
             if greedy:
-                self.add_epsilon(new_start, start)  # Try to match
-                self.add_epsilon(new_start, new_end)  # Or skip - allows empty match
+                # Try to match (greedy)
+                self.add_epsilon(new_start, start)
+                self.add_epsilon(end, start)  # Loop back
+                self.add_epsilon(end, new_end)  # Or finish
             else:
-                self.add_epsilon(new_start, new_end)  # Try to skip - allows empty match
-                self.add_epsilon(new_start, start)  # Or match
-            self.add_epsilon(end, start)  # Loop back
-            self.add_epsilon(end, new_end)  # Or finish
+                # Try to skip (reluctant)
+                self.add_epsilon(new_start, start)
+                self.add_epsilon(end, start)  # Loop back
+                self.add_epsilon(end, new_end)  # Or finish
             
         elif min_rep == 1 and max_rep is None:  # +
             self.add_epsilon(new_start, start)  # Must match once
@@ -317,14 +393,10 @@ class NFABuilder:
             self.add_epsilon(end, new_end)  # Or finish
             
         elif min_rep == 0 and max_rep == 1:  # ?
-            if greedy:
-                self.add_epsilon(new_start, start)  # Try to match
-                self.add_epsilon(new_start, new_end)  # Or skip - allows empty match
-            else:
-                self.add_epsilon(new_start, new_end)  # Try to skip - allows empty match
-                self.add_epsilon(new_start, start)  # Or match
-            self.add_epsilon(end, new_end)
-            print(f"Added epsilon transition for ? quantifier - allows empty match")
+            # Must have this for optional elements (var?)
+            self.add_epsilon(new_start, new_end)  # Skip it completely
+            self.add_epsilon(new_start, start)    # Or match it once
+            self.add_epsilon(end, new_end)        # End after match
             
         else:  # {m,n} bounds
             # Create chain for minimum repetitions
@@ -332,7 +404,6 @@ class NFABuilder:
             if min_rep == 0:
                 # Direct path for empty match
                 self.add_epsilon(new_start, new_end)
-                print(f"Added epsilon transition for {min_rep},{max_rep} quantifier - allows empty match")
                 
             for _ in range(min_rep):
                 next_start = self.new_state()
@@ -358,7 +429,6 @@ class NFABuilder:
         
         return new_start, new_end
 
-    
     def _copy_subpattern(self, 
                         orig_start: int, 
                         orig_end: int, 

@@ -472,7 +472,7 @@ class MeasureEvaluator:
 
     def _get_var_indices(self, var: str) -> List[int]:
         """
-        Get indices of rows matched to a variable or subset.
+        Get indices of rows matched to a variable or subset with improved handling.
         
         Args:
             var: The variable name
@@ -484,13 +484,25 @@ class MeasureEvaluator:
         if var in self.context.variables:
             return sorted(self.context.variables[var])
         
-        # Check for subset variable
+        # Check for subset variable with improved handling
         if hasattr(self.context, 'subsets') and var in self.context.subsets:
             indices = []
             for comp_var in self.context.subsets[var]:
                 if comp_var in self.context.variables:
                     indices.extend(self.context.variables[comp_var])
-            return sorted(indices)
+            return sorted(set(indices))  # Ensure we don't have duplicates
+        
+        # Try to handle variable name with quantifier (var?)
+        base_var = None
+        if var.endswith('?'):
+            base_var = var[:-1]
+        elif var.endswith('*') or var.endswith('+'):
+            base_var = var[:-1]
+        elif '{' in var and var.endswith('}'):
+            base_var = var[:var.find('{')]
+            
+        if base_var and base_var in self.context.variables:
+            return sorted(self.context.variables[base_var])
         
         return []
 

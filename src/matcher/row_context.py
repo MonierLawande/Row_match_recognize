@@ -117,6 +117,9 @@ class RowContext:
         indices = self.var_row_indices(variable)
         return [self.rows[idx] for idx in indices if 0 <= idx < len(self.rows)]
 
+    # src/matcher/row_context.py
+    # Update the var_row_indices method in RowContext class
+
     def var_row_indices(self, variable: str) -> List[int]:
         """
         Get indices of rows matched to a variable or subset.
@@ -134,15 +137,32 @@ class RowContext:
         """
         indices = []
         
-        # Check direct variable
-        if variable in self.variables:
-            indices = self.variables[variable]
+        # Handle base variables with quantifiers (e.g., B?, C*)
+        base_var = variable
+        if variable.endswith('?'):
+            base_var = variable[:-1]
+        elif variable.endswith('+') or variable.endswith('*'):
+            base_var = variable[:-1]
+        elif '{' in variable and variable.endswith('}'):
+            base_var = variable[:variable.find('{')]
+        
+        # Check direct variable (using base name)
+        if base_var in self.variables:
+            indices = self.variables[base_var]
         
         # Check subset variable
         elif variable in self.subsets:
             for comp in self.subsets[variable]:
-                if comp in self.variables:
-                    indices.extend(self.variables[comp])
+                comp_base = comp
+                if comp.endswith('?'):
+                    comp_base = comp[:-1]
+                elif comp.endswith('+') or comp.endswith('*'):
+                    comp_base = comp[:-1]
+                elif '{' in comp and comp.endswith('}'):
+                    comp_base = comp[:comp.find('{')]
+                    
+                if comp_base in self.variables:
+                    indices.extend(self.variables[comp_base])
         
         return sorted(indices)
     

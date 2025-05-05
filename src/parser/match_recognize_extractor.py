@@ -173,6 +173,37 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         self.validate_function_usage(ctx)
         
         return self.ast
+    # Add this method to the MatchRecognizeExtractor class in src/parser/match_recognize_extractor.py
+
+    def extract_subset(self, ctx: TrinoParser.PatternRecognitionContext) -> List[SubsetClause]:
+        """Extract SUBSET clause information.
+        
+        The SUBSET clause defines union variables as combinations of primary pattern variables.
+        For example: SUBSET X = (A, B), Y = (B, C)
+        
+        Args:
+            ctx: The pattern recognition context
+        
+        Returns:
+            List of SubsetClause objects
+        """
+        subset_clauses = []
+        
+        # Check if we have a SUBSET_ token and subsetDefinition contexts
+        if hasattr(ctx, 'SUBSET_') and ctx.SUBSET_() and hasattr(ctx, 'subsetDefinition'):
+            for subset_def in ctx.subsetDefinition():
+                # Get the original text directly from the input stream
+                start = subset_def.start.start
+                stop = subset_def.stop.stop
+                subset_text = subset_def.start.getInputStream().getText(start, stop)
+                
+                # Create a SubsetClause object with the raw text
+                subset_clauses.append(SubsetClause(subset_text))
+                
+                # Debug output
+                print(f"Extracted subset definition: {subset_text}")
+        
+        return subset_clauses
 
     def _parse_skip_text(self, skip_text: str) -> AfterMatchSkipClause:
         """Parse the AFTER MATCH SKIP clause text extracted from raw SQL."""
