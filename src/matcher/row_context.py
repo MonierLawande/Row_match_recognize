@@ -120,6 +120,8 @@ class RowContext:
     # src/matcher/row_context.py
     # Update the var_row_indices method in RowContext class
 
+    # src/matcher/row_context.py
+
     def var_row_indices(self, variable: str) -> List[int]:
         """
         Get indices of rows matched to a variable or subset.

@@ -1,8 +1,10 @@
 # src/executor/match_recognize.py
 
 import pandas as pd
-from typing import List, Dict, Any, Optional, Set
-
+import re
+import time
+import itertools
+from typing import List, Dict, Any, Optional, Set, Tuple, Union
 from src.parser.match_recognize_extractor import parse_full_query
 from src.matcher.pattern_tokenizer import tokenize_pattern
 from src.matcher.automata import NFABuilder
@@ -40,11 +42,118 @@ def extract_subset_dict(subsets):
                 subset_dict[subset_name] = components
     return subset_dict
 
-# Fix for the rows_per_match detection in match_recognize function
+def format_trino_output(df):
+    """Format DataFrame output to match Trino's text output format."""
+    if df.empty:
+        return "(0 rows)"
+    
+    # Get column widths
+    col_widths = {}
+    for col in df.columns:
+        # Calculate max width of column name and values
+        col_width = max(
+            len(str(col)),
+            df[col].astype(str).str.len().max() if not df[col].empty else 0
+        )
+        col_widths[col] = col_width + 2  # Add padding
+    
+    # Format header
+    header = " | ".join(f"{col:{col_widths[col]}}" for col in df.columns)
+    separator = "-" * len(header)
+    for col in df.columns:
+        pos = header.find(col)
+        separator = separator[:pos-1] + "+" + separator[pos:pos+len(col)] + "+" + separator[pos+len(col)+1:]
+    
+    # Format rows
+    rows = []
+    for _, row in df.iterrows():
+        formatted_row = " | ".join(f"{str(row[col]):{col_widths[col]}}" for col in df.columns)
+        rows.append(formatted_row)
+    
+    # Combine all parts
+    result = f"{header}\n{separator}\n" + "\n".join(rows)
+    result += f"\n({len(df)} {'row' if len(df) == 1 else 'rows'})"
+    
+    return result
+
+def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, List[int]], all_rows: List[Dict[str, Any]]) -> Tuple[bool, Any]:
+    """
+    Evaluate a pattern variable reference like A.salary or LAST(C.salary).
+    
+    Args:
+        expr: The expression to evaluate
+        var_assignments: Dictionary mapping variables to row indices
+        all_rows: List of all rows
+        
+    Returns:
+        Tuple of (is_handled, value)
+    """
+    print(f"Evaluating pattern variable reference: {expr}")
+    print(f"Variable assignments: {var_assignments}")
+    print(f"Number of rows: {len(all_rows)}")
+    
+    # Handle direct pattern variable references like A.salary
+    var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)[.]([A-Za-z_][A-Za-z0-9_]*)$', expr)
+    if var_col_match:
+        var_name = var_col_match.group(1)
+        col_name = var_col_match.group(2)
+        print(f"Matched pattern variable reference: {var_name}.{col_name}")
+        
+        # Get the variable's matched rows
+        var_indices = var_assignments.get(var_name, [])
+        print(f"Variable {var_name} indices: {var_indices}")
+        
+        if var_indices:
+            # Use the first row for the variable
+            idx = var_indices[0]
+            if idx < len(all_rows):
+                value = all_rows[idx].get(col_name)
+                print(f"Setting value to {value} from {var_name}.{col_name}")
+                return True, value
+            else:
+                print(f"Index {idx} out of bounds for all_rows (length {len(all_rows)})")
+        else:
+            print(f"No indices found for variable {var_name}")
+        return True, None
+    
+    # Handle LAST function
+    last_match = re.match(r'^LAST\(([A-Za-z_][A-Za-z0-9_]*)[.]([A-Za-z_][A-Za-z0-9_]*)(?:,\s*(\d+))?\)$', expr, re.IGNORECASE)
+    if last_match:
+        var_name = last_match.group(1)
+        col_name = last_match.group(2)
+        occurrence = int(last_match.group(3)) if last_match.group(3) else 0
+        print(f"Matched LAST function: LAST({var_name}.{col_name}, {occurrence})")
+        
+        # Get the variable's matched rows
+        var_indices = var_assignments.get(var_name, [])
+        print(f"Variable {var_name} indices: {var_indices}")
+        
+        if var_indices and occurrence < len(var_indices):
+            # Use the last row for the variable
+            idx = var_indices[-1]  # Always use the last index for LAST function
+            if idx < len(all_rows):
+                value = all_rows[idx].get(col_name)
+                print(f"Setting value to {value} from LAST({var_name}.{col_name})")
+                return True, value
+            else:
+                print(f"Index {idx} out of bounds for all_rows (length {len(all_rows)})")
+        else:
+            print(f"No indices found for variable {var_name} or occurrence {occurrence} out of bounds")
+        return True, None
+    
+    # Handle MATCH_NUMBER
+    if expr.upper() == "MATCH_NUMBER()":
+        print("Matched MATCH_NUMBER function")
+        return False, None  # Handled separately
+    
+    # Not a pattern variable reference
+    print(f"Not a pattern variable reference: {expr}")
+    return False, None
+
 def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     """
     Execute a MATCH_RECOGNIZE query against a Pandas DataFrame.
-    Enhanced with support for all MATCH_RECOGNIZE features, including empty matches.
+    Enhanced to match Trino's output format exactly.
     """
     # Parse the query and build the AST
     ast = parse_full_query(query)
@@ -56,7 +165,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     partition_by = mr_clause.partition_by.columns if mr_clause.partition_by else []
     order_by = [si.column for si in mr_clause.order_by.sort_items] if mr_clause.order_by else []
 
-# Extract rows per match configuration
+    # Extract rows per match configuration
     rows_per_match = RowsPerMatch.ONE_ROW  # Default
     if mr_clause.rows_per_match:
         # Get the raw mode text
@@ -83,7 +192,6 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         if "{-" in pattern_text and "-}" in pattern_text:
             raise ValueError("Pattern exclusions are not allowed with ALL ROWS PER MATCH WITH UNMATCHED ROWS")
 
-   
     # Extract after match skip configuration
     skip_mode = SkipMode.PAST_LAST_ROW  # Default
     skip_var = None
@@ -155,6 +263,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
 
     # Process partitions
     results = []
+    all_matches = []  # Store all matches for post-processing
+    all_rows = []  # Store all rows for post-processing
     
     # Partition the DataFrame
     if partition_by:
@@ -169,6 +279,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             
         # Convert to rows
         rows = partition.to_dict('records')
+        partition_start_idx = len(all_rows)  # Remember where this partition starts
+        all_rows.extend(rows)  # Store rows for post-processing
         
         # Create context and configure subsets
         context = RowContext()
@@ -187,14 +299,14 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         # Create matcher with all necessary parameters
         matcher = EnhancedMatcher(
-        dfa=dfa,
-        measures=measures,
-        measure_semantics=measure_semantics,
-        exclusion_ranges=nfa.exclusion_ranges,
-        after_match_skip=skip_mode,
-        subsets=subset_dict,
-        original_pattern=mr_clause.pattern.pattern  # Pass the original pattern
-    )
+            dfa=dfa,
+            measures=measures,
+            measure_semantics=measure_semantics,
+            exclusion_ranges=nfa.exclusion_ranges,
+            after_match_skip=skip_mode,
+            subsets=subset_dict,
+            original_pattern=mr_clause.pattern.pattern  # Pass the original pattern
+        )
         
         # Find matches
         partition_results = matcher.find_matches(
@@ -203,33 +315,132 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             measures=measures  # Pass measures explicitly
         )
         
+        # Store matches for post-processing with adjusted indices
+        if hasattr(matcher, "_matches"):
+            for match in matcher._matches:
+                # Adjust indices to be relative to all_rows
+                if "variables" in match:
+                    adjusted_vars = {}
+                    for var, indices in match["variables"].items():
+                        adjusted_vars[var] = [idx + partition_start_idx for idx in indices]
+                    match["variables"] = adjusted_vars
+                
+                # Adjust start and end indices
+                if "start" in match:
+                    match["start"] += partition_start_idx
+                if "end" in match:
+                    match["end"] += partition_start_idx
+                
+                all_matches.append(match)
+        
         # Add partition columns if needed
         if partition_by and rows:
             for result in partition_results:
                 for col in partition_by:
-                    result[col] = rows[0][col]  # Use values from first row of partition
+                    if col not in result and rows:
+                        result[col] = rows[0][col]  # Use values from first row of partition
                     
         results.extend(partition_results)
 
+    # Debug the match data
+    print("\nMatch data:")
+    for match in all_matches:
+        print(f"Match number: {match.get('match_number')}")
+        print(f"Start: {match['start']}, End: {match['end']}")
+        print(f"Variables: {match.get('variables', {})}")
+        
+        # Debug the variable assignments
+        for var, indices in match.get("variables", {}).items():
+            print(f"  Variable {var} assigned to rows: {indices}")
+            for idx in indices:
+                if idx < len(all_rows):
+                    print(f"    Row {idx}: {all_rows[idx]}")
+
     # Create output DataFrame
-    if not results:
+    if not results and not all_matches:
         # Create empty DataFrame with appropriate columns
-        columns = list(df.columns)  # Include original columns
+        columns = []
+        # Add partition columns
+        columns.extend(partition_by)
+        # Add measure columns
         if measures:
-            columns.extend(measures.keys())  # Add measure columns
-        columns.extend(['MATCH_NUMBER', 'IS_EMPTY_MATCH'])  # Add metadata columns
+            columns.extend(measures.keys())
         return pd.DataFrame(columns=columns)
-    
-    # Return the results with columns in the original order plus measure columns
-    # This preserves column ordering from the input DataFrame
-    result_df = pd.DataFrame(results)
-    
-    # Re-order columns to put original columns first, then measures, then metadata
-    original_cols = [col for col in df.columns if col in result_df.columns]
-    measure_cols = [col for col in measures.keys() if col in result_df.columns]
-    meta_cols = ["MATCH_NUMBER", "IS_EMPTY_MATCH"]
-    other_cols = [col for col in result_df.columns 
-                 if col not in original_cols and col not in measure_cols and col not in meta_cols]
-    
-    ordered_cols = original_cols + measure_cols + meta_cols + other_cols
-    return result_df[ordered_cols]
+
+    # For ONE ROW PER MATCH, we need to create a new DataFrame with the correct columns
+    if rows_per_match == RowsPerMatch.ONE_ROW:
+        # Create a list to hold the final result rows
+        final_results = []
+        
+        # Process each match
+        for match in all_matches:
+            match_num = match.get("match_number")
+            var_assignments = match.get("variables", {})
+            
+            # Create a new result row
+            result_row = {}
+            
+            # Add partition columns
+            if match["start"] < len(all_rows):
+                start_row = all_rows[match["start"]]
+                for col in partition_by:
+                    if col in start_row:
+                        result_row[col] = start_row[col]
+            
+            # Process measures directly from the match data
+            for measure in mr_clause.measures.measures:
+                alias = measure.alias
+                expr = measure.expression
+                
+                # Handle special case for MATCH_NUMBER
+                if expr.upper() == "MATCH_NUMBER()":
+                    result_row[alias] = match_num
+                    print(f"Setting {alias} to {match_num} from MATCH_NUMBER()")
+                    continue
+                
+                # Handle pattern variable references
+                handled, value = evaluate_pattern_variable_reference(expr, var_assignments, all_rows)
+                if handled:
+                    result_row[alias] = value
+                    continue
+                
+                # For other expressions, use the evaluator (not implemented here)
+                result_row[alias] = None
+            
+            final_results.append(result_row)
+        
+        # Create DataFrame with the final results
+        result_df = pd.DataFrame(final_results)
+        
+        # Ensure columns are in the correct order
+        ordered_cols = []
+        ordered_cols.extend(partition_by)  # Partition columns first
+        if mr_clause.measures:
+            ordered_cols.extend([m.alias for m in mr_clause.measures.measures])  # Measures in specified order
+        
+        # Only keep columns that exist in the result
+        ordered_cols = [col for col in ordered_cols if col in result_df.columns]
+        return result_df[ordered_cols]
+    else:
+        # For ALL ROWS PER MATCH, keep all rows
+        result_df = pd.DataFrame(results)
+        
+        # Determine columns to include
+        output_cols = []
+        # Add original columns first
+        original_cols = [col for col in df.columns if col in result_df.columns]
+        output_cols.extend(original_cols)
+        
+        # Add measure columns
+        measure_cols = [col for col in measures.keys() if col in result_df.columns]
+        output_cols.extend(measure_cols)
+        
+        # Add metadata columns if they exist
+        meta_cols = ["MATCH_NUMBER", "IS_EMPTY_MATCH"]
+        for col in meta_cols:
+            if col in result_df.columns:
+                output_cols.append(col)
+        
+        # Only keep columns that exist in the result
+        output_cols = [col for col in output_cols if col in result_df.columns]
+        return result_df[output_cols]

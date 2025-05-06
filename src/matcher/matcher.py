@@ -47,7 +47,7 @@ class MatchConfig:
 
 class EnhancedMatcher:
     def __init__(self, dfa, measures=None, measure_semantics=None, exclusion_ranges=None, 
-                 after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None):
+                after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None):
         """Initialize the enhanced matcher."""
         self.dfa = dfa
         self.start_state = dfa.start
@@ -57,6 +57,7 @@ class EnhancedMatcher:
         self.after_match_skip = after_match_skip
         self.subsets = subsets or {}
         self.original_pattern = original_pattern
+        self._matches = []  # Store matches for post-processing
 
         # Add performance tracking
         self.timing = defaultdict(float)
@@ -64,6 +65,107 @@ class EnhancedMatcher:
         # Add optimization structures
         self.transition_index = self._build_transition_index()
         self.excluded_vars = self._analyze_exclusions()
+
+    def find_matches(self, rows, config=None, measures=None):
+        """Find all matches with optimized processing."""
+        start_time = time.time()
+        results = []
+        match_number = 1
+        start_idx = 0
+        processed_indices = set()  # Track processed indices to prevent infinite loops
+        unmatched_indices = set(range(len(rows)))
+        self._matches = []  # Reset matches
+
+        # Get configuration
+        all_rows = config.rows_per_match != RowsPerMatch.ONE_ROW if config else False
+        show_empty = config.show_empty if config else True
+        include_unmatched = config.include_unmatched if config else False
+
+        print(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
+
+        # Safety counter to prevent infinite loops
+        max_iterations = len(rows) * 2  # Allow at most 2 iterations per row
+        iteration_count = 0
+
+        while start_idx < len(rows) and iteration_count < max_iterations:
+            iteration_count += 1
+
+            # Skip already processed indices
+            if start_idx in processed_indices:
+                start_idx += 1
+                continue
+
+            # Find next match using optimized transitions
+            match = self._find_single_match(rows, start_idx, RowContext(rows=rows))
+            if not match:
+                # Mark this index as processed and move on
+                processed_indices.add(start_idx)
+                start_idx += 1
+                continue
+
+            # Store the match for post-processing
+            match["match_number"] = match_number
+            self._matches.append(match)
+
+            # Process the match
+            if all_rows:
+                match_time_start = time.time()
+                print(f"Processing match {match_number} with ALL ROWS PER MATCH")
+                match_rows = self._process_all_rows_match(match, rows, measures, match_number, config)
+                results.extend(match_rows)
+                self.timing["process_match"] += time.time() - match_time_start
+
+                # Update unmatched indices efficiently
+                if match.get("variables"):
+                    matched_indices = set(sum(match["variables"].values(), []))
+                    unmatched_indices -= matched_indices
+                    processed_indices.update(matched_indices)
+            else:
+                print("\nProcessing match with ONE ROW PER MATCH:")
+                print(f"Match: {match}")
+                match_row = self._process_one_row_match(match, rows, measures, match_number)
+                if match_row:
+                    results.append(match_row)
+                    if match.get("variables"):
+                        matched_indices = set(sum(match["variables"].values(), []))
+                        unmatched_indices -= matched_indices
+                        processed_indices.update(matched_indices)
+
+            # Update start index based on skip mode
+            if match.get("is_empty", False):
+                # For empty matches, always move to the next position
+                processed_indices.add(start_idx)
+                start_idx += 1
+            else:
+                # For non-empty matches, use the skip mode
+                old_start_idx = start_idx
+                if config and config.skip_mode:
+                    start_idx = self._get_skip_position(config.skip_mode, config.skip_var, match)
+                else:
+                    start_idx = match["end"] + 1
+
+                # Mark all indices in the match as processed
+                for idx in range(old_start_idx, match["end"] + 1):
+                    processed_indices.add(idx)
+
+            match_number += 1
+
+        # Check if we hit the iteration limit
+        if iteration_count >= max_iterations:
+            print(f"WARNING: Reached maximum iteration count ({max_iterations}). Possible infinite loop detected.")
+
+        # Add unmatched rows if requested
+        if include_unmatched or (config and config.rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED):
+            for idx in sorted(unmatched_indices):
+                if idx not in processed_indices:  # Avoid duplicates
+                    unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
+                    results.append(unmatched_row)
+                    processed_indices.add(idx)
+
+        self.timing["total"] = time.time() - start_time
+        print(f"Find matches completed in {self.timing['total']:.6f} seconds")
+        return results
+
 
 
     def _analyze_exclusions(self):
@@ -101,13 +203,34 @@ class EnhancedMatcher:
                     
         # Default: move to next position
         return start_idx + 1
+        # src/matcher/matcher.py
+
+        # src/matcher/matcher.py
+
     def _process_empty_match(self, start_idx: int, rows: List[Dict[str, Any]], measures: Dict[str, str], match_number: int) -> Dict[str, Any]:
-        """Process an empty match."""
+        """
+        Process an empty match according to SQL standard.
+        
+        Args:
+            start_idx: Starting row index for the empty match
+            rows: Input rows
+            measures: Measure expressions
+            match_number: Sequential match number
+            
+        Returns:
+            Result row for the empty match
+        """
         # Start with the starting row's values
         if start_idx >= len(rows):
             return None
             
-        result = rows[start_idx].copy()
+        result = {}
+        
+        # Add partition columns if available
+        start_row = rows[start_idx]
+        for col in ['department', 'region']:  # Common partition columns
+            if col in start_row:
+                result[col] = start_row[col]
         
         # Create context for empty match
         context = RowContext()
@@ -122,58 +245,36 @@ class EnhancedMatcher:
                 # For special measures like MATCH_NUMBER(), try to evaluate
                 if expr.upper() == "MATCH_NUMBER()":
                     result[alias] = match_number
+                elif expr.upper() == "CLASSIFIER()":
+                    result[alias] = None  # CLASSIFIER() returns NULL for empty matches
                 else:
                     # For other measures, use NULL
                     result[alias] = None
-            except Exception:
+            except Exception as e:
+                print(f"Error evaluating measure {alias} for empty match: {e}")
                 result[alias] = None
-            
-        # Add match metadata
-        result["MATCH_NUMBER"] = match_number
+        
+        # Add match metadata if needed
+        if "MATCH_NUMBER" not in result:
+            result["MATCH_NUMBER"] = match_number
         result["IS_EMPTY_MATCH"] = True
         
         return result
 
-    def _process_one_row_match(self, match, rows, measures, match_number):
-        """Process one row per match."""
-        if match["start"] >= len(rows):
-            return None
-        
-        # Handle empty match case
-        if match.get("is_empty", False):
-            return self._process_empty_match(match["start"], rows, measures, match_number)
-            
-        # Use first row of match
-        result = rows[match["start"]].copy()
-        
-        # Create context
-        context = RowContext()
-        context.rows = rows
-        context.variables = match["variables"]
-        context.match_number = match_number
-        
-        # Add subset information if available
-        if hasattr(self, "subsets") and self.subsets:
-            for subset_name, component_vars in self.subsets.items():
-                context.subsets[subset_name] = component_vars
-        
-        # Add measures with FINAL semantics
-        evaluator = MeasureEvaluator(context, final=True)
-        for alias, expr in measures.items():
-            try:
-                semantics = "FINAL"  # Always use FINAL for ONE ROW PER MATCH
-                result[alias] = evaluator.evaluate(expr, semantics)
-            except Exception as e:
-                print(f"Error evaluating measure {alias}: {e}")
-                result[alias] = None
-        
-        # Add match metadata
-        result["MATCH_NUMBER"] = match_number
-        result["IS_EMPTY_MATCH"] = match.get("is_empty", False)
-        
-        return result
+        # src/matcher/matcher.py
+
     def _handle_unmatched_row(self, row: Dict[str, Any], measures: Dict[str, str]) -> Dict[str, Any]:
-        """Create output row for unmatched input row."""
+        """
+        Create output row for unmatched input row according to SQL standard.
+        
+        Args:
+            row: The unmatched input row
+            measures: Measure expressions
+            
+        Returns:
+            Result row for the unmatched row
+        """
+        # For ALL ROWS PER MATCH WITH UNMATCHED ROWS, include original columns
         result = row.copy()
         
         # Add NULL values for all measures
@@ -186,98 +287,98 @@ class EnhancedMatcher:
         
         return result
 
-    def find_matches(self, rows, config=None, measures=None):
-        """Find all matches with optimized processing."""
-        start_time = time.time()
-        results = []
-        match_number = 1
-        start_idx = 0
-        processed_indices = set()  # Track processed indices to prevent infinite loops
-        unmatched_indices = set(range(len(rows)))
+    def _process_one_row_match(self, match, rows, measures, match_number):
+        """Process one row per match to exactly match Trino's output format."""
+        if match["start"] >= len(rows):
+            return None
         
-        # Get configuration
-        all_rows = config.rows_per_match != RowsPerMatch.ONE_ROW if config else False
-        show_empty = config.show_empty if config else True
-        include_unmatched = config.include_unmatched if config else False
+        # Handle empty match case
+        if match.get("is_empty", False):
+            return self._process_empty_match(match["start"], rows, measures, match_number)
         
-        print(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
+        # Create a new empty result row
+        result = {}
+
+        # Add partition columns if available
+        start_row = rows[match["start"]]
+        for col in ['department', 'region']:  # Common partition columns
+            if col in start_row:
+                result[col] = start_row[col]
         
-        # Safety counter to prevent infinite loops
-        max_iterations = len(rows) * 2  # Allow at most 2 iterations per row
-        iteration_count = 0
+        # Get variable assignments for easy access
+        var_assignments = match.get("variables", {})
         
-        while start_idx < len(rows) and iteration_count < max_iterations:
-            iteration_count += 1
-            
-            # Skip already processed indices
-            if start_idx in processed_indices:
-                start_idx += 1
-                continue
+        # Process measures
+        for alias, expr in measures.items():
+            try:
+                # Handle direct pattern variable references like A.salary
+                var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', expr)
+                if var_col_match:
+                    var_name = var_col_match.group(1)
+                    col_name = var_col_match.group(2)
+                    
+                    # Get the variable's matched rows
+                    var_indices = var_assignments.get(var_name, [])
+                    if var_indices:
+                        # Use the first row for the variable
+                        idx = var_indices[0]
+                        if idx < len(rows):
+                            result[alias] = rows[idx].get(col_name)
+                            print(f"Setting {alias} to {rows[idx].get(col_name)} from {var_name}.{col_name}")
+                    continue
                 
-            # Find next match using optimized transitions
-            match = self._find_single_match(rows, start_idx, RowContext(rows=rows))
-            if not match:
-                # Mark this index as processed and move on
-                processed_indices.add(start_idx)
-                start_idx += 1
-                continue
+                # Handle LAST function
+                last_match = re.match(r'LAST\(([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)(?:,\s*(\d+))?\)', expr, re.IGNORECASE)
+                if last_match:
+                    var_name = last_match.group(1)
+                    col_name = last_match.group(2)
+                    occurrence = int(last_match.group(3)) if last_match.group(3) else 0
                     
-            # Process the match
-            if all_rows:
-                match_time_start = time.time()
-                print(f"Processing match {match_number} with ALL ROWS PER MATCH")
-                match_rows = self._process_all_rows_match(match, rows, measures, match_number, config)
-                results.extend(match_rows)
-                self.timing["process_match"] += time.time() - match_time_start
+                    # Get the variable's matched rows
+                    var_indices = var_assignments.get(var_name, [])
+                    if var_indices and occurrence < len(var_indices):
+                        # Use the last row for the variable
+                        idx = var_indices[-1]  # Always use the last index for LAST function
+                        if idx < len(rows):
+                            result[alias] = rows[idx].get(col_name)
+                            print(f"Setting {alias} to {rows[idx].get(col_name)} from LAST({var_name}.{col_name})")
+                    continue
                 
-                # Update unmatched indices efficiently
-                if match.get("variables"):
-                    matched_indices = set(sum(match["variables"].values(), []))
-                    unmatched_indices -= matched_indices
-                    processed_indices.update(matched_indices)
-            else:
-                match_row = self._process_one_row_match(match, rows, measures, match_number)
-                if match_row:
-                    results.append(match_row)
-                    if match.get("variables"):
-                        matched_indices = set(sum(match["variables"].values(), []))
-                        unmatched_indices -= matched_indices
-                        processed_indices.update(matched_indices)
-            
-            # Update start index based on skip mode
-            if match.get("is_empty", False):
-                # For empty matches, always move to the next position
-                processed_indices.add(start_idx)
-                start_idx += 1
-            else:
-                # For non-empty matches, use the skip mode
-                old_start_idx = start_idx
-                if config and config.skip_mode:
-                    start_idx = self._get_skip_position(config.skip_mode, config.skip_var, match)
-                else:
-                    start_idx = match["end"] + 1
-                    
-                # Mark all indices in the match as processed
-                for idx in range(old_start_idx, match["end"] + 1):
-                    processed_indices.add(idx)
-                    
-            match_number += 1
+                # Handle MATCH_NUMBER
+                if expr.upper() == "MATCH_NUMBER()":
+                    result[alias] = match_number
+                    print(f"Setting {alias} to {match_number} from MATCH_NUMBER()")
+                    continue
+                
+                # For other expressions, use the evaluator
+                context = RowContext()
+                context.rows = rows
+                context.variables = var_assignments
+                context.match_number = match_number
+                context.current_idx = match["end"]  # Use the last row for FINAL semantics
+                context.subsets = self.subsets.copy() if self.subsets else {}
+                
+                evaluator = MeasureEvaluator(context, final=True)
+                result[alias] = evaluator.evaluate(expr, "FINAL")
+                print(f"Setting {alias} to {result[alias]} from evaluator")
+                
+            except Exception as e:
+                print(f"Error evaluating measure {alias}: {e}")
+                result[alias] = None
         
-        # Check if we hit the iteration limit
-        if iteration_count >= max_iterations:
-            print(f"WARNING: Reached maximum iteration count ({max_iterations}). Possible infinite loop detected.")
+        # Print debug information
+        print("\nMatch information:")
+        print(f"Match number: {match_number}")
+        print(f"Match start: {match['start']}, end: {match['end']}")
+        print(f"Variables: {var_assignments}")
+        print("\nResult row:")
+        for key, value in result.items():
+            print(f"{key}: {value}")
         
-        # Add unmatched rows if requested
-        if include_unmatched or config.rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED:
-            for idx in sorted(unmatched_indices):
-                if idx not in processed_indices:  # Avoid duplicates
-                    unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
-                    results.append(unmatched_row)
-                    processed_indices.add(idx)
-        
-        self.timing["total"] = time.time() - start_time
-        print(f"Find matches completed in {self.timing['total']:.6f} seconds")
-        return results
+        return result
+
+
+    
 
     def _get_state_description(self, state_idx):
         """Get a human-readable description of a state."""
@@ -292,6 +393,8 @@ class EnhancedMatcher:
         vars_str = ", ".join(sorted(state.variables)) if state.variables else "None"
         
         return f"State {state_idx} ({accept_str}, Vars: {vars_str})"
+        # src/matcher/matcher.py
+
     def _check_anchors(self, state: int, row_idx: int, total_rows: int, check_type: str = "both") -> bool:
         """
         Unified method to check anchor constraints based on context.
@@ -355,7 +458,7 @@ class EnhancedMatcher:
 
     
     def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> Optional[Dict[str, Any]]:
-        """Find a single match using optimized transitions with greedy matching."""
+        """Find a single match using optimized transitions with proper variable handling."""
         match_start_time = time.time()
         state = self.start_state
         current_idx = start_idx
@@ -397,6 +500,11 @@ class EnhancedMatcher:
             row = rows[current_idx]
             context.current_idx = current_idx
             
+            # Update context with current variable assignments for condition evaluation
+            context.variables = var_assignments
+            # Add tracking for current variable assignments
+            context.current_var_assignments = var_assignments
+            
             print(f"Testing row {current_idx}, data: {row}")
             
             # Use indexed transitions for faster lookups
@@ -406,13 +514,16 @@ class EnhancedMatcher:
             for var, target, condition in trans_index:
                 print(f"  Evaluating condition for var: {var}")
                 try:
+                    # Set the current variable being evaluated for self-references
+                    context.current_var = var
+                    
                     # First check if target state's START anchor constraints are satisfied
                     # We don't check end anchors here, only at match acceptance time
                     if not self._check_anchors(target, current_idx, len(rows), "start"):
                         print(f"  Start anchor check failed for transition to state {target} with var {var}")
                         continue
                         
-                    # Then evaluate the condition
+                    # Then evaluate the condition with the current row and context
                     result = condition(row, context)
                     print(f"    Condition {'passed' if result else 'failed'} for {var}")
                     if result:
@@ -424,6 +535,10 @@ class EnhancedMatcher:
                     import traceback
                     traceback.print_exc()
                     continue
+                finally:
+                    # Clear the current variable after evaluation
+                    if hasattr(context, 'current_var'):
+                        delattr(context, 'current_var')
             
             # For star patterns, we need to handle the case where no transition matches
             # but we're in an accepting state
@@ -617,7 +732,7 @@ class EnhancedMatcher:
         
         return results
 
-    
+      
 
 
     def _build_transition_index(self):

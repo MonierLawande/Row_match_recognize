@@ -51,24 +51,18 @@ class MeasureEvaluator:
                         for idx in self.context.variables[comp]:
                             self._row_to_vars[idx].add(subset_name)
 
+        # src/matcher/measure_evaluator.py
+
     def evaluate(self, expr: str, semantics: str = None) -> Any:
         """
         Evaluate a measure expression with proper RUNNING/FINAL semantics.
         
         Args:
             expr: The expression to evaluate
-            semantics: Optional semantics override ("RUNNING" or "FINAL")
+            semantics: Optional semantics override ('RUNNING' or 'FINAL')
             
         Returns:
-            The evaluated result of the expression
-            
-        Examples:
-            >>> evaluator.evaluate("salary", "RUNNING")
-            1200
-            >>> evaluator.evaluate("CLASSIFIER()", "RUNNING") 
-            'A'
-            >>> evaluator.evaluate("SUM(salary)", "FINAL")
-            3400
+            The result of the expression evaluation
         """
         # Use passed semantics or instance default
         is_running = (semantics == 'RUNNING') if semantics else not self.final
@@ -81,13 +75,43 @@ class MeasureEvaluator:
         # Store original expression for reference
         self.original_expr = expr
         
+        # Check for explicit RUNNING/FINAL prefix
+        running_match = re.match(r'RUNNING\s+(.+)', expr, re.IGNORECASE)
+        final_match = re.match(r'FINAL\s+(.+)', expr, re.IGNORECASE)
+        
+        if running_match:
+            expr = running_match.group(1)
+            is_running = True
+        elif final_match:
+            expr = final_match.group(1)
+            is_running = False
+        
         # Ensure current_idx is always defined and valid
         if not hasattr(self.context, 'current_idx') or self.context.current_idx is None:
             self.context.current_idx = 0
         
         if len(self.context.rows) > 0 and self.context.current_idx >= len(self.context.rows):
             self.context.current_idx = len(self.context.rows) - 1
+        
+        # Special handling for pattern variable references like A.salary
+        var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', expr)
+        if var_col_match:
+            var_name = var_col_match.group(1)
+            col_name = var_col_match.group(2)
             
+            # Get the row matched to this variable
+            var_indices = self._get_var_indices(var_name)
+            if var_indices:
+                if is_running:
+                    # For RUNNING semantics, use the first occurrence
+                    idx = var_indices[0]
+                else:
+                    # For FINAL semantics, use the last occurrence
+                    idx = var_indices[-1]
+                    
+                if idx < len(self.context.rows):
+                    return self.context.rows[idx].get(col_name)
+        
         # Enhanced CLASSIFIER handling with caching
         classifier_pattern = r'CLASSIFIER\(\s*([A-Za-z][A-Za-z0-9_]*)?\s*\)'
         classifier_match = re.match(classifier_pattern, expr, re.IGNORECASE)
@@ -99,26 +123,7 @@ class MeasureEvaluator:
         if expr.upper().strip() == "MATCH_NUMBER()":
             return self.context.match_number
 
-        # Remove RUNNING/FINAL prefix if present
-        if expr.upper().startswith("RUNNING "):
-            is_running = True
-            expr = expr[8:].strip()
-        elif expr.upper().startswith("FINAL "):
-            is_running = False
-            expr = expr[6:].strip()
-            
-        # Handle non-aggregation column references
-        if not any(func in expr.upper() for func in ["COUNT", "SUM", "AVG", "MIN", "MAX", "FIRST", "LAST", "PREV", "NEXT"]):
-            if not any(c in expr for c in "().*+-/"):
-                if not is_running:
-                    for var, indices in self.context.variables.items():
-                        if indices:
-                            last_idx = max(indices)
-                            if last_idx < len(self.context.rows):
-                                return self.context.rows[last_idx].get(expr)
-                return self.context.rows[self.context.current_idx].get(expr)
-        
-        # Check for navigation functions
+        # Handle navigation functions like FIRST, LAST, PREV, NEXT
         if any(expr.upper().startswith(f"{func}(") for func in ["FIRST", "LAST", "PREV", "NEXT"]):
             return self._evaluate_navigation(expr, is_running)
             
@@ -136,10 +141,12 @@ class MeasureEvaluator:
             print(f"Error evaluating expression '{expr}': {e}")
             return None
 
+        # src/matcher/measure_evaluator.py
+
     def evaluate_classifier(self, 
-                           var_name: Optional[str] = None, 
-                           *, 
-                           running: bool = True) -> Optional[str]:
+                        var_name: Optional[str] = None, 
+                        *, 
+                        running: bool = True) -> Optional[str]:
         """
         Evaluate CLASSIFIER function according to SQL standard.
         
@@ -251,7 +258,7 @@ class MeasureEvaluator:
         current_idx = self.context.current_idx
         
         # Fast path using row-to-variable index
-        if current_idx in self._row_to_vars:
+        if hasattr(self, '_row_to_vars') and current_idx in self._row_to_vars:
             matched_vars = self._row_to_vars[current_idx]
             
             # Handle CLASSIFIER() without arguments - use first matched variable
@@ -322,6 +329,8 @@ class MeasureEvaluator:
     
 
         
+    # src/matcher/measure_evaluator.py
+
     def _evaluate_navigation(self, expr: str, is_running: bool) -> Any:
         """
         Evaluate navigation functions with comprehensive support.
@@ -506,9 +515,11 @@ class MeasureEvaluator:
         
         return []
 
+        # src/matcher/measure_evaluator.py
+
     def _evaluate_aggregate(self, func_name: str, args_str: str, is_running: bool) -> Any:
         """
-        Evaluate aggregate functions like SUM, COUNT, etc.
+        Evaluate aggregate functions like SUM, COUNT, etc. with enhanced pattern variable support.
         
         Args:
             func_name: The aggregate function name
@@ -529,6 +540,15 @@ class MeasureEvaluator:
                 # For FINAL semantics, count all rows
                 return len(self.context.rows)
         
+        # Handle pattern variable COUNT(A.*) special case
+        pattern_count_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.\*', args_str)
+        if func_name.lower() == 'count' and pattern_count_match:
+            var_name = pattern_count_match.group(1)
+            var_indices = self._get_var_indices(var_name)
+            if is_running:
+                var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+            return len(var_indices)
+        
         # Parse variable and column references
         var_scope = None
         col_name = None
@@ -544,7 +564,7 @@ class MeasureEvaluator:
         rows_to_use = []
         if var_scope:
             # Get rows matched to specific variable
-            indices = self.context.variables.get(var_scope, [])
+            indices = self._get_var_indices(var_scope)
             if is_running:
                 # For RUNNING semantics, only consider rows up to current_idx
                 indices = [idx for idx in indices if idx <= self.context.current_idx]

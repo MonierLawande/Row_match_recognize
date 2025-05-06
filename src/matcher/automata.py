@@ -30,6 +30,8 @@ class NFAState:
 
 # Updated NFABuilder class for src/matcher/automata.py
 
+# src/matcher/automata.py
+
 class NFABuilder:
     def __init__(self):
         self.states: List[NFAState] = []
@@ -191,7 +193,6 @@ class NFABuilder:
         
         return start, end
 
-   
     def _process_permute(self, token: PatternToken, define: Dict[str, str]) -> Tuple[int, int]:
         """
         Process a PERMUTE token with enhanced functionality for nesting support.
@@ -259,8 +260,6 @@ class NFABuilder:
         
         return perm_start, perm_end
 
-    
-    # In NFABuilder class (src/matcher/automata.py):
     def _process_exclusion(self, tokens: List[PatternToken], idx: List[int], define: Dict[str, str]) -> Tuple[int, int]:
         """Process an exclusion pattern fragment."""
         # Remember exclusion start position
@@ -292,9 +291,6 @@ class NFABuilder:
             idx[0] += 1
         
         return excl_start, excl_end
-
-        # src/matcher/automata.py
-    # Update the create_var_states method in NFABuilder class
 
     def create_var_states(self, var: str, define: Dict[str, str]) -> Tuple[int, int]:
         """Create states for a pattern variable with proper quantifier handling."""
@@ -338,10 +334,6 @@ class NFABuilder:
             start, end = self._apply_quantifier(start, end, min_rep, max_rep, greedy)
         
         return start, end
-
-
-        # src/matcher/automata.py
-    # Update the _apply_quantifier method in NFABuilder class
 
     def _apply_quantifier(self, 
                     start: int, 

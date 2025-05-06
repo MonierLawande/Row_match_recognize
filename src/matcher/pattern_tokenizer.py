@@ -51,8 +51,10 @@ def parse_quantifier(quant: str) -> Tuple[int, Optional[int], bool]:
 # src/matcher/pattern_tokenizer.py
 # Update the tokenize_pattern function
 
+# src/matcher/pattern_tokenizer.py
+
 def tokenize_pattern(pattern: str) -> List[PatternToken]:
-    """Enhanced tokenizer with improved PERMUTE support and nested structures."""
+    """Enhanced tokenizer with improved support for all pattern syntax features."""
     tokens = []
     i = 0
     paren_depth = 0  # Track parenthesis depth
@@ -198,9 +200,6 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
                 tokens.append(permute_token)
                 continue
         
-        # Handle remaining token types...
-        # (rest of the function remains the same)
-    
         # Handle pattern exclusions
         elif i+1 < len(pattern) and pattern[i:i+2] == '{-':
             tokens.append(PatternToken(PatternTokenType.EXCLUSION_START, '{-'))
@@ -312,3 +311,4 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
         tokens.append(PatternToken(PatternTokenType.ANCHOR_END, '$'))
             
     return tokens
+

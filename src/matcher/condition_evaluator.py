@@ -10,6 +10,7 @@ from src.matcher.row_context import RowContext
 class ConditionEvaluator(ast.NodeVisitor):
     def __init__(self, context: RowContext):
         self.context = context
+        self.current_row = None
         # Extended mathematical and utility functions
         self.math_functions = {
             # Basic math functions
@@ -100,12 +101,16 @@ class ConditionEvaluator(ast.NodeVisitor):
         elif node.id == "row":
             # Special handling for 'row' references in keyword substitution
             return {}  # Return an empty dict that will be used in visit_Subscript
+        elif node.id == "get_var_value":
+            # Special function for pattern variable access
+            return self._get_variable_column_value
                 
         # Regular variable - get from current row
-        if self.context.current_idx >= len(self.context.rows):
-            # Safer boundary handling
-            return None
-        return self.context.rows[self.context.current_idx].get(node.id)
+        if self.current_row is not None:
+            return self.current_row.get(node.id)
+        elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+            return self.context.rows[self.context.current_idx].get(node.id)
+        return None
 
     def _extract_navigation_args(self, node: ast.Call):
         """Extract arguments from a navigation function call with support for nesting."""
@@ -132,6 +137,13 @@ class ConditionEvaluator(ast.NodeVisitor):
                     return self.math_functions[func_name](*args)
                 except Exception as e:
                     raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Special handling for pattern variable access
+            if func_name == "GET_VAR_VALUE":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 3:
+                    var_name, col_name, ctx = args
+                    return self._get_variable_column_value(var_name, col_name, ctx)
             
             # Enhanced navigation function handling with nesting support
             if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
@@ -172,16 +184,66 @@ class ConditionEvaluator(ast.NodeVisitor):
             var = node.value.id
             col = node.attr
             
-            # Get all rows matched to the pattern variable
-            var_rows = self.context.var_rows(var)
-            if var_rows:
-                # Return value from last row that matched this variable
-                return var_rows[-1].get(col)
+            # Handle pattern variable references
+            return self._get_variable_column_value(var, col, self.context)
         
         # If we can't extract a pattern var reference, try regular attribute access
         obj = self.visit(node.value)
         if obj is not None:
             return getattr(obj, node.attr, None)
+        
+        return None
+
+        # src/matcher/condition_evaluator.py
+
+    def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
+        """
+        Get a column value from a pattern variable's matched rows.
+        
+        For self-referential conditions (e.g., A.salary > 1000 when evaluating for A),
+        use the current row's value.
+        
+        Args:
+            var_name: Pattern variable name
+            col_name: Column name
+            ctx: Row context
+            
+        Returns:
+            Column value from the matched row or current row
+        """
+        # Check if we're evaluating a condition for the same variable (self-reference)
+        is_self_reference = False
+        
+        # If we have current_var set, this is a direct check for self-reference
+        if hasattr(ctx, 'current_var') and ctx.current_var == var_name:
+            is_self_reference = True
+            print(f"  Self-reference detected: {var_name}.{col_name}")
+        
+        # Otherwise check if current row is already assigned to this variable
+        if not is_self_reference and hasattr(ctx, 'current_var_assignments'):
+            if var_name in ctx.current_var_assignments and ctx.current_idx in ctx.current_var_assignments[var_name]:
+                is_self_reference = True
+        
+        if is_self_reference:
+            # Self-reference: use the current row's value
+            if self.current_row is not None:
+                return self.current_row.get(col_name)
+            elif ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                return ctx.rows[ctx.current_idx].get(col_name)
+        
+        # Otherwise, get the value from the last row matched to this variable
+        var_indices = ctx.variables.get(var_name, [])
+        if var_indices:
+            last_idx = max(var_indices)
+            if last_idx < len(ctx.rows):
+                return ctx.rows[last_idx].get(col_name)
+        
+        # If no rows matched yet, use the current row's value
+        # This is important for the first evaluation of a pattern variable
+        if self.current_row is not None:
+            return self.current_row.get(col_name)
+        elif ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+            return ctx.rows[ctx.current_idx].get(col_name)
         
         return None
 
@@ -302,8 +364,8 @@ class ConditionEvaluator(ast.NodeVisitor):
             col_name = self._extract_subscript_value(node)
                     
             # Return the column value from the current row
-            if col_name is not None:
-                return self.context.rows[self.context.current_idx].get(col_name)
+            if col_name is not None and self.current_row is not None:
+                return self.current_row.get(col_name)
         
         # Handle array-like access for column values: price[1] -> PREV(price, 1)
         if isinstance(node.value, ast.Name):
@@ -387,50 +449,60 @@ class ConditionEvaluator(ast.NodeVisitor):
 
     def _get_last_value(self, variable: str, column: str, occurrence: int = 0) -> Any:
         """Implementation of LAST function."""
-        row = self.context.last(variable, occurrence)
-        return row.get(column) if row else None
+        # Check if this is a pattern variable reference (e.g., LAST(C.salary))
+        var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', column)
+        if var_col_match:
+            var_name = var_col_match.group(1)
+            col_name = var_col_match.group(2)
+            
+            # Get the last row matched to this variable
+            var_indices = self.context.variables.get(var_name, [])
+            if var_indices:
+                last_idx = var_indices[-1]
+                if last_idx < len(self.context.rows):
+                    return self.context.rows[last_idx].get(col_name)
+            return None
+        
+        # Regular LAST function
+        var_indices = self.context.variables.get(variable, [])
+        if var_indices and occurrence < len(var_indices):
+            idx = var_indices[-(occurrence+1)]
+            if idx < len(self.context.rows):
+                return self.context.rows[idx].get(column)
+        return None
+
+
         
     def _get_classifier(self, variable: Optional[str] = None) -> str:
         """Implementation of CLASSIFIER function."""
         return self.context.classifier(variable)
-    def _get_variable_column_value(var: str, col: str, ctx: RowContext) -> Any:
-        """Helper to get column value from the last row matched to a pattern variable."""
-        var_rows = ctx.var_rows(var)
-        if not var_rows:
-            return None
-        # Get the value from the last row matched to this variable
-        return var_rows[-1].get(col)
 
-    def _get_prev_value(col: str, steps: int, ctx: RowContext) -> Any:
-        """Helper to get a column value from a previous row."""
-        prev_row = ctx.prev(steps)
-        return prev_row.get(col) if prev_row else None
-
-    def _get_next_value(col: str, steps: int, ctx: RowContext) -> Any:
-        """Helper to get a column value from a next row."""
-        next_row = ctx.next(steps)
-        return next_row.get(col) if next_row else None
-
-# Update compile_condition function in src/matcher/condition_evaluator.py
-
-# src/matcher/condition_evaluator.py
-# Update the compile_condition function
 
 def compile_condition(expr: str) -> Callable[[Dict[str, Any], RowContext], bool]:
-    """Compile a condition expression into a function with improved SQL string handling."""
+    """Compile a condition expression into a function with improved pattern variable handling."""
     # Special case for TRUE/FALSE constants
     if expr.upper() == "TRUE":
         return lambda row, ctx: True
     elif expr.upper() == "FALSE":
         return lambda row, ctx: False
     
+    # Check for pattern variable references (e.g., A.salary > 1000)
+    pattern_var_match = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', expr)
+    if pattern_var_match:
+        var_name = pattern_var_match.group(1)
+        col_name = pattern_var_match.group(2)
+        
+        # Replace pattern variable references with function calls
+        processed_expr = re.sub(
+            r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)',
+            r'get_var_value(\"\\1\", \"\\2\", ctx)',
+            expr
+        )
+    else:
+        processed_expr = expr
+    
     # Fix for SQL-style string literals with single quotes
     # Handle both 'string' and "string" literals
-    processed_expr = expr
-    
-    # First convert 'string' style literals to Python format
-    # Need to handle cases like: event_type = 'start' AND A.value < NEXT(A.value)
-    # We'll use a regex to identify and transform only complete string literals
     single_quoted_pattern = r"('(?:[^'\\]|\\.)*')"
     matches = re.finditer(single_quoted_pattern, processed_expr)
     
@@ -451,27 +523,6 @@ def compile_condition(expr: str) -> Callable[[Dict[str, Any], RowContext], bool]
         # Adjust offset for future replacements
         offset += len(replacement) - (end - start)
     
-    # Handle simple string comparisons directly for efficiency
-    eq_pattern = r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*["\']([^"\']*)["\']$'
-    eq_match = re.match(eq_pattern, processed_expr)
-    if eq_match:
-        col, val = eq_match.groups()
-        return lambda row, ctx: row.get(col, '') == val
-    
-    # Handle navigation functions (PREV, NEXT, FIRST, LAST)
-    # Replace them with function calls that our AST evaluator can handle
-    nav_funcs = ["PREV", "NEXT", "FIRST", "LAST"]
-    for func in nav_funcs:
-        # Replace patterns like NEXT(A.value) with get_next_value("A.value", ctx)
-        func_pattern = rf"{func}\s*\(\s*([^,\)]+)(?:\s*,\s*([^\)]+))?\s*\)"
-        if re.search(func_pattern, processed_expr, re.IGNORECASE):
-            processed_expr = re.sub(
-                func_pattern,
-                lambda m: f'get_{func.lower()}_value("{m.group(1)}", {m.group(2) if m.group(2) else "1"}, ctx)',
-                processed_expr,
-                flags=re.IGNORECASE
-            )
-    
     # Try to parse the expression using AST
     try:
         tree = ast.parse(processed_expr, mode='eval')
@@ -479,6 +530,10 @@ def compile_condition(expr: str) -> Callable[[Dict[str, Any], RowContext], bool]
         
         def ast_evaluator(row: Dict[str, Any], context: RowContext) -> bool:
             evaluator.context = context
+            # Set the current row for evaluation
+            evaluator.current_row = row
+            # Set the variable being evaluated (for self-references)
+            evaluator.current_var = context.current_var if hasattr(context, 'current_var') else None
             try:
                 result = evaluator.visit(tree.body)
                 return bool(result) if result is not None else False
@@ -490,19 +545,6 @@ def compile_condition(expr: str) -> Callable[[Dict[str, Any], RowContext], bool]
     except SyntaxError as e:
         print(f"Syntax error parsing: '{expr}' (processed as '{processed_expr}')")
         print(f"Error details: {e}")
-        
-        # Try one more approach - direct condition evaluation
-        if "=" in expr and not any(op in expr for op in ["==", "!=", "<>", "<", ">", "<=", ">="]):
-            parts = expr.split("=", 1)
-            if len(parts) == 2:
-                col = parts[0].strip()
-                val_part = parts[1].strip()
-                
-                # Handle quoted values
-                if (val_part.startswith("'") and val_part.endswith("'")) or \
-                   (val_part.startswith('"') and val_part.endswith('"')):
-                    val = val_part[1:-1]
-                    return lambda row, ctx: row.get(col, '') == val
         
         # Fallback to always True if we can't parse
         print(f"WARNING: Falling back to TRUE for condition: {expr}")
