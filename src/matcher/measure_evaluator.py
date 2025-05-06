@@ -269,30 +269,15 @@ class MeasureEvaluator:
         the current row. It can be used in two forms:
         
         1. CLASSIFIER() - Returns the pattern variable for the current row
-        2. CLASSIFIER(var) - Returns var if the current row is matched to var, otherwise NULL
+        2. CLASSIFIER(var) - Returns var if it exists in the pattern (in ONE ROW PER MATCH mode)
+                            or if the current row is matched to var (in ALL ROWS PER MATCH mode)
         
         Args:
             var_name: Optional variable name to check against
-            running: Whether to use RUNNING semantics (default: True)
+            running: Whether to use RUNNING semantics
             
         Returns:
             String containing the pattern variable name or None if not matched
-            
-        Examples:
-            >>> # With current row matched to variable 'A':
-            >>> evaluator.evaluate_classifier()  
-            'A'
-            >>> evaluator.evaluate_classifier('A')  
-            'A'
-            >>> evaluator.evaluate_classifier('B')  
-            None
-            
-            >>> # With subset U = (A, B):
-            >>> evaluator.evaluate_classifier('U')
-            'A'  # Returns the component variable that matched
-            
-        Raises:
-            ClassifierError: If the variable name is invalid
         """
         start_time = time.time()
         self.stats["total_evaluations"] += 1
@@ -311,6 +296,16 @@ class MeasureEvaluator:
                 
             self.stats["cache_misses"] += 1
             
+            # Special handling for CLASSIFIER(var) in ONE ROW PER MATCH mode
+            if var_name is not None and not running:
+                # For ONE ROW PER MATCH, return var if it exists in the pattern
+                if var_name in self.context.variables:
+                    result = var_name
+                    self._classifier_cache[cache_key] = result
+                    return result
+                return None
+            
+            # For ALL ROWS PER MATCH or CLASSIFIER() without arguments
             result = self._evaluate_classifier_impl(var_name, running)
             
             # Cache the result
@@ -320,6 +315,8 @@ class MeasureEvaluator:
         finally:
             self.timing["classifier_evaluation"] += time.time() - start_time
 
+    
+    
     def _validate_classifier_arg(self, var_name: Optional[str]) -> None:
         """
         Validate CLASSIFIER function argument.

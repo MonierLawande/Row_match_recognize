@@ -141,14 +141,16 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     if mr_clause.measures:
         for m in mr_clause.measures.measures:
             # Handle special functions
-            if m.expression.upper() == "CLASSIFIER()":
-                measures[m.alias] = "CLASSIFIER()"
-                # Default semantics for CLASSIFIER
-                measure_semantics[m.alias] = "RUNNING" if rows_per_match != RowsPerMatch.ONE_ROW else "FINAL"
+            if m.is_classifier:  # Check if it's a CLASSIFIER function
+                measures[m.alias] = m.expression
+                # For ONE ROW PER MATCH, all CLASSIFIER functions should use FINAL semantics
+                if rows_per_match == RowsPerMatch.ONE_ROW:
+                    measure_semantics[m.alias] = "FINAL"
+                else:
+                    measure_semantics[m.alias] = "RUNNING"
             elif m.expression.upper() == "MATCH_NUMBER()":
                 measures[m.alias] = "MATCH_NUMBER()"
-                # Default semantics for MATCH_NUMBER
-                measure_semantics[m.alias] = "RUNNING" if rows_per_match != RowsPerMatch.ONE_ROW else "FINAL"
+                measure_semantics[m.alias] = "FINAL" if rows_per_match == RowsPerMatch.ONE_ROW else "RUNNING"
             else:
                 # Store the expression without prefix
                 expr = m.expression
