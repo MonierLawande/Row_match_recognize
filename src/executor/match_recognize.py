@@ -12,7 +12,7 @@ from src.matcher.dfa import DFABuilder
 from src.matcher.matcher import EnhancedMatcher, MatchConfig, SkipMode, RowsPerMatch
 from src.matcher.row_context import RowContext
 from src.matcher.condition_evaluator import compile_condition
-
+from src.matcher.measure_evaluator import MeasureEvaluator
 def process_subset_clause(subsets, row_context):
     """Process SUBSET clause and configure the row context."""
     for subset in subsets:
@@ -76,79 +76,6 @@ def format_trino_output(df):
     
     return result
 
-def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, List[int]], all_rows: List[Dict[str, Any]]) -> Tuple[bool, Any]:
-    """
-    Evaluate a pattern variable reference like A.salary or LAST(C.salary).
-    
-    Args:
-        expr: The expression to evaluate
-        var_assignments: Dictionary mapping variables to row indices
-        all_rows: List of all rows
-        
-    Returns:
-        Tuple of (is_handled, value)
-    """
-    print(f"Evaluating pattern variable reference: {expr}")
-    print(f"Variable assignments: {var_assignments}")
-    print(f"Number of rows: {len(all_rows)}")
-    
-    # Handle direct pattern variable references like A.salary
-    var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)[.]([A-Za-z_][A-Za-z0-9_]*)$', expr)
-    if var_col_match:
-        var_name = var_col_match.group(1)
-        col_name = var_col_match.group(2)
-        print(f"Matched pattern variable reference: {var_name}.{col_name}")
-        
-        # Get the variable's matched rows
-        var_indices = var_assignments.get(var_name, [])
-        print(f"Variable {var_name} indices: {var_indices}")
-        
-        if var_indices:
-            # Use the first row for the variable
-            idx = var_indices[0]
-            if idx < len(all_rows):
-                value = all_rows[idx].get(col_name)
-                print(f"Setting value to {value} from {var_name}.{col_name}")
-                return True, value
-            else:
-                print(f"Index {idx} out of bounds for all_rows (length {len(all_rows)})")
-        else:
-            print(f"No indices found for variable {var_name}")
-        return True, None
-    
-    # Handle LAST function
-    last_match = re.match(r'^LAST\(([A-Za-z_][A-Za-z0-9_]*)[.]([A-Za-z_][A-Za-z0-9_]*)(?:,\s*(\d+))?\)$', expr, re.IGNORECASE)
-    if last_match:
-        var_name = last_match.group(1)
-        col_name = last_match.group(2)
-        occurrence = int(last_match.group(3)) if last_match.group(3) else 0
-        print(f"Matched LAST function: LAST({var_name}.{col_name}, {occurrence})")
-        
-        # Get the variable's matched rows
-        var_indices = var_assignments.get(var_name, [])
-        print(f"Variable {var_name} indices: {var_indices}")
-        
-        if var_indices and occurrence < len(var_indices):
-            # Use the last row for the variable
-            idx = var_indices[-1]  # Always use the last index for LAST function
-            if idx < len(all_rows):
-                value = all_rows[idx].get(col_name)
-                print(f"Setting value to {value} from LAST({var_name}.{col_name})")
-                return True, value
-            else:
-                print(f"Index {idx} out of bounds for all_rows (length {len(all_rows)})")
-        else:
-            print(f"No indices found for variable {var_name} or occurrence {occurrence} out of bounds")
-        return True, None
-    
-    # Handle MATCH_NUMBER
-    if expr.upper() == "MATCH_NUMBER()":
-        print("Matched MATCH_NUMBER function")
-        return False, None  # Handled separately
-    
-    # Not a pattern variable reference
-    print(f"Not a pattern variable reference: {expr}")
-    return False, None
 
 def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -164,6 +91,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     # Extract partitioning and ordering information
     partition_by = mr_clause.partition_by.columns if mr_clause.partition_by else []
     order_by = [si.column for si in mr_clause.order_by.sort_items] if mr_clause.order_by else []
+
 
     # Extract rows per match configuration
     rows_per_match = RowsPerMatch.ONE_ROW  # Default
@@ -387,25 +315,26 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     if col in start_row:
                         result_row[col] = start_row[col]
             
-            # Process measures directly from the match data
+            # Create context for measure evaluation
+            context = RowContext()
+            context.rows = all_rows
+            context.variables = var_assignments
+            context.match_number = match_num
+            context.current_idx = match["end"]  # Use the last row for FINAL semantics
+            context.subsets = subset_dict.copy() if subset_dict else {}
+            
+            # Create evaluator with caching
+            evaluator = MeasureEvaluator(context, final=True)
+            
+            # Process measures
             for measure in mr_clause.measures.measures:
                 alias = measure.alias
                 expr = measure.expression
                 
-                # Handle special case for MATCH_NUMBER
-                if expr.upper() == "MATCH_NUMBER()":
-                    result_row[alias] = match_num
-                    print(f"Setting {alias} to {match_num} from MATCH_NUMBER()")
-                    continue
-                
-                # Handle pattern variable references
-                handled, value = evaluate_pattern_variable_reference(expr, var_assignments, all_rows)
-                if handled:
-                    result_row[alias] = value
-                    continue
-                
-                # For other expressions, use the evaluator (not implemented here)
-                result_row[alias] = None
+                # Evaluate the expression with appropriate semantics
+                semantics = measure_semantics.get(alias, "FINAL")
+                result_row[alias] = evaluator.evaluate(expr, semantics)
+                print(f"Setting {alias} to {result_row[alias]} from evaluator")
             
             final_results.append(result_row)
         

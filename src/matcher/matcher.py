@@ -44,7 +44,91 @@ class MatchConfig:
     def get(self, key, default=None):
         """Dictionary-like get method for compatibility."""
         return self._config_dict.get(key, default)
+# Add to src/matcher/matcher.py
 
+class PatternExclusionHandler:
+    """
+    Handler for pattern exclusions with proper semantics.
+    """
+    
+    def __init__(self, original_pattern: str):
+        self.original_pattern = original_pattern
+        self.exclusion_ranges = []
+        self.excluded_vars = set()
+        self._parse_exclusions()
+    
+    def _parse_exclusions(self):
+        """
+        Parse exclusion patterns from the original pattern.
+        """
+        if not self.original_pattern:
+            return
+        
+        # Find all exclusion sections
+        pattern = self.original_pattern
+        start = 0
+        while True:
+            start_marker = pattern.find("{-", start)
+            if start_marker == -1:
+                break
+            end_marker = pattern.find("-}", start_marker)
+            if end_marker == -1:
+                print(f"Warning: Unbalanced exclusion markers in pattern: {pattern}")
+                break
+            
+            # Extract excluded content
+            excluded_content = pattern[start_marker + 2:end_marker].strip()
+            self.exclusion_ranges.append((start_marker, end_marker))
+            
+            # Extract excluded variables
+            var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)(?:[+*?]|\{[0-9,]*\})?'
+            excluded_vars = re.findall(var_pattern, excluded_content)
+            self.excluded_vars.update(excluded_vars)
+            
+            start = end_marker + 2
+    
+    def is_excluded(self, var_name: str) -> bool:
+        """
+        Check if a variable is excluded.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if the variable is excluded, False otherwise
+        """
+        return var_name in self.excluded_vars
+    
+    def filter_excluded_rows(self, match: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Filter out excluded rows from a match.
+        
+        Args:
+            match: The match to filter
+            
+        Returns:
+            Filtered match with excluded rows removed
+        """
+        if not self.excluded_vars or "variables" not in match:
+            return match
+        
+        # Create a copy of the match
+        filtered_match = match.copy()
+        filtered_match["variables"] = match["variables"].copy()
+        
+        # Remove excluded variables
+        for var in self.excluded_vars:
+            if var in filtered_match["variables"]:
+                del filtered_match["variables"][var]
+        
+        # Update matched indices
+        matched_indices = []
+        for var, indices in filtered_match["variables"].items():
+            matched_indices.extend(indices)
+        filtered_match["matched_indices"] = sorted(set(matched_indices))
+        
+        return filtered_match
+    
 class EnhancedMatcher:
     def __init__(self, dfa, measures=None, measure_semantics=None, exclusion_ranges=None, 
                 after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None):
@@ -65,6 +149,10 @@ class EnhancedMatcher:
         # Add optimization structures
         self.transition_index = self._build_transition_index()
         self.excluded_vars = self._analyze_exclusions()
+        
+        # Create pattern exclusion handler
+        self.exclusion_handler = PatternExclusionHandler(original_pattern) if original_pattern else None
+
 
     def find_matches(self, rows, config=None, measures=None):
         """Find all matches with optimized processing."""
@@ -296,6 +384,10 @@ class EnhancedMatcher:
         if match.get("is_empty", False):
             return self._process_empty_match(match["start"], rows, measures, match_number)
         
+        # Filter out excluded rows if needed
+        if self.exclusion_handler and self.exclusion_handler.excluded_vars:
+            match = self.exclusion_handler.filter_excluded_rows(match)
+        
         # Create a new empty result row
         result = {}
 
@@ -308,58 +400,23 @@ class EnhancedMatcher:
         # Get variable assignments for easy access
         var_assignments = match.get("variables", {})
         
+        # Create context for measure evaluation
+        context = RowContext()
+        context.rows = rows
+        context.variables = var_assignments
+        context.match_number = match_number
+        context.current_idx = match["end"]  # Use the last row for FINAL semantics
+        context.subsets = self.subsets.copy() if self.subsets else {}
+        
+        # Create evaluator with caching
+        evaluator = MeasureEvaluator(context, final=True)
+        
         # Process measures
         for alias, expr in measures.items():
             try:
-                # Handle direct pattern variable references like A.salary
-                var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', expr)
-                if var_col_match:
-                    var_name = var_col_match.group(1)
-                    col_name = var_col_match.group(2)
-                    
-                    # Get the variable's matched rows
-                    var_indices = var_assignments.get(var_name, [])
-                    if var_indices:
-                        # Use the first row for the variable
-                        idx = var_indices[0]
-                        if idx < len(rows):
-                            result[alias] = rows[idx].get(col_name)
-                            print(f"Setting {alias} to {rows[idx].get(col_name)} from {var_name}.{col_name}")
-                    continue
-                
-                # Handle LAST function
-                last_match = re.match(r'LAST\(([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)(?:,\s*(\d+))?\)', expr, re.IGNORECASE)
-                if last_match:
-                    var_name = last_match.group(1)
-                    col_name = last_match.group(2)
-                    occurrence = int(last_match.group(3)) if last_match.group(3) else 0
-                    
-                    # Get the variable's matched rows
-                    var_indices = var_assignments.get(var_name, [])
-                    if var_indices and occurrence < len(var_indices):
-                        # Use the last row for the variable
-                        idx = var_indices[-1]  # Always use the last index for LAST function
-                        if idx < len(rows):
-                            result[alias] = rows[idx].get(col_name)
-                            print(f"Setting {alias} to {rows[idx].get(col_name)} from LAST({var_name}.{col_name})")
-                    continue
-                
-                # Handle MATCH_NUMBER
-                if expr.upper() == "MATCH_NUMBER()":
-                    result[alias] = match_number
-                    print(f"Setting {alias} to {match_number} from MATCH_NUMBER()")
-                    continue
-                
-                # For other expressions, use the evaluator
-                context = RowContext()
-                context.rows = rows
-                context.variables = var_assignments
-                context.match_number = match_number
-                context.current_idx = match["end"]  # Use the last row for FINAL semantics
-                context.subsets = self.subsets.copy() if self.subsets else {}
-                
-                evaluator = MeasureEvaluator(context, final=True)
-                result[alias] = evaluator.evaluate(expr, "FINAL")
+                # Evaluate the expression with appropriate semantics
+                semantics = self.measure_semantics.get(alias, "FINAL")
+                result[alias] = evaluator.evaluate(expr, semantics)
                 print(f"Setting {alias} to {result[alias]} from evaluator")
                 
             except Exception as e:
@@ -376,7 +433,6 @@ class EnhancedMatcher:
             print(f"{key}: {value}")
         
         return result
-
 
     
 

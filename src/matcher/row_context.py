@@ -7,6 +7,9 @@ from typing import Dict, Any, List, Optional, Set, Tuple, Union
 from collections import defaultdict
 import time
 @dataclass
+# Add to src/matcher/row_context.py
+
+@dataclass
 class RowContext:
     """
     Maintains context for row pattern matching and navigation functions.
@@ -38,6 +41,14 @@ class RowContext:
         for var, indices in self.variables.items():
             for idx in indices:
                 self._row_var_index[idx].add(var)
+        
+        # Build subset index for faster lookups
+        self._subset_index = {}
+        for subset_name, components in self.subsets.items():
+            for comp in components:
+                if comp not in self._subset_index:
+                    self._subset_index[comp] = set()
+                self._subset_index[comp].add(subset_name)
         
     def classifier(self, variable: Optional[str] = None) -> str:
         """

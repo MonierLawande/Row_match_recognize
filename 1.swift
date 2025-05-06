@@ -378,3 +378,16 @@ Provide a clear API for external callers (e.g., a method that accepts a SQL quer
 Security & Robustness:
 Validate all inputs rigorously. Use sandboxing for expression evaluations to prevent arbitrary code execution.
 
+Specific Implementation Improvements
+Short-term Improvements
+Optimize variable lookups in the evaluate_pattern_variable_reference function
+Add proper error handling for malformed pattern variable references
+Implement caching for frequently accessed rows and variables
+Support for more navigation functions like PREV and NEXT
+Add proper handling for empty matches in all scenarios
+Medium-term Improvements
+Implement a proper expression evaluator for complex measure expressions
+Add support for pattern exclusions with proper semantics
+Optimize partition handling for large datasets
+Implement proper type handling for measure values
+Add support for CLASSIFIER() function with proper semantics

@@ -48,10 +48,43 @@ def parse_quantifier(quant: str) -> Tuple[int, Optional[int], bool]:
             return (min_bound, max_bound, greedy)
     return (1, 1, True)
 
-# src/matcher/pattern_tokenizer.py
-# Update the tokenize_pattern function
 
-# src/matcher/pattern_tokenizer.py
+def extract_exclusion_variables(pattern: str) -> Set[str]:
+    """
+    Extract variables from exclusion patterns.
+    
+    Args:
+        pattern: The pattern string
+        
+    Returns:
+        Set of excluded variable names
+    """
+    excluded_vars = set()
+    
+    if not pattern or "{-" not in pattern or "-}" not in pattern:
+        return excluded_vars
+    
+    # Find all exclusion sections
+    start = 0
+    while True:
+        start_marker = pattern.find("{-", start)
+        if start_marker == -1:
+            break
+        end_marker = pattern.find("-}", start_marker)
+        if end_marker == -1:
+            print(f"Warning: Unbalanced exclusion markers in pattern: {pattern}")
+            break
+        
+        # Extract excluded content
+        excluded_content = pattern[start_marker + 2:end_marker].strip()
+        
+        # Extract excluded variables
+        var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)(?:[+*?]|\{[0-9,]*\})?'
+        excluded_vars.update(re.findall(var_pattern, excluded_content))
+        
+        start = end_marker + 2
+    
+    return excluded_vars
 
 def tokenize_pattern(pattern: str) -> List[PatternToken]:
     """Enhanced tokenizer with improved support for all pattern syntax features."""

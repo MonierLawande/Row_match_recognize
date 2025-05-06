@@ -19,6 +19,111 @@ class ClassifierError(Exception):
     """Error in CLASSIFIER function evaluation."""
     pass
 
+
+# Add to src/matcher/measure_evaluator.py
+
+def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, List[int]], all_rows: List[Dict[str, Any]], cache: Dict[str, Any] = None) -> Tuple[bool, Any]:
+    """
+    Evaluate a pattern variable reference with optimized lookups and caching.
+    
+    Args:
+        expr: The expression to evaluate
+        var_assignments: Dictionary mapping variables to row indices
+        all_rows: List of all rows
+        cache: Optional cache dictionary for memoization
+        
+    Returns:
+        Tuple of (is_handled, value)
+    """
+    # Use cache if provided
+    if cache is not None and expr in cache:
+        return True, cache[expr]
+    
+    # Handle direct pattern variable references like A.salary
+    var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)[.]([A-Za-z_][A-Za-z0-9_]*)$', expr)
+    if var_col_match:
+        var_name = var_col_match.group(1)
+        col_name = var_col_match.group(2)
+        
+        # Fast path: direct lookup without unnecessary checks
+        var_indices = var_assignments.get(var_name, [])
+        if var_indices and var_indices[0] < len(all_rows):
+            value = all_rows[var_indices[0]].get(col_name)
+            # Cache the result if cache is provided
+            if cache is not None:
+                cache[expr] = value
+            return True, value
+        return True, None
+    
+    # Handle LAST function with optimized lookup
+    last_match = re.match(r'^LAST\(([A-Za-z_][A-Za-z0-9_]*)[.]([A-Za-z_][A-Za-z0-9_]*)(?:,\s*(\d+))?\)$', expr, re.IGNORECASE)
+    if last_match:
+        var_name = last_match.group(1)
+        col_name = last_match.group(2)
+        occurrence = int(last_match.group(3)) if last_match.group(3) else 0
+        
+        # Fast path: direct lookup with bounds checking
+        var_indices = var_assignments.get(var_name, [])
+        if var_indices and occurrence < len(var_indices):
+            idx = var_indices[-1 - occurrence]  # Get the last-occurrence index
+            if idx < len(all_rows):
+                value = all_rows[idx].get(col_name)
+                # Cache the result if cache is provided
+                if cache is not None:
+                    cache[expr] = value
+                return True, value
+        return True, None
+    
+    # Handle PREV function
+    prev_match = re.match(r'^PREV\(([A-Za-z_][A-Za-z0-9_]*)(?:[.]([A-Za-z_][A-Za-z0-9_]*))?(?:,\s*(\d+))?\)$', expr, re.IGNORECASE)
+    if prev_match:
+        var_name = prev_match.group(1)
+        col_name = prev_match.group(2) if prev_match.group(2) else var_name
+        steps = int(prev_match.group(3)) if prev_match.group(3) else 1
+        
+        # Find the current row index
+        current_idx = None
+        for var, indices in var_assignments.items():
+            if indices:
+                current_idx = max(indices)
+                break
+        
+        if current_idx is not None:
+            # Get the previous row index
+            prev_idx = current_idx - steps
+            if 0 <= prev_idx < len(all_rows):
+                value = all_rows[prev_idx].get(col_name)
+                if cache is not None:
+                    cache[expr] = value
+                return True, value
+        return True, None
+    
+    # Handle NEXT function
+    next_match = re.match(r'^NEXT\(([A-Za-z_][A-Za-z0-9_]*)(?:[.]([A-Za-z_][A-Za-z0-9_]*))?(?:,\s*(\d+))?\)$', expr, re.IGNORECASE)
+    if next_match:
+        var_name = next_match.group(1)
+        col_name = next_match.group(2) if next_match.group(2) else var_name
+        steps = int(next_match.group(3)) if next_match.group(3) else 1
+        
+        # Find the current row index
+        current_idx = None
+        for var, indices in var_assignments.items():
+            if indices:
+                current_idx = max(indices)
+                break
+        
+        if current_idx is not None:
+            # Get the next row index
+            next_idx = current_idx + steps
+            if 0 <= next_idx < len(all_rows):
+                value = all_rows[next_idx].get(col_name)
+                if cache is not None:
+                    cache[expr] = value
+                return True, value
+        return True, None
+    
+    # Not a pattern variable reference
+    return False, None
 class MeasureEvaluator:
     def __init__(self, context: RowContext, final: bool = True):
         self.context = context
@@ -26,6 +131,7 @@ class MeasureEvaluator:
         self.original_expr = None
         # Add cache for classifier lookups with LRU cache policy
         self._classifier_cache = {}
+        self._var_ref_cache = {}  # New cache for variable references
         self.timing = defaultdict(float)
         self.stats = {
             "cache_hits": 0,
@@ -35,7 +141,9 @@ class MeasureEvaluator:
         
         # Create row-to-variable index for fast lookup
         self._build_row_variable_index()
-        
+
+
+
     def _build_row_variable_index(self):
         """Build an index of which variables each row belongs to for faster lookup."""
         self._row_to_vars = defaultdict(set)
@@ -52,7 +160,7 @@ class MeasureEvaluator:
                             self._row_to_vars[idx].add(subset_name)
 
         # src/matcher/measure_evaluator.py
-
+    
     def evaluate(self, expr: str, semantics: str = None) -> Any:
         """
         Evaluate a measure expression with proper RUNNING/FINAL semantics.
@@ -92,6 +200,16 @@ class MeasureEvaluator:
         
         if len(self.context.rows) > 0 and self.context.current_idx >= len(self.context.rows):
             self.context.current_idx = len(self.context.rows) - 1
+        
+        # Try optimized pattern variable reference evaluation first
+        handled, value = evaluate_pattern_variable_reference(
+            expr, 
+            self.context.variables, 
+            self.context.rows,
+            self._var_ref_cache
+        )
+        if handled:
+            return value
         
         # Special handling for pattern variable references like A.salary
         var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', expr)
@@ -140,9 +258,6 @@ class MeasureEvaluator:
         except Exception as e:
             print(f"Error evaluating expression '{expr}': {e}")
             return None
-
-        # src/matcher/measure_evaluator.py
-
     def evaluate_classifier(self, 
                         var_name: Optional[str] = None, 
                         *, 
