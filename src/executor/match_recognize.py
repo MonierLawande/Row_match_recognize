@@ -198,7 +198,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     
     # Partition the DataFrame
     if partition_by:
-        partitions = [group for _, group in df.groupby(partition_by)]
+        partitions = [group for _, group in df.groupby(partition_by, sort=False)]
+
     else:
         partitions = [df]
     
@@ -275,13 +276,34 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     # Debug the match data
     print("\nMatch data:")
     for match in all_matches:
-        print(f"Match number: {match.get('match_number')}")
-        print(f"Start: {match['start']}, End: {match['end']}")
+        # Get partition information
+        partition_info = ""
+        if match["start"] < len(all_rows) and partition_by:
+            partition_values = []
+            for col in partition_by:
+                if col in all_rows[match["start"]]:
+                    partition_values.append(f"{col}={all_rows[match['start']][col]}")
+            if partition_values:
+                partition_info = f" (Partition: {', '.join(partition_values)})"
+        
+        print(f"Match number: {match.get('match_number')}{partition_info}")
+        print(f"Global indices - Start: {match['start']}, End: {match['end']}")
+        
+        # Calculate local indices within the partition
+        local_start = match['start']
+        local_end = match['end']
+        for i in range(match['start']):
+            if i > 0 and all_rows[i-1].get(partition_by[0]) != all_rows[match['start']].get(partition_by[0]):
+                local_start -= i
+                local_end -= i
+                break
+        
+        print(f"Local indices within partition - Start: {local_start}, End: {local_end}")
         print(f"Variables: {match.get('variables', {})}")
         
         # Debug the variable assignments
         for var, indices in match.get("variables", {}).items():
-            print(f"  Variable {var} assigned to rows: {indices}")
+            print(f"  Variable {var} assigned to rows (global indices): {indices}")
             for idx in indices:
                 if idx < len(all_rows):
                     print(f"    Row {idx}: {all_rows[idx]}")
@@ -351,6 +373,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         # Only keep columns that exist in the result
         ordered_cols = [col for col in ordered_cols if col in result_df.columns]
+        
+
+            
         return result_df[ordered_cols]
     else:
         # For ALL ROWS PER MATCH, keep all rows
@@ -374,4 +399,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         # Only keep columns that exist in the result
         output_cols = [col for col in output_cols if col in result_df.columns]
+        
+      
+            
         return result_df[output_cols]

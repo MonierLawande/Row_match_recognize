@@ -391,3 +391,27 @@ Add support for pattern exclusions with proper semantics
 Optimize partition handling for large datasets
 Implement proper type handling for measure values
 Add support for CLASSIFIER() function with proper semantics
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Support for Complex Expressions: Extend the parser to handle more complex expressions in DEFINE, MEASURES, and PARTITION BY clauses.
+
+Subquery Support: Add support for subqueries within MATCH_RECOGNIZE.
+Error Handling: Improve error messages with line/column information for syntax errors.
+
+Advanced Pattern Features
+Complex Pattern Support
+Nested Patterns: Support for nested pattern expressions.
+Pattern Exclusions: Enhance pattern exclusion handling.
+Quantifier Improvements: Support for reluctant and possessive quantifiers.
+
+
+Optimized Automata
+Lazy DFA Construction: Build DFA states on-demand rather than all at once.
+Pattern Optimization: Analyze patterns to eliminate redundant states.
+
+
+Advanced Row Navigation
+Window Functions: Support for window functions in measures.
+Aggregation Functions: Add more aggregation functions (STDDEV, PERCENTILE, etc.).

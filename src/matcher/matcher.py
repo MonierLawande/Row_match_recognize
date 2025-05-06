@@ -297,7 +297,7 @@ class EnhancedMatcher:
 
     def _process_empty_match(self, start_idx: int, rows: List[Dict[str, Any]], measures: Dict[str, str], match_number: int) -> Dict[str, Any]:
         """
-        Process an empty match according to SQL standard.
+        Process an empty match according to SQL standard, preserving original row data.
         
         Args:
             start_idx: Starting row index for the empty match
@@ -306,19 +306,14 @@ class EnhancedMatcher:
             match_number: Sequential match number
             
         Returns:
-            Result row for the empty match
+            Result row for the empty match with original row data preserved
         """
-        # Start with the starting row's values
+        # Check if index is valid
         if start_idx >= len(rows):
             return None
             
-        result = {}
-        
-        # Add partition columns if available
-        start_row = rows[start_idx]
-        for col in ['department', 'region']:  # Common partition columns
-            if col in start_row:
-                result[col] = start_row[col]
+        # Start with a copy of the original row to preserve all columns
+        result = rows[start_idx].copy()
         
         # Create context for empty match
         context = RowContext()
@@ -327,29 +322,20 @@ class EnhancedMatcher:
         context.match_number = match_number
         context.current_idx = start_idx
         
-        # Add measures as NULL values or evaluate them if possible
+        # Set all measures to NULL values
         for alias, expr in measures.items():
-            try:
-                # For special measures like MATCH_NUMBER(), try to evaluate
-                if expr.upper() == "MATCH_NUMBER()":
-                    result[alias] = match_number
-                elif expr.upper() == "CLASSIFIER()":
-                    result[alias] = None  # CLASSIFIER() returns NULL for empty matches
-                else:
-                    # For other measures, use NULL
-                    result[alias] = None
-            except Exception as e:
-                print(f"Error evaluating measure {alias} for empty match: {e}")
+            # Special handling for MATCH_NUMBER()
+            if expr.upper() == "MATCH_NUMBER()":
+                result[alias] = match_number
+            else:
+                # All other measures are NULL for empty matches
                 result[alias] = None
         
-        # Add match metadata if needed
-        if "MATCH_NUMBER" not in result:
-            result["MATCH_NUMBER"] = match_number
+        # Add match metadata
+        result["MATCH_NUMBER"] = match_number
         result["IS_EMPTY_MATCH"] = True
         
         return result
-
-        # src/matcher/matcher.py
 
     def _handle_unmatched_row(self, row: Dict[str, Any], measures: Dict[str, str]) -> Dict[str, Any]:
         """
@@ -663,16 +649,9 @@ class EnhancedMatcher:
         Process ALL rows in a match with proper handling for multiple rows and exclusions.
         """
         process_start = time.time()
-        classifier_start = time.time()
         results = []
         
-        # Check if CLASSIFIER is already requested in measures
-        has_classifier_measure = any(
-            re.match(r'CLASSIFIER\(\s*([A-Za-z][A-Za-z0-9_]*)?\s*\)', expr, re.IGNORECASE)
-            for expr in measures.values()
-        )
-        
-        # Direct string-based exclusion extraction with improved error handling
+        # Extract excluded variables
         excluded_vars = set()
         if self.original_pattern:
             try:
@@ -736,51 +715,55 @@ class EnhancedMatcher:
         # Track individual measure timing
         measure_timings = defaultdict(float)
         
-        # Process each matched row (excluding excluded rows)
-        for idx in matched_indices:
-            if idx >= len(rows) or idx in excluded_indices:
-                continue
+        # Handle empty matches
+        if match.get("is_empty", False):
+            if config and config.show_empty:
+                # For empty matches, use the original row data at the start index
+                if match["start"] < len(rows):
+                    empty_row = rows[match["start"]].copy()
+                    
+                    # Set all measures to NULL
+                    for alias in measures:
+                        if alias.upper() == "MATCH_NUM" or measures[alias].upper() == "MATCH_NUMBER()":
+                            empty_row[alias] = match_number
+                        else:
+                            empty_row[alias] = None
+                    
+                    # Add match metadata
+                    empty_row["MATCH_NUMBER"] = match_number
+                    empty_row["IS_EMPTY_MATCH"] = True
+                    
+                    results.append(empty_row)
+                    print(f"Added empty match row for index {match['start']}")
+        else:
+            # Process each matched row (excluding excluded rows)
+            for idx in matched_indices:
+                if idx >= len(rows) or idx in excluded_indices:
+                    continue
+                    
+                # Create result row from original data
+                result = dict(rows[idx])
+                context.current_idx = idx
                 
-            # Create result row from original data
-            result = dict(rows[idx])
-            context.current_idx = idx
-            
-            # Calculate measures with performance tracking
-            for alias, expr in measures.items():
-                measure_start = time.time()
-                try:
-                    result[alias] = measure_evaluator.evaluate(expr, "RUNNING")
-                    print(f"Evaluated measure {alias} for row {idx} with RUNNING semantics: {result[alias]}")
-                except Exception as e:
-                    print(f"Error evaluating measure {alias} for row {idx}: {e}")
-                    result[alias] = None
-                measure_timings[alias] += time.time() - measure_start
-            
-            # Add match metadata
-            result["MATCH_NUMBER"] = match_number
-            result["IS_EMPTY_MATCH"] = match.get("is_empty", False)
-            
-            results.append(result)
-            print(f"Added row {idx} to results")
+                # Calculate measures with performance tracking
+                for alias, expr in measures.items():
+                    measure_start = time.time()
+                    try:
+                        result[alias] = measure_evaluator.evaluate(expr, "RUNNING")
+                        print(f"Evaluated measure {alias} for row {idx} with RUNNING semantics: {result[alias]}")
+                    except Exception as e:
+                        print(f"Error evaluating measure {alias} for row {idx}: {e}")
+                        result[alias] = None
+                    measure_timings[alias] += time.time() - measure_start
+                
+                # Add match metadata
+                result["MATCH_NUMBER"] = match_number
+                result["IS_EMPTY_MATCH"] = False
+                
+                results.append(result)
+                print(f"Added row {idx} to results")
         
-        # Handle empty matches if requested
-        if match.get("is_empty", False) and config and config.show_empty:
-            empty_result = self._process_empty_match(match["start"], rows, measures, match_number)
-            results.append(empty_result)
-        
-        # Add timing information
-        self.timing["classifier_total"] = time.time() - classifier_start
-        self.timing["process_match_rows"] = time.time() - process_start
-        
-        # Log performance stats for debugging
-        if hasattr(measure_evaluator, 'stats') and measure_evaluator.stats["total_evaluations"] > 0:
-            print("CLASSIFIER performance stats:")
-            print(f"  Cache hits: {measure_evaluator.stats['cache_hits']}")
-            print(f"  Cache misses: {measure_evaluator.stats['cache_misses']}")
-            print(f"  Hit ratio: {measure_evaluator.stats['cache_hits']/measure_evaluator.stats['total_evaluations']:.2%}")
-            print(f"  Total evaluations: {measure_evaluator.stats['total_evaluations']}")
-        
-        # Log individual measure timings
+        # Log measure timings
         if measure_timings:
             print("Measure evaluation timings:")
             for alias, duration in measure_timings.items():
