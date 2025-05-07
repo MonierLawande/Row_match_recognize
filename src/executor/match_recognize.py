@@ -199,7 +199,6 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     # Partition the DataFrame
     if partition_by:
         partitions = [group for _, group in df.groupby(partition_by, sort=False)]
-
     else:
         partitions = [df]
     
@@ -374,7 +373,15 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         # Only keep columns that exist in the result
         ordered_cols = [col for col in ordered_cols if col in result_df.columns]
         
-
+        # Sort the results to match Trino's output ordering
+        sort_columns = []
+        if partition_by:
+            sort_columns.extend([col for col in partition_by if col in result_df.columns])
+        if order_by:
+            sort_columns.extend([col for col in order_by if col in result_df.columns])
+        
+        if sort_columns and not result_df.empty:
+            result_df = result_df.sort_values(by=sort_columns, kind='mergesort')
             
         return result_df[ordered_cols]
     else:
@@ -400,6 +407,14 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         # Only keep columns that exist in the result
         output_cols = [col for col in output_cols if col in result_df.columns]
         
-      
+        # Sort the results to match Trino's output ordering
+        sort_columns = []
+        if partition_by:
+            sort_columns.extend([col for col in partition_by if col in result_df.columns])
+        if order_by:
+            sort_columns.extend([col for col in order_by if col in result_df.columns])
+        
+        if sort_columns and not result_df.empty:
+            result_df = result_df.sort_values(by=sort_columns, kind='mergesort')
             
         return result_df[output_cols]

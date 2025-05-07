@@ -538,6 +538,11 @@ class EnhancedMatcher:
         longest_match = None
         trans_index = self.transition_index[state]
         
+        # Check if we have both start and end anchors in the pattern
+        has_both_anchors = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("spans_partition", False)
+        # Check if we have only end anchor in the pattern
+        has_end_anchor = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("has_end_anchor", False)
+        
         while current_idx < len(rows):
             row = rows[current_idx]
             context.current_idx = current_idx
@@ -588,19 +593,39 @@ class EnhancedMatcher:
                 print(f"No valid transition from accepting state {state} at row {current_idx}")
                 # Update longest match to include all rows up to this point
                 if current_idx > start_idx:  # Only if we've matched at least one row
-                    longest_match = {
-                        "start": start_idx,
-                        "end": current_idx - 1,
-                        "variables": {k: v[:] for k, v in var_assignments.items()},
-                        "state": state,
-                        "is_empty": False
-                    }
-                break
-            
+                    # For patterns with both start and end anchors, we need to check if we've reached the end
+                    if has_both_anchors and current_idx < len(rows):
+                        print(f"Pattern has both anchors but we're not at the end of partition")
+                        break  # Don't accept partial matches for ^...$ patterns
+                    
+                    # For patterns with only end anchor, we need to check if we're at the last row
+                    if has_end_anchor and not has_both_anchors:
+                        # Only accept if we're at the last row
+                        if current_idx - 1 == len(rows) - 1:
+                            longest_match = {
+                                "start": start_idx,
+                                "end": current_idx - 1,
+                                "variables": {k: v[:] for k, v in var_assignments.items()},
+                                "state": state,
+                                "is_empty": False
+                            }
+                        else:
+                            print(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
+                    else:
+                        # No end anchor, accept the match
+                        longest_match = {
+                            "start": start_idx,
+                            "end": current_idx - 1,
+                            "variables": {k: v[:] for k, v in var_assignments.items()},
+                            "state": state,
+                            "is_empty": False
+                        }
+                    break
+                
             if next_state is None:
                 print(f"No valid transition from state {state} at row {current_idx}")
                 break
-                
+                    
             # Record variable assignment
             if matched_var:
                 if matched_var not in var_assignments:
@@ -621,6 +646,21 @@ class EnhancedMatcher:
                     continue
                     
                 print(f"Reached accepting state {state} at row {current_idx-1}")
+                
+                # For patterns with both start and end anchors, we need to check if we've consumed the entire partition
+                if has_both_anchors and current_idx < len(rows):
+                    # If we have both anchors (^...$) and haven't reached the end of the partition,
+                    # we need to continue matching to try to consume the entire partition
+                    print(f"Pattern has both anchors but we're not at the end of partition yet")
+                    continue
+                
+                # For patterns with only end anchor, we need to check if we're at the last row
+                if has_end_anchor and not has_both_anchors:
+                    # Only accept if we're at the last row
+                    if current_idx - 1 != len(rows) - 1:
+                        print(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
+                        continue
+                
                 longest_match = {
                     "start": start_idx,
                     "end": current_idx - 1,
@@ -629,6 +669,23 @@ class EnhancedMatcher:
                     "is_empty": False
                 }
                 print(f"  Current longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                
+                # If we have both anchors and have reached the end of the partition, we can stop
+                if has_both_anchors and current_idx == len(rows):
+                    print(f"Found complete match spanning entire partition")
+                    break
+        
+        # For patterns with both anchors, verify we've consumed the entire partition
+        if longest_match and has_both_anchors:
+            if start_idx != 0 or longest_match["end"] != len(rows) - 1:
+                print(f"Match doesn't span entire partition for ^...$ pattern, rejecting")
+                longest_match = None
+        
+        # For patterns with only end anchor, verify the match ends at the last row
+        if longest_match and has_end_anchor and not has_both_anchors:
+            if longest_match["end"] != len(rows) - 1:
+                print(f"Match doesn't end at last row for $ pattern, rejecting")
+                longest_match = None
         
         # Prefer non-empty match over empty match
         if longest_match and longest_match["end"] >= longest_match["start"]:  # Ensure it's a valid match
@@ -643,6 +700,7 @@ class EnhancedMatcher:
             print(f"No match found starting at index {start_idx}")
             self.timing["find_match"] += time.time() - match_start_time
             return None
+
 
     def _process_all_rows_match(self, match, rows, measures, match_number, config=None):
         """
