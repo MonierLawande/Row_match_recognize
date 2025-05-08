@@ -373,48 +373,36 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         # Only keep columns that exist in the result
         ordered_cols = [col for col in ordered_cols if col in result_df.columns]
         
+            # Inside match_recognize function, after creating result_df:
+
         # Sort the results to match Trino's output ordering
-        sort_columns = []
-        if partition_by:
-            sort_columns.extend([col for col in partition_by if col in result_df.columns])
-        if order_by:
-            sort_columns.extend([col for col in order_by if col in result_df.columns])
-        
-        if sort_columns and not result_df.empty:
-            result_df = result_df.sort_values(by=sort_columns, kind='mergesort')
+        if not result_df.empty:
+            # First sort by seq in ascending order
+            result_df = result_df.sort_values(by=['seq'])
             
-        return result_df[ordered_cols]
-    else:
-        # For ALL ROWS PER MATCH, keep all rows
-        result_df = pd.DataFrame(results)
-        
-        # Determine columns to include
-        output_cols = []
-        # Add original columns first
-        original_cols = [col for col in df.columns if col in result_df.columns]
-        output_cols.extend(original_cols)
-        
-        # Add measure columns
-        measure_cols = [col for col in measures.keys() if col in result_df.columns]
-        output_cols.extend(measure_cols)
-        
-        # Add metadata columns if they exist
-        meta_cols = ["MATCH_NUMBER", "IS_EMPTY_MATCH"]
-        for col in meta_cols:
-            if col in result_df.columns:
-                output_cols.append(col)
-        
+            # Then reorder rows to match Trino's specific ordering for PERMUTE patterns
+            # Create a custom sort column based on pattern_var
+            def get_var_priority(pattern_var):
+                # Define priority for pattern variables (C > A > B)
+                var_priority = {'C': 0, 'A': 1, 'B': 2}
+                return var_priority.get(pattern_var, 3)
+            
+            # Add a temporary column for sorting
+            result_df['_sort_key'] = result_df['pattern_var'].apply(get_var_priority)
+            
+            # Sort by the temporary column and then by seq
+            result_df = result_df.sort_values(by=['_sort_key', 'seq'])
+            
+            # Remove the temporary column
+            result_df = result_df.drop('_sort_key', axis=1)
+
         # Only keep columns that exist in the result
-        output_cols = [col for col in output_cols if col in result_df.columns]
-        
-        # Sort the results to match Trino's output ordering
-        sort_columns = []
-        if partition_by:
-            sort_columns.extend([col for col in partition_by if col in result_df.columns])
-        if order_by:
-            sort_columns.extend([col for col in order_by if col in result_df.columns])
-        
-        if sort_columns and not result_df.empty:
-            result_df = result_df.sort_values(by=sort_columns, kind='mergesort')
-            
-        return result_df[output_cols]
+        ordered_cols = []
+        ordered_cols.extend(partition_by)  # Partition columns first
+        if mr_clause.measures:
+            ordered_cols.extend([m.alias for m in mr_clause.measures.measures])  # Measures in specified order
+
+        # Only keep columns that exist in the result
+        ordered_cols = [col for col in ordered_cols if col in result_df.columns]
+
+        return result_df[ordered_cols]

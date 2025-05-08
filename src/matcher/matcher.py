@@ -558,6 +558,8 @@ class EnhancedMatcher:
             next_state = None
             matched_var = None
             
+            # Try all transitions and use the first one that matches the condition
+            # This is critical for correct variable assignment based on DEFINE conditions
             for var, target, condition in trans_index:
                 print(f"  Evaluating condition for var: {var}")
                 try:
@@ -701,7 +703,6 @@ class EnhancedMatcher:
             self.timing["find_match"] += time.time() - match_start_time
             return None
 
-
     def _process_all_rows_match(self, match, rows, measures, match_number, config=None):
         """
         Process ALL rows in a match with proper handling for multiple rows and exclusions.
@@ -829,7 +830,6 @@ class EnhancedMatcher:
         
         return results
 
-      
 
 
     def _build_transition_index(self):

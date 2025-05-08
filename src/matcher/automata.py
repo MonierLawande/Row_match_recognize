@@ -195,13 +195,7 @@ class NFABuilder:
 
     def _process_permute(self, token: PatternToken, define: Dict[str, str]) -> Tuple[int, int]:
         """
-        Process a PERMUTE token with enhanced functionality for nesting support.
-        
-        This method handles:
-        1. Basic permutation of variables
-        2. Quantifiers applied to the entire PERMUTE
-        3. Nested PERMUTE expressions
-        4. Variable-based lexicographical ordering
+        Process a PERMUTE token with comprehensive support for all cases.
         
         Args:
             token: The PERMUTE token with metadata
@@ -210,43 +204,53 @@ class NFABuilder:
         Returns:
             Tuple of (start_state, end_state)
         """
-        # Extract permute variables, ensuring nested PERMUTE tokens are processed
+        # Extract permute variables
         variables = token.metadata.get("variables", [])
         
         # Create states for the permutation
         perm_start = self.new_state()
         perm_end = self.new_state()
         
-        # Process variables to handle nested PERMUTE expressions
+        # Handle nested PERMUTE patterns
         processed_vars = []
         for var in variables:
             if isinstance(var, PatternToken) and var.type == PatternTokenType.PERMUTE:
-                # Handle nested PERMUTE recursively
+                # Recursively process nested PERMUTE
                 nested_start, nested_end = self._process_permute(var, define)
-                # Connect nested permutation to our permutation structure
-                self.add_epsilon(perm_start, nested_start)
-                self.add_epsilon(nested_end, perm_end)
+                processed_vars.append((nested_start, nested_end))
             else:
                 # Regular variable
                 processed_vars.append(var)
         
-        # Generate all permutations of regular variables
-        import itertools
-        all_perms = list(itertools.permutations(processed_vars))
+        # Generate all permutations in lexicographical order
+        permutable_vars = [v for v in processed_vars if isinstance(v, str)]
+        all_perms = list(itertools.permutations(permutable_vars))
         
-        # Sort permutations lexicographically based on original order
-        var_index = {var: idx for idx, var in enumerate(processed_vars)}
-        all_perms.sort(key=lambda p: tuple(var_index.get(var, 999) for var in p))
+        # Sort permutations to match Trino's behavior:
+        # 1. Original order is most preferred
+        # 2. Reverse order is least preferred
+        # 3. Other permutations ordered lexicographically
+        def permutation_key(perm):
+            original_order = {var: idx for idx, var in enumerate(permutable_vars)}
+            return tuple(original_order[var] for var in perm)
+        
+        all_perms.sort(key=permutation_key)
         
         # Process each permutation
         for perm in all_perms:
             branch_start = self.new_state()
             branch_current = branch_start
             
+            # Build the permutation branch
             for var in perm:
-                var_start, var_end = self.create_var_states(var, define)
-                self.add_epsilon(branch_current, var_start)
-                branch_current = var_end
+                if isinstance(var, tuple):  # Nested PERMUTE result
+                    nested_start, nested_end = var
+                    self.add_epsilon(branch_current, nested_start)
+                    branch_current = nested_end
+                else:  # Regular variable
+                    var_start, var_end = self.create_var_states(var, define)
+                    self.add_epsilon(branch_current, var_start)
+                    branch_current = var_end
             
             # Connect this permutation branch
             self.add_epsilon(perm_start, branch_start)
@@ -259,6 +263,8 @@ class NFABuilder:
                 perm_start, perm_end, min_rep, max_rep, greedy)
         
         return perm_start, perm_end
+
+
 
     def _process_exclusion(self, tokens: List[PatternToken], idx: List[int], define: Dict[str, str]) -> Tuple[int, int]:
         """Process an exclusion pattern fragment."""
@@ -293,7 +299,7 @@ class NFABuilder:
         return excl_start, excl_end
 
     def create_var_states(self, var: str, define: Dict[str, str]) -> Tuple[int, int]:
-        """Create states for a pattern variable with proper quantifier handling."""
+        """Create states for a pattern variable with support for subset variables."""
         start = self.new_state()
         end = self.new_state()
         
@@ -301,19 +307,16 @@ class NFABuilder:
         var_base = var
         quantifier = None
         
-        # Check for optional element (var?)
+        # Handle quantifiers
         if var.endswith('?'):
             var_base = var[:-1]
             quantifier = '?'
-        # Check for one or more (var+)
         elif var.endswith('+'):
             var_base = var[:-1]
             quantifier = '+'
-        # Check for zero or more (var*)
         elif var.endswith('*'):
             var_base = var[:-1]
             quantifier = '*'
-        # Check for count quantifier (var{n} or var{m,n})
         elif '{' in var and var.endswith('}'):
             open_idx = var.find('{')
             var_base = var[:open_idx]
@@ -334,6 +337,7 @@ class NFABuilder:
             start, end = self._apply_quantifier(start, end, min_rep, max_rep, greedy)
         
         return start, end
+
 
     def _apply_quantifier(self, 
                     start: int, 

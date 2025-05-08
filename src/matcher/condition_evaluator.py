@@ -486,28 +486,35 @@ def compile_condition(expr: str) -> Callable[[Dict[str, Any], RowContext], bool]
     elif expr.upper() == "FALSE":
         return lambda row, ctx: False
     
-    # Check for pattern variable references (e.g., A.salary > 1000)
-    pattern_var_match = re.search(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', expr)
-    if pattern_var_match:
-        var_name = pattern_var_match.group(1)
-        col_name = pattern_var_match.group(2)
-        
-        # Replace pattern variable references with function calls
-        processed_expr = re.sub(
-            r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)',
-            r'get_var_value(\"\\1\", \"\\2\", ctx)',
-            expr
-        )
-    else:
-        processed_expr = expr
+    # Handle simple equality conditions like "event_type = 'start'"
+    if '=' in expr and not '==' in expr and not '<=' in expr and not '>=' in expr:
+        try:
+            left, right = expr.split('=', 1)
+            left = left.strip()
+            right = right.strip()
+            
+            # Remove quotes if present
+            if (right.startswith("'") and right.endswith("'")) or (right.startswith('"') and right.endswith('"')):
+                right = right[1:-1]
+            
+            def simple_condition(row, ctx):
+                # Get the value from the row
+                left_value = row.get(left)
+                return left_value == right
+                
+            return simple_condition
+        except Exception as e:
+            print(f"Error parsing simple condition '{expr}': {e}")
+            # Continue with AST parsing
     
     # Fix for SQL-style string literals with single quotes
     # Handle both 'string' and "string" literals
     single_quoted_pattern = r"('(?:[^'\\]|\\.)*')"
-    matches = re.finditer(single_quoted_pattern, processed_expr)
+    matches = re.finditer(single_quoted_pattern, expr)
     
     # Replace each match one by one to avoid issues with replacements
     offset = 0
+    processed_expr = expr
     for match in matches:
         start, end = match.span()
         start += offset
@@ -523,29 +530,160 @@ def compile_condition(expr: str) -> Callable[[Dict[str, Any], RowContext], bool]
         # Adjust offset for future replacements
         offset += len(replacement) - (end - start)
     
-    # Try to parse the expression using AST
+    # Handle pattern variable references
+    # Replace A.col with ctx.get_var_value('A', 'col')
+    var_col_pattern = r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)'
+    processed_expr = re.sub(var_col_pattern, r'get_var_value("\1", "\2", ctx)', processed_expr)
+    
+    # Handle PREV and NEXT functions
+    prev_pattern = r'PREV\(([^,)]+)(?:,\s*(\d+))?\)'
+    processed_expr = re.sub(prev_pattern, r'get_prev_value("\1", ctx, \2 if "\2" else 1)', processed_expr, flags=re.IGNORECASE)
+    
+    next_pattern = r'NEXT\(([^,)]+)(?:,\s*(\d+))?\)'
+    processed_expr = re.sub(next_pattern, r'get_next_value("\1", ctx, \2 if "\2" else 1)', processed_expr, flags=re.IGNORECASE)
+    
+    # Handle SQL-style operators
+    processed_expr = processed_expr.replace(' AND ', ' and ')
+    processed_expr = processed_expr.replace(' OR ', ' or ')
+    processed_expr = processed_expr.replace(' NOT ', ' not ')
+    processed_expr = processed_expr.replace('!=', '==')
+    processed_expr = processed_expr.replace('<>', '!=')
+    
+    # Define helper functions that will be available in the condition evaluation
+    def get_var_value(var_name, col_name, ctx):
+        """Get value from a pattern variable."""
+        if not hasattr(ctx, 'variables') or not ctx.variables:
+            return None
+            
+        # Check if this is the current variable being evaluated
+        if hasattr(ctx, 'current_var') and ctx.current_var == var_name:
+            # For self-references, use the current row
+            if hasattr(ctx, 'current_idx') and ctx.current_idx is not None:
+                return ctx.rows[ctx.current_idx].get(col_name)
+            return None
+            
+        # Check if this is a subset variable
+        if hasattr(ctx, 'subsets') and var_name in ctx.subsets:
+            # For subset variables, use the last component variable that has rows
+            components = ctx.subsets[var_name]
+            for component in reversed(components):  # Process in reverse order
+                if component in ctx.variables and ctx.variables[component]:
+                    var_indices = ctx.variables[component]
+                    if var_indices:
+                        # For condition evaluation, use the last occurrence
+                        idx = var_indices[-1]
+                        if idx < len(ctx.rows):
+                            return ctx.rows[idx].get(col_name)
+            return None
+            
+        # Regular variable lookup
+        var_indices = ctx.variables.get(var_name, [])
+        if var_indices:
+            # For condition evaluation, use the last occurrence
+            idx = var_indices[-1]
+            if idx < len(ctx.rows):
+                return ctx.rows[idx].get(col_name)
+        return None
+    
+    def get_prev_value(col_name, ctx, steps=1):
+        """Get value from previous row."""
+        if not hasattr(ctx, 'current_idx') or ctx.current_idx is None:
+            return None
+            
+        prev_idx = ctx.current_idx - steps
+        if 0 <= prev_idx < len(ctx.rows):
+            return ctx.rows[prev_idx].get(col_name)
+        return None
+    
+    def get_next_value(col_name, ctx, steps=1):
+        """Get value from next row."""
+        if not hasattr(ctx, 'current_idx') or ctx.current_idx is None:
+            return None
+            
+        next_idx = ctx.current_idx + steps
+        if 0 <= next_idx < len(ctx.rows):
+            return ctx.rows[next_idx].get(col_name)
+        return None
+    
+    # Try to compile the expression
     try:
-        tree = ast.parse(processed_expr, mode='eval')
-        evaluator = ConditionEvaluator(None)
+        # Create a safe namespace with only the functions we want to expose
+        safe_globals = {
+            'get_var_value': get_var_value,
+            'get_prev_value': get_prev_value,
+            'get_next_value': get_next_value,
+            'abs': abs,
+            'min': min,
+            'max': max,
+            'sum': sum,
+            'len': len,
+            'str': str,
+            'int': int,
+            'float': float,
+            'bool': bool
+        }
         
-        def ast_evaluator(row: Dict[str, Any], context: RowContext) -> bool:
-            evaluator.context = context
-            # Set the current row for evaluation
-            evaluator.current_row = row
-            # Set the variable being evaluated (for self-references)
-            evaluator.current_var = context.current_var if hasattr(context, 'current_var') else None
+        # Compile the expression
+        code = compile(f"lambda row, ctx: {processed_expr}", "<string>", "eval")
+        condition_func = eval(code, safe_globals)
+        
+        # Wrap the function to handle exceptions
+        def safe_condition(row, ctx):
             try:
-                result = evaluator.visit(tree.body)
-                return bool(result) if result is not None else False
+                return bool(condition_func(row, ctx))
             except Exception as e:
                 print(f"Error evaluating condition '{expr}': {e}")
                 return False
+                
+        return safe_condition
         
-        return ast_evaluator
     except SyntaxError as e:
         print(f"Syntax error parsing: '{expr}' (processed as '{processed_expr}')")
         print(f"Error details: {e}")
         
-        # Fallback to always True if we can't parse
-        print(f"WARNING: Falling back to TRUE for condition: {expr}")
-        return lambda row, ctx: True
+        # Fallback to a simple condition evaluator
+        def fallback_evaluator(row, ctx):
+            try:
+                # Try to handle common SQL conditions
+                if " = " in expr:
+                    left, right = expr.split(" = ", 1)
+                    left = left.strip()
+                    right = right.strip()
+                    
+                    # Remove quotes if present
+                    if (right.startswith("'") and right.endswith("'")) or (right.startswith('"') and right.endswith('"')):
+                        right = right[1:-1]
+                    
+                    left_value = row.get(left)
+                    return left_value == right
+                elif " > " in expr:
+                    left, right = expr.split(" > ", 1)
+                    left = left.strip()
+                    right = right.strip()
+                    
+                    left_value = row.get(left)
+                    try:
+                        right_value = float(right)
+                        return left_value > right_value
+                    except:
+                        return left_value > right
+                elif " < " in expr:
+                    left, right = expr.split(" < ", 1)
+                    left = left.strip()
+                    right = right.strip()
+                    
+                    left_value = row.get(left)
+                    try:
+                        right_value = float(right)
+                        return left_value < right_value
+                    except:
+                        return left_value < right
+                
+                # Default to TRUE if we can't parse
+                print(f"WARNING: Falling back to TRUE for condition: {expr}")
+                return True
+            except Exception as e:
+                print(f"Error in fallback evaluator for '{expr}': {e}")
+                return True
+        
+        return fallback_evaluator

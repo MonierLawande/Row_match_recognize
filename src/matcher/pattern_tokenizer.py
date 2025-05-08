@@ -24,6 +24,15 @@ class PatternToken:
     def __post_init__(self):
         if self.metadata is None:
             self.metadata = {}
+        # Add PERMUTE-specific metadata initialization
+        if self.type == PatternTokenType.PERMUTE:
+            if "variables" not in self.metadata:
+                self.metadata["variables"] = []
+            if "nested" not in self.metadata:
+                self.metadata["nested"] = False
+            if "original" not in self.metadata:
+                self.metadata["original"] = ""
+
 
 def parse_quantifier(quant: str) -> Tuple[int, Optional[int], bool]:
     """Parse quantifier into (min, max, greedy) tuple."""

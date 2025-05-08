@@ -19,111 +19,62 @@ class ClassifierError(Exception):
     """Error in CLASSIFIER function evaluation."""
     pass
 
-
-# Add to src/matcher/measure_evaluator.py
-
-def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, List[int]], all_rows: List[Dict[str, Any]], cache: Dict[str, Any] = None) -> Tuple[bool, Any]:
+def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, List[int]], all_rows: List[Dict[str, Any]], cache: Dict[str, Any] = None, subsets: Dict[str, List[str]] = None) -> Tuple[bool, Any]:
     """
-    Evaluate a pattern variable reference with optimized lookups and caching.
+    Evaluate a pattern variable reference with proper subset handling.
     
     Args:
         expr: The expression to evaluate
         var_assignments: Dictionary mapping variables to row indices
-        all_rows: List of all rows
-        cache: Optional cache dictionary for memoization
+        all_rows: List of all rows in the partition
+        cache: Optional cache for variable reference results
+        subsets: Optional dictionary of subset variable definitions
         
     Returns:
-        Tuple of (is_handled, value)
+        Tuple of (handled, value) where handled is True if this was a pattern variable reference
     """
     # Use cache if provided
     if cache is not None and expr in cache:
         return True, cache[expr]
     
-    # Handle direct pattern variable references like A.salary
-    var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)[.]([A-Za-z_][A-Za-z0-9_]*)$', expr)
+    # Handle direct pattern variable references like A.salary or X.value
+    var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)$', expr)
     if var_col_match:
         var_name = var_col_match.group(1)
         col_name = var_col_match.group(2)
         
-        # Fast path: direct lookup without unnecessary checks
+        # Check if this is a subset variable
+        if subsets and var_name in subsets:
+            components = subsets[var_name]
+            
+            # For subset variables, prioritize the last component in the list
+            # This matches Trino's behavior where the last component has precedence
+            for component in reversed(components):
+                if component in var_assignments and var_assignments[component]:
+                    var_indices = var_assignments[component]
+                    if var_indices and var_indices[0] < len(all_rows):
+                        value = all_rows[var_indices[0]].get(col_name)
+                        if cache is not None:
+                            cache[expr] = value
+                        return True, value
+            
+            return True, None
+        
+        # Direct variable lookup
         var_indices = var_assignments.get(var_name, [])
         if var_indices and var_indices[0] < len(all_rows):
             value = all_rows[var_indices[0]].get(col_name)
-            # Cache the result if cache is provided
             if cache is not None:
                 cache[expr] = value
             return True, value
         return True, None
     
-    # Handle LAST function with optimized lookup
-    last_match = re.match(r'^LAST\(([A-Za-z_][A-Za-z0-9_]*)[.]([A-Za-z_][A-Za-z0-9_]*)(?:,\s*(\d+))?\)$', expr, re.IGNORECASE)
-    if last_match:
-        var_name = last_match.group(1)
-        col_name = last_match.group(2)
-        occurrence = int(last_match.group(3)) if last_match.group(3) else 0
-        
-        # Fast path: direct lookup with bounds checking
-        var_indices = var_assignments.get(var_name, [])
-        if var_indices and occurrence < len(var_indices):
-            idx = var_indices[-1 - occurrence]  # Get the last-occurrence index
-            if idx < len(all_rows):
-                value = all_rows[idx].get(col_name)
-                # Cache the result if cache is provided
-                if cache is not None:
-                    cache[expr] = value
-                return True, value
-        return True, None
-    
-    # Handle PREV function
-    prev_match = re.match(r'^PREV\(([A-Za-z_][A-Za-z0-9_]*)(?:[.]([A-Za-z_][A-Za-z0-9_]*))?(?:,\s*(\d+))?\)$', expr, re.IGNORECASE)
-    if prev_match:
-        var_name = prev_match.group(1)
-        col_name = prev_match.group(2) if prev_match.group(2) else var_name
-        steps = int(prev_match.group(3)) if prev_match.group(3) else 1
-        
-        # Find the current row index
-        current_idx = None
-        for var, indices in var_assignments.items():
-            if indices:
-                current_idx = max(indices)
-                break
-        
-        if current_idx is not None:
-            # Get the previous row index
-            prev_idx = current_idx - steps
-            if 0 <= prev_idx < len(all_rows):
-                value = all_rows[prev_idx].get(col_name)
-                if cache is not None:
-                    cache[expr] = value
-                return True, value
-        return True, None
-    
-    # Handle NEXT function
-    next_match = re.match(r'^NEXT\(([A-Za-z_][A-Za-z0-9_]*)(?:[.]([A-Za-z_][A-Za-z0-9_]*))?(?:,\s*(\d+))?\)$', expr, re.IGNORECASE)
-    if next_match:
-        var_name = next_match.group(1)
-        col_name = next_match.group(2) if next_match.group(2) else var_name
-        steps = int(next_match.group(3)) if next_match.group(3) else 1
-        
-        # Find the current row index
-        current_idx = None
-        for var, indices in var_assignments.items():
-            if indices:
-                current_idx = max(indices)
-                break
-        
-        if current_idx is not None:
-            # Get the next row index
-            next_idx = current_idx + steps
-            if 0 <= next_idx < len(all_rows):
-                value = all_rows[next_idx].get(col_name)
-                if cache is not None:
-                    cache[expr] = value
-                return True, value
-        return True, None
-    
     # Not a pattern variable reference
     return False, None
+
+
+
+
 class MeasureEvaluator:
     def __init__(self, context: RowContext, final: bool = True):
         self.context = context
@@ -206,16 +157,37 @@ class MeasureEvaluator:
             expr, 
             self.context.variables, 
             self.context.rows,
-            self._var_ref_cache
+            self._var_ref_cache,
+            getattr(self.context, 'subsets', None)  # Pass subsets if available
         )
         if handled:
             return value
         
         # Special handling for pattern variable references like A.salary
-        var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', expr)
+        var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', expr)
         if var_col_match:
             var_name = var_col_match.group(1)
             col_name = var_col_match.group(2)
+            
+            # Check if this is a subset variable
+            if hasattr(self.context, 'subsets') and var_name in self.context.subsets:
+                # For subset variables, use the last component variable that has rows
+                # This matches Trino's behavior of preferring later components
+                components = self.context.subsets[var_name]
+                for component in reversed(components):  # Process in reverse order
+                    if component in self.context.variables and self.context.variables[component]:
+                        var_indices = self.context.variables[component]
+                        if var_indices:
+                            if is_running:
+                                # For RUNNING semantics, use the first occurrence
+                                idx = var_indices[0]
+                            else:
+                                # For FINAL semantics, use the last occurrence
+                                idx = var_indices[-1]
+                                
+                            if idx < len(self.context.rows):
+                                return self.context.rows[idx].get(col_name)
+                return None
             
             # Get the row matched to this variable
             var_indices = self._get_var_indices(var_name)
@@ -258,6 +230,8 @@ class MeasureEvaluator:
         except Exception as e:
             print(f"Error evaluating expression '{expr}': {e}")
             return None
+
+
     def evaluate_classifier(self, 
                         var_name: Optional[str] = None, 
                         *, 
@@ -369,6 +343,14 @@ class MeasureEvaluator:
         """
         current_idx = self.context.current_idx
         
+        # For ONE ROW PER MATCH with FINAL semantics, we need to return the variable
+        # that matched the row based on the DEFINE conditions, not just the last variable
+        if not running and var_name is None:
+            # Check which variable this row was assigned to
+            for var, indices in self.context.variables.items():
+                if current_idx in indices:
+                    return var
+        
         # Fast path using row-to-variable index
         if hasattr(self, '_row_to_vars') and current_idx in self._row_to_vars:
             matched_vars = self._row_to_vars[current_idx]
@@ -450,7 +432,7 @@ class MeasureEvaluator:
         Args:
             expr: The navigation expression to evaluate
             is_running: Whether to use RUNNING semantics
-            
+                
         Returns:
             The result of the navigation function
         """
@@ -467,7 +449,7 @@ class MeasureEvaluator:
                 print(f"Processing nested navigation: {outer_func}({inner_func}({inner_args}), {steps})")
                 
                 # Parse the inner args - expecting pattern_var.column
-                var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', inner_args)
+                var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', inner_args)
                 if var_col_match:
                     var = var_col_match.group(1)
                     col = var_col_match.group(2)
@@ -513,7 +495,7 @@ class MeasureEvaluator:
                 return None
                 
             # Handle both A.col and just col formats
-            var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', args[0])
+            var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args[0])
             if var_col_match:
                 var = var_col_match.group(1)
                 col = var_col_match.group(2)
@@ -536,11 +518,13 @@ class MeasureEvaluator:
                 if func_name == "FIRST":
                     if occurrence < len(var_indices):
                         row_idx = var_indices[occurrence]
-                        return self.context.rows[row_idx].get(col)
+                        if row_idx < len(self.context.rows):
+                            return self.context.rows[row_idx].get(col)
                 else:  # LAST
                     if occurrence < len(var_indices):
                         row_idx = var_indices[-(occurrence+1)]
-                        return self.context.rows[row_idx].get(col)
+                        if row_idx < len(self.context.rows):
+                            return self.context.rows[row_idx].get(col)
                         
             # If not var.col format, treat as a universal column
             else:
@@ -577,19 +561,40 @@ class MeasureEvaluator:
             
             # Default to navigation relative to current row
             current_idx = self.context.current_idx
-            column = args[0]
-            steps = int(args[1]) if len(args) > 1 else 1
             
-            if func_name == "PREV":
-                nav_idx = current_idx - steps
-                if 0 <= nav_idx < len(self.context.rows):
-                    return self.context.rows[nav_idx].get(column)
-            else:  # NEXT
-                nav_idx = current_idx + steps
-                if 0 <= nav_idx < len(self.context.rows):
-                    return self.context.rows[nav_idx].get(column)
+            # Check if first argument is a pattern variable reference
+            var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args[0])
+            if var_col_match:
+                var_name = var_col_match.group(1)
+                col_name = var_col_match.group(2)
+                steps = int(args[1]) if len(args) > 1 else 1
+                
+                # For pattern variable references, navigate relative to the current row
+                if func_name == "PREV":
+                    nav_idx = current_idx - steps
+                    if 0 <= nav_idx < len(self.context.rows):
+                        return self.context.rows[nav_idx].get(col_name)
+                else:  # NEXT
+                    nav_idx = current_idx + steps
+                    if 0 <= nav_idx < len(self.context.rows):
+                        return self.context.rows[nav_idx].get(col_name)
+            else:
+                # Simple column reference
+                column = args[0]
+                steps = int(args[1]) if len(args) > 1 else 1
+                
+                if func_name == "PREV":
+                    nav_idx = current_idx - steps
+                    if 0 <= nav_idx < len(self.context.rows):
+                        return self.context.rows[nav_idx].get(column)
+                else:  # NEXT
+                    nav_idx = current_idx + steps
+                    if 0 <= nav_idx < len(self.context.rows):
+                        return self.context.rows[nav_idx].get(column)
         
         return None
+
+
 
     def _get_var_indices(self, var: str) -> List[int]:
         """
@@ -627,7 +632,6 @@ class MeasureEvaluator:
         
         return []
 
-        # src/matcher/measure_evaluator.py
 
     def _evaluate_aggregate(self, func_name: str, args_str: str, is_running: bool) -> Any:
         """
