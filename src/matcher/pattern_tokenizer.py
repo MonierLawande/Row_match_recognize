@@ -96,7 +96,7 @@ def extract_exclusion_variables(pattern: str) -> Set[str]:
     return excluded_vars
 
 def tokenize_pattern(pattern: str) -> List[PatternToken]:
-    """Enhanced tokenizer with improved support for all pattern syntax features."""
+    """Enhanced tokenizer with comprehensive support for all pattern syntax features including nested PERMUTE."""
     tokens = []
     i = 0
     paren_depth = 0  # Track parenthesis depth
@@ -113,7 +113,7 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
             i += 1
             continue
             
-        # Enhanced PERMUTE handling with recursive nesting
+        # Enhanced PERMUTE handling with recursive nesting and quantifiers
         if i+7 <= len(pattern) and pattern[i:i+7].upper() == 'PERMUTE':
             permute_start = i
             i += 7  # Move past "PERMUTE"
@@ -147,210 +147,303 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
                         nested_permute_start = i
                         nested_permute_depth = 0
                         found_open = False
+                        nested_paren_depth = 0
                         
-                        while i < len(pattern):
-                            if pattern[i] == '(' and not found_open:
-                                found_open = True
-                                nested_permute_depth = 1
-                                i += 1
-                            elif pattern[i] == '(' and found_open:
-                                nested_permute_depth += 1
-                                i += 1
-                            elif pattern[i] == ')' and found_open:
-                                nested_permute_depth -= 1
-                                if nested_permute_depth == 0:
-                                    # Found end of nested PERMUTE
-                                    break
-                                i += 1
+                        # Skip to the opening parenthesis of nested PERMUTE
+                        j = i + 7  # After "PERMUTE"
+                        while j < len(pattern) and pattern[j] != '(':
+                            if not pattern[j].isspace():
+                                # Found non-whitespace before opening parenthesis
+                                print(f"Warning: Unexpected character '{pattern[j]}' after PERMUTE")
+                            j += 1
+                        
+                        if j < len(pattern) and pattern[j] == '(':
+                            # Found opening parenthesis for nested PERMUTE
+                            nested_paren_start = j
+                            nested_paren_depth = 1
+                            j += 1
+                            
+                            # Find matching closing parenthesis
+                            while j < len(pattern) and nested_paren_depth > 0:
+                                if pattern[j] == '(':
+                                    nested_paren_depth += 1
+                                elif pattern[j] == ')':
+                                    nested_paren_depth -= 1
+                                j += 1
+                            
+                            if nested_paren_depth == 0:
+                                # Successfully found the end of nested PERMUTE
+                                nested_permute_text = pattern[nested_permute_start:j]
+                                nested_tokens = tokenize_pattern(nested_permute_text)
+                                
+                                if nested_tokens:
+                                    # Add the nested PERMUTE token to our variables
+                                    nested_tokens[0].metadata["nested"] = True
+                                    variables.append(nested_tokens[0])
+                                
+                                # Update the outer loop position
+                                i = j
+                                var_start = j
+                                
+                                # Check for quantifiers after the nested PERMUTE
+                                quantifier = None
+                                if i < len(pattern) and pattern[i] in '*+?':
+                                    quantifier = pattern[i]
+                                    i += 1
+                                    
+                                    # Check for non-greedy marker
+                                    greedy = True
+                                    if i < len(pattern) and pattern[i] == '?':
+                                        greedy = False
+                                        i += 1
+                                        
+                                    # Apply quantifier to the last nested token
+                                    if nested_tokens and isinstance(variables[-1], PatternToken):
+                                        variables[-1].quantifier = quantifier
+                                        variables[-1].greedy = greedy
+                                elif i < len(pattern) and pattern[i] == '{':
+                                    # Complex quantifier like {n}, {n,m}, etc.
+                                    quant_start = i
+                                    brace_depth = 1
+                                    i += 1
+                                    
+                                    while i < len(pattern) and brace_depth > 0:
+                                        if pattern[i] == '{':
+                                            brace_depth += 1
+                                        elif pattern[i] == '}':
+                                            brace_depth -= 1
+                                        i += 1
+                                    
+                                    quantifier = pattern[quant_start:i]
+                                    
+                                    # Check for non-greedy marker
+                                    greedy = True
+                                    if i < len(pattern) and pattern[i] == '?':
+                                        greedy = False
+                                        i += 1
+                                        
+                                    # Apply quantifier to the last nested token
+                                    if nested_tokens and isinstance(variables[-1], PatternToken):
+                                        variables[-1].quantifier = quantifier
+                                        variables[-1].greedy = greedy
+                                
+                                # If we're at a comma, skip it
+                                if i < len(pattern) and pattern[i] == ',':
+                                    i += 1
+                                    var_start = i
                             else:
+                                # Unbalanced parentheses in nested PERMUTE
+                                print(f"Warning: Unbalanced parentheses in nested PERMUTE: {pattern[nested_permute_start:]}")
+                                # Try to continue anyway
                                 i += 1
-                        
-                        # Get the nested PERMUTE expression
-                        if found_open:
-                            nested_permute = pattern[nested_permute_start:i+1]
-                            # Recursively tokenize the nested PERMUTE
-                            nested_tokens = tokenize_pattern(nested_permute)
-                            if nested_tokens:
-                                variables.append(nested_tokens[0])
-                        
-                        i += 1  # Move past closing parenthesis
-                        var_start = i
-                        
+                        else:
+                            # Expected opening parenthesis not found
+                            print(f"Warning: Missing opening parenthesis after PERMUTE keyword")
+                            i += 1
                     elif pattern[i] == '(':
                         nested_depth += 1
                         i += 1
                     elif pattern[i] == ')':
                         nested_depth -= 1
-                        if nested_depth == 0:
-                            # End of PERMUTE, get the last variable
+                        if nested_depth > 0:
+                            i += 1
+                        else:
+                            # Before closing, extract any last variable
+                            if i > var_start:
+                                var_text = pattern[var_start:i].strip()
+                                if var_text:
+                                    if var_text.endswith(','):
+                                        var_text = var_text[:-1].strip()
+                                    if var_text:
+                                        variables.append(var_text)
+                            i += 1  # Skip closing parenthesis
+                    elif pattern[i] == ',':
+                        # Extract variable and skip comma
+                        if i > var_start:
                             var_text = pattern[var_start:i].strip()
                             if var_text:
-                                if var_text.endswith(','):
-                                    var_text = var_text[:-1].strip()
-                                if var_text:
-                                    variables.append(var_text)
-                        i += 1
-                    elif pattern[i] == ',' and nested_depth == 1:
-                        # Variable separator at top level
-                        var_text = pattern[var_start:i].strip()
-                        if var_text:
-                            variables.append(var_text)
+                                variables.append(var_text)
                         i += 1
                         var_start = i
                     else:
                         i += 1
                 
-                # Check for quantifiers after PERMUTE
-                quant = ''
+                # Check for quantifiers after the PERMUTE construct
+                quantifier = None
                 greedy = True
                 
-                if i < len(pattern) and pattern[i] in '+*?{':
-                    quant_start = i
+                if i < len(pattern) and pattern[i] in '*+?':
+                    quantifier = pattern[i]
+                    i += 1
                     
-                    if pattern[i] in '+*?':
+                    # Check for non-greedy marker
+                    if i < len(pattern) and pattern[i] == '?':
+                        greedy = False
                         i += 1
-                        # Check for reluctant quantifier
-                        if i < len(pattern) and pattern[i] == '?':
-                            greedy = False
-                            i += 1
-                    elif pattern[i] == '{':
-                        # Find matching closing brace
-                        brace_pos = pattern.find('}', i)
-                        if brace_pos == -1:
-                            raise ValueError(f"Unterminated quantifier at position {i}")
-                        i = brace_pos + 1
-                        
-                        # Check for reluctant quantifier after brace
-                        if i < len(pattern) and pattern[i] == '?':
-                            greedy = False
-                            i += 1
+                elif i < len(pattern) and pattern[i] == '{':
+                    # Complex quantifier like {n}, {n,m}, etc.
+                    quant_start = i
+                    brace_depth = 1
+                    i += 1
                     
-                    quant = pattern[quant_start:i]
+                    while i < len(pattern) and brace_depth > 0:
+                        if pattern[i] == '{':
+                            brace_depth += 1
+                        elif pattern[i] == '}':
+                            brace_depth -= 1
+                        i += 1
+                    
+                    quantifier = pattern[quant_start:i]
+                    
+                    # Check for non-greedy marker
+                    if i < len(pattern) and pattern[i] == '?':
+                        greedy = False
+                        i += 1
                 
-                # Create a PERMUTE token with metadata
+                # Create token with metadata about the PERMUTE variables
                 permute_token = PatternToken(
-                    type=PatternTokenType.PERMUTE,
-                    value='PERMUTE',
-                    quantifier=quant or None,
+                    PatternTokenType.PERMUTE,
+                    f"PERMUTE({','.join(str(v) for v in variables)})",
+                    quantifier=quantifier,
                     greedy=greedy,
                     metadata={
                         "variables": variables,
-                        "original": pattern[permute_start:i],
-                        "nested": True
+                        "base_variables": [v for v in variables if not isinstance(v, PatternToken)],
+                        "permute": True,
+                        "nested_permute": any(isinstance(v, PatternToken) and v.type == PatternTokenType.PERMUTE for v in variables),
+                        "original": pattern[permute_start:i]
                     }
                 )
+                
                 tokens.append(permute_token)
-                continue
-        
-        # Handle pattern exclusions
-        elif i+1 < len(pattern) and pattern[i:i+2] == '{-':
-            tokens.append(PatternToken(PatternTokenType.EXCLUSION_START, '{-'))
-            i += 2
-            
-        elif i+1 < len(pattern) and pattern[i:i+2] == '-}':
-            tokens.append(PatternToken(PatternTokenType.EXCLUSION_END, '-}'))
-            i += 2
-            
-        # Handle grouping
-        elif char == '(':
-            tokens.append(PatternToken(PatternTokenType.GROUP_START, '('))
-            paren_depth += 1
-            i += 1
-            
-        elif char == ')':
-            if paren_depth <= 0:
-                raise ValueError(f"Unbalanced parentheses in pattern: unexpected closing parenthesis at position {i}")
-                
-            paren_depth -= 1
-            token = PatternToken(PatternTokenType.GROUP_END, ')')
-            
-            # Check for quantifiers after group
-            next_pos = i + 1
-            while next_pos < len(pattern) and pattern[next_pos] in '+*?{':
-                next_pos += 1
-                
-                # If we encounter a '{', we need to find the matching '}' 
-                if pattern[next_pos-1] == '{':
-                    brace_pos = pattern.find('}', next_pos)
-                    if brace_pos == -1:
-                        raise ValueError(f"Unterminated quantifier at position {next_pos-1}")
-                    next_pos = brace_pos + 1
-                    
-                # Check for reluctant quantifier
-                if next_pos < len(pattern) and pattern[next_pos] == '?':
-                    next_pos += 1
-                    
-            if next_pos > i + 1:
-                quant = pattern[i+1:next_pos]
-                token.quantifier = quant
-                token.greedy = not quant.endswith('?')
-                i = next_pos
             else:
-                i += 1
-            tokens.append(token)
-            
+                # Invalid PERMUTE - missing opening parenthesis
+                print(f"Warning: Invalid PERMUTE syntax at position {i}")
+                tokens.append(PatternToken(PatternTokenType.LITERAL, "PERMUTE"))
+                i += 7
+        
+        # Handle pattern exclusion
+        elif char == '{' and i + 1 < len(pattern) and pattern[i + 1] == '-':
+            tokens.append(PatternToken(PatternTokenType.EXCLUSION_START, "{-"))
+            i += 2
+        elif char == '-' and i + 1 < len(pattern) and pattern[i + 1] == '}':
+            tokens.append(PatternToken(PatternTokenType.EXCLUSION_END, "-}"))
+            i += 2
+        
+        # Handle anchors
+        elif char == '^':
+            tokens.append(PatternToken(PatternTokenType.ANCHOR_START, "^"))
+            i += 1
+        elif char == '$':
+            tokens.append(PatternToken(PatternTokenType.ANCHOR_END, "$"))
+            i += 1
+        
         # Handle alternation
         elif char == '|':
-            tokens.append(PatternToken(PatternTokenType.ALTERNATION, '|'))
+            tokens.append(PatternToken(PatternTokenType.ALTERNATION, "|"))
             i += 1
-            
-        # Handle end anchor
-        elif char == '$':
-            tokens.append(PatternToken(PatternTokenType.ANCHOR_END, '$'))
+        
+        # Handle grouping
+        elif char == '(':
+            tokens.append(PatternToken(PatternTokenType.GROUP_START, "("))
+            paren_depth += 1
             i += 1
-            
-        # Handle pattern variables
-        elif char.isalpha():
-            var_start = i
-            while i < len(pattern) and (pattern[i].isalnum() or pattern[i] == '_'):
-                i += 1
-            var_name = pattern[var_start:i]
+        elif char == ')':
+            paren_depth -= 1
             
             # Check for quantifiers
-            quant = ''
-            greedy = True
-            if i < len(pattern) and pattern[i] in '+*?{':
-                quant_start = i
-                
-                # Parse the quantifier
-                if pattern[i] in '+*?':
-                    i += 1
-                    # Check for reluctant quantifier
-                    if i < len(pattern) and pattern[i] == '?':
-                        greedy = False
-                        i += 1
-                elif pattern[i] == '{':
-                    # Find matching closing brace
-                    brace_pos = pattern.find('}', i)
-                    if brace_pos == -1:
-                        raise ValueError(f"Unterminated quantifier at position {i}")
-                    i = brace_pos + 1
-                    
-                    # Check for reluctant quantifier after brace
-                    if i < len(pattern) and pattern[i] == '?':
-                        greedy = False
-                        i += 1
-                
-                quant = pattern[quant_start:i]
+            quantifier = None
+            is_greedy = True
             
+            # Look ahead for quantifiers
+            if i + 1 < len(pattern) and pattern[i + 1] in "*+?{":
+                j = i + 1
+                
+                # Extended quantifier like {n,m}
+                if pattern[j] == '{':
+                    quant_start = j
+                    j += 1
+                    while j < len(pattern) and pattern[j] != '}':
+                        j += 1
+                    if j < len(pattern) and pattern[j] == '}':
+                        quantifier = pattern[quant_start:j+1]
+                        j += 1
+                else:
+                    # Simple quantifier
+                    quantifier = pattern[j]
+                    j += 1
+                
+                # Check for reluctant quantifier
+                if j < len(pattern) and pattern[j] == '?':
+                    is_greedy = False
+                    quantifier += '?'
+                    j += 1
+                
+                i = j  # Update position past quantifier
+            else:
+                i += 1
+            
+            # Add token with optional quantifier
             tokens.append(PatternToken(
-                PatternTokenType.LITERAL,
-                var_name,
-                quantifier=quant or None,
-                greedy=greedy
+                PatternTokenType.GROUP_END, 
+                ")", 
+                quantifier, 
+                is_greedy
             ))
             
+        # Handle literal with quantifier
         else:
-            # Skip characters we don't recognize
-            i += 1
+            # Extract literal variable name
+            var_start = i
+            while i < len(pattern) and pattern[i] not in "|()*+?{}^$ \t\n\r":
+                i += 1
             
-    # Check for unbalanced parentheses at the end
-    if paren_depth > 0:
-        raise ValueError(f"Unbalanced parentheses in pattern: missing {paren_depth} closing parentheses")
-            
-    # Handle end anchor at the end of the pattern
-    if pattern.endswith('$') and tokens and tokens[-1].type != PatternTokenType.ANCHOR_END:
-        tokens.append(PatternToken(PatternTokenType.ANCHOR_END, '$'))
-            
+            if i > var_start:
+                var_name = pattern[var_start:i]
+                
+                # Check for quantifiers
+                quantifier = None
+                is_greedy = True
+                
+                if i < len(pattern) and pattern[i] in "*+?{":
+                    j = i
+                    
+                    # Extended quantifier like {n,m}
+                    if pattern[j] == '{':
+                        quant_start = j
+                        j += 1
+                        while j < len(pattern) and pattern[j] != '}':
+                            j += 1
+                        if j < len(pattern) and pattern[j] == '}':
+                            quantifier = pattern[quant_start:j+1]
+                            j += 1
+                    else:
+                        # Simple quantifier
+                        quantifier = pattern[j]
+                        j += 1
+                    
+                    # Check for reluctant quantifier
+                    if j < len(pattern) and pattern[j] == '?':
+                        is_greedy = False
+                        quantifier += '?'
+                        j += 1
+                    
+                    i = j  # Update position past quantifier
+                
+                # Add token with optional quantifier
+                tokens.append(PatternToken(
+                    PatternTokenType.LITERAL, 
+                    var_name, 
+                    quantifier, 
+                    is_greedy
+                ))
+    
+    # Handle end anchor if present
+    if pattern.endswith('$'):
+        # If we already processed the $, don't add it again
+        if len(tokens) == 0 or tokens[-1].type != PatternTokenType.ANCHOR_END:
+            tokens.append(PatternToken(PatternTokenType.ANCHOR_END, "$"))
+    
+    # Return the list of tokens
     return tokens
 

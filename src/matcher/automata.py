@@ -206,10 +206,31 @@ class NFABuilder:
         """
         # Extract permute variables
         variables = token.metadata.get("variables", [])
+        original_pattern = token.metadata.get("original", "")
         
         # Create states for the permutation
         perm_start = self.new_state()
         perm_end = self.new_state()
+        
+        # Handle edge cases
+        if not variables:
+            # Empty PERMUTE - just an epsilon transition
+            self.add_epsilon(perm_start, perm_end)
+            return perm_start, perm_end
+        elif len(variables) == 1:
+            # Single variable - equivalent to just the variable
+            var = variables[0]
+            if isinstance(var, PatternToken) and var.type == PatternTokenType.PERMUTE:
+                # Nested single PERMUTE
+                inner_start, inner_end = self._process_permute(var, define)
+                self.add_epsilon(perm_start, inner_start)
+                self.add_epsilon(inner_end, perm_end)
+            else:
+                # Regular variable
+                var_start, var_end = self.create_var_states(var, define)
+                self.add_epsilon(perm_start, var_start)
+                self.add_epsilon(var_end, perm_end)
+            return perm_start, perm_end
         
         # Handle nested PERMUTE patterns
         processed_vars = []
@@ -219,52 +240,153 @@ class NFABuilder:
                 nested_start, nested_end = self._process_permute(var, define)
                 processed_vars.append((nested_start, nested_end))
             else:
-                # Regular variable
-                processed_vars.append(var)
+                # Check for quantifiers on variables
+                if isinstance(var, str) and (var.endswith('*') or var.endswith('+') or 
+                                            var.endswith('?') or 
+                                            ('{' in var and var.endswith('}'))):
+                    # Extract quantifier from the variable
+                    var_base = var
+                    quantifier = None
+                    
+                    if var.endswith('*'):
+                        var_base = var[:-1]
+                        quantifier = '*'
+                    elif var.endswith('+'):
+                        var_base = var[:-1]
+                        quantifier = '+'
+                    elif var.endswith('?'):
+                        var_base = var[:-1]
+                        quantifier = '?'
+                    elif '{' in var and var.endswith('}'):
+                        open_idx = var.find('{')
+                        var_base = var[:open_idx]
+                        quantifier = var[open_idx:]
+                    
+                    # Create state for base variable
+                    var_start, var_end = self.create_var_states(var_base, define)
+                    
+                    # Apply quantifier if present
+                    if quantifier:
+                        min_rep, max_rep, greedy = parse_quantifier(quantifier)
+                        var_start, var_end = self._apply_quantifier(
+                            var_start, var_end, min_rep, max_rep, greedy)
+                    
+                    processed_vars.append((var_start, var_end))
+                else:
+                    # Regular variable without quantifier
+                    processed_vars.append(var)
         
-        # Generate all permutations in lexicographical order
+        # Organize variables for permutation
         permutable_vars = [v for v in processed_vars if isinstance(v, str)]
-        all_perms = list(itertools.permutations(permutable_vars))
+        nested_perms = [v for v in processed_vars if isinstance(v, tuple)]
         
-        # Sort permutations to match Trino's behavior:
-        # 1. Original order is most preferred
-        # 2. Reverse order is least preferred
-        # 3. Other permutations ordered lexicographically
-        def permutation_key(perm):
-            original_order = {var: idx for idx, var in enumerate(permutable_vars)}
-            return tuple(original_order[var] for var in perm)
-        
-        all_perms.sort(key=permutation_key)
-        
-        # Process each permutation
-        for perm in all_perms:
+        # Handle large permutation sets efficiently
+        if len(permutable_vars) > 6:  # Threshold for switching to lazy generation
+            print(f"Large permutation set detected ({len(permutable_vars)} variables), using lazy generation")
+            
+            # Create initial ordered sequence
             branch_start = self.new_state()
             branch_current = branch_start
             
-            # Build the permutation branch
-            for var in perm:
-                if isinstance(var, tuple):  # Nested PERMUTE result
-                    nested_start, nested_end = var
-                    self.add_epsilon(branch_current, nested_start)
-                    branch_current = nested_end
-                else:  # Regular variable
-                    var_start, var_end = self.create_var_states(var, define)
-                    self.add_epsilon(branch_current, var_start)
-                    branch_current = var_end
+            # Add regular variables first
+            for var in permutable_vars:
+                var_start, var_end = self.create_var_states(var, define)
+                self.add_epsilon(branch_current, var_start)
+                branch_current = var_end
             
-            # Connect this permutation branch
+            # Then add nested PERMUTE results
+            for nested_start, nested_end in nested_perms:
+                self.add_epsilon(branch_current, nested_start)
+                branch_current = nested_end
+            
+            # Connect original ordering branch
             self.add_epsilon(perm_start, branch_start)
             self.add_epsilon(branch_current, perm_end)
+            
+            # Create optimized structure for other permutations
+            any_branch_start = self.new_state()
+            any_branch_current = any_branch_start
+            
+            # Create parallel paths for all variables
+            var_ends = []
+            
+            # Add regular variables
+            for var in permutable_vars:
+                var_start, var_end = self.create_var_states(var, define)
+                self.add_epsilon(any_branch_current, var_start)
+                var_ends.append(var_end)
+            
+            # Add nested PERMUTE results
+            for nested_start, nested_end in nested_perms:
+                self.add_epsilon(any_branch_current, nested_start)
+                var_ends.append(nested_end)
+            
+            # Connect to junction point
+            junction = self.new_state()
+            for var_end in var_ends:
+                self.add_epsilon(var_end, junction)
+            
+            # Add structure for remaining permutation options
+            if len(permutable_vars) + len(nested_perms) > 1:
+                recursive_state = self.new_state()
+                self.add_epsilon(junction, recursive_state)
+                self.add_epsilon(recursive_state, perm_end)
+            
+            # Connect the optimized branch
+            self.add_epsilon(perm_start, any_branch_start)
+            self.add_epsilon(junction, perm_end)
+        else:
+            # For smaller sets, generate all permutations explicitly
+            all_vars = []
+            
+            # Process regular variables
+            for var in permutable_vars:
+                all_vars.append(("var", var))
+            
+            # Process nested PERMUTE results
+            for nested_idx, (nested_start, nested_end) in enumerate(nested_perms):
+                all_vars.append(("nested", nested_idx, nested_start, nested_end))
+            
+            # Generate all permutations
+            all_perms = list(itertools.permutations(all_vars))
+            
+            # Sort permutations to match standard behavior
+            def permutation_key(perm):
+                original_order = {var: idx for idx, var in enumerate(all_vars)}
+                return tuple(original_order[var] for var in perm)
+            
+            all_perms.sort(key=permutation_key)
+            
+            # Process each permutation
+            for perm in all_perms:
+                branch_start = self.new_state()
+                branch_current = branch_start
+                
+                # Build the permutation branch
+                for var_info in perm:
+                    if var_info[0] == "nested":
+                        # Nested PERMUTE
+                        _, _, nested_start, nested_end = var_info
+                        self.add_epsilon(branch_current, nested_start)
+                        branch_current = nested_end
+                    else:
+                        # Regular variable
+                        var = var_info[1]
+                        var_start, var_end = self.create_var_states(var, define)
+                        self.add_epsilon(branch_current, var_start)
+                        branch_current = var_end
+                
+                # Connect this permutation branch
+                self.add_epsilon(perm_start, branch_start)
+                self.add_epsilon(branch_current, perm_end)
         
-        # Apply quantifiers to the entire PERMUTE if present
+        # Apply quantifiers to the entire PERMUTE pattern if present
         if token.quantifier:
             min_rep, max_rep, greedy = parse_quantifier(token.quantifier)
             perm_start, perm_end = self._apply_quantifier(
                 perm_start, perm_end, min_rep, max_rep, greedy)
         
         return perm_start, perm_end
-
-
 
     def _process_exclusion(self, tokens: List[PatternToken], idx: List[int], define: Dict[str, str]) -> Tuple[int, int]:
         """Process an exclusion pattern fragment."""
@@ -337,7 +459,6 @@ class NFABuilder:
             start, end = self._apply_quantifier(start, end, min_rep, max_rep, greedy)
         
         return start, end
-
 
     def _apply_quantifier(self, 
                     start: int, 

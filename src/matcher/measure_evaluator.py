@@ -47,16 +47,22 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
         if subsets and var_name in subsets:
             components = subsets[var_name]
             
-            # For subset variables, prioritize the last component in the list
-            # This matches Trino's behavior where the last component has precedence
-            for component in reversed(components):
+            # Find the latest position among all component variables
+            # Map components to their positions in the match
+            component_positions = {}
+            for component in components:
                 if component in var_assignments and var_assignments[component]:
-                    var_indices = var_assignments[component]
-                    if var_indices and var_indices[0] < len(all_rows):
-                        value = all_rows[var_indices[0]].get(col_name)
-                        if cache is not None:
-                            cache[expr] = value
-                        return True, value
+                    component_positions[component] = max(var_assignments[component])
+            
+            # If we have any components, get the one with the latest position
+            if component_positions:
+                latest_component = max(component_positions.items(), key=lambda x: x[1])[0]
+                var_indices = var_assignments[latest_component]
+                if var_indices and var_indices[0] < len(all_rows):
+                    value = all_rows[var_indices[0]].get(col_name)
+                    if cache is not None:
+                        cache[expr] = value
+                    return True, value
             
             return True, None
         
@@ -171,22 +177,29 @@ class MeasureEvaluator:
             
             # Check if this is a subset variable
             if hasattr(self.context, 'subsets') and var_name in self.context.subsets:
-                # For subset variables, use the last component variable that has rows
-                # This matches Trino's behavior of preferring later components
+                # For subset variables, prioritize the component variable that appears latest in the match
                 components = self.context.subsets[var_name]
-                for component in reversed(components):  # Process in reverse order
+                
+                # Find the latest position among all component variables
+                component_positions = {}
+                for component in components:
                     if component in self.context.variables and self.context.variables[component]:
-                        var_indices = self.context.variables[component]
-                        if var_indices:
-                            if is_running:
-                                # For RUNNING semantics, use the first occurrence
-                                idx = var_indices[0]
-                            else:
-                                # For FINAL semantics, use the last occurrence
-                                idx = var_indices[-1]
-                                
-                            if idx < len(self.context.rows):
-                                return self.context.rows[idx].get(col_name)
+                        component_positions[component] = max(self.context.variables[component])
+                
+                # If we have any components, get the one with the latest position
+                if component_positions:
+                    latest_component = max(component_positions.items(), key=lambda x: x[1])[0]
+                    var_indices = self.context.variables[latest_component]
+                    if var_indices:
+                        if is_running:
+                            # For RUNNING semantics, use the first occurrence
+                            idx = var_indices[0]
+                        else:
+                            # For FINAL semantics, use the last occurrence
+                            idx = var_indices[-1]
+                            
+                        if idx < len(self.context.rows):
+                            return self.context.rows[idx].get(col_name)
                 return None
             
             # Get the row matched to this variable

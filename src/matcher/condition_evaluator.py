@@ -4,8 +4,11 @@ import ast
 import operator
 import re
 import math
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, Callable, List, Union
 from src.matcher.row_context import RowContext
+
+# Define the type for condition functions
+ConditionFn = Callable[[Dict[str, Any], Any], bool]
 
 class ConditionEvaluator(ast.NodeVisitor):
     def __init__(self, context: RowContext):
@@ -194,8 +197,6 @@ class ConditionEvaluator(ast.NodeVisitor):
         
         return None
 
-        # src/matcher/condition_evaluator.py
-
     def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
         """
         Get a column value from a pattern variable's matched rows.
@@ -246,7 +247,6 @@ class ConditionEvaluator(ast.NodeVisitor):
             return ctx.rows[ctx.current_idx].get(col_name)
         
         return None
-
 
     def visit_Num(self, node: ast.Num):
         return node.n
@@ -471,219 +471,275 @@ class ConditionEvaluator(ast.NodeVisitor):
                 return self.context.rows[idx].get(column)
         return None
 
-
-        
     def _get_classifier(self, variable: Optional[str] = None) -> str:
         """Implementation of CLASSIFIER function."""
         return self.context.classifier(variable)
 
+# Define the ConditionFn type for clarity
+from typing import Callable, Dict, Any, Optional, List, Tuple, Union
+import re
+import ast
 
-def compile_condition(expr: str) -> Callable[[Dict[str, Any], RowContext], bool]:
-    """Compile a condition expression into a function with improved pattern variable handling."""
-    # Special case for TRUE/FALSE constants
-    if expr.upper() == "TRUE":
+# Type alias for condition functions
+ConditionFn = Callable[[Dict[str, Any], 'ConditionContext'], bool]
+
+def compile_condition(condition_text: str) -> ConditionFn:
+    """Compile a condition string into a condition function with strict Trino-compatible navigation behaviors."""
+    if not condition_text or condition_text.strip().upper() == 'TRUE':
         return lambda row, ctx: True
-    elif expr.upper() == "FALSE":
-        return lambda row, ctx: False
     
-    # Handle simple equality conditions like "event_type = 'start'"
-    if '=' in expr and not '==' in expr and not '<=' in expr and not '>=' in expr:
-        try:
-            left, right = expr.split('=', 1)
-            left = left.strip()
-            right = right.strip()
-            
-            # Remove quotes if present
-            if (right.startswith("'") and right.endswith("'")) or (right.startswith('"') and right.endswith('"')):
-                right = right[1:-1]
-            
-            def simple_condition(row, ctx):
-                # Get the value from the row
-                left_value = row.get(left)
-                return left_value == right
-                
-            return simple_condition
-        except Exception as e:
-            print(f"Error parsing simple condition '{expr}': {e}")
-            # Continue with AST parsing
-    
-    # Fix for SQL-style string literals with single quotes
-    # Handle both 'string' and "string" literals
-    single_quoted_pattern = r"('(?:[^'\\]|\\.)*')"
-    matches = re.finditer(single_quoted_pattern, expr)
-    
-    # Replace each match one by one to avoid issues with replacements
-    offset = 0
-    processed_expr = expr
-    for match in matches:
-        start, end = match.span()
-        start += offset
-        end += offset
-        
-        # Get the quoted content without the quotes
-        content = processed_expr[start+1:end-1]
-        # Replace with Python double-quoted string
-        replacement = f'"{content}"'
-        
-        # Replace in the string
-        processed_expr = processed_expr[:start] + replacement + processed_expr[end:]
-        # Adjust offset for future replacements
-        offset += len(replacement) - (end - start)
-    
-    # Handle pattern variable references
-    # Replace A.col with ctx.get_var_value('A', 'col')
-    var_col_pattern = r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)'
-    processed_expr = re.sub(var_col_pattern, r'get_var_value("\1", "\2", ctx)', processed_expr)
-    
-    # Handle PREV and NEXT functions
-    prev_pattern = r'PREV\(([^,)]+)(?:,\s*(\d+))?\)'
-    processed_expr = re.sub(prev_pattern, r'get_prev_value("\1", ctx, \2 if "\2" else 1)', processed_expr, flags=re.IGNORECASE)
-    
-    next_pattern = r'NEXT\(([^,)]+)(?:,\s*(\d+))?\)'
-    processed_expr = re.sub(next_pattern, r'get_next_value("\1", ctx, \2 if "\2" else 1)', processed_expr, flags=re.IGNORECASE)
-    
-    # Handle SQL-style operators
-    processed_expr = processed_expr.replace(' AND ', ' and ')
-    processed_expr = processed_expr.replace(' OR ', ' or ')
-    processed_expr = processed_expr.replace(' NOT ', ' not ')
-    processed_expr = processed_expr.replace('!=', '==')
-    processed_expr = processed_expr.replace('<>', '!=')
-    
-    # Define helper functions that will be available in the condition evaluation
-    def get_var_value(var_name, col_name, ctx):
-        """Get value from a pattern variable."""
-        if not hasattr(ctx, 'variables') or not ctx.variables:
-            return None
-            
-        # Check if this is the current variable being evaluated
-        if hasattr(ctx, 'current_var') and ctx.current_var == var_name:
-            # For self-references, use the current row
-            if hasattr(ctx, 'current_idx') and ctx.current_idx is not None:
-                return ctx.rows[ctx.current_idx].get(col_name)
-            return None
-            
-        # Check if this is a subset variable
-        if hasattr(ctx, 'subsets') and var_name in ctx.subsets:
-            # For subset variables, use the last component variable that has rows
-            components = ctx.subsets[var_name]
-            for component in reversed(components):  # Process in reverse order
-                if component in ctx.variables and ctx.variables[component]:
-                    var_indices = ctx.variables[component]
-                    if var_indices:
-                        # For condition evaluation, use the last occurrence
-                        idx = var_indices[-1]
-                        if idx < len(ctx.rows):
-                            return ctx.rows[idx].get(col_name)
-            return None
-            
-        # Regular variable lookup
-        var_indices = ctx.variables.get(var_name, [])
-        if var_indices:
-            # For condition evaluation, use the last occurrence
-            idx = var_indices[-1]
-            if idx < len(ctx.rows):
-                return ctx.rows[idx].get(col_name)
-        return None
-    
-    def get_prev_value(col_name, ctx, steps=1):
-        """Get value from previous row."""
-        if not hasattr(ctx, 'current_idx') or ctx.current_idx is None:
-            return None
-            
-        prev_idx = ctx.current_idx - steps
-        if 0 <= prev_idx < len(ctx.rows):
-            return ctx.rows[prev_idx].get(col_name)
-        return None
-    
-    def get_next_value(col_name, ctx, steps=1):
-        """Get value from next row."""
-        if not hasattr(ctx, 'current_idx') or ctx.current_idx is None:
-            return None
-            
-        next_idx = ctx.current_idx + steps
-        if 0 <= next_idx < len(ctx.rows):
-            return ctx.rows[next_idx].get(col_name)
-        return None
-    
-    # Try to compile the expression
     try:
-        # Create a safe namespace with only the functions we want to expose
-        safe_globals = {
-            'get_var_value': get_var_value,
-            'get_prev_value': get_prev_value,
-            'get_next_value': get_next_value,
-            'abs': abs,
-            'min': min,
-            'max': max,
-            'sum': sum,
-            'len': len,
-            'str': str,
-            'int': int,
-            'float': float,
-            'bool': bool
-        }
+        # Special case for simple pattern: column = 'value'
+        simple_eq_match = re.match(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*'([^']*)'", condition_text.strip())
+        if simple_eq_match:
+            column = simple_eq_match.group(1)
+            value = simple_eq_match.group(2)
+            return lambda row, ctx: row.get(column) == value
         
-        # Compile the expression
-        code = compile(f"lambda row, ctx: {processed_expr}", "<string>", "eval")
-        condition_func = eval(code, safe_globals)
+        # Convert SQL string literals to Python string literals
+        processed_text = ""
+        i = 0
+        in_string = False
         
-        # Wrap the function to handle exceptions
-        def safe_condition(row, ctx):
+        while i < len(condition_text):
+            if not in_string and condition_text[i:i+1] == "'":
+                # Start of a SQL string
+                processed_text += '"'
+                in_string = True
+                i += 1
+            elif in_string and condition_text[i:i+1] == "'":
+                # Check if this is an escaped quote ('' in SQL)
+                if i + 1 < len(condition_text) and condition_text[i+1:i+2] == "'":
+                    # It's an escaped quote in SQL, convert to single quote in Python
+                    processed_text += "'"
+                    i += 2  # Skip both single quotes
+                else:
+                    # End of SQL string
+                    processed_text += '"'
+                    in_string = False
+                    i += 1
+            else:
+                # Regular character
+                if in_string and condition_text[i] == '"':
+                    # Escape double quotes inside string
+                    processed_text += '\\"'
+                else:
+                    processed_text += condition_text[i]
+                i += 1
+        
+        # Handle SQL operators
+        processed_text = re.sub(r'\bAND\b', 'and', processed_text, flags=re.IGNORECASE)
+        processed_text = re.sub(r'\bOR\b', 'or', processed_text, flags=re.IGNORECASE)
+        processed_text = re.sub(r'\bNOT\b', 'not', processed_text, flags=re.IGNORECASE)
+        
+        # Convert SQL = to Python ==
+        processed_text = re.sub(r'(?<![=!<>])=(?!=)', '==', processed_text)
+        
+        # Handle pattern variable references
+        processed_text = re.sub(
+            r'([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)',
+            r"get_var_value('\1', '\2')",
+            processed_text
+        )
+        
+        # Handle navigation functions
+        processed_text = re.sub(
+            r'PREV\s*\(\s*([^,\)]+)(?:\s*,\s*(\d+))?\s*\)',
+            lambda m: f"prev('{m.group(1).strip()}', {m.group(2) if m.group(2) else 1})",
+            processed_text,
+            flags=re.IGNORECASE
+        )
+        
+        processed_text = re.sub(
+            r'NEXT\s*\(\s*([^,\)]+)(?:\s*,\s*(\d+))?\s*\)',
+            lambda m: f"next('{m.group(1).strip()}', {m.group(2) if m.group(2) else 1})",
+            processed_text,
+            flags=re.IGNORECASE
+        )
+        
+        processed_text = re.sub(
+            r'FIRST\s*\(\s*([^,\)]+)(?:\s*,\s*([^,\)]+))?\s*\)',
+            lambda m: f"first('{m.group(1).strip()}', '{m.group(2).strip() if m.group(2) else ''}')",
+            processed_text,
+            flags=re.IGNORECASE
+        )
+        
+        processed_text = re.sub(
+            r'LAST\s*\(\s*([^,\)]+)(?:\s*,\s*([^,\)]+))?\s*\)',
+            lambda m: f"last('{m.group(1).strip()}', '{m.group(2).strip() if m.group(2) else ''}')",
+            processed_text,
+            flags=re.IGNORECASE
+        )
+        
+        # Try compiling
+        compiled_code = compile(processed_text, '<string>', 'eval')
+        
+        # Define condition function with all required helpers
+        def condition_fn(row, ctx):
+            # Helper for variable access
+            def get_var_value(var, col):
+                var_indices = ctx.variables.get(var, [])
+                if var_indices:
+                    idx = var_indices[-1]  # Use most recent match
+                    if 0 <= idx < len(ctx.rows):
+                        return ctx.rows[idx].get(col)
+                return None
+            
+            # Navigation functions with Trino-compatible behavior for PERMUTE
+            def prev(col, steps=1):
+                # For PERMUTE patterns with fixed logical order navigation
+                is_permute = hasattr(ctx, 'pattern_variables') and len(ctx.pattern_variables) > 0
+                
+                if is_permute and hasattr(ctx, 'current_var'):
+                    # Get original pattern order (A, B, C)
+                    pattern_order = ctx.pattern_variables
+                    current_var = ctx.current_var
+                    
+                    if current_var in pattern_order:
+                        current_pos = pattern_order.index(current_var)
+                        
+                        # In Trino's PERMUTE: PREV reference is only valid if:
+                        # 1. Current var is not the first in original pattern
+                        # 2. Previous var in original pattern has already been matched
+                        if current_pos < steps:
+                            # Cannot go back steps positions in original pattern
+                            return None
+                        
+                        # Get previous variable in original pattern
+                        prev_var = pattern_order[current_pos - steps]
+                        
+                        # Check if that variable has been matched yet
+                        prev_indices = ctx.variables.get(prev_var, [])
+                        if not prev_indices:
+                            # The variable hasn't been matched yet - in Trino this means NULL
+                            return None
+                        
+                        # Return value from most recent match of previous variable
+                        prev_idx = prev_indices[-1]
+                        if 0 <= prev_idx < len(ctx.rows):
+                            return ctx.rows[prev_idx].get(col)
+                        return None
+                
+                # Default implementation for normal patterns
+                if ctx.current_idx < steps:
+                    return None
+                    
+                idx = ctx.current_idx - steps
+                return ctx.rows[idx].get(col)
+            
+            def next(col, steps=1):
+                # For PERMUTE patterns with fixed logical order navigation
+                is_permute = hasattr(ctx, 'pattern_variables') and len(ctx.pattern_variables) > 0
+                
+                if is_permute and hasattr(ctx, 'current_var'):
+                    # Get original pattern order (A, B, C)
+                    pattern_order = ctx.pattern_variables
+                    current_var = ctx.current_var
+                    
+                    if current_var in pattern_order:
+                        current_pos = pattern_order.index(current_var)
+                        
+                        # In Trino's PERMUTE: NEXT reference is only valid if:
+                        # 1. Current var is not the last in original pattern
+                        # 2. Next var in original pattern has already been matched
+                        if current_pos + steps >= len(pattern_order):
+                            # Cannot go forward steps positions in original pattern
+                            return None
+                        
+                        # Get next variable in original pattern
+                        next_var = pattern_order[current_pos + steps]
+                        
+                        # Check if that variable has been matched yet
+                        next_indices = ctx.variables.get(next_var, [])
+                        if not next_indices:
+                            # The variable hasn't been matched yet - in Trino this means NULL
+                            return None
+                        
+                        # Return value from most recent match of next variable
+                        next_idx = next_indices[-1]
+                        if 0 <= next_idx < len(ctx.rows):
+                            return ctx.rows[next_idx].get(col)
+                        return None
+                
+                # Default implementation for normal patterns
+                if ctx.current_idx + steps >= len(ctx.rows):
+                    return None
+                    
+                idx = ctx.current_idx + steps
+                return ctx.rows[idx].get(col)
+            
+            def first(var, col=None):
+                # FIRST requires the variable to already be matched
+                if col is None and '.' in var:
+                    # Handle FIRST(A.col) format
+                    parts = var.split('.')
+                    if len(parts) == 2:
+                        var, col = parts
+                
+                var_indices = ctx.variables.get(var, [])
+                if not var_indices:
+                    # Trino behavior: FIRST returns NULL if variable not matched yet
+                    return None
+                
+                # Get first occurrence of the variable
+                idx = var_indices[0]
+                if 0 <= idx < len(ctx.rows):
+                    return ctx.rows[idx].get(col) if col else None
+                return None
+            
+            def last(var, col=None):
+                # LAST requires the variable to already be matched
+                var_indices = ctx.variables.get(var, [])
+                if not var_indices:
+                    return None
+                    
+                if col:
+                    idx = var_indices[-1]
+                    return ctx.rows[idx].get(col)
+                else:
+                    # Handle LAST(A.col)
+                    parts = var.split('.')
+                    if len(parts) == 2:
+                        var_name, col_name = parts
+                        var_indices = ctx.variables.get(var_name, [])
+                        if var_indices:
+                            idx = var_indices[-1]
+                            return ctx.rows[idx].get(col_name)
+                return None
+            
+            # Set up environment
+            env = {
+                'row': row,
+                'ctx': ctx,
+                # Add direct row value access
+                **{k: v for k, v in row.items()},
+                # Helper functions
+                'get_var_value': get_var_value,
+                'prev': prev,
+                'next': next,
+                'first': first,
+                'last': last,
+            }
+            
             try:
-                return bool(condition_func(row, ctx))
+                # Execute the condition with proper NULL handling
+                result = eval(compiled_code, {}, env)
+                if result is None:
+                    # In SQL, comparison with NULL results in FALSE
+                    return False
+                return bool(result)
             except Exception as e:
-                print(f"Error evaluating condition '{expr}': {e}")
+                print(f"Error evaluating condition '{processed_text}': {str(e)}")
                 return False
                 
-        return safe_condition
-        
+        return condition_fn
+            
     except SyntaxError as e:
-        print(f"Syntax error parsing: '{expr}' (processed as '{processed_expr}')")
+        print(f"Syntax error parsing: '{condition_text}' (processed as '{processed_text}')")
         print(f"Error details: {e}")
-        
-        # Fallback to a simple condition evaluator
-        def fallback_evaluator(row, ctx):
-            try:
-                # Try to handle common SQL conditions
-                if " = " in expr:
-                    left, right = expr.split(" = ", 1)
-                    left = left.strip()
-                    right = right.strip()
-                    
-                    # Remove quotes if present
-                    if (right.startswith("'") and right.endswith("'")) or (right.startswith('"') and right.endswith('"')):
-                        right = right[1:-1]
-                    
-                    left_value = row.get(left)
-                    return left_value == right
-                elif " > " in expr:
-                    left, right = expr.split(" > ", 1)
-                    left = left.strip()
-                    right = right.strip()
-                    
-                    left_value = row.get(left)
-                    try:
-                        right_value = float(right)
-                        return left_value > right_value
-                    except:
-                        return left_value > right
-                elif " < " in expr:
-                    left, right = expr.split(" < ", 1)
-                    left = left.strip()
-                    right = right.strip()
-                    
-                    left_value = row.get(left)
-                    try:
-                        right_value = float(right)
-                        return left_value < right_value
-                    except:
-                        return left_value < right
-                
-                # Default to TRUE if we can't parse
-                print(f"WARNING: Falling back to TRUE for condition: {expr}")
-                return True
-            except Exception as e:
-                print(f"Error in fallback evaluator for '{expr}': {e}")
-                return True
-        
-        return fallback_evaluator
+        print(f"WARNING: Falling back to TRUE for condition: {condition_text}")
+        return lambda row, ctx: True
+    except Exception as e:
+        print(f"Error processing condition: '{condition_text}': {str(e)}")
+        print(f"WARNING: Falling back to TRUE for condition: {condition_text}")
+        return lambda row, ctx: True

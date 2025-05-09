@@ -543,6 +543,16 @@ class EnhancedMatcher:
         # Check if we have only end anchor in the pattern
         has_end_anchor = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("has_end_anchor", False)
         
+        # Add pattern_variables to context for PERMUTE pattern navigation
+        if hasattr(self, 'original_pattern') and 'PERMUTE' in self.original_pattern:
+            # Extract A, B, C from PERMUTE(A, B, C)
+            pattern_str = self.original_pattern
+            permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', pattern_str, re.IGNORECASE)
+            if permute_match:
+                variables = [v.strip() for v in permute_match.group(1).split(',')]
+                context.pattern_variables = variables
+                # Important: Store the ORIGINAL pattern order, not the permuted order
+        
         while current_idx < len(rows):
             row = rows[current_idx]
             context.current_idx = current_idx
