@@ -373,30 +373,85 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         # Only keep columns that exist in the result
         ordered_cols = [col for col in ordered_cols if col in result_df.columns]
         
-            # Inside match_recognize function, after creating result_df:
-
         # Sort the results to match Trino's output ordering
         if not result_df.empty:
-            # First sort by seq in ascending order
-            result_df = result_df.sort_values(by=['seq'])
+            sort_columns = []
             
-            # Then reorder rows to match Trino's specific ordering for PERMUTE patterns
-            # Create a custom sort column based on pattern_var
-            def get_var_priority(pattern_var):
-                # Define priority for pattern variables (C > A > B)
-                var_priority = {'C': 0, 'A': 1, 'B': 2}
-                return var_priority.get(pattern_var, 3)
+            # First check if 'seq' column exists before sorting
+            if 'seq' in result_df.columns:
+                sort_columns.append('seq')
+                print(f"Sorting by sequence column: 'seq'")
             
-            # Add a temporary column for sorting
-            result_df['_sort_key'] = result_df['pattern_var'].apply(get_var_priority)
+            # Then reorder rows for pattern variables if the column exists
+            if 'pattern_var' in result_df.columns:
+                print(f"Pattern variable column found: 'pattern_var'")
+                
+                # Get all unique pattern variables to create dynamic priorities
+                unique_vars = sorted(result_df['pattern_var'].unique())
+                print(f"Unique pattern variables: {unique_vars}")
+                
+                # Create dynamic priority mapping based on the pattern
+                # Priority should match Trino's ordering for compatibility
+                var_priority = {}
+                
+                # Extract variable ordering from pattern if possible
+                pattern_text = mr_clause.pattern.pattern if mr_clause.pattern else ""
+                print(f"Using pattern for ordering: {pattern_text}")
+                
+                # Try to determine order from pattern or use alphabetical as fallback
+                ordered_vars = []
+                
+                # Method 1: Extract from PATTERN clause directly (simple sequential patterns)
+                var_matches = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)', pattern_text)
+                # Remove duplicates while preserving order
+                for var in var_matches:
+                    if var not in ordered_vars and var in unique_vars:
+                        ordered_vars.append(var)
+                
+                # Method 2: For PERMUTE patterns, order matters differently
+                if "PERMUTE" in pattern_text.upper():
+                    permute_match = re.search(r'PERMUTE\s*\((.*?)\)', pattern_text, re.IGNORECASE)
+                    if permute_match:
+                        permute_vars = [v.strip() for v in permute_match.group(1).split(',')]
+                        # In PERMUTE, lexicographical order is used for matches
+                        ordered_vars = [v for v in permute_vars if v in unique_vars]
+                
+                # If we couldn't determine order from pattern, fall back to sorted order
+                if not ordered_vars:
+                    ordered_vars = unique_vars
+                
+                print(f"Determined variable ordering: {ordered_vars}")
+                
+                # Assign priorities - lower values are higher priority
+                for i, var in enumerate(ordered_vars):
+                    var_priority[var] = i
+                
+                print(f"Variable priorities: {var_priority}")
+                
+                # Create temporary sorting column
+                try:
+                    result_df['_sort_key'] = result_df['pattern_var'].apply(
+                        lambda x: var_priority.get(x, len(var_priority))
+                    )
+                    sort_columns.append('_sort_key')
+                except Exception as e:
+                    print(f"Warning: Error creating sort key: {e}")
             
-            # Sort by the temporary column and then by seq
-            result_df = result_df.sort_values(by=['_sort_key', 'seq'])
-            
-            # Remove the temporary column
-            result_df = result_df.drop('_sort_key', axis=1)
+            # Apply sorting if we have columns to sort by
+            if sort_columns:
+                try:
+                    print(f"Sorting by columns: {sort_columns}")
+                    result_df = result_df.sort_values(by=sort_columns)
+                    
+                    # Remove temporary sort column if it exists
+                    if '_sort_key' in result_df.columns:
+                        result_df = result_df.drop('_sort_key', axis=1)
+                except Exception as e:
+                    print(f"Warning: Error during sorting: {e}")
+            else:
+                print("No sort columns identified, skipping sort operation")
 
-        # Only keep columns that exist in the result
+        # Only keep columns that exist in the result - consolidate the two occurrences
         ordered_cols = []
         ordered_cols.extend(partition_by)  # Partition columns first
         if mr_clause.measures:
@@ -404,5 +459,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
 
         # Only keep columns that exist in the result
         ordered_cols = [col for col in ordered_cols if col in result_df.columns]
+        
+        # Format the output to match Trino's format exactly
+        formatted_output = format_trino_output(result_df[ordered_cols])
+        print(f"Formatted output in Trino style:\n{formatted_output}")
 
         return result_df[ordered_cols]
