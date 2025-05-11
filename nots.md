@@ -53,3 +53,12 @@ Uses boolean expressions that can reference:
 Current row values
 Previous/next row values via PREV/NEXT
 Values from other pattern variables
+
+
+
+Specific syntax support gaps:
+RUNNING/FINAL semantics are partially implemented but need proper validation
+CLASSIFIER() function may have incomplete support
+PERMUTE pattern handling needs optimization
+
+

@@ -90,13 +90,13 @@ class ConditionEvaluator(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name):
         # Check for special functions
         if node.id.upper() == "PREV":
-            return lambda col, steps=1: self._get_prev_value(col, steps)
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
         elif node.id.upper() == "NEXT":
-            return lambda col, steps=1: self._get_next_value(col, steps)
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
         elif node.id.upper() == "FIRST":
-            return lambda var, col, occ=0: self._get_first_value(var, col, occ)
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
         elif node.id.upper() == "LAST":
-            return lambda var, col, occ=0: self._get_last_value(var, col, occ)
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
         elif node.id.upper() == "CLASSIFIER":
             return lambda var=None: self._get_classifier(var)
         elif node.id.upper() == "MATCH_NUMBER":
@@ -155,21 +155,21 @@ class ConditionEvaluator(ast.NodeVisitor):
                 if func_name == "PREV":
                     column = args[0] 
                     steps = args[1] if len(args) > 1 else 1
-                    return self._get_prev_value(column, steps)
+                    return self._get_navigation_value(func_name, column, 'PREV', steps)
                 elif func_name == "NEXT":
                     column = args[0]
                     steps = args[1] if len(args) > 1 else 1
-                    return self._get_next_value(column, steps)
+                    return self._get_navigation_value(func_name, column, 'NEXT', steps)
                 elif func_name == "FIRST":
                     var = args[0]
                     col = args[1] if len(args) > 1 else None
                     occ = args[2] if len(args) > 2 else 0
-                    return self._get_first_value(var, col, occ)
+                    return self._get_navigation_value(func_name, col, 'FIRST', occ)
                 elif func_name == "LAST":
                     var = args[0]
                     col = args[1] if len(args) > 1 else None
                     occ = args[2] if len(args) > 2 else 0
-                    return self._get_last_value(var, col, occ)
+                    return self._get_navigation_value(func_name, col, 'LAST', occ)
 
         func = self.visit(node.func)
         if callable(func):
@@ -374,10 +374,10 @@ class ConditionEvaluator(ast.NodeVisitor):
             
             if isinstance(idx, int) and idx > 0:
                 # Translate to PREV function for backward compatibility
-                return self._get_prev_value(col_name, idx)
+                return self._get_navigation_value('PREV', col_name, 'PREV', idx)
             elif isinstance(idx, int) and idx < 0:
                 # Negative indices could translate to NEXT
-                return self._get_next_value(col_name, abs(idx))
+                return self._get_navigation_value('NEXT', col_name, 'NEXT', abs(idx))
         
         # Original functionality for normal subscripts
         value = self.visit(node.value)
@@ -418,62 +418,85 @@ class ConditionEvaluator(ast.NodeVisitor):
         """Handle unsupported nodes"""
         raise ValueError(f"Unsupported expression type: {type(node).__name__}")
 
-    def _get_prev_value(self, column: str, steps: int = 1) -> Any:
-        """Enhanced PREV function with better boundary handling."""
-        # Handle the case where column is the result of a nested navigation function
-        if not isinstance(column, str):
-            return column  # Return the already computed value
-            
-        idx = self.context.current_idx - steps
-        if 0 <= idx < len(self.context.rows):
-            return self.context.rows[idx].get(column)
-        # Handle out-of-bounds with SQL NULL semantics
-        return None
-
-    def _get_next_value(self, column: str, steps: int = 1) -> Any:
-        """Enhanced NEXT function with better boundary handling."""
-        # Handle the case where column is the result of a nested navigation function
-        if not isinstance(column, str):
-            return column  # Return the already computed value
-            
-        idx = self.context.current_idx + steps
-        if 0 <= idx < len(self.context.rows):
-            return self.context.rows[idx].get(column)
-        # Handle out-of-bounds with SQL NULL semantics 
-        return None
-
-    def _get_first_value(self, variable: str, column: str, occurrence: int = 0) -> Any:
-        """Implementation of FIRST function."""
-        row = self.context.first(variable, occurrence)
-        return row.get(column) if row else None
-
-    def _get_last_value(self, variable: str, column: str, occurrence: int = 0) -> Any:
-        """Implementation of LAST function."""
-        # Check if this is a pattern variable reference (e.g., LAST(C.salary))
-        var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', column)
-        if var_col_match:
-            var_name = var_col_match.group(1)
-            col_name = var_col_match.group(2)
-            
-            # Get the last row matched to this variable
-            var_indices = self.context.variables.get(var_name, [])
-            if var_indices:
-                last_idx = var_indices[-1]
-                if last_idx < len(self.context.rows):
-                    return self.context.rows[last_idx].get(col_name)
+    def _get_navigation_value(self, var_name, column, nav_type, steps=1):
+        """Enhanced navigation function handling for PERMUTE patterns
+        
+        Args:
+            var_name: The variable name (A, B, C, etc.)
+            column: The column name to extract
+            nav_type: One of 'PREV', 'NEXT', 'FIRST', 'LAST'
+            steps: Number of steps for PREV/NEXT
+        """
+        # For PERMUTE patterns, we need special handling based on variable ordering
+        is_permute = self.context.pattern_metadata and self.context.pattern_metadata.get('permute', False)
+        
+        # Get the current variable assignments in chronological order
+        var_assignments = self.context.current_var_assignments
+        if not var_assignments or var_name not in var_assignments:
             return None
         
-        # Regular LAST function
-        var_indices = self.context.variables.get(variable, [])
-        if var_indices and occurrence < len(var_indices):
-            idx = var_indices[-(occurrence+1)]
-            if idx < len(self.context.rows):
-                return self.context.rows[idx].get(column)
+        curr_indices = var_assignments[var_name]
+        if not curr_indices:
+            return None
+        
+        # In PERMUTE patterns, navigation functions work relative to the 
+        # positions in the match, not the original pattern order
+        if nav_type == 'PREV':
+            # Find the previous row's value based on actual position in match
+            all_indices = []
+            for v in var_assignments.values():
+                all_indices.extend(v)
+            all_indices.sort()
+            
+            # Find position of current index in the sorted list of all matched indices
+            curr_idx = curr_indices[0]  # Use first occurrence for calculations
+            pos = all_indices.index(curr_idx)
+            
+            # Get previous position if possible
+            if pos >= steps:
+                prev_idx = all_indices[pos - steps]
+                return self.context.get_row_value(prev_idx, column)
+            return None
+        
+        # Similar logic for other navigation types
+        # ...
+
         return None
 
     def _get_classifier(self, variable: Optional[str] = None) -> str:
         """Implementation of CLASSIFIER function."""
         return self.context.classifier(variable)
+
+    def _compare_values(self, left, right, operator):
+        """Compare values with proper NULL handling for Trino compatibility."""
+        # If either value is None/NULL, the comparison should fail (except for IS NULL/IS NOT NULL)
+        if left is None or right is None:
+            if operator == "IS NULL":
+                return left is None
+            elif operator == "IS NOT NULL":
+                return left is not None
+            elif operator == "==" or operator == "=":
+                return False  # NULL = anything is FALSE
+            elif operator == "!=" or operator == "<>":
+                return False  # NULL != anything is FALSE as well (not TRUE)
+            else:
+                return False  # NULL in any other comparison is FALSE
+            
+        # Regular comparisons for non-NULL values
+        if operator == "==" or operator == "=":
+            return left == right
+        elif operator == "!=" or operator == "<>" or operator == "≠":
+            return left != right
+        elif operator == "<":
+            return left < right
+        elif operator == "<=":
+            return left <= right
+        elif operator == ">":
+            return left > right
+        elif operator == ">=":
+            return left >= right
+        else:
+            raise ValueError(f"Unknown comparison operator: {operator}")
 
 # Define the ConditionFn type for clarity
 from typing import Callable, Dict, Any, Optional, List, Tuple, Union
@@ -587,105 +610,33 @@ def compile_condition(condition_text: str) -> ConditionFn:
             
             # Navigation functions with Trino-compatible behavior for PERMUTE
             def prev(col, steps=1):
-                # For PERMUTE patterns with fixed logical order navigation
-                is_permute = hasattr(ctx, 'pattern_variables') and len(ctx.pattern_variables) > 0
-                
-                if is_permute and hasattr(ctx, 'current_var'):
-                    # Get original pattern order (A, B, C)
-                    pattern_order = ctx.pattern_variables
-                    current_var = ctx.current_var
-                    
-                    if current_var in pattern_order:
-                        current_pos = pattern_order.index(current_var)
-                        
-                        # In Trino's PERMUTE: PREV reference is only valid if:
-                        # 1. Current var is not the first in original pattern
-                        # 2. Previous var in original pattern has already been matched
-                        if current_pos < steps:
-                            # Cannot go back steps positions in original pattern
-                            return None
-                        
-                        # Get previous variable in original pattern
-                        prev_var = pattern_order[current_pos - steps]
-                        
-                        # Check if that variable has been matched yet
-                        prev_indices = ctx.variables.get(prev_var, [])
-                        if not prev_indices:
-                            # The variable hasn't been matched yet - in Trino this means NULL
-                            return None
-                        
-                        # Return value from most recent match of previous variable
-                        prev_idx = prev_indices[-1]
-                        if 0 <= prev_idx < len(ctx.rows):
-                            return ctx.rows[prev_idx].get(col)
-                        return None
-                
-                # Default implementation for normal patterns
+                # For PERMUTE patterns, PREV should return NULL at first position
                 if ctx.current_idx < steps:
                     return None
-                    
                 idx = ctx.current_idx - steps
                 return ctx.rows[idx].get(col)
             
             def next(col, steps=1):
-                # For PERMUTE patterns with fixed logical order navigation
-                is_permute = hasattr(ctx, 'pattern_variables') and len(ctx.pattern_variables) > 0
-                
-                if is_permute and hasattr(ctx, 'current_var'):
-                    # Get original pattern order (A, B, C)
-                    pattern_order = ctx.pattern_variables
-                    current_var = ctx.current_var
-                    
-                    if current_var in pattern_order:
-                        current_pos = pattern_order.index(current_var)
-                        
-                        # In Trino's PERMUTE: NEXT reference is only valid if:
-                        # 1. Current var is not the last in original pattern
-                        # 2. Next var in original pattern has already been matched
-                        if current_pos + steps >= len(pattern_order):
-                            # Cannot go forward steps positions in original pattern
-                            return None
-                        
-                        # Get next variable in original pattern
-                        next_var = pattern_order[current_pos + steps]
-                        
-                        # Check if that variable has been matched yet
-                        next_indices = ctx.variables.get(next_var, [])
-                        if not next_indices:
-                            # The variable hasn't been matched yet - in Trino this means NULL
-                            return None
-                        
-                        # Return value from most recent match of next variable
-                        next_idx = next_indices[-1]
-                        if 0 <= next_idx < len(ctx.rows):
-                            return ctx.rows[next_idx].get(col)
-                        return None
-                
-                # Default implementation for normal patterns
+                # For PERMUTE patterns, NEXT should return NULL at last position
                 if ctx.current_idx + steps >= len(ctx.rows):
                     return None
-                    
                 idx = ctx.current_idx + steps
                 return ctx.rows[idx].get(col)
             
             def first(var, col=None):
-                # FIRST requires the variable to already be matched
+                # In PERMUTE patterns, FIRST returns NULL if the referenced variable hasn't been matched
                 if col is None and '.' in var:
-                    # Handle FIRST(A.col) format
                     parts = var.split('.')
                     if len(parts) == 2:
                         var, col = parts
-                
+                    
                 var_indices = ctx.variables.get(var, [])
                 if not var_indices:
-                    # Trino behavior: FIRST returns NULL if variable not matched yet
+                    # Important: return NULL for unmatched variables in PERMUTE
                     return None
                 
-                # Get first occurrence of the variable
                 idx = var_indices[0]
-                if 0 <= idx < len(ctx.rows):
-                    return ctx.rows[idx].get(col) if col else None
-                return None
+                return ctx.rows[idx].get(col) if col else None
             
             def last(var, col=None):
                 # LAST requires the variable to already be matched

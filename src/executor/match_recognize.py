@@ -6,13 +6,14 @@ import time
 import itertools
 from typing import List, Dict, Any, Optional, Set, Tuple, Union
 from src.parser.match_recognize_extractor import parse_full_query
-from src.matcher.pattern_tokenizer import tokenize_pattern
+from src.matcher.pattern_tokenizer import tokenize_pattern, PermuteHandler
 from src.matcher.automata import NFABuilder
 from src.matcher.dfa import DFABuilder
 from src.matcher.matcher import EnhancedMatcher, MatchConfig, SkipMode, RowsPerMatch
 from src.matcher.row_context import RowContext
 from src.matcher.condition_evaluator import compile_condition
 from src.matcher.measure_evaluator import MeasureEvaluator
+
 def process_subset_clause(subsets, row_context):
     """Process SUBSET clause and configure the row context."""
     for subset in subsets:
@@ -76,11 +77,108 @@ def format_trino_output(df):
     
     return result
 
+def validate_navigation_functions(match, pattern_variables, define_clauses):
+    """
+    Generalized validation of navigation functions in PERMUTE patterns.
+    Ensures that references to other variables are valid given the match ordering.
+    
+    Returns True if all navigation functions can be evaluated, False otherwise.
+    """
+    # Map variables to their positions in the match
+    var_positions = {}
+    for var, indices in match['variables'].items():
+        if indices:
+            var_positions[var] = min(indices)
+    
+    # Get the ordered list of variables based on their positions
+    ordered_vars = sorted(var_positions.keys(), key=lambda v: var_positions[v])
+    
+    for define in define_clauses:
+        var = define.variable
+        condition = define.condition
+        var_idx = ordered_vars.index(var) if var in ordered_vars else -1
+        
+        # Extract all navigation function calls
+        nav_funcs = []
+        # Match NEXT, PREV, FIRST, LAST with their arguments
+        patterns = [
+            r'NEXT\(([A-Za-z0-9_]+)\.', 
+            r'PREV\(([A-Za-z0-9_]+)\.', 
+            r'FIRST\(([A-Za-z0-9_]+)\.', 
+            r'LAST\(([A-Za-z0-9_]+)\.'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, condition)
+            for match in matches:
+                if pattern.startswith(r'NEXT'):
+                    nav_funcs.append(('NEXT', match))
+                elif pattern.startswith(r'PREV'):
+                    nav_funcs.append(('PREV', match))
+                elif pattern.startswith(r'FIRST'):
+                    nav_funcs.append(('FIRST', match))
+                elif pattern.startswith(r'LAST'):
+                    nav_funcs.append(('LAST', match))
+        
+        # Validate each navigation function
+        for func_type, ref_var in nav_funcs:
+            # Get position of referenced variable
+            if ref_var not in var_positions:
+                return False  # Referenced variable doesn't exist in this match
+            
+            ref_idx = ordered_vars.index(ref_var)
+            
+            # Validate based on function type
+            if func_type == 'NEXT':
+                # For NEXT(X), X must be the current variable and not the last
+                if ref_var == var and var_idx == len(ordered_vars) - 1:
+                    return False
+                # For NEXT(Y), Y must appear before the current variable
+                elif ref_var != var and ref_idx >= var_idx:
+                    return False
+            
+            elif func_type == 'PREV':
+                # For PREV(X), X must be the current variable and not the first
+                if ref_var == var and var_idx == 0:
+                    return False
+                # For PREV(Y), Y must appear before the current variable
+                elif ref_var != var and ref_idx >= var_idx:
+                    return False
+            
+            elif func_type == 'FIRST':
+                # Ensure the referenced variable appears somewhere in the match
+                # (Already checked by the existence check above)
+                pass
+            
+            elif func_type == 'LAST':
+                # Ensure the referenced variable appears somewhere in the match
+                # (Already checked by the existence check above)
+                pass
+    
+    return True
+
+def extract_original_variable_order(pattern_clause):
+    """Extract the original order of variables in a PERMUTE pattern."""
+    if not pattern_clause or not pattern_clause.pattern:
+        return []
+    
+    pattern_text = pattern_clause.pattern
+    if "PERMUTE" not in pattern_text:
+        return []
+    
+    # Extract variables from PERMUTE(X, Y, Z)
+    permute_content = re.search(r'PERMUTE\s*\(([^)]+)\)', pattern_text)
+    if not permute_content:
+        return []
+    
+    # Split by comma and clean up whitespace
+    variables = [var.strip() for var in permute_content.group(1).split(',')]
+    return variables
 
 def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     """
     Execute a MATCH_RECOGNIZE query against a Pandas DataFrame.
-    Enhanced to match Trino's output format exactly.
+    Enhanced to match Trino's output format exactly with support for all PERMUTE cases.
     """
     # Parse the query and build the AST
     ast = parse_full_query(query)
@@ -307,6 +405,25 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 if idx < len(all_rows):
                     print(f"    Row {idx}: {all_rows[idx]}")
 
+    # After finding matches but before processing them:
+    if hasattr(mr_clause, 'pattern') and hasattr(mr_clause.pattern, 'metadata') and \
+       mr_clause.pattern.metadata.get('permute', False):
+        print("PERMUTE pattern detected, validating navigation functions...")
+        # Get define clauses
+        define_clauses = mr_clause.define.definitions
+        
+        # Filter matches that have invalid navigation function references
+        valid_matches = []
+        for match in all_matches:
+            if validate_navigation_functions(match, mr_clause.pattern.metadata.get('variables', []), define_clauses):
+                valid_matches.append(match)
+            else:
+                print(f"Filtering out match with invalid navigation function usage: {match['variables']}")
+        
+        # Replace matches with valid ones
+        all_matches = valid_matches
+        print(f"After filtering: {len(all_matches)} valid matches")
+
     # Create output DataFrame
     if not results and not all_matches:
         # Create empty DataFrame with appropriate columns
@@ -386,56 +503,13 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             if 'pattern_var' in result_df.columns:
                 print(f"Pattern variable column found: 'pattern_var'")
                 
-                # Get all unique pattern variables to create dynamic priorities
-                unique_vars = sorted(result_df['pattern_var'].unique())
-                print(f"Unique pattern variables: {unique_vars}")
+                # Modify sorting to prioritize pattern variable
+                # Sort by pattern variable first (using Trino's alphabetical ordering)
+                sorted_df = result_df.sort_values(['pattern_var', 'seq'])
                 
-                # Create dynamic priority mapping based on the pattern
-                # Priority should match Trino's ordering for compatibility
-                var_priority = {}
-                
-                # Extract variable ordering from pattern if possible
-                pattern_text = mr_clause.pattern.pattern if mr_clause.pattern else ""
-                print(f"Using pattern for ordering: {pattern_text}")
-                
-                # Try to determine order from pattern or use alphabetical as fallback
-                ordered_vars = []
-                
-                # Method 1: Extract from PATTERN clause directly (simple sequential patterns)
-                var_matches = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)', pattern_text)
-                # Remove duplicates while preserving order
-                for var in var_matches:
-                    if var not in ordered_vars and var in unique_vars:
-                        ordered_vars.append(var)
-                
-                # Method 2: For PERMUTE patterns, order matters differently
-                if "PERMUTE" in pattern_text.upper():
-                    permute_match = re.search(r'PERMUTE\s*\((.*?)\)', pattern_text, re.IGNORECASE)
-                    if permute_match:
-                        permute_vars = [v.strip() for v in permute_match.group(1).split(',')]
-                        # In PERMUTE, lexicographical order is used for matches
-                        ordered_vars = [v for v in permute_vars if v in unique_vars]
-                
-                # If we couldn't determine order from pattern, fall back to sorted order
-                if not ordered_vars:
-                    ordered_vars = unique_vars
-                
-                print(f"Determined variable ordering: {ordered_vars}")
-                
-                # Assign priorities - lower values are higher priority
-                for i, var in enumerate(ordered_vars):
-                    var_priority[var] = i
-                
-                print(f"Variable priorities: {var_priority}")
-                
-                # Create temporary sorting column
-                try:
-                    result_df['_sort_key'] = result_df['pattern_var'].apply(
-                        lambda x: var_priority.get(x, len(var_priority))
-                    )
-                    sort_columns.append('_sort_key')
-                except Exception as e:
-                    print(f"Warning: Error creating sort key: {e}")
+                # Replace the original DataFrame with sorted version
+                result_df = sorted_df
+                print(f"Sorting by pattern variable first, then by sequence")
             
             # Apply sorting if we have columns to sort by
             if sort_columns:
@@ -461,7 +535,83 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         ordered_cols = [col for col in ordered_cols if col in result_df.columns]
         
         # Format the output to match Trino's format exactly
-        formatted_output = format_trino_output(result_df[ordered_cols])
-        print(f"Formatted output in Trino style:\n{formatted_output}")
+        #formatted_output = format_trino_output(result_df[ordered_cols])
+        #print(f"Formatted output in Trino style:\n{formatted_output}")
 
         return result_df[ordered_cols]
+
+    # If PERMUTE is present, expand the pattern and use the expanded pattern for matching
+    if mr_clause.pattern.get('permute', True):
+        permute_handler = PermuteHandler()
+        if mr_clause.pattern.get('nested_permute', False):
+            expanded_pattern = permute_handler.expand_nested_permute(mr_clause.pattern)
+        else:
+            expanded_pattern = {'permutations': permute_handler.expand_permutation(mr_clause.pattern['variables'])}
+        # Use expanded pattern for matching
+
+    # Extract the original variable order from PERMUTE pattern
+    original_variable_order = []
+    if hasattr(mr_clause, 'pattern') and hasattr(mr_clause.pattern, 'metadata') and \
+       mr_clause.pattern.metadata.get('permute', False):
+        original_variable_order = extract_original_variable_order(mr_clause.pattern)
+        print(f"Original PERMUTE variable order: {original_variable_order}")
+    
+    # Process results with clean PERMUTE handling
+    if rows_per_match == RowsPerMatch.ONE_ROW and len(final_results) > 0:
+        result_df = pd.DataFrame(final_results)
+        sort_columns = []
+        
+        # Add primary sorting by partition columns
+        if partition_by:
+            sort_columns.extend(partition_by)
+        
+        # Handle PERMUTE patterns specially to match Trino behavior
+        if hasattr(mr_clause.pattern, 'metadata') and mr_clause.pattern.metadata.get('permute', False):
+            # Create a sort key based on the original variable order
+            if 'pattern_var' in result_df.columns and original_variable_order:
+                # Map pattern variables to their position in original pattern
+                variable_priorities = {var: idx for idx, var in enumerate(original_variable_order)}
+                print(f"Variable priorities: {variable_priorities}")
+                result_df['_sort_key'] = result_df['pattern_var'].map(variable_priorities)
+                
+                # Filter results for complex navigation functions (NEXT, PREV, FIRST, LAST)
+                has_nav_functions = False
+                if mr_clause.define:
+                    has_nav_functions = any(("NEXT(" in d.condition or "PREV(" in d.condition or 
+                                           "FIRST(" in d.condition or "LAST(" in d.condition)
+                                          for d in mr_clause.define.definitions)
+                
+                if has_nav_functions:
+                    # For each sequence, only keep first match by variable priority (lexicographical)
+                    to_keep = []
+                    for seq_val in result_df['seq'].unique():
+                        seq_rows = result_df[result_df['seq'] == seq_val]
+                        if len(seq_rows) > 0:
+                            # Sort by pattern variable priority to match Trino's behavior
+                            seq_rows = seq_rows.sort_values('_sort_key')
+                            to_keep.append(seq_rows.iloc[0])
+                    
+                    if to_keep:
+                        result_df = pd.DataFrame(to_keep)
+                
+                sort_columns.append('_sort_key')
+        
+        # Apply sorting
+        if sort_columns:
+            print(f"Sorting by columns: {sort_columns}")
+            result_df = result_df.sort_values(by=sort_columns)
+            
+            # Remove temporary sort column
+            if '_sort_key' in result_df.columns:
+                result_df = result_df.drop('_sort_key', axis=1)
+        
+        # Only keep columns that exist in the result
+        ordered_cols = []
+        ordered_cols.extend(partition_by)  # Partition columns first
+        if mr_clause.measures:
+            ordered_cols.extend([m.alias for m in mr_clause.measures.measures])
+        
+        ordered_cols = [col for col in ordered_cols if col in result_df.columns]
+        return result_df[ordered_cols]
+
+    return result_df

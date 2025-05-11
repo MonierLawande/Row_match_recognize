@@ -166,6 +166,15 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             self.ast.pattern.update_from_defined(defined_vars)
             logger.debug(f"Updated Pattern tokens: {self.ast.pattern.metadata}")
         
+        # Fix for PERMUTE variable ordering - move this AFTER all update_from_defined calls
+        if self.ast.pattern and "PERMUTE" in self.ast.pattern.pattern.upper():
+            permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', self.ast.pattern.pattern, re.IGNORECASE)
+            if permute_match:
+                # Preserve original PERMUTE order
+                variables = [v.strip() for v in permute_match.group(1).split(',')]
+                self.ast.pattern.metadata["variables"] = variables
+                self.ast.pattern.metadata["base_variables"] = variables.copy()
+        
         # Run validations
         self.validate_clauses(ctx)
         self.validate_identifiers(ctx)
@@ -478,6 +487,15 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     logger.debug(f"Updated Pattern tokens: {pattern_clause.metadata}")
                     logger.debug(f"PATTERN clause validated successfully: {pattern_text}")
             
+            # Fix for PERMUTE variable ordering - move this AFTER all update_from_defined calls
+            if pattern_text and "PERMUTE" in pattern_text.upper():
+                permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', pattern_text, re.IGNORECASE)
+                if permute_match:
+                    # Preserve original PERMUTE order
+                    variables = [v.strip() for v in permute_match.group(1).split(',')]
+                    pattern_clause.metadata["variables"] = variables
+                    pattern_clause.metadata["base_variables"] = variables.copy()
+            
             return pattern_clause
         return PatternClause("")  # Return empty pattern clause if no pattern found
 
@@ -670,6 +688,16 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         logger.debug(f"Referenced variables: {referenced_vars}")
         logger.debug(f"Defined variables: {defined_vars}")
         logger.debug(f"Subset variables: {subset_vars}")
+
+    def extract_permute_variables(self, pattern_text):
+        # Current extraction puts variables in wrong order: ['B', 'A', 'C'] instead of ['A', 'B', 'C']
+        # Fix to preserve original order from pattern:
+        match = re.search(r'PERMUTE\s*\(([^)]+)\)', pattern_text)
+        if match:
+            variables = [v.strip() for v in match.group(1).split(',')]
+            return variables
+        return []
+
 class FullQueryExtractor(TrinoParserVisitor):
     def __init__(self, original_query: str):
         self.original_query = original_query

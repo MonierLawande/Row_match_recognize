@@ -394,6 +394,14 @@ class EnhancedMatcher:
         context.current_idx = match["end"]  # Use the last row for FINAL semantics
         context.subsets = self.subsets.copy() if self.subsets else {}
         
+        # Set pattern_variables from the original_pattern string
+        if isinstance(self.original_pattern, str) and 'PERMUTE' in self.original_pattern:
+            permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', self.original_pattern, re.IGNORECASE)
+            if permute_match:
+                context.pattern_variables = [v.strip() for v in permute_match.group(1).split(',')]
+        elif hasattr(self.original_pattern, 'metadata'):
+            context.pattern_variables = self.original_pattern.metadata.get('base_variables', [])
+        
         # Create evaluator with caching
         evaluator = MeasureEvaluator(context, final=True)
         
@@ -873,3 +881,29 @@ class EnhancedMatcher:
         }
         
         return index
+
+    def _select_preferred_match(self, matches, variables):
+        """
+        When multiple permutation matches are found, select the one with
+        highest lexicographical preference according to Trino rules.
+        """
+        if not matches:
+            return None
+        
+        # Create priority map based on original variable order
+        var_priority = {var: idx for idx, var in enumerate(variables)}
+        
+        # Sort matches by permutation preference
+        def match_priority(match):
+            # For each position in the pattern, get the actual variable that matched
+            # Lower score is higher priority (more preferred)
+            score = []
+            for i in range(len(variables)):
+                for var, indices in match.get('variables', {}).items():
+                    if i in indices:
+                        score.append(var_priority.get(var, len(variables)))
+                        break
+            return score
+        
+        # Return the most preferred match
+        return sorted(matches, key=match_priority)[0]

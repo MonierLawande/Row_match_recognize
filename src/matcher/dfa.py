@@ -2,8 +2,8 @@
 
 from typing import List, Dict, FrozenSet, Set, Any, Optional, Tuple
 from dataclasses import dataclass, field
-from src.matcher.automata import NFA, NFAState, Transition
-from src.matcher.pattern_tokenizer import PatternTokenType
+from src.matcher.automata import NFA, NFAState, Transition, NFABuilder
+from src.matcher.pattern_tokenizer import PatternTokenType, PermuteHandler
 
 FAIL_STATE = -1
 
@@ -141,3 +141,28 @@ class DFABuilder:
             print(f"  State {i}: {acceptance_str}, Variables: {vars_str}, Excluded: {excl_str}, Transitions: {transitions_str}")
         
         return DFA(0, dfa_states, self.nfa.exclusion_ranges)
+
+    def build_dfa(self, pattern):
+        if pattern.get('permute', False):
+            return self._build_optimized_permute_dfa(pattern)
+        # else normal DFA building
+    
+    def _build_optimized_permute_dfa(self, pattern):
+        """Build an optimized DFA for PERMUTE patterns"""
+        variables = pattern.get('variables', [])
+        
+        # Use the NFA builder to create the basic NFA structure
+        nfa_builder = NFABuilder()
+        
+        # Create separate patterns for each permutation in priority order
+        permute_handler = PermuteHandler()
+        permutations = permute_handler.expand_permutation(variables)
+        
+        # Build the NFA with all permutations
+        nfa = nfa_builder.build_permute_nfa(permutations, pattern.get('define', {}))
+        
+        # Convert to DFA
+        dfa_builder = DFABuilder(nfa)
+        dfa = dfa_builder.build()
+        
+        return dfa
