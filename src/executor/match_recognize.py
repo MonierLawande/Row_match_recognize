@@ -11,7 +11,7 @@ from src.matcher.automata import NFABuilder
 from src.matcher.dfa import DFABuilder
 from src.matcher.matcher import EnhancedMatcher, MatchConfig, SkipMode, RowsPerMatch
 from src.matcher.row_context import RowContext
-from src.matcher.condition_evaluator import compile_condition
+from src.matcher.condition_evaluator import compile_condition, validate_navigation_conditions
 from src.matcher.measure_evaluator import MeasureEvaluator
 
 def process_subset_clause(subsets, row_context):
@@ -78,83 +78,120 @@ def format_trino_output(df):
     return result
 
 def validate_navigation_functions(match, pattern_variables, define_clauses):
-    """
-    Generalized validation of navigation functions in PERMUTE patterns.
-    Ensures that references to other variables are valid given the match ordering.
+    """Validate navigation functions for a matched pattern"""
+    # Create timeline of matched variables in chronological order
+    timeline = []
+    variables_by_pos = {}
     
-    Returns True if all navigation functions can be evaluated, False otherwise.
-    """
-    # Map variables to their positions in the match
-    var_positions = {}
     for var, indices in match['variables'].items():
-        if indices:
-            var_positions[var] = min(indices)
+        for idx in indices:
+            timeline.append((idx, var))
+    timeline.sort()
     
-    # Get the ordered list of variables based on their positions
-    ordered_vars = sorted(var_positions.keys(), key=lambda v: var_positions[v])
+    # Map positions to variables for validation
+    for pos, (idx, var) in enumerate(timeline):
+        variables_by_pos[pos] = var
     
-    for define in define_clauses:
-        var = define.variable
-        condition = define.condition
-        var_idx = ordered_vars.index(var) if var in ordered_vars else -1
-        
-        # Extract all navigation function calls
-        nav_funcs = []
-        # Match NEXT, PREV, FIRST, LAST with their arguments
-        patterns = [
-            r'NEXT\(([A-Za-z0-9_]+)\.', 
-            r'PREV\(([A-Za-z0-9_]+)\.', 
-            r'FIRST\(([A-Za-z0-9_]+)\.', 
-            r'LAST\(([A-Za-z0-9_]+)\.'
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, condition)
-            for match in matches:
-                if pattern.startswith(r'NEXT'):
-                    nav_funcs.append(('NEXT', match))
-                elif pattern.startswith(r'PREV'):
-                    nav_funcs.append(('PREV', match))
-                elif pattern.startswith(r'FIRST'):
-                    nav_funcs.append(('FIRST', match))
-                elif pattern.startswith(r'LAST'):
-                    nav_funcs.append(('LAST', match))
-        
-        # Validate each navigation function
-        for func_type, ref_var in nav_funcs:
-            # Get position of referenced variable
-            if ref_var not in var_positions:
-                return False  # Referenced variable doesn't exist in this match
-            
-            ref_idx = ordered_vars.index(ref_var)
-            
-            # Validate based on function type
-            if func_type == 'NEXT':
-                # For NEXT(X), X must be the current variable and not the last
-                if ref_var == var and var_idx == len(ordered_vars) - 1:
-                    return False
-                # For NEXT(Y), Y must appear before the current variable
-                elif ref_var != var and ref_idx >= var_idx:
-                    return False
-            
-            elif func_type == 'PREV':
-                # For PREV(X), X must be the current variable and not the first
-                if ref_var == var and var_idx == 0:
-                    return False
-                # For PREV(Y), Y must appear before the current variable
-                elif ref_var != var and ref_idx >= var_idx:
-                    return False
-            
-            elif func_type == 'FIRST':
-                # Ensure the referenced variable appears somewhere in the match
-                # (Already checked by the existence check above)
-                pass
-            
-            elif func_type == 'LAST':
-                # Ensure the referenced variable appears somewhere in the match
-                # (Already checked by the existence check above)
-                pass
+    # Track var positions (first occurrence)
+    var_first_pos = {}
+    for pos, (_, var) in enumerate(timeline):
+        if var not in var_first_pos:
+            var_first_pos[var] = pos
     
+    # Validate each condition
+    for var, condition in define_clauses.items():
+        var_pos = var_first_pos.get(var, -1)
+        if var_pos < 0:
+            continue
+            
+        # Check NEXT references from last position
+        if 'NEXT(' in condition and var_pos == len(timeline) - 1:
+            if f"NEXT({var}" in condition:
+                return False  # Self-NEXT from last position is invalid
+        
+        # Check FIRST references to variables that appear later
+        if 'FIRST(' in condition:
+            for ref_var in pattern_variables:
+                if f"FIRST({ref_var}" in condition:
+                    if ref_var not in var_first_pos:
+                        return False  # Referenced variable doesn't exist
+                    if var_pos < var_first_pos[ref_var]:
+                        return False  # Referencing variable not matched yet
+    
+    # If all checks pass
+    return True
+
+def validate_inner_navigation(expr, current_var, ordered_vars, var_positions):
+    """
+    Validate a nested navigation function expression.
+    
+    Args:
+        expr: The inner navigation expression string
+        current_var: The variable whose condition contains this expression
+        ordered_vars: Ordered list of variables in the match
+        var_positions: Dictionary mapping variables to their positions
+        
+    Returns:
+        True if valid, False otherwise
+    """
+    # Extract function and arguments from inner expression
+    pattern = r'(NEXT|PREV|FIRST|LAST)\s*\(\s*([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)(?:\s*,\s*(\d+))?\s*\)'
+    match_obj = re.match(pattern, expr)
+    
+    if not match_obj:
+        # Try to handle nested navigation within nested navigation
+        return validate_complex_nested_navigation(expr, current_var, ordered_vars, var_positions)
+        
+    func_type = match_obj.group(1)
+    ref_var = match_obj.group(2)
+    field = match_obj.group(3)
+    offset_str = match_obj.group(4)
+    offset = int(offset_str) if offset_str else 1
+    
+    # Get position of referenced variable
+    if ref_var not in var_positions:
+        return False  # Referenced variable doesn't exist
+        
+    current_idx = ordered_vars.index(current_var)
+    ref_idx = ordered_vars.index(ref_var)
+    
+    # Apply similar validation as in the main function
+    if func_type in ('NEXT', 'PREV'):
+        # Navigation from current variable
+        if ref_var == current_var:
+            # For nested functions, we're not at runtime yet to check specific indices
+            # Just ensure the variable exists and has multiple rows if needed
+            if func_type == 'PREV' and offset > 0:
+                return len(var_positions.get(ref_var, [])) > offset
+        # Navigation between different variables
+        else:
+            # Ensure referenced variable appears before current variable
+            return ref_idx < current_idx
+    
+    # FIRST and LAST can reference any available variable
+    return True
+
+def validate_complex_nested_navigation(expr, current_var, ordered_vars, var_positions):
+    """
+    Handle deeply nested navigation functions.
+    This is a simplified implementation that checks for common error patterns.
+    
+    Returns:
+        True if likely valid, False if definitely invalid
+    """
+    # Check for basic syntax issues
+    if expr.count('(') != expr.count(')'):
+        return False
+        
+    # Check if all referenced variables exist in the match
+    # Extract all variable references like X.field
+    var_refs = re.findall(r'([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)', expr)
+    for var, field in var_refs:
+        if var not in var_positions:
+            return False
+            
+    # If we've made it here, the expression is potentially valid
+    # A more complete validation would require complex parsing
     return True
 
 def extract_original_variable_order(pattern_clause):
@@ -409,20 +446,13 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     if hasattr(mr_clause, 'pattern') and hasattr(mr_clause.pattern, 'metadata') and \
        mr_clause.pattern.metadata.get('permute', False):
         print("PERMUTE pattern detected, validating navigation functions...")
-        # Get define clauses
-        define_clauses = mr_clause.define.definitions
-        
-        # Filter matches that have invalid navigation function references
         valid_matches = []
+        define_conditions = {define.variable: define.condition for define in mr_clause.define.definitions}
         for match in all_matches:
-            if validate_navigation_functions(match, mr_clause.pattern.metadata.get('variables', []), define_clauses):
+            if post_validate_permute_match(match, define_conditions):
                 valid_matches.append(match)
-            else:
-                print(f"Filtering out match with invalid navigation function usage: {match['variables']}")
-        
-        # Replace matches with valid ones
+        print(f"After filtering: {len(valid_matches)} valid matches")
         all_matches = valid_matches
-        print(f"After filtering: {len(all_matches)} valid matches")
 
     # Create output DataFrame
     if not results and not all_matches:
@@ -615,3 +645,100 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         return result_df[ordered_cols]
 
     return result_df
+
+def validate_navigation_bounds(match_data, define_conditions):
+    """Validate that navigation functions don't reference out-of-bounds positions in PERMUTE patterns"""
+    ordered_vars = list(match_data['variables'].keys())
+    
+    for var, condition in define_conditions.items():
+        if var not in ordered_vars:
+            continue
+            
+        var_idx = ordered_vars.index(var)
+        
+        # Check NEXT references
+        if 'NEXT(' in condition:
+            # Check if variable is last in sequence and references NEXT
+            if var_idx == len(ordered_vars) - 1:
+                return False
+                
+        # Check PREV references
+        if 'PREV(' in condition:
+            # Check if variable is first in sequence and references PREV
+            if var_idx == 0:
+                return False
+    
+    # Check FIRST references
+    if any('FIRST(' in cond for cond in define_conditions.values()):
+        # Ensure A exists for FIRST(A.value) references
+        for var, condition in define_conditions.items():
+            if 'FIRST(' in condition:
+                # Extract referenced variable
+                ref_match = re.search(r'FIRST\s*\(\s*([A-Za-z0-9_]+)\.', condition)
+                if ref_match and ref_match.group(1) not in match_data['variables']:
+                    return False
+    
+    return True
+
+def post_validate_permute_match(match, define_conditions):
+    """Post-validate PERMUTE matches with navigation functions for Trino compatibility"""
+    # Skip empty matches
+    if not match or match.get('is_empty', True):
+        return False
+    
+    # Basic validation for navigation bounds in PERMUTE patterns
+    if not validate_navigation_bounds(match, define_conditions):
+        return False
+    
+    # Extract navigation function references for deep validation
+    nav_refs = {}
+    for var, condition in define_conditions.items():
+        refs = extract_navigation_references(condition)
+        if refs:
+            nav_refs[var] = refs
+    
+    # If no navigation references, match is valid
+    if not nav_refs:
+        return True
+    
+    # Validate each navigation reference in context of the match
+    match_var_order = list(match['variables'].keys())
+    for var, refs in nav_refs.items():
+        if var not in match_var_order:
+            continue
+        
+        var_idx = match_var_order.index(var)
+        
+        for ref_type, ref_var, step in refs:
+            # Validate NEXT references
+            if ref_type == 'NEXT' and var_idx >= len(match_var_order) - step:
+                return False
+            
+            # Validate PREV references
+            elif ref_type == 'PREV' and var_idx < step:
+                return False
+            
+            # Validate FIRST references - ensure referenced var exists
+            elif ref_type == 'FIRST' and ref_var not in match['variables']:
+                return False
+            
+            # Validate LAST references - ensure referenced var exists
+            elif ref_type == 'LAST' and ref_var not in match['variables']:
+                return False
+    
+    return True
+
+def extract_navigation_references(condition):
+    """Extract all navigation functions referenced in a condition"""
+    pattern = r'(NEXT|PREV|FIRST|LAST)\s*\(\s*([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)(?:\s*,\s*(\d+))?\s*\)'
+    refs = []
+    
+    for match in re.finditer(pattern, condition):
+        func_type = match.group(1)
+        var_name = match.group(2)
+        field = match.group(3)
+        offset = int(match.group(4)) if match.group(4) else 1
+        # Return only the fields needed for validation (type, var, step)
+        refs.append((func_type, var_name, offset))
+        
+    return refs

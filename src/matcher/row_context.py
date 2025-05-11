@@ -1,13 +1,9 @@
 # src/matcher/row_context.py
 
-
-
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Set, Tuple, Union
 from collections import defaultdict
 import time
-@dataclass
-# Add to src/matcher/row_context.py
 
 @dataclass
 class RowContext:
@@ -29,6 +25,8 @@ class RowContext:
     subsets: Dict[str, List[str]] = field(default_factory=dict)
     current_idx: int = 0
     match_number: int = 1
+    current_var: Optional[str] = None
+    navigation_cache: Dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
         """Build optimized lookup structures."""
@@ -128,11 +126,6 @@ class RowContext:
         indices = self.var_row_indices(variable)
         return [self.rows[idx] for idx in indices if 0 <= idx < len(self.rows)]
 
-    # src/matcher/row_context.py
-    # Update the var_row_indices method in RowContext class
-
-    # src/matcher/row_context.py
-
     def var_row_indices(self, variable: str) -> List[int]:
         """
         Get indices of rows matched to a variable or subset.
@@ -179,7 +172,6 @@ class RowContext:
         
         return sorted(indices)
     
-       
     def prev(self, steps: int = 1) -> Optional[Dict[str, Any]]:
         """
         Get previous row within partition with robust boundary handling.
@@ -239,3 +231,26 @@ class RowContext:
         if indices and occurrence >= 0 and occurrence < len(indices):
             return self.rows[indices[-(occurrence+1)]]
         return None
+
+    def get_variable_positions(self, var_name):
+        """Get sorted list of row positions for a variable, handling subsets."""
+        if var_name in self.variables:
+            return sorted(self.variables[var_name])
+        elif var_name in self.subsets:
+            # For subset variables, collect all rows from component variables
+            subset_indices = []
+            for component_var in self.subsets[var_name]:
+                if component_var in self.variables:
+                    subset_indices.extend(self.variables[component_var])
+            return sorted(subset_indices)
+        return []
+    
+    def get_row_value(self, row_idx, field_name):
+        """Safely retrieve a value from a row."""
+        if 0 <= row_idx < len(self.rows) and field_name in self.rows[row_idx]:
+            return self.rows[row_idx][field_name]
+        return None
+    
+    def reset_cache(self):
+        """Clear navigation function cache between matches."""
+        self.navigation_cache.clear()
