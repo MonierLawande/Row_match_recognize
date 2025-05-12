@@ -650,99 +650,147 @@ class MeasureEvaluator:
         """
         Evaluate aggregate functions like SUM, COUNT, etc. with enhanced pattern variable support.
         
+        This method supports both pattern variable prefixed and non-prefixed column references:
+        - SUM(A.order_amount): Sum of order_amount values from rows matched to variable A
+        - SUM(order_amount): Sum of order_amount values from all matched rows
+        
         Args:
-            func_name: The aggregate function name
-            args_str: Function arguments as string
-            is_running: Whether to use RUNNING semantics
-            
+            func_name: The aggregate function name (sum, count, avg, min, max, etc.)
+            args_str: Function arguments as string (column name or pattern_var.column)
+            is_running: Whether to use RUNNING semantics (True) or FINAL semantics (False)
+                
         Returns:
-            Result of the aggregate function
+            Result of the aggregate function or None if no values to aggregate
+            
+        Examples:
+            COUNT(*) -> Count of all rows in the match
+            COUNT(A.*) -> Count of rows matched to variable A
+            SUM(A.amount) -> Sum of amount values from rows matched to variable A
+            AVG(price) -> Average of price values from all matched rows
         """
         print(f"Evaluating aggregate function: {func_name}({args_str})")
         
+        # Normalize function name to lowercase for case-insensitive comparison
+        func_name = func_name.lower()
+        
         # Handle COUNT(*) special case
-        if func_name.lower() == 'count' and args_str.strip() in ('*', ''):
+        if func_name == 'count' and args_str.strip() in ('*', ''):
+            # Get the current match's row count (unique indices)
+            matched_indices = []
+            for var, indices in self.context.variables.items():
+                matched_indices.extend(indices)
+            
+            # Use set to avoid counting duplicates
+            unique_indices = set(matched_indices)
+            
+            # For RUNNING semantics, only include rows up to current_idx
             if is_running:
-                # For RUNNING semantics, count rows up to current position
-                return self.context.current_idx + 1
-            else:
-                # For FINAL semantics, count all rows
-                return len(self.context.rows)
+                unique_indices = {idx for idx in unique_indices if idx <= self.context.current_idx}
+                
+            return len(unique_indices)
         
         # Handle pattern variable COUNT(A.*) special case
         pattern_count_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.\*', args_str)
-        if func_name.lower() == 'count' and pattern_count_match:
+        if func_name == 'count' and pattern_count_match:
             var_name = pattern_count_match.group(1)
             var_indices = self._get_var_indices(var_name)
+            
+            # For RUNNING semantics, only include rows up to current_idx
             if is_running:
                 var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+                
             return len(var_indices)
         
-        # Parse variable and column references
-        var_scope = None
-        col_name = None
-        
-        var_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*|\\*)', args_str)
-        if var_match:
-            var_scope = var_match.group(1)
-            col_name = var_match.group(2)
+        # Check for pattern variable prefix (A.column_name)
+        var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args_str)
+        if var_col_match:
+            var_name = var_col_match.group(1)
+            col_name = var_col_match.group(2)
+            
+            # Get rows matched to this variable
+            var_indices = self._get_var_indices(var_name)
+            
+            # For RUNNING semantics, only include rows up to current_idx
+            if is_running:
+                var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+            
+            # Get values from these rows
+            values = []
+            for idx in sorted(var_indices):
+                if idx < len(self.context.rows):
+                    val = self.context.rows[idx].get(col_name)
+                    if val is not None:  # Skip NULL values
+                        values.append(val)
         else:
+            # No pattern variable prefix, use column directly
             col_name = args_str
-        
-        # Get rows to aggregate over
-        rows_to_use = []
-        if var_scope:
-            # Get rows matched to specific variable
-            indices = self._get_var_indices(var_scope)
+            
+            # Get all matched rows
+            matched_indices = []
+            for var, indices in self.context.variables.items():
+                matched_indices.extend(indices)
+            
+            # Sort and filter indices
+            matched_indices = sorted(set(matched_indices))  # Use set to avoid duplicates
+            
+            # For RUNNING semantics, only include rows up to current_idx
             if is_running:
-                # For RUNNING semantics, only consider rows up to current_idx
-                indices = [idx for idx in indices if idx <= self.context.current_idx]
-            rows_to_use = [self.context.rows[idx] for idx in sorted(indices) if idx < len(self.context.rows)]
-        else:
-            # Use all rows up to current position if running
-            if is_running:
-                # For RUNNING semantics with no variable scope, use only the current match
-                # Get all matched rows in the current match
-                matched_indices = []
-                for var, indices in self.context.variables.items():
-                    matched_indices.extend(indices)
-                matched_indices = sorted(matched_indices)
-                
-                # Only include rows up to current_idx
                 matched_indices = [idx for idx in matched_indices if idx <= self.context.current_idx]
-                rows_to_use = [self.context.rows[idx] for idx in matched_indices if idx < len(self.context.rows)]
-            else:
-                rows_to_use = self.context.rows
+            
+            # Get values from these rows
+            values = []
+            for idx in matched_indices:
+                if idx < len(self.context.rows):
+                    val = self.context.rows[idx].get(col_name)
+                    if val is not None:  # Skip NULL values
+                        values.append(val)
         
-        # Special handling for COUNT(var.*)
-        if func_name.lower() == 'count' and col_name == '*':
-            return len(rows_to_use)
-        
-        # Get values to aggregate
-        values = []
-        for row in rows_to_use:
-            if col_name != '*':
-                val = row.get(col_name)
-                if val is not None:  # Skip NULL values
-                    values.append(val)
-        
-        # Perform aggregation
+        # Perform aggregation with proper error handling
         if not values:
             return None
-            
-        if func_name.lower() == 'count':
-            return len(values)
-        elif func_name.lower() == 'sum':
-            return sum(values)
-        elif func_name.lower() == 'avg':
-            return sum(values) / len(values)
-        elif func_name.lower() == 'min':
-            return min(values)
-        elif func_name.lower() == 'max':
-            return max(values)
-        elif func_name.lower() == 'first':
-            return values[0]
-        elif func_name.lower() == 'last':
-            return values[-1]
         
-        return None
+        try:
+            if func_name == 'count':
+                return len(values)
+            elif func_name == 'sum':
+                return sum(values)
+            elif func_name == 'avg':
+                return sum(values) / len(values)
+            elif func_name == 'min':
+                return min(values)
+            elif func_name == 'max':
+                return max(values)
+            elif func_name == 'first':
+                return values[0]
+            elif func_name == 'last':
+                return values[-1]
+            elif func_name == 'median':
+                # Add support for median function
+                sorted_values = sorted(values)
+                n = len(sorted_values)
+                if n % 2 == 0:
+                    # Even number of values - average the middle two
+                    return (sorted_values[n//2 - 1] + sorted_values[n//2]) / 2
+                else:
+                    # Odd number of values - return the middle one
+                    return sorted_values[n//2]
+            elif func_name == 'stddev' or func_name == 'stddev_samp':
+                # Standard deviation (sample)
+                if len(values) <= 1:
+                    return None  # Need at least 2 values for sample stddev
+                mean = sum(values) / len(values)
+                variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
+                return math.sqrt(variance)
+            elif func_name == 'stddev_pop':
+                # Standard deviation (population)
+                if not values:
+                    return None
+                mean = sum(values) / len(values)
+                variance = sum((x - mean) ** 2 for x in values) / len(values)
+                return math.sqrt(variance)
+            else:
+                print(f"Warning: Unsupported aggregate function: {func_name}")
+                return None
+        except Exception as e:
+            print(f"Error evaluating aggregate function {func_name}: {e}")
+            return None

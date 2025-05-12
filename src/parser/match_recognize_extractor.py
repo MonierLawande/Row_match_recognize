@@ -662,7 +662,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         if self.ast.measures:
             for measure in self.ast.measures.measures:
                 # Extract variables from column references like A.totalprice
-                column_refs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)', measure.expression)
+                column_refs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', measure.expression)
                 referenced_vars.update([ref[0] for ref in column_refs])
                 
                 # Extract variables from functions but exclude known function names
