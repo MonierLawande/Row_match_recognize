@@ -443,8 +443,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     print(f"    Row {idx}: {all_rows[idx]}")
 
     # After finding matches but before processing them:
-    if hasattr(mr_clause, 'pattern') and hasattr(mr_clause.pattern, 'metadata') and \
-       mr_clause.pattern.metadata.get('permute', False):
+    if mr_clause.pattern.metadata.get('permute', False):
         print("PERMUTE pattern detected, validating navigation functions...")
         valid_matches = []
         define_conditions = {define.variable: define.condition for define in mr_clause.define.definitions}
@@ -571,18 +570,17 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         return result_df[ordered_cols]
 
     # If PERMUTE is present, expand the pattern and use the expanded pattern for matching
-    if mr_clause.pattern.get('permute', True):
+    if mr_clause.pattern.metadata.get('permute', False):
         permute_handler = PermuteHandler()
-        if mr_clause.pattern.get('nested_permute', False):
+        if mr_clause.pattern.metadata.get('nested_permute', False):
             expanded_pattern = permute_handler.expand_nested_permute(mr_clause.pattern)
         else:
-            expanded_pattern = {'permutations': permute_handler.expand_permutation(mr_clause.pattern['variables'])}
+            expanded_pattern = {'permutations': permute_handler.expand_permutation(mr_clause.pattern.metadata['variables'])}
         # Use expanded pattern for matching
 
     # Extract the original variable order from PERMUTE pattern
     original_variable_order = []
-    if hasattr(mr_clause, 'pattern') and hasattr(mr_clause.pattern, 'metadata') and \
-       mr_clause.pattern.metadata.get('permute', False):
+    if mr_clause.pattern.metadata.get('permute', False):
         original_variable_order = extract_original_variable_order(mr_clause.pattern)
         print(f"Original PERMUTE variable order: {original_variable_order}")
     
@@ -596,7 +594,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             sort_columns.extend(partition_by)
         
         # Handle PERMUTE patterns specially to match Trino behavior
-        if hasattr(mr_clause.pattern, 'metadata') and mr_clause.pattern.metadata.get('permute', False):
+        if mr_clause.pattern.metadata.get('permute', False):
             # Create a sort key based on the original variable order
             if 'pattern_var' in result_df.columns and original_variable_order:
                 # Map pattern variables to their position in original pattern
@@ -643,6 +641,28 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         ordered_cols = [col for col in ordered_cols if col in result_df.columns]
         return result_df[ordered_cols]
+
+    # After PERMUTE pattern handling code (around line 590-600)
+    # Create result_df if it hasn't been defined yet
+    if rows_per_match != RowsPerMatch.ONE_ROW:
+        # Use results for ALL_ROWS_PER_MATCH
+        result_df = pd.DataFrame(results)
+        
+        # Add necessary columns from original data if needed
+        if order_by and not result_df.empty:
+            for col in order_by:
+                if col not in result_df.columns:
+                    result_df[col] = [row.get(col) for row in rows]
+        
+        # Define ordered columns
+        ordered_cols = []
+        if partition_by:
+            ordered_cols.extend(partition_by)
+        if mr_clause.measures:
+            ordered_cols.extend([m.alias for m in mr_clause.measures.measures])
+        
+        # Only keep columns that exist
+        ordered_cols = [col for col in ordered_cols if col in result_df.columns]
 
     return result_df
 
