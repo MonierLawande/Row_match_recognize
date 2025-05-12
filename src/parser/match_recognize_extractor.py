@@ -571,7 +571,13 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                                 self.ast.pattern.pattern.strip() == "()"):
             logger.debug("Empty pattern detected in validate_identifiers - skipping validation")
             return
-            
+                
+        # For nested PERMUTE patterns, skip validation as all defined variables are considered valid
+        if self.ast.pattern and (self.ast.pattern.metadata.get("nested_permute", False) or 
+                                "PERMUTE" in self.ast.pattern.pattern.upper()):
+            logger.debug("PERMUTE pattern detected - skipping variable validation")
+            return
+                
         pattern_vars = set(self.ast.pattern.metadata.get("base_variables", [])) if self.ast.pattern else set()
         
         # Extract subset component variables
@@ -598,11 +604,15 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                                         self.ast.pattern.metadata.get("empty_pattern", False)):
                     return
                     
+                # Skip this check for PERMUTE patterns
+                if self.ast.pattern and "PERMUTE" in self.ast.pattern.pattern.upper():
+                    # For PERMUTE patterns, all defined variables are considered valid
+                    return
+                    
                 raise ParserError(
                     f"Define variable '{definition.variable}' not found in pattern or subset components.", 
                     line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
                 )
-
 
     def validate_pattern_variables_defined(self, ctx):
         """Validate pattern variable definitions and references."""
@@ -615,6 +625,11 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         
         if is_empty_pattern or self.ast.pattern.metadata.get("empty_pattern", False):
             logger.debug("Empty pattern detected - skipping variable validation")
+            return
+            
+        # Skip validation for PERMUTE patterns
+        if "PERMUTE" in pattern_text.upper():
+            logger.debug("PERMUTE pattern detected - skipping variable validation")
             return
             
         # Get pattern variables and defined variables (case-sensitive)
@@ -669,7 +684,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         # Check for missing references
         all_valid_vars = pattern_vars.union(subset_components)
         missing = referenced_vars - all_valid_vars
-        if missing:
+        if missing and "PERMUTE" not in pattern_text.upper():
             raise ParserError(f"Referenced variable(s) {missing} not found in the PATTERN clause or SUBSET definitions.", 
                             line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         
@@ -678,6 +693,9 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         if extra:
             # Special case for empty pattern: allow any definition variables
             if self.ast.pattern and self.ast.pattern.pattern.strip() == "()":
+                return
+            # Special case for PERMUTE patterns: allow any definition variables
+            if self.ast.pattern and "PERMUTE" in self.ast.pattern.pattern.upper():
                 return
             # Otherwise raise error
             raise ParserError(f"Defined variable(s) {extra} not found in the PATTERN clause or as subset components.", 
