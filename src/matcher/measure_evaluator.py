@@ -646,6 +646,146 @@ class MeasureEvaluator:
         return []
 
 
+    def _supported_aggregates(self) -> Set[str]:
+        """Return set of supported aggregate functions."""
+        return {
+            'sum', 'count', 'avg', 'min', 'max', 'first', 'last',
+            'median', 'stddev', 'stddev_samp', 'stddev_pop',
+            'var', 'var_samp', 'var_pop', 'covar', 'corr'
+        }
+
+    def _evaluate_count_star(self, is_running: bool) -> int:
+        """Optimized implementation of COUNT(*)."""
+        matched_indices = set()
+        for indices in self.context.variables.values():
+            matched_indices.update(indices)
+        
+        if is_running:
+            matched_indices = {idx for idx in matched_indices if idx <= self.context.current_idx}
+            
+        return len(matched_indices)
+
+    def _evaluate_count_var(self, var_name: str, is_running: bool) -> int:
+        """Optimized implementation of COUNT(var.*)."""
+        var_indices = self._get_var_indices(var_name)
+        
+        if is_running:
+            var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+            
+        return len(var_indices)
+
+    def _gather_values_for_aggregate(self, args_str: str, is_running: bool) -> List[Any]:
+        """Gather values for aggregation with proper type handling."""
+        values = []
+        indices_to_use = []
+        
+        # Check for pattern variable prefix
+        var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args_str)
+        
+        if var_col_match:
+            # Pattern variable prefixed column
+            var_name, col_name = var_col_match.groups()
+            indices_to_use = self._get_var_indices(var_name)
+        else:
+            # Direct column reference
+            col_name = args_str
+            # Get all matched rows
+            for indices in self.context.variables.values():
+                indices_to_use.extend(indices)
+            indices_to_use = sorted(set(indices_to_use))
+        
+        # Apply RUNNING semantics filter
+        if is_running:
+            indices_to_use = [idx for idx in indices_to_use if idx <= self.context.current_idx]
+        
+        # Gather values with type checking
+        for idx in indices_to_use:
+            if idx < len(self.context.rows):
+                val = self.context.rows[idx].get(col_name)
+                if val is not None:
+                    try:
+                        # Ensure numeric type for numeric aggregates
+                        if isinstance(val, (str, bool)):
+                            val = float(val)
+                        values.append(val)
+                    except (ValueError, TypeError):
+                        # Log warning but continue processing
+                        print(f"Warning: Non-numeric value '{val}' found in column {col_name}")
+                        continue
+        
+        return values
+
+    def _compute_aggregate(self, func_name: str, values: List[Any]) -> Any:
+        """Compute aggregate with proper type handling and SQL semantics."""
+        if not values:
+            return None
+            
+        try:
+            if func_name == 'count':
+                return len(values)
+            elif func_name == 'sum':
+                return sum(values)
+            elif func_name == 'avg':
+                return sum(values) / len(values)
+            elif func_name == 'min':
+                return min(values)
+            elif func_name == 'max':
+                return max(values)
+            elif func_name == 'first':
+                return values[0]
+            elif func_name == 'last':
+                return values[-1]
+            elif func_name == 'median':
+                return self._compute_median(values)
+            elif func_name in ('stddev', 'stddev_samp'):
+                return self._compute_stddev(values, population=False)
+            elif func_name == 'stddev_pop':
+                return self._compute_stddev(values, population=True)
+            elif func_name in ('var', 'var_samp'):
+                return self._compute_variance(values, population=False)
+            elif func_name == 'var_pop':
+                return self._compute_variance(values, population=True)
+            
+        except Exception as e:
+            self._log_aggregate_error(func_name, str(values), e)
+            return None
+
+    def _compute_median(self, values: List[Any]) -> Any:
+        """Compute median with proper handling of even/odd counts."""
+        sorted_vals = sorted(values)
+        n = len(sorted_vals)
+        mid = n // 2
+        
+        if n % 2 == 0:
+            return (sorted_vals[mid-1] + sorted_vals[mid]) / 2
+        return sorted_vals[mid]
+
+    def _compute_stddev(self, values: List[Any], population: bool = False) -> float:
+        """Compute standard deviation with proper handling of sample vs population."""
+        if len(values) < (1 if population else 2):
+            return None
+            
+        mean = sum(values) / len(values)
+        squared_diff_sum = sum((x - mean) ** 2 for x in values)
+        
+        if population:
+            return math.sqrt(squared_diff_sum / len(values))
+        return math.sqrt(squared_diff_sum / (len(values) - 1))
+
+    def _compute_variance(self, values: List[Any], population: bool = False) -> float:
+        """Compute variance with proper handling of sample vs population."""
+        stddev = self._compute_stddev(values, population)
+        return stddev * stddev if stddev is not None else None
+
+    def _log_aggregate_error(self, func_name: str, args: str, error: Exception) -> None:
+        """Log aggregate function errors with context."""
+        error_msg = (
+            f"Error in aggregate function {func_name}({args}): {str(error)}\n"
+            f"Context: current_idx={self.context.current_idx}, "
+            f"running={not self.final}"
+        )
+        print(error_msg)  # Replace with proper logging in production
+
     def _evaluate_aggregate(self, func_name: str, args_str: str, is_running: bool) -> Any:
         """
         Production-level implementation of aggregate function evaluation for pattern matching.
@@ -716,8 +856,9 @@ class MeasureEvaluator:
                     result = self._compute_aggregate(func_name, values)
                 
                 # Cache the result
-                if hasattr(self, '_agg_cache'):
-                    self._agg_cache[cache_key] = result
+                if not hasattr(self, '_agg_cache'):
+                    self._agg_cache = {}
+                self._agg_cache[cache_key] = result
                 
                 return result
                 
@@ -731,143 +872,3 @@ class MeasureEvaluator:
             duration = time.time() - start_time
             if hasattr(self, 'timing'):
                 self.timing[f'aggregate_{func_name}'] += duration
-
-        def _supported_aggregates(self) -> Set[str]:
-            """Return set of supported aggregate functions."""
-            return {
-                'sum', 'count', 'avg', 'min', 'max', 'first', 'last',
-                'median', 'stddev', 'stddev_samp', 'stddev_pop',
-                'var', 'var_samp', 'var_pop', 'covar', 'corr'
-            }
-
-        def _evaluate_count_star(self, is_running: bool) -> int:
-            """Optimized implementation of COUNT(*)."""
-            matched_indices = set()
-            for indices in self.context.variables.values():
-                matched_indices.update(indices)
-            
-            if is_running:
-                matched_indices = {idx for idx in matched_indices if idx <= self.context.current_idx}
-                
-            return len(matched_indices)
-
-        def _evaluate_count_var(self, var_name: str, is_running: bool) -> int:
-            """Optimized implementation of COUNT(var.*)."""
-            var_indices = self._get_var_indices(var_name)
-            
-            if is_running:
-                var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
-                
-            return len(var_indices)
-
-        def _gather_values_for_aggregate(self, args_str: str, is_running: bool) -> List[Any]:
-            """Gather values for aggregation with proper type handling."""
-            values = []
-            indices_to_use = []
-            
-            # Check for pattern variable prefix
-            var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args_str)
-            
-            if var_col_match:
-                # Pattern variable prefixed column
-                var_name, col_name = var_col_match.groups()
-                indices_to_use = self._get_var_indices(var_name)
-            else:
-                # Direct column reference
-                col_name = args_str
-                # Get all matched rows
-                for indices in self.context.variables.values():
-                    indices_to_use.extend(indices)
-                indices_to_use = sorted(set(indices_to_use))
-            
-            # Apply RUNNING semantics filter
-            if is_running:
-                indices_to_use = [idx for idx in indices_to_use if idx <= self.context.current_idx]
-            
-            # Gather values with type checking
-            for idx in indices_to_use:
-                if idx < len(self.context.rows):
-                    val = self.context.rows[idx].get(col_name)
-                    if val is not None:
-                        try:
-                            # Ensure numeric type for numeric aggregates
-                            if isinstance(val, (str, bool)):
-                                val = float(val)
-                            values.append(val)
-                        except (ValueError, TypeError):
-                            # Log warning but continue processing
-                            print(f"Warning: Non-numeric value '{val}' found in column {col_name}")
-                            continue
-            
-            return values
-
-        def _compute_aggregate(self, func_name: str, values: List[Any]) -> Any:
-            """Compute aggregate with proper type handling and SQL semantics."""
-            if not values:
-                return None
-                
-            try:
-                if func_name == 'count':
-                    return len(values)
-                elif func_name == 'sum':
-                    return sum(values)
-                elif func_name == 'avg':
-                    return sum(values) / len(values)
-                elif func_name == 'min':
-                    return min(values)
-                elif func_name == 'max':
-                    return max(values)
-                elif func_name == 'first':
-                    return values[0]
-                elif func_name == 'last':
-                    return values[-1]
-                elif func_name == 'median':
-                    return self._compute_median(values)
-                elif func_name in ('stddev', 'stddev_samp'):
-                    return self._compute_stddev(values, population=False)
-                elif func_name == 'stddev_pop':
-                    return self._compute_stddev(values, population=True)
-                elif func_name in ('var', 'var_samp'):
-                    return self._compute_variance(values, population=False)
-                elif func_name == 'var_pop':
-                    return self._compute_variance(values, population=True)
-                
-            except Exception as e:
-                self._log_aggregate_error(func_name, str(values), e)
-                return None
-
-        def _compute_median(self, values: List[Any]) -> Any:
-            """Compute median with proper handling of even/odd counts."""
-            sorted_vals = sorted(values)
-            n = len(sorted_vals)
-            mid = n // 2
-            
-            if n % 2 == 0:
-                return (sorted_vals[mid-1] + sorted_vals[mid]) / 2
-            return sorted_vals[mid]
-
-        def _compute_stddev(self, values: List[Any], population: bool = False) -> float:
-            """Compute standard deviation with proper handling of sample vs population."""
-            if len(values) < (1 if population else 2):
-                return None
-                
-            mean = sum(values) / len(values)
-            squared_diff_sum = sum((x - mean) ** 2 for x in values)
-            
-            if population:
-                return math.sqrt(squared_diff_sum / len(values))
-            return math.sqrt(squared_diff_sum / (len(values) - 1))
-
-        def _compute_variance(self, values: List[Any], population: bool = False) -> float:
-            """Compute variance with proper handling of sample vs population."""
-            stddev = self._compute_stddev(values, population)
-            return stddev * stddev if stddev is not None else None
-
-        def _log_aggregate_error(self, func_name: str, args: str, error: Exception) -> None:
-            """Log aggregate function errors with context."""
-            error_msg = (
-                f"Error in aggregate function {func_name}({args}): {str(error)}\n"
-                f"Context: current_idx={self.context.current_idx}, "
-                f"running={not self.final}"
-            )
-            print(error_msg)  # Replace with proper logging in production
