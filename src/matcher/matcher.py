@@ -130,14 +130,17 @@ class PatternExclusionHandler:
         return filtered_match
     
 class EnhancedMatcher:
+# Fix for src/matcher/matcher.py - EnhancedMatcher.__init__ method
+
     def __init__(self, dfa, measures=None, measure_semantics=None, exclusion_ranges=None, 
                 after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None):
-        """Initialize the enhanced matcher."""
+        """Initialize the enhanced matcher with support for new DFA features."""
         self.dfa = dfa
         self.start_state = dfa.start
         self.measures = measures or {}
         self.measure_semantics = measure_semantics or {}
-        self.exclusion_ranges = exclusion_ranges or []
+        # Use exclusion ranges from DFA if available
+        self.exclusion_ranges = exclusion_ranges or dfa.exclusion_ranges
         self.after_match_skip = after_match_skip
         self.subsets = subsets or {}
         self.original_pattern = original_pattern
@@ -146,14 +149,80 @@ class EnhancedMatcher:
         # Add performance tracking
         self.timing = defaultdict(float)
         
+        # Initialize anchor metadata before building transition index
+        self._anchor_metadata = {
+            "has_start_anchor": False,
+            "has_end_anchor": False,
+            "spans_partition": False,
+            "start_anchor_states": set(),
+            "end_anchor_accepting_states": set()
+        }
+        
+        # Extract metadata from DFA for optimization
+        self._extract_dfa_metadata()
+        
         # Add optimization structures
         self.transition_index = self._build_transition_index()
-        self.excluded_vars = self._analyze_exclusions()
         
         # Create pattern exclusion handler
         self.exclusion_handler = PatternExclusionHandler(original_pattern) if original_pattern else None
 
-
+    def _extract_dfa_metadata(self):
+        """Extract and process metadata from the DFA for optimization."""
+        # Copy metadata from DFA if available
+        if hasattr(self.dfa, 'metadata'):
+            self.metadata = self.dfa.metadata.copy()
+            
+            # Extract excluded variables from DFA states
+            self.excluded_vars = set()
+            for state in self.dfa.states:
+                self.excluded_vars.update(state.excluded_variables)
+                
+            # Extract anchor information
+            self._anchor_metadata = {
+                "has_start_anchor": self.metadata.get("has_start_anchor", False),
+                "has_end_anchor": self.metadata.get("has_end_anchor", False),
+                "spans_partition": self.metadata.get("spans_partition", False)
+            }
+        else:
+            # Fallback to legacy behavior
+            self.metadata = {}
+            self.excluded_vars = self._analyze_exclusions()
+            self._anchor_metadata = {
+                "has_start_anchor": False,
+                "has_end_anchor": False,
+                "spans_partition": False
+            }
+    def _build_transition_index(self):
+        """Build index of transitions with enhanced metadata support."""
+        index = defaultdict(list)
+        
+        # Add anchor information to the index for faster checking
+        anchor_start_states = set()
+        anchor_end_accepting_states = set()
+        
+        # Identify states with anchors
+        for i, state in enumerate(self.dfa.states):
+            if hasattr(state, 'is_anchor') and state.is_anchor:
+                if state.anchor_type == PatternTokenType.ANCHOR_START:
+                    anchor_start_states.add(i)
+                elif state.anchor_type == PatternTokenType.ANCHOR_END and state.is_accept:
+                    anchor_end_accepting_states.add(i)
+        
+        # Build normal transition index with priority support
+        for i, state in enumerate(self.dfa.states):
+            # Sort transitions by priority (lower is higher priority)
+            sorted_transitions = sorted(state.transitions, key=lambda t: t.priority)
+            for trans in sorted_transitions:
+                index[i].append((trans.variable, trans.target, trans.condition))
+        
+        # Store anchor metadata for quick reference
+        self._anchor_metadata.update({
+            "start_anchor_states": anchor_start_states,
+            "end_anchor_accepting_states": anchor_end_accepting_states,
+        })
+        
+        return index        
     def find_matches(self, rows, config=None, measures=None):
         """Find all matches with optimized processing."""
         start_time = time.time()
@@ -506,7 +575,6 @@ class EnhancedMatcher:
             
         return True
 
-    
     def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> Optional[Dict[str, Any]]:
         """Find a single match using optimized transitions with proper variable handling."""
         match_start_time = time.time()
@@ -516,6 +584,10 @@ class EnhancedMatcher:
         
         print(f"Starting match at index {start_idx}, state: {self._get_state_description(state)}")
         
+        # Update context with subset variables from DFA metadata
+        if hasattr(self.dfa, 'metadata') and 'subset_vars' in self.dfa.metadata:
+            context.subsets.update(self.dfa.metadata['subset_vars'])
+
         # Optional early filtering based on anchor constraints
         if hasattr(self, '_anchor_metadata') and not self._can_satisfy_anchors(len(rows)):
             print(f"Partition cannot satisfy anchor constraints")
@@ -721,6 +793,51 @@ class EnhancedMatcher:
             self.timing["find_match"] += time.time() - match_start_time
             return None
 
+    def _process_permute_match(self, match, original_variables):
+        """Process a match from a PERMUTE pattern with lexicographical ordering."""
+        # If this is a PERMUTE pattern, ensure lexicographical ordering
+        if not hasattr(self.dfa, 'metadata') or not self.dfa.metadata.get('permute', False):
+            return match
+            
+        # Get original variable order
+        if not original_variables:
+            if 'original_variables' in self.dfa.metadata:
+                original_variables = self.dfa.metadata['original_variables']
+            elif 'permute_variables' in self.dfa.metadata:
+                original_variables = self.dfa.metadata['permute_variables']
+                
+        if not original_variables:
+            return match
+            
+        # Create priority map based on original variable order
+        var_priority = {var: idx for idx, var in enumerate(original_variables)}
+        
+        # Add priority information to the match
+        match['variable_priority'] = var_priority
+        
+        # For nested PERMUTE, we need to determine the lexicographical ordering
+        # based on the actual variable sequence in the match
+        if self.dfa.metadata.get('nested_permute', False):
+            # Get the actual sequence of variables in this match
+            var_sequence = []
+            for idx in range(match['start'], match['end'] + 1):
+                for var, indices in match['variables'].items():
+                    if idx in indices:
+                        var_sequence.append(var)
+                        break
+            
+            # Calculate lexicographical score (lower is better)
+            lex_score = 0
+            for i, var in enumerate(var_sequence):
+                if var in var_priority:
+                    lex_score += var_priority[var] * (10 ** (len(var_sequence) - i - 1))
+            
+            match['lex_score'] = lex_score
+        
+        return match
+
+
+
     def _process_all_rows_match(self, match, rows, measures, match_number, config=None):
         """
         Process ALL rows in a match with proper handling for multiple rows and exclusions.
@@ -850,38 +967,8 @@ class EnhancedMatcher:
 
 
 
-    def _build_transition_index(self):
-        """Build index of transitions with enhanced anchor metadata."""
-        index = defaultdict(list)
-        
-        # Add anchor information to the index for faster checking
-        anchor_start_states = set()
-        anchor_end_accepting_states = set()
-        
-        # Identify states with anchors
-        for i, state in enumerate(self.dfa.states):
-            if hasattr(state, 'is_anchor') and state.is_anchor:
-                if state.anchor_type == PatternTokenType.ANCHOR_START:
-                    anchor_start_states.add(i)
-                elif state.anchor_type == PatternTokenType.ANCHOR_END and state.is_accept:
-                    anchor_end_accepting_states.add(i)
-        
-        # Build normal transition index
-        for i, state in enumerate(self.dfa.states):
-            for transition in state.transitions:
-                index[i].append((transition.variable, transition.target, transition.condition))
-        
-        # Store anchor metadata for quick reference
-        self._anchor_metadata = {
-            "has_start_anchor": bool(anchor_start_states),
-            "has_end_anchor": bool(anchor_end_accepting_states),
-            "start_anchor_states": anchor_start_states,
-            "end_anchor_accepting_states": anchor_end_accepting_states,
-            "spans_partition": bool(anchor_start_states and anchor_end_accepting_states)
-        }
-        
-        return index
-
+    
+    
     def _select_preferred_match(self, matches, variables):
         """
         When multiple permutation matches are found, select the one with

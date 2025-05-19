@@ -48,6 +48,8 @@ class RowContext:
                     self._subset_index[comp] = set()
                 self._subset_index[comp].add(subset_name)
         
+    # Updates for src/matcher/row_context.py
+
     def classifier(self, variable: Optional[str] = None) -> str:
         """
         Return pattern variable for current row or specified set.
@@ -107,25 +109,6 @@ class RowContext:
             if hasattr(self, 'timing'):
                 self.timing['classifier'] = classifier_time
 
-    def var_rows(self, variable: str) -> List[Dict[str, Any]]:
-        """
-        Get all rows matched to a variable or subset.
-        
-        Args:
-            variable: Variable name
-            
-        Returns:
-            List of rows matched to the variable
-            
-        Example:
-            >>> # Get all rows matched to variable 'A'
-            >>> a_rows = context.var_rows('A')
-            >>> # Get rows matched to subset 'U'
-            >>> u_rows = context.var_rows('U')
-        """
-        indices = self.var_row_indices(variable)
-        return [self.rows[idx] for idx in indices if 0 <= idx < len(self.rows)]
-
     def var_row_indices(self, variable: str) -> List[int]:
         """
         Get indices of rows matched to a variable or subset.
@@ -171,6 +154,27 @@ class RowContext:
                     indices.extend(self.variables[comp_base])
         
         return sorted(indices)
+        
+    def var_rows(self, variable: str) -> List[Dict[str, Any]]:
+        """
+        Get all rows matched to a variable or subset.
+        
+        Args:
+            variable: Variable name
+            
+        Returns:
+            List of rows matched to the variable
+            
+        Example:
+            >>> # Get all rows matched to variable 'A'
+            >>> a_rows = context.var_rows('A')
+            >>> # Get rows matched to subset 'U'
+            >>> u_rows = context.var_rows('U')
+        """
+        indices = self.var_row_indices(variable)
+        return [self.rows[idx] for idx in indices if 0 <= idx < len(self.rows)]
+
+    
     
     def prev(self, steps: int = 1) -> Optional[Dict[str, Any]]:
         """

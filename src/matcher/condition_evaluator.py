@@ -197,9 +197,11 @@ class ConditionEvaluator(ast.NodeVisitor):
         
         return None
 
+        # Updates for src/matcher/condition_evaluator.py
+
     def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
         """
-        Get a column value from a pattern variable's matched rows.
+        Get a column value from a pattern variable's matched rows with enhanced subset support.
         
         For self-referential conditions (e.g., A.salary > 1000 when evaluating for A),
         use the current row's value.
@@ -222,15 +224,32 @@ class ConditionEvaluator(ast.NodeVisitor):
         
         # Otherwise check if current row is already assigned to this variable
         if not is_self_reference and hasattr(ctx, 'current_var_assignments'):
-            if var_name in ctx.current_var_assignments and self.context.current_idx in ctx.current_var_assignments[var_name]:
+            if var_name in ctx.current_var_assignments and ctx.current_idx in ctx.current_var_assignments[var_name]:
                 is_self_reference = True
         
         if is_self_reference:
             # Self-reference: use the current row's value
             if self.current_row is not None:
                 return self.current_row.get(col_name)
-            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
-                return self.context.rows[self.context.current_idx].get(col_name)
+            elif ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                return ctx.rows[ctx.current_idx].get(col_name)
+        
+        # Check if this is a subset variable
+        if var_name in ctx.subsets:
+            # For subset variables, find the last row matched to any component variable
+            component_vars = ctx.subsets[var_name]
+            last_idx = -1
+            
+            for comp_var in component_vars:
+                if comp_var in ctx.variables:
+                    var_indices = ctx.variables[comp_var]
+                    if var_indices:
+                        last_var_idx = max(var_indices)
+                        if last_var_idx > last_idx:
+                            last_idx = last_var_idx
+            
+            if last_idx >= 0 and last_idx < len(ctx.rows):
+                return ctx.rows[last_idx].get(col_name)
         
         # Otherwise, get the value from the last row matched to this variable
         var_indices = ctx.variables.get(var_name, [])
@@ -243,10 +262,116 @@ class ConditionEvaluator(ast.NodeVisitor):
         # This is important for the first evaluation of a pattern variable
         if self.current_row is not None:
             return self.current_row.get(col_name)
-        elif self.context.current_idx >= 0 and self.context.current_idx < len(ctx.rows):
-            return ctx.rows[self.context.current_idx].get(col_name)
+        elif ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+            return ctx.rows[ctx.current_idx].get(col_name)
         
         return None
+
+    def _get_navigation_value(self, var_name, column, nav_type, steps=1):
+        """Enhanced navigation function handling with subset variable support."""
+        # Check for cached result
+        if not hasattr(self.context, 'navigation_cache'):
+            self.context.navigation_cache = {}
+        
+        cache_key = (var_name, column, nav_type, steps, self.context.current_idx)
+        if cache_key in self.context.navigation_cache:
+            return self.context.navigation_cache[cache_key]
+        
+        # Get context state
+        curr_idx = self.context.current_idx
+        current_var = getattr(self.context, 'current_var', None)
+        is_permute = hasattr(self.context, 'pattern_metadata') and getattr(self.context, 'pattern_metadata', {}).get('permute', False)
+        
+        # Handle subset variables for logical navigation
+        if nav_type in ('FIRST', 'LAST') and var_name in self.context.subsets:
+            # For subset variables, find rows matched to any component variable
+            component_vars = self.context.subsets[var_name]
+            all_indices = []
+            
+            for comp_var in component_vars:
+                if comp_var in self.context.variables:
+                    all_indices.extend(self.context.variables[comp_var])
+            
+            if all_indices:
+                all_indices.sort()
+                idx = all_indices[0] if nav_type == 'FIRST' else all_indices[-1]
+                
+                if idx < 0 or idx >= len(self.context.rows):
+                    self.context.navigation_cache[cache_key] = None
+                    return None
+                
+                result = self.context.rows[idx].get(column)
+                self.context.navigation_cache[cache_key] = result
+                return result
+        
+        # Enhancement: Ensure consistent timeline
+        # Build a timeline of all pattern variables in this match
+        timeline = []
+        for var, indices in self.context.variables.items():
+            for idx in indices:
+                timeline.append((idx, var))
+        timeline.sort()  # Sort by row index
+        
+        # Empty timeline indicates incomplete match state
+        if not timeline:
+            self.context.navigation_cache[cache_key] = None
+            return None
+        
+        # Handle reference to non-existent variable
+        if nav_type not in ('FIRST', 'LAST') and var_name not in self.context.variables:
+            self.context.navigation_cache[cache_key] = None
+            return None
+        
+        result = None
+        
+        # For logical positioning functions (FIRST/LAST)
+        if nav_type in ('FIRST', 'LAST'):
+            if var_name not in self.context.variables or not self.context.variables[var_name]:
+                self.context.navigation_cache[cache_key] = None
+                return None
+            
+            var_indices = sorted(self.context.variables[var_name])
+            idx = var_indices[0] if nav_type == 'FIRST' else var_indices[-1]
+            
+            if idx < 0 or idx >= len(self.context.rows):
+                self.context.navigation_cache[cache_key] = None
+                return None
+            
+            result = self.context.rows[idx].get(column)
+        
+        # For physical navigation (PREV/NEXT)
+        elif nav_type in ('PREV', 'NEXT'):
+            # Find current position in timeline
+            curr_pos = -1
+            for i, (idx, var) in enumerate(timeline):
+                if idx == curr_idx and (current_var is None or var == current_var):
+                    curr_pos = i
+                    break
+            
+            # If current position not found in timeline
+            if curr_pos < 0:
+                self.context.navigation_cache[cache_key] = None
+                return None
+            
+            # Handle PREV navigation with bounds checking
+            if nav_type == 'PREV':
+                if curr_pos >= steps:
+                    prev_idx, _ = timeline[curr_pos - steps]
+                    result = self.context.rows[prev_idx].get(column)
+            
+            # Handle NEXT navigation with bounds checking
+            elif nav_type == 'NEXT':
+                if curr_pos >= 0 and curr_pos + steps < len(timeline):
+                    next_idx, _ = timeline[curr_pos + steps]
+                    result = self.context.rows[next_idx].get(column)
+        
+        # Cache the result
+        self.context.navigation_cache[cache_key] = result
+        return result
+
+    def _get_classifier(self, variable: Optional[str] = None) -> str:
+        """Implementation of CLASSIFIER function with subset support."""
+        return self.context.classifier(variable)
 
     def visit_Num(self, node: ast.Num):
         return node.n
@@ -418,89 +543,8 @@ class ConditionEvaluator(ast.NodeVisitor):
         """Handle unsupported nodes"""
         raise ValueError(f"Unsupported expression type: {type(node).__name__}")
 
-    def _get_navigation_value(self, var_name, column, nav_type, steps=1):
-        """Enhanced navigation function handling with caching and better context consistency"""
-        # Check for cached result
-        if not hasattr(self.context, 'navigation_cache'):
-            self.context.navigation_cache = {}
-        
-        cache_key = (var_name, column, nav_type, steps, self.context.current_idx)
-        if cache_key in self.context.navigation_cache:
-            return self.context.navigation_cache[cache_key]
-        
-        # Get context state
-        curr_idx = self.context.current_idx
-        current_var = getattr(self.context, 'current_var', None)
-        is_permute = hasattr(self.context, 'pattern_metadata') and getattr(self.context, 'pattern_metadata', {}).get('permute', False)
-        
-        # Enhancement 4: Ensure consistent timeline
-        # Build a timeline of all pattern variables in this match
-        timeline = []
-        for var, indices in self.context.variables.items():
-            for idx in indices:
-                timeline.append((idx, var))
-        timeline.sort()  # Sort by row index
-        
-        # Empty timeline indicates incomplete match state
-        if not timeline:
-            self.context.navigation_cache[cache_key] = None
-            return None
-        
-        # Handle reference to non-existent variable
-        if nav_type not in ('FIRST', 'LAST') and var_name not in self.context.variables:
-            self.context.navigation_cache[cache_key] = None
-            return None
-        
-        result = None
-        
-        # For logical positioning functions (FIRST/LAST)
-        if nav_type in ('FIRST', 'LAST'):
-            if var_name not in self.context.variables or not self.context.variables[var_name]:
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
-            var_indices = sorted(self.context.variables[var_name])
-            idx = var_indices[0] if nav_type == 'FIRST' else var_indices[-1]
-            
-            if idx < 0 or idx >= len(self.context.rows):
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
-            result = self.context.rows[idx].get(column)
-        
-        # For physical navigation (PREV/NEXT)
-        elif nav_type in ('PREV', 'NEXT'):
-            # Find current position in timeline
-            curr_pos = -1
-            for i, (idx, var) in enumerate(timeline):
-                if idx == curr_idx and (current_var is None or var == current_var):
-                    curr_pos = i
-                    break
-            
-            # If current position not found in timeline
-            if curr_pos < 0:
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
-            # Handle PREV navigation with bounds checking
-            if nav_type == 'PREV':
-                if curr_pos >= steps:
-                    prev_idx, _ = timeline[curr_pos - steps]
-                    result = self.context.rows[prev_idx].get(column)
-            
-            # Handle NEXT navigation with bounds checking
-            elif nav_type == 'NEXT':
-                if curr_pos >= 0 and curr_pos + steps < len(timeline):
-                    next_idx, _ = timeline[curr_pos + steps]
-                    result = self.context.rows[next_idx].get(column)
-        
-        # Cache the result
-        self.context.navigation_cache[cache_key] = result
-        return result
+    
 
-    def _get_classifier(self, variable: Optional[str] = None) -> str:
-        """Implementation of CLASSIFIER function."""
-        return self.context.classifier(variable)
 
     def _compare_values(self, left, right, operator):
         """Compare values with proper NULL handling for Trino compatibility."""

@@ -19,6 +19,8 @@ class ClassifierError(Exception):
     """Error in CLASSIFIER function evaluation."""
     pass
 
+# Updates for src/matcher/measure_evaluator.py
+
 def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, List[int]], all_rows: List[Dict[str, Any]], cache: Dict[str, Any] = None, subsets: Dict[str, List[str]] = None) -> Tuple[bool, Any]:
     """
     Evaluate a pattern variable reference with proper subset handling.
@@ -77,8 +79,6 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
     
     # Not a pattern variable reference
     return False, None
-
-
 
 
 class MeasureEvaluator:
@@ -290,6 +290,14 @@ class MeasureEvaluator:
                     result = var_name
                     self._classifier_cache[cache_key] = result
                     return result
+                # Check if it's a subset variable
+                elif hasattr(self.context, 'subsets') and var_name in self.context.subsets:
+                    # For subset variables, check if any component matched
+                    for comp in self.context.subsets[var_name]:
+                        if comp in self.context.variables:
+                            result = comp
+                            self._classifier_cache[cache_key] = result
+                            return result
                 return None
             
             # For ALL ROWS PER MATCH or CLASSIFIER() without arguments
@@ -301,8 +309,7 @@ class MeasureEvaluator:
             
         finally:
             self.timing["classifier_evaluation"] += time.time() - start_time
-
-    
+        
     
     def _validate_classifier_arg(self, var_name: Optional[str]) -> None:
         """
@@ -342,8 +349,8 @@ class MeasureEvaluator:
                 )
 
     def _evaluate_classifier_impl(self, 
-                                var_name: Optional[str] = None,
-                                running: bool = True) -> Optional[str]:
+                            var_name: Optional[str] = None,
+                            running: bool = True) -> Optional[str]:
         """
         Internal implementation of CLASSIFIER evaluation with optimizations.
         

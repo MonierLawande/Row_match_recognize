@@ -409,6 +409,8 @@ def validate_pattern_structure(pattern: str) -> None:
         if char in "*+?" and (i == 0 or pattern[i-1] in "|({"):
             raise QuantifierError(f"Invalid quantifier '{char}' position", i, pattern)
 
+# Updates for src/matcher/pattern_tokenizer.py
+
 def tokenize_pattern(pattern: str) -> List[PatternToken]:
     """
     Enhanced tokenizer with comprehensive support for all pattern syntax features.
@@ -416,177 +418,249 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
     This tokenizer handles:
     - Basic pattern elements (literals, alternation, grouping)
     - Quantifiers (*, +, ?, {n}, {n,m})
-    - Anchors (^, $)
+    - Anchors (^ and $)
     - Pattern exclusions ({- ... -})
     - PERMUTE expressions with nested PERMUTE support
-    
-    Args:
-        pattern: The pattern string to tokenize
-        
-    Returns:
-        List of PatternToken objects
-        
-    Raises:
-        PatternSyntaxError: If pattern syntax is invalid
-        PermutePatternError: If PERMUTE syntax is invalid
-        QuantifierError: If quantifier syntax is invalid
-        UnbalancedPatternError: If pattern has unbalanced elements
+    - Subset variables
     """
     # First validate overall pattern structure
-    try:
-        validate_pattern_structure(pattern)
-    except PatternSyntaxError as e:
-        # Log the error with context
-        print(f"Pattern structure validation error: {str(e)}")
-        raise
+    validate_pattern_structure(pattern)
     
     tokens = []
     i = 0
-    paren_depth = 0  # Track parenthesis depth
     
-    try:
-        # Handle start anchor
-        if pattern.startswith('^'):
-            tokens.append(PatternToken(PatternTokenType.ANCHOR_START, '^'))
+    # Handle start anchor
+    if pattern.startswith('^'):
+        tokens.append(PatternToken(PatternTokenType.ANCHOR_START, '^'))
+        i += 1
+        
+    while i < len(pattern):
+        char = pattern[i]
+        
+        if char.isspace():
             i += 1
+            continue
             
-        while i < len(pattern):
-            char = pattern[i]
+        # Enhanced PERMUTE handling with recursive nesting and quantifiers
+        if i+7 <= len(pattern) and pattern[i:i+7].upper() == 'PERMUTE':
+            permute_start = i
+            i += 7  # Move past "PERMUTE"
             
-            if char.isspace():
+            # Skip whitespace after PERMUTE
+            while i < len(pattern) and pattern[i].isspace():
                 i += 1
-                continue
                 
-            # Enhanced PERMUTE handling with recursive nesting and quantifiers
-            if i+7 <= len(pattern) and pattern[i:i+7].upper() == 'PERMUTE':
-                permute_start = i
-                i += 7  # Move past "PERMUTE"
+            # Handle opening parenthesis
+            if i >= len(pattern) or pattern[i] != '(':
+                raise ValueError(f"Expected '(' after PERMUTE at position {i}")
+            
+            i += 1  # Skip opening parenthesis
+            
+            # Process PERMUTE variables
+            variables, i = process_permute_variables(pattern, i)
+            
+            if not variables:
+                raise ValueError(f"Empty PERMUTE not allowed at position {permute_start}")
+            
+            # Check for duplicate variables
+            var_names = [v for v in variables if isinstance(v, str)]
+            if len(var_names) != len(set(var_names)):
+                raise ValueError(f"Duplicate variables in PERMUTE at position {permute_start}")
+            
+            # Check for quantifiers after the PERMUTE construct
+            quantifier, is_greedy, i = parse_quantifier_at(pattern, i)
+            
+            # Create token with metadata about the PERMUTE variables
+            permute_token = PatternToken(
+                PatternTokenType.PERMUTE,
+                f"PERMUTE({','.join(str(v) for v in variables)})",
+                quantifier=quantifier,
+                greedy=is_greedy,
+                metadata={
+                    "variables": variables,
+                    "base_variables": [v for v in variables if isinstance(v, str)],
+                    "permute": True,
+                    "nested_permute": any(isinstance(v, PatternToken) and v.type == PatternTokenType.PERMUTE for v in variables),
+                    "original": pattern[permute_start:i]
+                }
+            )
+            
+            tokens.append(permute_token)
+        
+        # Handle pattern exclusion
+        elif char == '{' and i + 1 < len(pattern) and pattern[i + 1] == '-':
+            tokens.append(PatternToken(PatternTokenType.EXCLUSION_START, "{-"))
+            i += 2
+        elif char == '-' and i + 1 < len(pattern) and pattern[i + 1] == '}':
+            tokens.append(PatternToken(PatternTokenType.EXCLUSION_END, "-}"))
+            i += 2
+        
+        # Handle anchors
+        elif char == '^':
+            if i > 0 and not (i > 1 and pattern[i-1] == '(' and pattern[i-2] == '|'):
+                raise ValueError(f"^ anchor must be at start of pattern or alternation at position {i}")
+            tokens.append(PatternToken(PatternTokenType.ANCHOR_START, "^"))
+            i += 1
+        elif char == '$':
+            if i < len(pattern) - 1 and pattern[i+1] != ')' and pattern[i+1] != '|':
+                raise ValueError(f"$ anchor must be at end of pattern or alternation at position {i}")
+            tokens.append(PatternToken(PatternTokenType.ANCHOR_END, "$"))
+            i += 1
+        
+        # Handle alternation
+        elif char == '|':
+            tokens.append(PatternToken(PatternTokenType.ALTERNATION, "|"))
+            i += 1
+        
+        # Handle grouping
+        elif char == '(':
+            tokens.append(PatternToken(PatternTokenType.GROUP_START, "("))
+            i += 1
+        elif char == ')':
+            # Parse quantifier if present
+            next_pos = i + 1
+            quantifier = None
+            is_greedy = True
+            
+            if next_pos < len(pattern) and pattern[next_pos] in "*+?{":
+                quantifier, is_greedy, next_pos = parse_quantifier_at(pattern, next_pos)
+            
+            # Add token with optional quantifier
+            tokens.append(PatternToken(
+                PatternTokenType.GROUP_END, 
+                ")", 
+                quantifier, 
+                is_greedy
+            ))
+            
+            i = next_pos
+            
+        # Handle literal with quantifier
+        else:
+            # Extract literal variable name
+            var_start = i
+            while i < len(pattern) and pattern[i] not in "|()*+?{}^$ \t\n\r":
+                i += 1
+            
+            if i > var_start:
+                var_name = pattern[var_start:i]
                 
-                # Skip whitespace after PERMUTE
-                while i < len(pattern) and pattern[i].isspace():
-                    i += 1
-                    
-                # Handle opening parenthesis
-                if i >= len(pattern) or pattern[i] != '(':
-                    raise PermutePatternError("Expected '(' after PERMUTE", i, pattern)
-                
-                i += 1  # Skip opening parenthesis
-                
-                # Process PERMUTE variables
-                variables, i = process_permute_variables(pattern, i)
-                
-                if not variables:
-                    raise PermutePatternError("Empty PERMUTE not allowed", permute_start, pattern)
-                
-                # Check for duplicate variables
-                var_names = [v for v in variables if isinstance(v, str)]
-                if len(var_names) != len(set(var_names)):
-                    raise PermutePatternError("Duplicate variables in PERMUTE", permute_start, pattern)
-                
-                # Check for quantifiers after the PERMUTE construct
+                # Check for quantifiers
                 quantifier, is_greedy, i = parse_quantifier_at(pattern, i)
-                
-                # Create token with metadata about the PERMUTE variables
-                permute_token = PatternToken(
-                    PatternTokenType.PERMUTE,
-                    f"PERMUTE({','.join(str(v) for v in variables)})",
-                    quantifier=quantifier,
-                    greedy=is_greedy,
-                    metadata={
-                        "variables": variables,
-                        "base_variables": [v for v in variables if isinstance(v, str)],
-                        "permute": True,
-                        "nested_permute": any(isinstance(v, PatternToken) and v.type == PatternTokenType.PERMUTE for v in variables),
-                        "original": pattern[permute_start:i]
-                    }
-                )
-                
-                tokens.append(permute_token)
-            
-            # Handle pattern exclusion
-            elif char == '{' and i + 1 < len(pattern) and pattern[i + 1] == '-':
-                tokens.append(PatternToken(PatternTokenType.EXCLUSION_START, "{-"))
-                i += 2
-            elif char == '-' and i + 1 < len(pattern) and pattern[i + 1] == '}':
-                tokens.append(PatternToken(PatternTokenType.EXCLUSION_END, "-}"))
-                i += 2
-            
-            # Handle anchors
-            elif char == '^':
-                if i > 0 and not (i > 1 and pattern[i-1] == '(' and pattern[i-2] == '|'):
-                    raise PatternSyntaxError("^ anchor must be at start of pattern or alternation", i, pattern)
-                tokens.append(PatternToken(PatternTokenType.ANCHOR_START, "^"))
-                i += 1
-            elif char == '$':
-                if i < len(pattern) - 1 and pattern[i+1] != ')' and pattern[i+1] != '|':
-                    raise PatternSyntaxError("$ anchor must be at end of pattern or alternation", i, pattern)
-                tokens.append(PatternToken(PatternTokenType.ANCHOR_END, "$"))
-                i += 1
-            
-            # Handle alternation
-            elif char == '|':
-                tokens.append(PatternToken(PatternTokenType.ALTERNATION, "|"))
-                i += 1
-            
-            # Handle grouping
-            elif char == '(':
-                tokens.append(PatternToken(PatternTokenType.GROUP_START, "("))
-                paren_depth += 1
-                i += 1
-            elif char == ')':
-                paren_depth -= 1
-                
-                # Parse quantifier if present
-                next_pos = i + 1
-                quantifier = None
-                is_greedy = True
-                
-                if next_pos < len(pattern) and pattern[next_pos] in "*+?{":
-                    quantifier, is_greedy, next_pos = parse_quantifier_at(pattern, next_pos)
                 
                 # Add token with optional quantifier
                 tokens.append(PatternToken(
-                    PatternTokenType.GROUP_END, 
-                    ")", 
+                    PatternTokenType.LITERAL, 
+                    var_name, 
                     quantifier, 
                     is_greedy
                 ))
-                
-                i = next_pos
-                
-            # Handle literal with quantifier
-            else:
-                # Extract literal variable name
-                var_start = i
-                while i < len(pattern) and pattern[i] not in "|()*+?{}^$ \t\n\r":
-                    i += 1
-                
-                if i > var_start:
-                    var_name = pattern[var_start:i]
-                    
-                    # Check for quantifiers
-                    quantifier, is_greedy, i = parse_quantifier_at(pattern, i)
-                    
-                    # Add token with optional quantifier
-                    tokens.append(PatternToken(
-                        PatternTokenType.LITERAL, 
-                        var_name, 
-                        quantifier, 
-                        is_greedy
-                    ))
+    
+    # Handle end anchor if present
+    if pattern.endswith('$'):
+        # If we already processed the $, don't add it again
+        if len(tokens) == 0 or tokens[-1].type != PatternTokenType.ANCHOR_END:
+            tokens.append(PatternToken(PatternTokenType.ANCHOR_END, "$"))
+    
+    return tokens
+
+def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[str, PatternToken]], int]:
+    """
+    Process variables in a PERMUTE expression, handling nested PERMUTE patterns.
+    
+    Args:
+        pattern: The full pattern string
+        start_pos: Position to start parsing from (after opening parenthesis)
         
-        # Handle end anchor if present
-        if pattern.endswith('$'):
-            # If we already processed the $, don't add it again
-            if len(tokens) == 0 or tokens[-1].type != PatternTokenType.ANCHOR_END:
-                tokens.append(PatternToken(PatternTokenType.ANCHOR_END, "$"))
-        
-        return tokens
-        
-    except (PatternSyntaxError, PermutePatternError, QuantifierError, UnbalancedPatternError) as e:
-        # Log the error with context
-        print(f"Pattern tokenization error: {str(e)}")
-        raise
+    Returns:
+        Tuple of (variables_list, new_position)
+    """
+    variables = []
+    pos = start_pos
+    var_start = pos
+    nested_permute_depth = 0
+    
+    while pos < len(pattern):
+        # Handle nested PERMUTE
+        if pos + 7 <= len(pattern) and pattern[pos:pos+7].upper() == 'PERMUTE':
+            # Extract any variable before this nested PERMUTE
+            if pos > var_start:
+                var_text = pattern[var_start:pos].strip()
+                if var_text and not var_text.endswith(','):
+                    if var_text.endswith(','):
+                        var_text = var_text[:-1].strip()
+                    if var_text:
+                        variables.append(var_text)
+            
+            # Process the nested PERMUTE
+            nested_start = pos
+            pos += 7  # Skip "PERMUTE"
+            
+            # Skip whitespace
+            while pos < len(pattern) and pattern[pos].isspace():
+                pos += 1
+                
+            if pos >= len(pattern) or pattern[pos] != '(':
+                raise ValueError(f"Expected '(' after nested PERMUTE at position {pos}")
+                
+            # Find matching closing parenthesis for the nested PERMUTE
+            nested_paren_depth = 1
+            pos += 1  # Skip opening parenthesis
+            nested_content_start = pos
+            
+            while pos < len(pattern) and nested_paren_depth > 0:
+                if pattern[pos] == '(':
+                    nested_paren_depth += 1
+                elif pattern[pos] == ')':
+                    nested_paren_depth -= 1
+                pos += 1
+                
+            if nested_paren_depth > 0:
+                raise ValueError(f"Unmatched parenthesis in nested PERMUTE at position {nested_start}")
+                
+            # Extract nested PERMUTE content
+            nested_content_end = pos - 1  # Position of closing parenthesis
+            nested_content = pattern[nested_start:pos]
+            
+            # Recursively tokenize the nested PERMUTE
+            nested_tokens = tokenize_pattern(nested_content)
+            
+            if nested_tokens and nested_tokens[0].type == PatternTokenType.PERMUTE:
+                # Mark as nested and add to variables
+                nested_tokens[0].metadata["nested"] = True
+                variables.append(nested_tokens[0])
+                
+                # Check for quantifiers on the nested PERMUTE
+                if pos < len(pattern) and pattern[pos] in "*+?{":
+                    quantifier, is_greedy, pos = parse_quantifier_at(pattern, pos)
+                    if nested_tokens[0]:
+                        nested_tokens[0].quantifier = quantifier
+                        nested_tokens[0].greedy = is_greedy
+            
+            var_start = pos
+            
+        elif pattern[pos] == ',':
+            # Extract variable and skip comma
+            if pos > var_start:
+                var_text = pattern[var_start:pos].strip()
+                if var_text:
+                    variables.append(var_text)
+            pos += 1
+            var_start = pos
+            
+        elif pattern[pos] == ')':
+            # Extract final variable before closing parenthesis
+            if pos > var_start:
+                var_text = pattern[var_start:pos].strip()
+                if var_text:
+                    variables.append(var_text)
+            return variables, pos + 1  # Return position after closing parenthesis
+            
+        else:
+            pos += 1
+            
+    # If we get here, we didn't find the closing parenthesis
+    raise ValueError(f"Unterminated PERMUTE expression at position {start_pos - 1}")
 
 class PermuteHandler:
     """Handles PERMUTE patterns with lexicographical ordering and optimizations."""
