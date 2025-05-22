@@ -661,7 +661,6 @@ def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[
             
     # If we get here, we didn't find the closing parenthesis
     raise ValueError(f"Unterminated PERMUTE expression at position {start_pos - 1}")
-
 class PermuteHandler:
     """Handles PERMUTE patterns with lexicographical ordering and optimizations."""
     
@@ -743,67 +742,262 @@ class PermuteHandler:
         Handles nested PERMUTE patterns like PERMUTE(A, PERMUTE(B, C)).
         
         Args:
-            pattern: Pattern object with potentially nested PERMUTE
+            pattern: Pattern object or metadata with potentially nested PERMUTE
             
         Returns:
             Expanded pattern with all permutations properly resolved
-            
-        Raises:
-            ValueError: If pattern format is invalid
         """
-        if not isinstance(pattern, dict) and not hasattr(pattern, 'get'):
-            raise ValueError(f"Invalid pattern format: {pattern}")
-            
-        # Check if pattern has nested PERMUTE
-        if not self._has_nested_permute(pattern):
-            variables = pattern.get('variables', [])
-            if not variables:
-                raise ValueError("No variables found in pattern")
-            return self.expand_permutation(variables)
-            
-        # Process nested permutations first, then outer permutation
-        expanded_variables = []
-        for component in pattern.get('components', []):
-            if component.get('permute', False):
-                # Recursively expand nested permute
-                expanded = self.expand_nested_permute(component)
-                expanded_variables.append(expanded)
-            else:
-                var = component.get('variable')
-                if var:
-                    expanded_variables.append([var])
+        import itertools
         
-        # Flatten the expanded variables
-        flat_variables = []
-        for sublist in expanded_variables:
-            if isinstance(sublist, list):
-                flat_variables.extend(sublist)
-            else:
-                flat_variables.append(sublist)
+        # Extract pattern text for parsing
+        pattern_text = ""
+        if hasattr(pattern, 'pattern'):
+            pattern_text = pattern.pattern
+        elif hasattr(pattern, 'metadata') and pattern.metadata.get('original_pattern'):
+            pattern_text = pattern.metadata.get('original_pattern')
+        elif isinstance(pattern, dict) and pattern.get('original_pattern'):
+            pattern_text = pattern.get('original_pattern')
+        else:
+            pattern_text = str(pattern)
+        
+        # If we have a pattern with nested PERMUTE, parse it directly
+        if 'PERMUTE' in pattern_text.upper():
+            # First, handle the outer PERMUTE
+            outer_match = re.search(r'PERMUTE\s*\(\s*(.*?)\s*\)', pattern_text, re.IGNORECASE | re.DOTALL)
+            if outer_match:
+                outer_content = outer_match.group(1)
                 
-        return self.expand_permutation(flat_variables)
-            
-    def _has_nested_permute(self, pattern):
+                # Split the outer content by commas, but respect nested PERMUTE
+                outer_vars = []
+                var_start = 0
+                paren_depth = 0
+                in_nested = False
+                
+                i = 0
+                while i < len(outer_content):
+                    # Check for nested PERMUTE
+                    if i + 7 <= len(outer_content) and outer_content[i:i+7].upper() == 'PERMUTE':
+                        in_nested = True
+                        nested_start = i
+                        i += 7  # Skip "PERMUTE"
+                        
+                        # Skip whitespace
+                        while i < len(outer_content) and outer_content[i].isspace():
+                            i += 1
+                        
+                        # Find the matching parenthesis for this PERMUTE
+                        if i < len(outer_content) and outer_content[i] == '(':
+                            paren_depth = 1
+                            i += 1  # Skip opening parenthesis
+                            
+                            while i < len(outer_content) and paren_depth > 0:
+                                if outer_content[i] == '(':
+                                    paren_depth += 1
+                                elif outer_content[i] == ')':
+                                    paren_depth -= 1
+                                i += 1
+                            
+                            # Extract the entire nested PERMUTE expression
+                            nested_expr = outer_content[nested_start:i]
+                            
+                            # Add any previous variable if exists
+                            if var_start < nested_start:
+                                prefix = outer_content[var_start:nested_start].strip()
+                                if prefix and prefix != ',':
+                                    if prefix.endswith(','):
+                                        prefix = prefix[:-1].strip()
+                                    if prefix:
+                                        outer_vars.append(prefix)
+                            
+                            # Add the nested PERMUTE as a single variable
+                            outer_vars.append(nested_expr)
+                            
+                            # Reset for next variable
+                            var_start = i
+                            in_nested = False
+                            
+                            # Skip any comma after the nested PERMUTE
+                            if i < len(outer_content) and outer_content[i] == ',':
+                                var_start = i + 1
+                                i += 1
+                            continue
+                    
+                    # Handle regular variable separation
+                    if outer_content[i] == ',' and not in_nested and paren_depth == 0:
+                        # Extract variable before comma
+                        var = outer_content[var_start:i].strip()
+                        if var:
+                            outer_vars.append(var)
+                        var_start = i + 1
+                    
+                    i += 1
+                
+                # Add the last variable if any
+                if var_start < len(outer_content):
+                    var = outer_content[var_start:].strip()
+                    if var:
+                        outer_vars.append(var)
+                
+                # Process each variable from the outer PERMUTE
+                expanded_variables = []
+                for var in outer_vars:
+                    if isinstance(var, str) and 'PERMUTE' in var.upper():
+                        # This is a nested PERMUTE - extract its variables
+                        nested_match = re.search(r'PERMUTE\s*\(\s*(.*?)\s*\)', var, re.IGNORECASE | re.DOTALL)
+                        if nested_match:
+                            nested_content = nested_match.group(1)
+                            nested_vars = [v.strip() for v in nested_content.split(',')]
+                            # Expand the nested permutation
+                            expanded = self.expand_permutation(nested_vars)
+                            expanded_variables.append(expanded)
+                        else:
+                            # If we couldn't extract nested vars, treat as regular variable
+                            expanded_variables.append([var])
+                    else:
+                        # Regular variable
+                        expanded_variables.append([var])
+                
+                # Generate all combinations of the expanded variables
+                result = []
+                for combo in itertools.product(*expanded_variables):
+                    result.append(list(itertools.chain.from_iterable(
+                        [item] if isinstance(item, str) else item 
+                        for item in combo
+                    )))
+                
+                return result
+        
+        # Fallback to simple permutation if we couldn't parse the nested structure
+        if hasattr(pattern, 'metadata'):
+            variables = pattern.metadata.get('variables', [])
+        elif isinstance(pattern, dict):
+            variables = pattern.get('variables', [])
+        else:
+            variables = []
+        
+        if not variables:
+            # Try to extract variables from the pattern text
+            if pattern_text and 'PERMUTE' in pattern_text.upper():
+                match = re.search(r'PERMUTE\s*\(\s*(.*?)\s*\)', pattern_text, re.IGNORECASE | re.DOTALL)
+                if match:
+                    content = match.group(1)
+                    variables = [v.strip() for v in content.split(',')]
+        
+        if not variables:
+            raise ValueError("No variables found in pattern")
+        
+        # Clean up variables - remove any PERMUTE prefixes
+        clean_variables = []
+        for var in variables:
+            if isinstance(var, str) and 'PERMUTE' in var.upper():
+                # Extract variables from this PERMUTE string
+                match = re.search(r'PERMUTE\s*\(\s*(.*?)\s*\)', var, re.IGNORECASE | re.DOTALL)
+                if match:
+                    nested_vars = [v.strip() for v in match.group(1).split(',')]
+                    clean_variables.extend(nested_vars)
+                else:
+                    clean_variables.append(var)
+            else:
+                clean_variables.append(var)
+        
+        return self.expand_permutation(clean_variables)
+
+
+    def _parse_permute_content(self, content):
         """
-        Check if pattern has nested PERMUTE.
+        Parse PERMUTE content with proper handling of nested PERMUTE expressions.
         
         Args:
-            pattern: Pattern object to check
+            content: The content inside a PERMUTE(...) expression
             
         Returns:
-            True if pattern has nested PERMUTE, False otherwise
+            List of variables, with nested PERMUTE expressions preserved
         """
-        if not isinstance(pattern, dict) and not hasattr(pattern, 'get'):
-            return False
+        variables = []
+        start = 0
+        paren_depth = 0
+        in_nested_permute = False
+        nested_start = -1
+        
+        for i, char in enumerate(content):
+            if char == '(' and not in_nested_permute and content[max(0, i-7):i].upper().endswith('PERMUTE'):
+                in_nested_permute = True
+                nested_start = max(0, i-7)
+                paren_depth = 1
+            elif in_nested_permute:
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                    if paren_depth == 0:
+                        # End of nested PERMUTE
+                        nested_expr = content[nested_start:i+1]
+                        if start < nested_start:
+                            # Add any content before the nested PERMUTE
+                            prefix = content[start:nested_start].strip()
+                            if prefix and prefix != ',':
+                                if prefix.endswith(','):
+                                    prefix = prefix[:-1].strip()
+                                if prefix:
+                                    variables.append(prefix)
+                        variables.append(nested_expr)
+                        in_nested_permute = False
+                        start = i + 1
+            elif char == ',' and not in_nested_permute:
+                # Regular variable separator
+                var = content[start:i].strip()
+                if var:
+                    variables.append(var)
+                start = i + 1
+        
+        # Add the last variable if any
+        if start < len(content) and not in_nested_permute:
+            var = content[start:].strip()
+            if var:
+                variables.append(var)
+        
+        return variables
+    
+    def _extract_pattern_metadata(self, pattern):
+        """
+        Extract pattern metadata from various input types.
+        
+        Args:
+            pattern: Pattern object, dict, or other object with metadata
             
-        if not pattern.get('permute', False):
-            return False
+        Returns:
+            Dict containing pattern metadata
+        """
+        if hasattr(pattern, 'metadata'):
+            return pattern.metadata
+        elif isinstance(pattern, dict):
+            return pattern
+        elif hasattr(pattern, 'get'):
+            return pattern
+        else:
+            # Try to extract from string representation
+            if isinstance(pattern, str) and 'PERMUTE' in pattern.upper():
+                return {'variables': self._extract_nested_permute_vars(pattern)}
+            return {}
+    
+    def _extract_nested_permute_vars(self, permute_str):
+        """
+        Extract variables from a nested PERMUTE string.
+        
+        Args:
+            permute_str: String containing PERMUTE expression
             
-        for component in pattern.get('components', []):
-            if component.get('permute', False):
-                return True
-                
-        return False
+        Returns:
+            List of variables in the PERMUTE expression
+        """
+        import re
+        match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', permute_str, re.IGNORECASE)
+        if match:
+            content = match.group(1)
+            # Parse with proper handling of nested PERMUTE
+            return self._parse_permute_content(content)
+        return []
+    
     def analyze_pattern_hierarchy(self, pattern_text):
         """
         Analyze a pattern to determine variable hierarchy for lexicographical ordering.
@@ -815,42 +1009,24 @@ class PermuteHandler:
         """
         def parse_permute(text, level=0):
             """Recursively parse PERMUTE expressions."""
-            match = re.search(r'PERMUTE\s*\((.*)\)', text, re.IGNORECASE)
+            match = re.search(r'PERMUTE\s*\((.+)\)', text, re.IGNORECASE)
             if not match:
                 return []
             
             content = match.group(1)
             variables = []
             
-            # Split by commas, but respect nested parentheses
-            parts = []
-            start = 0
-            paren_depth = 0
+            # Parse with proper handling of nested PERMUTE
+            parsed_vars = self._parse_permute_content(content)
             
-            for i, char in enumerate(content):
-                if char == '(':
-                    paren_depth += 1
-                elif char == ')':
-                    paren_depth -= 1
-                elif char == ',' and paren_depth == 0:
-                    parts.append(content[start:i].strip())
-                    start = i + 1
-            
-            # Add the last part
-            if start < len(content):
-                parts.append(content[start:].strip())
-            
-            # Process each part
-            for part in parts:
-                if 'PERMUTE' in part.upper():
-                    # This is a nested PERMUTE - parse recursively
-                    nested_vars = parse_permute(part, level + 1)
+            for var in parsed_vars:
+                if isinstance(var, str) and 'PERMUTE' in var.upper():
+                    # Recursive parsing of nested PERMUTE
+                    nested_vars = parse_permute(var, level + 1)
                     variables.extend(nested_vars)
                 else:
-                    # This is a regular variable
-                    var = part.strip()
-                    if var:
-                        variables.append((var, level))
+                    # Regular variable
+                    variables.append((var, level))
             
             return variables
         
@@ -866,4 +1042,3 @@ class PermuteHandler:
             priority[var] = level * 1000 + idx
         
         return priority
-

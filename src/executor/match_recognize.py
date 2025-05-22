@@ -569,14 +569,27 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
 
         return result_df[ordered_cols]
 
-    # If PERMUTE is present, expand the pattern and use the expanded pattern for matching
+        #  handles PERMUTE patterns
     if mr_clause.pattern.metadata.get('permute', False):
         permute_handler = PermuteHandler()
-        if mr_clause.pattern.metadata.get('nested_permute', False):
-            expanded_pattern = permute_handler.expand_nested_permute(mr_clause.pattern)
-        else:
-            expanded_pattern = {'permutations': permute_handler.expand_permutation(mr_clause.pattern.metadata['variables'])}
-        # Use expanded pattern for matching
+        try:
+            if mr_clause.pattern.metadata.get('nested_permute', False):
+                expanded_pattern = permute_handler.expand_nested_permute(mr_clause.pattern)
+            else:
+                expanded_pattern = permute_handler.expand_permutation(mr_clause.pattern.metadata['variables'])
+            
+            # Store expanded pattern for matching
+            mr_clause.pattern.metadata['expanded_pattern'] = expanded_pattern
+            print(f"Successfully expanded PERMUTE pattern with {len(expanded_pattern)} permutations")
+        except Exception as e:
+            print(f"Warning: Error expanding PERMUTE pattern: {e}")
+            # Fallback to simple permutation if nested expansion fails
+            try:
+                expanded_pattern = permute_handler.expand_permutation(mr_clause.pattern.metadata['variables'])
+                mr_clause.pattern.metadata['expanded_pattern'] = expanded_pattern
+                print(f"Using fallback permutation with {len(expanded_pattern)} permutations")
+            except Exception as e2:
+                print(f"Critical error in PERMUTE handling: {e2}")
 
     # Extract the original variable order from PERMUTE pattern
     original_variable_order = []
