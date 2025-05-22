@@ -782,7 +782,7 @@ class PermuteHandler:
                 flat_variables.append(sublist)
                 
         return self.expand_permutation(flat_variables)
-        
+            
     def _has_nested_permute(self, pattern):
         """
         Check if pattern has nested PERMUTE.
@@ -804,3 +804,66 @@ class PermuteHandler:
                 return True
                 
         return False
+    def analyze_pattern_hierarchy(self, pattern_text):
+        """
+        Analyze a pattern to determine variable hierarchy for lexicographical ordering.
+        
+        For nested PERMUTE patterns, Trino applies these rules:
+        1. Variables in outer PERMUTE have higher priority than inner PERMUTE variables
+        2. Within each PERMUTE level, earlier variables have higher priority
+        3. For sequences ending with the same variable, lexicographical ordering is applied
+        """
+        def parse_permute(text, level=0):
+            """Recursively parse PERMUTE expressions."""
+            match = re.search(r'PERMUTE\s*\((.*)\)', text, re.IGNORECASE)
+            if not match:
+                return []
+            
+            content = match.group(1)
+            variables = []
+            
+            # Split by commas, but respect nested parentheses
+            parts = []
+            start = 0
+            paren_depth = 0
+            
+            for i, char in enumerate(content):
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                elif char == ',' and paren_depth == 0:
+                    parts.append(content[start:i].strip())
+                    start = i + 1
+            
+            # Add the last part
+            if start < len(content):
+                parts.append(content[start:].strip())
+            
+            # Process each part
+            for part in parts:
+                if 'PERMUTE' in part.upper():
+                    # This is a nested PERMUTE - parse recursively
+                    nested_vars = parse_permute(part, level + 1)
+                    variables.extend(nested_vars)
+                else:
+                    # This is a regular variable
+                    var = part.strip()
+                    if var:
+                        variables.append((var, level))
+            
+            return variables
+        
+        # Parse the pattern and create hierarchy
+        variables = parse_permute(pattern_text)
+        
+        # Create priority map based on level and position
+        # Lower priority number means higher priority
+        priority = {}
+        for idx, (var, level) in enumerate(variables):
+            # Priority formula: level * 1000 + position
+            # This ensures outer PERMUTE variables have higher priority
+            priority[var] = level * 1000 + idx
+        
+        return priority
+
