@@ -317,8 +317,6 @@ def extract_original_variable_order(pattern_clause):
     # Split by comma and clean up whitespace
     variables = [var.strip() for var in permute_content.group(1).split(',')]
     return variables
-
-
 def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     """
     Execute a MATCH_RECOGNIZE query against a Pandas DataFrame.
@@ -676,6 +674,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         try:
                             semantics = measure_semantics.get(alias, "FINAL")
                             result_row[alias] = evaluator.evaluate(expr, semantics)
+                            print(f"Setting {alias} to {result_row[alias]} from evaluator")
                         except Exception as e:
                             print(f"Error evaluating measure {alias}: {e}")
                             result_row[alias] = None
@@ -770,25 +769,11 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             for alias, expr in measures.items():
                                 try:
                                     semantics = measure_semantics.get(alias, "RUNNING")
-                                    
-                                    # For pattern variable references (A.value, B.value, etc.), only populate
-                                    # if the corresponding variable has been matched up to this point
-                                    if '.' in expr:
-                                        var_name = expr.split('.')[0]
-                                        if var_name in context.variables:
-                                            # Only populate if the variable has been matched up to this row
-                                            var_indices = context.variables[var_name]
-                                            if any(i <= idx for i in var_indices):
-                                                result[alias] = evaluator.evaluate(expr, semantics)
-                                            else:
-                                                result[alias] = None
-                                        else:
-                                            result[alias] = None
-                                    else:
-                                        # For other expressions, evaluate normally
-                                        result[alias] = evaluator.evaluate(expr, semantics)
+                                    # Standard evaluation for all expressions - no special case handling
+                                    result[alias] = evaluator.evaluate(expr, semantics)
+                                    print(f"DEBUG: Set {alias}={result[alias]} for row {idx}")
                                 except Exception as e:
-                                    print(f"Error evaluating measure {alias}: {e}")
+                                    print(f"Error evaluating measure {alias} for row {idx}: {e}")
                                     result[alias] = None
                             
                             # Add match metadata
@@ -807,6 +792,27 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 # Create result DataFrame
                 result_df = pd.DataFrame(results)
+                
+                # Debug the measure columns
+                print("\nDEBUG: Checking measure columns in final DataFrame:")
+                for alias in measures.keys():
+                    if alias in result_df.columns:
+                        print(f"  Measure '{alias}' exists with values: {result_df[alias].head(3).tolist()}")
+                    else:
+                        print(f"  Measure '{alias}' is MISSING from result DataFrame")
+                
+                # Ensure measure columns are properly preserved
+                for alias in measures.keys():
+                    if alias in result_df.columns:
+                        # Check if the column has all None values when it shouldn't
+                        if result_df[alias].isna().all():
+                            print(f"WARNING: Measure column '{alias}' has all None values!")
+                            
+                            # Try to recover values from raw results if possible
+                            for i, row in enumerate(results):
+                                if alias in row and row[alias] is not None:
+                                    result_df.at[i, alias] = row[alias]
+                                    print(f"  Fixed value at row {i}: {row[alias]}")
                 
                 # Handle empty result case
                 if result_df.empty:
@@ -871,520 +877,6 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         # Always record total time
         metrics["total_time"] = time.time() - start_time
         print(f"Query execution metrics: {metrics}")
-    """
-    Execute a MATCH_RECOGNIZE query against a Pandas DataFrame.
-    
-    This production-ready implementation follows SQL:2016 standard for pattern matching
-    with full support for all features including nested PERMUTE patterns, navigation functions,
-    and different output modes.
-    
-    Args:
-        query: SQL query string containing a MATCH_RECOGNIZE clause
-        df: Input DataFrame to perform pattern matching on
-        
-    Returns:
-        DataFrame containing the query results
-        
-    Raises:
-        ValueError: If the query is invalid or cannot be executed
-        RuntimeError: If an unexpected error occurs during execution
-    """
-    # Initialize performance metrics
-    metrics = {
-        "parsing_time": 0,
-        "automata_build_time": 0,
-        "matching_time": 0,
-        "result_processing_time": 0,
-        "total_time": 0,
-        "partition_count": 0,
-        "match_count": 0
-    }
-    start_time = time.time()
-    
-    try:
-        # --- PARSE QUERY ---
-        parsing_start = time.time()
-        try:
-            ast = parse_full_query(query)
-            if not ast.match_recognize:
-                raise ValueError("No MATCH_RECOGNIZE clause found in the query.")
-            mr_clause = ast.match_recognize
-        except Exception as e:
-            raise ValueError(f"Failed to parse query: {str(e)}")
-        metrics["parsing_time"] = time.time() - parsing_start
-        
-        # --- EXTRACT CONFIGURATION ---
-        
-        # Extract partitioning and ordering information
-        partition_by = mr_clause.partition_by.columns if mr_clause.partition_by else []
-        order_by = [si.column for si in mr_clause.order_by.sort_items] if mr_clause.order_by else []
-        
-        # Extract pattern information
-        if not mr_clause.pattern:
-            raise ValueError("PATTERN clause is required in MATCH_RECOGNIZE")
-        pattern_text = mr_clause.pattern.pattern
-        
-        # Extract rows per match configuration
-        rows_per_match = RowsPerMatch.ONE_ROW  # Default
-        show_empty = True
-        include_unmatched = False
-        
-        if mr_clause.rows_per_match:
-            clean_text = mr_clause.rows_per_match.raw_mode.upper().replace(" ", "")
-            
-            if "ALL" in clean_text:
-                if "WITHUNMATCHED" in clean_text:
-                    rows_per_match = RowsPerMatch.ALL_ROWS_WITH_UNMATCHED
-                    include_unmatched = True
-                    show_empty = True
-                elif "OMITEMPTY" in clean_text:
-                    rows_per_match = RowsPerMatch.ALL_ROWS
-                    show_empty = False
-                else:
-                    rows_per_match = RowsPerMatch.ALL_ROWS_SHOW_EMPTY
-                    show_empty = True
-        
-        # Validate pattern exclusions
-        if rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED:
-            if "{-" in pattern_text and "-}" in pattern_text:
-                raise ValueError(
-                    "Pattern exclusions ({- ... -}) are not allowed with ALL ROWS PER MATCH WITH UNMATCHED ROWS. "
-                    "This combination is prohibited by the SQL standard."
-                )
-        
-        # Extract after match skip configuration
-        skip_mode = SkipMode.PAST_LAST_ROW  # Default
-        skip_var = None
-        
-        if mr_clause.after_match_skip:
-            skip_text = mr_clause.after_match_skip.mode
-            if skip_text == "TO NEXT ROW":
-                skip_mode = SkipMode.TO_NEXT_ROW
-            elif skip_text == "TO FIRST":
-                skip_mode = SkipMode.TO_FIRST
-                skip_var = mr_clause.after_match_skip.target_variable
-            elif skip_text == "TO LAST":
-                skip_mode = SkipMode.TO_LAST
-                skip_var = mr_clause.after_match_skip.target_variable
-        
-        # Extract define and subset information
-        define = {d.variable: d.condition for d in mr_clause.define.definitions} if mr_clause.define else {}
-        subset_dict = extract_subset_dict(mr_clause.subset if mr_clause.subset else [])
-        
-        # Extract measures and semantics
-        measures = {}
-        measure_semantics = {}
-        
-        if mr_clause.measures:
-            for m in mr_clause.measures.measures:
-                expr = m.expression
-                alias = m.alias if m.alias else expr
-                
-                # Determine semantics based on measure type and rows_per_match
-                if m.is_classifier:
-                    measures[alias] = expr
-                    measure_semantics[alias] = "FINAL" if rows_per_match == RowsPerMatch.ONE_ROW else "RUNNING"
-                elif expr.upper() == "MATCH_NUMBER()":
-                    measures[alias] = "MATCH_NUMBER()"
-                    measure_semantics[alias] = "FINAL" if rows_per_match == RowsPerMatch.ONE_ROW else "RUNNING"
-                else:
-                    # Handle explicit semantics prefixes
-                    if expr.upper().startswith("RUNNING "):
-                        measures[alias] = expr[8:].strip()
-                        measure_semantics[alias] = "RUNNING"
-                    elif expr.upper().startswith("FINAL "):
-                        measures[alias] = expr[6:].strip()
-                        measure_semantics[alias] = "FINAL"
-                    elif m.metadata and 'semantics' in m.metadata:
-                        measures[alias] = expr
-                        measure_semantics[alias] = m.metadata['semantics']
-                    else:
-                        # Default semantics based on rows_per_match
-                        measures[alias] = expr
-                        measure_semantics[alias] = "RUNNING" if rows_per_match != RowsPerMatch.ONE_ROW else "FINAL"
-        
-        # Create match configuration
-        config = MatchConfig(
-            rows_per_match=rows_per_match,
-            skip_mode=skip_mode,
-            skip_var=skip_var,
-            show_empty=show_empty,
-            include_unmatched=include_unmatched,
-        )
-        
-        # --- BUILD PATTERN MATCHING AUTOMATA ---
-        
-        automata_start = time.time()
-        try:
-            # Build pattern matching automata
-            pattern_tokens = tokenize_pattern(pattern_text)
-            nfa_builder = NFABuilder()
-            nfa = nfa_builder.build(pattern_tokens, define, subset_dict)
-            dfa_builder = DFABuilder(nfa)
-            dfa = dfa_builder.build()
-            
-            # Create matcher with all necessary parameters
-            matcher = EnhancedMatcher(
-                dfa=dfa,
-                measures=measures,
-                measure_semantics=measure_semantics,
-                exclusion_ranges=nfa.exclusion_ranges,
-                after_match_skip=skip_mode,
-                subsets=subset_dict,
-                original_pattern=pattern_text
-            )
-        except Exception as e:
-            raise ValueError(f"Failed to build pattern matching automata: {str(e)}")
-        metrics["automata_build_time"] = time.time() - automata_start
-        
-        # --- PROCESS PARTITIONS ---
-        
-        results = []
-        all_matches = []  # Store all matches for post-processing
-        all_rows = []  # Store all rows for post-processing
-        all_matched_indices = set()  # Track all matched indices for unmatched row detection
-        
-        # Partition the DataFrame
-        matching_start = time.time()
-        try:
-            # Handle empty DataFrame case
-            if df.empty:
-                metrics["matching_time"] = time.time() - matching_start
-                # Return empty result with correct columns
-                columns = []
-                columns.extend(partition_by)
-                if measures:
-                    columns.extend(measures.keys())
-                return pd.DataFrame(columns=columns)
-            
-            # Create partitions
-            partitions = [group for _, group in df.groupby(partition_by, sort=False)] if partition_by else [df]
-            metrics["partition_count"] = len(partitions)
-            
-            # Process each partition
-            for partition_idx, partition in enumerate(partitions):
-                # Skip empty partitions
-                if partition.empty:
-                    continue
-                
-                # Order the partition
-                if order_by:
-                    partition = partition.sort_values(by=order_by)
-                
-                # Convert to rows
-                rows = partition.to_dict('records')
-                partition_start_idx = len(all_rows)  # Remember where this partition starts
-                all_rows.extend(rows)  # Store rows for post-processing
-                
-                # Find matches
-                partition_results = matcher.find_matches(
-                    rows=rows,
-                    config=config,
-                    measures=measures
-                )
-                
-                # Store matches for post-processing with adjusted indices
-                if hasattr(matcher, "_matches"):
-                    for match in matcher._matches:
-                        # Adjust indices to be relative to all_rows
-                        if "variables" in match:
-                            adjusted_vars = {}
-                            for var, indices in match["variables"].items():
-                                adjusted_indices = [idx + partition_start_idx for idx in indices]
-                                adjusted_vars[var] = adjusted_indices
-                                all_matched_indices.update(adjusted_indices)
-                            match["variables"] = adjusted_vars
-                        
-                        # Adjust start and end indices
-                        if "start" in match:
-                            match["start"] += partition_start_idx
-                        if "end" in match:
-                            match["end"] += partition_start_idx
-                        
-                        all_matches.append(match)
-                
-                # Add partition columns if needed
-                if partition_by and rows:
-                    for result in partition_results:
-                        for col in partition_by:
-                            if col not in result and rows:
-                                result[col] = rows[0][col]
-                
-                results.extend(partition_results)
-            
-            # Filter nested PERMUTE patterns
-            if mr_clause.pattern and "PERMUTE" in mr_clause.pattern.pattern:
-                # Check for nested PERMUTE pattern
-                nested_match = re.search(r'PERMUTE\s*\(\s*([^,]+)\s*,\s*PERMUTE\s*\(\s*([^)]+)\s*\)\s*\)', 
-                                        mr_clause.pattern.pattern, re.IGNORECASE)
-                if nested_match:
-                    # Extract outer and inner variables
-                    outer_var = nested_match.group(1).strip()
-                    inner_vars_str = nested_match.group(2).strip()
-                    inner_vars = [v.strip() for v in inner_vars_str.split(',')]
-                    
-                    # Filter matches to ensure inner variables are adjacent
-                    filtered_matches = []
-                    for match in all_matches:
-                        # Extract the sequence of variables in the match
-                        sequence = []
-                        for idx in range(match['start'], match['end'] + 1):
-                            for var, indices in match['variables'].items():
-                                if idx in indices:
-                                    sequence.append(var)
-                                    break
-                        
-                        # Check if inner variables are adjacent
-                        inner_positions = []
-                        for i, var in enumerate(sequence):
-                            if var in inner_vars:
-                                inner_positions.append(i)
-                        
-                        # Inner variables must be adjacent (consecutive positions)
-                        if inner_positions and max(inner_positions) - min(inner_positions) + 1 == len(inner_positions):
-                            filtered_matches.append(match)
-                        else:
-                            print(f"Rejecting match with sequence {sequence}: inner variables {inner_vars} are not adjacent")
-                    
-                    # Replace all_matches with filtered matches
-                    all_matches = filtered_matches
-            
-            # Apply nested PERMUTE validation and lexicographical filtering
-            if mr_clause.pattern and "PERMUTE" in mr_clause.pattern.pattern:
-                all_matches = filter_lexicographically(
-                    all_matches, 
-                    mr_clause.pattern.metadata, 
-                    all_rows, 
-                    partition_by
-                )
-            
-            metrics["match_count"] = len(all_matches)
-        except Exception as e:
-            raise RuntimeError(f"Error during pattern matching: {str(e)}")
-        metrics["matching_time"] = time.time() - matching_start
-        
-        # --- PROCESS RESULTS ---
-        
-        processing_start = time.time()
-        try:
-            # Handle empty results case
-            if not results and not all_matches:
-                # Create empty DataFrame with appropriate columns
-                columns = []
-                columns.extend(partition_by)
-                if measures:
-                    columns.extend(measures.keys())
-                metrics["result_processing_time"] = time.time() - processing_start
-                metrics["total_time"] = time.time() - start_time
-                return pd.DataFrame(columns=columns)
-            
-            # Handle ONE ROW PER MATCH mode
-            if rows_per_match == RowsPerMatch.ONE_ROW:
-                # Create a list to hold the final result rows
-                final_results = []
-                
-                # Process each match
-                for match in all_matches:
-                    match_num = match.get("match_number")
-                    
-                    # Handle empty match case
-                    if match.get("is_empty", False) or (match["start"] > match["end"]):
-                        if match["start"] < len(all_rows):
-                            empty_row = _process_empty_match(match["start"], all_rows, measures, match_num, partition_by)
-                            if empty_row:
-                                final_results.append(empty_row)
-                        continue
-                    
-                    # Create a new result row
-                    result_row = {}
-                    
-                    # Add partition columns
-                    if match["start"] < len(all_rows):
-                        start_row = all_rows[match["start"]]
-                        for col in partition_by:
-                            if col in start_row:
-                                result_row[col] = start_row[col]
-                    
-                    # Create context for measure evaluation
-                    context = RowContext()
-                    context.rows = all_rows
-                    context.variables = match.get("variables", {})
-                    context.match_number = match_num
-                    context.current_idx = match["end"]  # Use the last row for FINAL semantics
-                    context.subsets = subset_dict.copy() if subset_dict else {}
-                    
-                    # Set pattern_variables for PERMUTE patterns
-                    if isinstance(pattern_text, str) and 'PERMUTE' in pattern_text:
-                        permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', pattern_text, re.IGNORECASE)
-                        if permute_match:
-                            context.pattern_variables = [v.strip() for v in permute_match.group(1).split(',')]
-                    elif hasattr(mr_clause.pattern, 'metadata'):
-                        context.pattern_variables = mr_clause.pattern.metadata.get('base_variables', [])
-                    
-                    # Create evaluator and process measures
-                    evaluator = MeasureEvaluator(context, final=True)
-                    for alias, expr in measures.items():
-                        try:
-                            semantics = measure_semantics.get(alias, "FINAL")
-                            result_row[alias] = evaluator.evaluate(expr, semantics)
-                        except Exception as e:
-                            print(f"Error evaluating measure {alias}: {e}")
-                            result_row[alias] = None
-                    
-                    final_results.append(result_row)
-                
-                # Create DataFrame with the final results
-                result_df = pd.DataFrame(final_results)
-                
-                # Handle empty result case
-                if result_df.empty:
-                    # Create empty DataFrame with appropriate columns
-                    columns = []
-                    columns.extend(partition_by)
-                    if measures:
-                        columns.extend(measures.keys())
-                    metrics["result_processing_time"] = time.time() - processing_start
-                    metrics["total_time"] = time.time() - start_time
-                    return pd.DataFrame(columns=columns)
-                
-                # Ensure columns are in the correct order
-                ordered_cols = []
-                ordered_cols.extend(partition_by)  # Partition columns first
-                if mr_clause.measures:
-                    ordered_cols.extend([m.alias for m in mr_clause.measures.measures if m.alias])
-                
-                # Only keep columns that exist in the result
-                ordered_cols = [col for col in ordered_cols if col in result_df.columns]
-                
-                # Handle PERMUTE pattern sorting
-                if not result_df.empty and mr_clause.pattern.metadata.get('permute', False):
-                    # Extract original variable order
-                    original_variable_order = []
-                    if 'PERMUTE' in pattern_text:
-                        permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', pattern_text, re.IGNORECASE)
-                        if permute_match:
-                            original_variable_order = [v.strip() for v in permute_match.group(1).split(',')]
-                    
-                    # Create sort key if needed
-                    if 'pattern_var' in result_df.columns and original_variable_order:
-                        variable_priorities = {var: idx for idx, var in enumerate(original_variable_order)}
-                        result_df['_sort_key'] = result_df['pattern_var'].map(variable_priorities)
-                        
-                        # Sort by partition columns first, then by sort key
-                        sort_columns = partition_by + ['_sort_key'] if partition_by else ['_sort_key']
-                        result_df = result_df.sort_values(by=sort_columns)
-                        
-                        # Remove temporary sort column
-                        if '_sort_key' in result_df.columns:
-                            result_df = result_df.drop('_sort_key', axis=1)
-                
-                metrics["result_processing_time"] = time.time() - processing_start
-                metrics["total_time"] = time.time() - start_time
-                return result_df[ordered_cols]
-            
-            # Handle ALL ROWS PER MATCH modes
-            else:
-                # Rebuild results based on filtered matches for ALL ROWS PER MATCH
-                if mr_clause.pattern and "PERMUTE" in mr_clause.pattern.pattern:
-                    # Clear previous results and rebuild from filtered matches
-                    results = []
-                    
-                    for match in all_matches:
-                        match_num = match.get("match_number")
-                        
-                        # Handle empty match case
-                        if match.get("is_empty", False) or (match["start"] > match["end"]):
-                            if config.show_empty and match["start"] < len(all_rows):
-                                empty_row = _process_empty_match(match["start"], all_rows, measures, match_num, partition_by)
-                                if empty_row:
-                                    results.append(empty_row)
-                            continue
-                        
-                        # Process each matched row
-                        for idx in range(match["start"], match["end"] + 1):
-                            if idx >= len(all_rows):
-                                continue
-                                
-                            # Create result row from original data
-                            result = dict(all_rows[idx])
-                            
-                            # Create context for measure evaluation
-                            context = RowContext()
-                            context.rows = all_rows
-                            context.variables = match.get("variables", {})
-                            context.match_number = match_num
-                            context.current_idx = idx
-                            context.subsets = subset_dict.copy() if subset_dict else {}
-                            
-                            # Create evaluator and process measures
-                            evaluator = MeasureEvaluator(context, final=False)  # RUNNING semantics
-                            for alias, expr in measures.items():
-                                try:
-                                    semantics = measure_semantics.get(alias, "RUNNING")
-                                    result[alias] = evaluator.evaluate(expr, semantics)
-                                except Exception as e:
-                                    print(f"Error evaluating measure {alias}: {e}")
-                                    result[alias] = None
-                            
-                            # Add match metadata
-                            result["MATCH_NUMBER"] = match_num
-                            result["IS_EMPTY_MATCH"] = False
-                            
-                            results.append(result)
-                
-                # Handle unmatched rows for ALL ROWS PER MATCH WITH UNMATCHED ROWS
-                if config.include_unmatched:
-                    unmatched_indices = set(range(len(all_rows))) - all_matched_indices
-                    for idx in sorted(unmatched_indices):
-                        if idx < len(all_rows):
-                            unmatched_row = _handle_unmatched_row(all_rows[idx], measures, partition_by)
-                            results.append(unmatched_row)
-                
-                # Create result DataFrame
-                result_df = pd.DataFrame(results)
-                
-                # Handle empty result case
-                if result_df.empty:
-                    # Create empty DataFrame with appropriate columns
-                    columns = []
-                    columns.extend(partition_by)
-                    if measures:
-                        columns.extend(measures.keys())
-                    metrics["result_processing_time"] = time.time() - processing_start
-                    metrics["total_time"] = time.time() - start_time
-                    return pd.DataFrame(columns=columns)
-                
-                # Define ordered columns
-                ordered_cols = []
-                if partition_by:
-                    ordered_cols.extend(partition_by)
-                if mr_clause.measures:
-                    ordered_cols.extend([m.alias for m in mr_clause.measures.measures if m.alias])
-                
-                # Only keep columns that exist in the result
-                ordered_cols = [col for col in ordered_cols if col in result_df.columns]
-                
-                metrics["result_processing_time"] = time.time() - processing_start
-                metrics["total_time"] = time.time() - start_time
-                return result_df[ordered_cols]
-        except Exception as e:
-            raise RuntimeError(f"Error processing results: {str(e)}")
-    
-    except Exception as e:
-        # Log the error with detailed information
-        print(f"Error executing MATCH_RECOGNIZE query: {str(e)}")
-        print(f"Query: {query}")
-        print(f"Metrics: {metrics}")
-        # Re-raise the exception
-        raise
-    finally:
-        # Always record total time
-        metrics["total_time"] = time.time() - start_time
-        print(f"Query execution metrics: {metrics}")
-
-
-
-
 
 
 def get_unmatched_rows(all_rows: List[Dict[str, Any]], matched_indices: Set[int]) -> List[int]:

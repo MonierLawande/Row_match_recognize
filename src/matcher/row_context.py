@@ -48,7 +48,25 @@ class RowContext:
                     self._subset_index[comp] = set()
                 self._subset_index[comp].add(subset_name)
         
-    # Updates for src/matcher/row_context.py
+
+
+    def get_variable_indices_up_to(self, var_name: str, current_idx: int) -> List[int]:
+        """
+        Get indices of rows matched to a variable up to a specific position.
+        
+        Args:
+            var_name: Variable name
+            current_idx: Current row index
+            
+        Returns:
+            List of row indices matched to the variable up to current_idx
+        """
+        # Get all indices for this variable
+        all_indices = self.var_row_indices(var_name)
+        
+        # Filter to only include indices up to current_idx
+        return [idx for idx in all_indices if idx <= current_idx]
+
 
     def classifier(self, variable: Optional[str] = None) -> str:
         """

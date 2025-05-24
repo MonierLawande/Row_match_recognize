@@ -118,6 +118,9 @@ class MeasureEvaluator:
 
         # src/matcher/measure_evaluator.py
     
+        # In src/matcher/measure_evaluator.py
+    # Update the evaluate method
+
     def evaluate(self, expr: str, semantics: str = None) -> Any:
         """
         Evaluate a measure expression with proper RUNNING/FINAL semantics.
@@ -158,6 +161,66 @@ class MeasureEvaluator:
         if len(self.context.rows) > 0 and self.context.current_idx >= len(self.context.rows):
             self.context.current_idx = len(self.context.rows) - 1
         
+        # Handle navigation functions (FIRST, LAST, PREV, NEXT)
+        nav_match = re.match(r'(FIRST|LAST|PREV|NEXT)\s*\(\s*(.+?)\s*\)', expr, re.IGNORECASE)
+        if nav_match:
+            func_name = nav_match.group(1).upper()
+            args_str = nav_match.group(2)
+            
+            # Parse arguments
+            args = [arg.strip() for arg in args_str.split(',')]
+            if not args:
+                return None
+                
+            # For RUNNING semantics with variable references, ensure we only consider rows up to current position
+            if is_running and func_name in ('FIRST', 'LAST'):
+                var_field_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args[0])
+                if var_field_match:
+                    var_name = var_field_match.group(1)
+                    field_name = var_field_match.group(2)
+                    
+                    # Get all indices for this variable
+                    all_indices = []
+                    if var_name in self.context.variables:
+                        all_indices = self.context.variables[var_name]
+                    
+                    # For RUNNING semantics, only consider rows up to current position
+                    valid_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
+                    
+                    # If no valid indices, return None
+                    if not valid_indices:
+                        return None
+                        
+                    # Get occurrence (default is 0)
+                    occurrence = 0
+                    if len(args) > 1:
+                        try:
+                            occurrence = int(args[1])
+                        except ValueError:
+                            pass
+                    
+                    # Sort indices to ensure correct order
+                    valid_indices = sorted(valid_indices)
+                    
+                    # For FIRST, get the first valid index
+                    if func_name == 'FIRST':
+                        if occurrence < len(valid_indices):
+                            idx = valid_indices[occurrence]
+                            if idx < len(self.context.rows):
+                                return self.context.rows[idx].get(field_name)
+                        
+                    # For LAST, get the last valid index
+                    elif func_name == 'LAST':
+                        if occurrence < len(valid_indices):
+                            idx = valid_indices[-(occurrence+1)]  # Count from the end
+                            if idx < len(self.context.rows):
+                                return self.context.rows[idx].get(field_name)
+                    
+                    return None
+            
+            # For other cases, use standard navigation function evaluation
+            return self._evaluate_navigation(expr, is_running)
+        
         # Try optimized pattern variable reference evaluation first
         handled, value = evaluate_pattern_variable_reference(
             expr, 
@@ -184,19 +247,30 @@ class MeasureEvaluator:
                 component_positions = {}
                 for component in components:
                     if component in self.context.variables and self.context.variables[component]:
-                        component_positions[component] = max(self.context.variables[component])
+                        # For RUNNING semantics, only consider rows up to current position
+                        if is_running:
+                            indices = [idx for idx in self.context.variables[component] if idx <= self.context.current_idx]
+                            if indices:
+                                component_positions[component] = max(indices)
+                        else:
+                            component_positions[component] = max(self.context.variables[component])
                 
                 # If we have any components, get the one with the latest position
                 if component_positions:
                     latest_component = max(component_positions.items(), key=lambda x: x[1])[0]
                     var_indices = self.context.variables[latest_component]
+                    
+                    # For RUNNING semantics, only consider rows up to current position
+                    if is_running:
+                        var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+                    
                     if var_indices:
                         if is_running:
-                            # For RUNNING semantics, use the first occurrence
-                            idx = var_indices[0]
+                            # For RUNNING semantics, use the latest occurrence up to current position
+                            idx = max(var_indices)
                         else:
                             # For FINAL semantics, use the last occurrence
-                            idx = var_indices[-1]
+                            idx = max(var_indices)
                             
                         if idx < len(self.context.rows):
                             return self.context.rows[idx].get(col_name)
@@ -204,13 +278,18 @@ class MeasureEvaluator:
             
             # Get the row matched to this variable
             var_indices = self._get_var_indices(var_name)
+            
+            # For RUNNING semantics, only consider rows up to current position
+            if is_running:
+                var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+            
             if var_indices:
                 if is_running:
-                    # For RUNNING semantics, use the first occurrence
-                    idx = var_indices[0]
+                    # For RUNNING semantics, use the latest occurrence up to current position
+                    idx = max(var_indices)
                 else:
                     # For FINAL semantics, use the last occurrence
-                    idx = var_indices[-1]
+                    idx = max(var_indices)
                     
                 if idx < len(self.context.rows):
                     return self.context.rows[idx].get(col_name)
@@ -243,6 +322,7 @@ class MeasureEvaluator:
         except Exception as e:
             print(f"Error evaluating expression '{expr}': {e}")
             return None
+
 
 
     def evaluate_classifier(self, 
@@ -443,177 +523,104 @@ class MeasureEvaluator:
     
 
         
-    # src/matcher/measure_evaluator.py
-
     def _evaluate_navigation(self, expr: str, is_running: bool) -> Any:
         """
-        Evaluate navigation functions with comprehensive support.
+        Handle navigation functions like FIRST, LAST, PREV, NEXT with proper semantics.
         
         Args:
-            expr: The navigation expression to evaluate
+            expr: The navigation expression (e.g., "LAST(A.value)")
             is_running: Whether to use RUNNING semantics
-                
+            
         Returns:
             The result of the navigation function
         """
-        print(f"Evaluating navigation function: {expr}")
+        # Cache key for memoization
+        cache_key = (expr, is_running, self.context.current_idx)
+        if hasattr(self, '_var_ref_cache') and cache_key in self._var_ref_cache:
+            return self._var_ref_cache[cache_key]
         
-        # Handle nested navigation functions (e.g., PREV(FIRST(A.val)))
-        nested_pattern = r'(PREV|NEXT)\s*\(\s*(FIRST|LAST)\s*\('
-        if re.match(nested_pattern, expr.upper()):
-            match = re.match(r'(PREV|NEXT)\s*\(\s*(FIRST|LAST)\s*\(([^)]+)\)\s*(?:,\s*(\d+))?\s*\)', expr, re.IGNORECASE)
-            if match:
-                outer_func, inner_func, inner_args, steps = match.groups()
-                steps = int(steps) if steps else 1
-                
-                print(f"Processing nested navigation: {outer_func}({inner_func}({inner_args}), {steps})")
-                
-                # Parse the inner args - expecting pattern_var.column
-                var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', inner_args)
-                if var_col_match:
-                    var = var_col_match.group(1)
-                    col = var_col_match.group(2)
-                    
-                    # Get all rows matched to the pattern variable
-                    var_indices = self._get_var_indices(var)
-                    
-                    if var_indices:
-                        target_idx = None
-                        # Use first or last matched row
-                        if inner_func.upper() == "FIRST":
-                            target_idx = min(var_indices)
-                        elif inner_func.upper() == "LAST":
-                            target_idx = max(var_indices)
-                        
-                        if target_idx is not None:
-                            # Navigate relative to the target row
-                            if outer_func.upper() == "PREV":
-                                nav_idx = target_idx - steps
-                            else:  # NEXT
-                                nav_idx = target_idx + steps
-                            
-                            # Check bounds
-                            if 0 <= nav_idx < len(self.context.rows):
-                                return self.context.rows[nav_idx].get(col)
-                    
-                    # Debug info for troubleshooting
-                    print(f"  var: {var}, col: {col}, var_indices: {var_indices}")
+        # Extract function name and arguments
+        match = re.match(r'(FIRST|LAST|PREV|NEXT)\s*\(\s*(.+?)\s*\)', expr, re.IGNORECASE)
+        if not match:
+            return None
+            
+        func_name = match.group(1).upper()
+        args_str = match.group(2)
         
-        # Regular (non-nested) navigation functions
-        func_match = re.match(r'([A-Z]+)\((.*?)\)', expr, re.IGNORECASE)
-        if not func_match:
+        # Parse arguments
+        args = [arg.strip() for arg in args_str.split(',')]
+        if not args:
             return None
         
-        func_name = func_match.group(1).upper()
-        args_str = func_match.group(2)
-        args = [arg.strip() for arg in args_str.split(',')] if args_str else []
+        result = None
         
-        print(f"Function: {func_name}, Args: {args}")
-
-        if func_name in ("FIRST", "LAST"):
-            if not args:
-                return None
-                
-            # Handle both A.col and just col formats
-            var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args[0])
-            if var_col_match:
-                var = var_col_match.group(1)
-                col = var_col_match.group(2)
-                occurrence = int(args[1]) if len(args) > 1 else 0
-                
-                # Get indices of rows matched to the variable
-                var_indices = self._get_var_indices(var)
-                if not var_indices:
-                    return None
-                    
-                # Sort indices
-                var_indices = sorted(var_indices)
-                
-                # For RUNNING semantics, only consider rows up to current_idx
-                if is_running:
-                    var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
-                    if not var_indices:
-                        return None
-                
-                if func_name == "FIRST":
-                    if occurrence < len(var_indices):
-                        row_idx = var_indices[occurrence]
-                        if row_idx < len(self.context.rows):
-                            return self.context.rows[row_idx].get(col)
-                else:  # LAST
-                    if occurrence < len(var_indices):
-                        row_idx = var_indices[-(occurrence+1)]
-                        if row_idx < len(self.context.rows):
-                            return self.context.rows[row_idx].get(col)
-                        
-            # If not var.col format, treat as a universal column
-            else:
-                col = args[0]
-                occurrence = int(args[1]) if len(args) > 1 else 0
-                
-                # Get all matched rows
-                matched_indices = []
-                for indices in self.context.variables.values():
-                    matched_indices.extend(indices)
-                
-                # Sort indices
-                matched_indices = sorted(matched_indices)
-                
-                # For RUNNING semantics, only consider rows up to current_idx
-                if is_running:
-                    matched_indices = [idx for idx in matched_indices if idx <= self.context.current_idx]
-                    if not matched_indices:
-                        return None
-                
-                if matched_indices:
-                    if func_name == "FIRST":
-                        if occurrence < len(matched_indices):
-                            row_idx = matched_indices[occurrence]
-                            return self.context.rows[row_idx].get(col)
-                    else:  # LAST
-                        if occurrence < len(matched_indices):
-                            row_idx = matched_indices[-(occurrence+1)]
-                            return self.context.rows[row_idx].get(col)
-        
-        elif func_name in ("PREV", "NEXT"):
-            if not args:
-                return None
+        # Handle variable.field references
+        var_field_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args[0])
+        if var_field_match:
+            var_name = var_field_match.group(1)
+            field_name = var_field_match.group(2)
             
-            # Default to navigation relative to current row
-            current_idx = self.context.current_idx
+            # Get occurrence (default is 0)
+            occurrence = 0
+            if len(args) > 1:
+                try:
+                    occurrence = int(args[1])
+                except ValueError:
+                    pass
             
-            # Check if first argument is a pattern variable reference
-            var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args[0])
-            if var_col_match:
-                var_name = var_col_match.group(1)
-                col_name = var_col_match.group(2)
-                steps = int(args[1]) if len(args) > 1 else 1
+            # Get variable indices
+            var_indices = []
+            if var_name in self.context.variables:
+                var_indices = self.context.variables[var_name]
+            
+            # For RUNNING semantics, only consider rows up to current position
+            if is_running:
+                var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+            
+            # Sort indices to ensure correct order
+            var_indices = sorted(var_indices)
+            
+            if var_indices:
+                if func_name == 'FIRST':
+                    # Get the appropriate occurrence from the start
+                    if occurrence < len(var_indices):
+                        idx = var_indices[occurrence]
+                        if idx < len(self.context.rows):
+                            result = self.context.rows[idx].get(field_name)
                 
-                # For pattern variable references, navigate relative to the current row
-                if func_name == "PREV":
-                    nav_idx = current_idx - steps
-                    if 0 <= nav_idx < len(self.context.rows):
-                        return self.context.rows[nav_idx].get(col_name)
-                else:  # NEXT
-                    nav_idx = current_idx + steps
-                    if 0 <= nav_idx < len(self.context.rows):
-                        return self.context.rows[nav_idx].get(col_name)
-            else:
-                # Simple column reference
-                column = args[0]
-                steps = int(args[1]) if len(args) > 1 else 1
-                
-                if func_name == "PREV":
-                    nav_idx = current_idx - steps
-                    if 0 <= nav_idx < len(self.context.rows):
-                        return self.context.rows[nav_idx].get(column)
-                else:  # NEXT
-                    nav_idx = current_idx + steps
-                    if 0 <= nav_idx < len(self.context.rows):
-                        return self.context.rows[nav_idx].get(column)
+                elif func_name == 'LAST':
+                    # Get the appropriate occurrence from the end
+                    if occurrence < len(var_indices):
+                        idx = var_indices[-(occurrence+1)]  # Count from the end
+                        if idx < len(self.context.rows):
+                            result = self.context.rows[idx].get(field_name)
         
-        return None
-
+        # Handle simple field references for PREV/NEXT
+        elif func_name in ('PREV', 'NEXT'):
+            field_name = args[0]
+            
+            # Get steps (default is 1)
+            steps = 1
+            if len(args) > 1:
+                try:
+                    steps = int(args[1])
+                except ValueError:
+                    pass
+            
+            if func_name == 'PREV':
+                prev_idx = self.context.current_idx - steps
+                if prev_idx >= 0 and prev_idx < len(self.context.rows):
+                    result = self.context.rows[prev_idx].get(field_name)
+            
+            elif func_name == 'NEXT':
+                next_idx = self.context.current_idx + steps
+                if next_idx >= 0 and next_idx < len(self.context.rows):
+                    result = self.context.rows[next_idx].get(field_name)
+        
+        # Cache the result
+        if hasattr(self, '_var_ref_cache'):
+            self._var_ref_cache[cache_key] = result
+        return result
 
 
     def _get_var_indices(self, var: str) -> List[int]:
