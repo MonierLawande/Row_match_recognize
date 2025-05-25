@@ -37,8 +37,8 @@ class DFAState:
 
     def add_transition(self, condition: Any, target: int, variable: Optional[str] = None):
         """Add a transition with enhanced validation."""
-        if variable and variable in self.excluded_variables:
-            return  # Skip transitions for excluded variables
+        # Allow transitions for excluded variables - they should be available for matching
+        # but will be filtered from output during result processing
         self.transitions.append(Transition(condition, target, variable))
 
     def allows_empty_match(self) -> bool:

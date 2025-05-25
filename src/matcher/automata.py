@@ -521,7 +521,7 @@ class NFABuilder:
         # Skip exclusion start token
         idx[0] += 1
         
-        # Process tokens inside exclusion
+        # Process tokens inside exclusion normally (don't create bypass)
         excl_start, excl_end = self._process_sequence(tokens, idx, define)
         
         # Mark exclusion end
@@ -539,7 +539,12 @@ class NFABuilder:
         if idx[0] < len(tokens) and tokens[idx[0]].type == PatternTokenType.EXCLUSION_END:
             idx[0] += 1
         
+        # Return the exclusion states directly without bypass
+        # This makes excluded variables available as normal transitions
+        # but they will be filtered from output during result processing
         return excl_start, excl_end
+
+
 
     def create_var_states(self, var: str, define: Dict[str, str]) -> Tuple[int, int]:
         """Create states for a pattern variable with support for subset variables."""

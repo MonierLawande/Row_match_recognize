@@ -218,46 +218,10 @@ def parse_quantifier_at(pattern: str, start_pos: int) -> Tuple[Optional[str], bo
         
     return quantifier, is_greedy, pos
 
-def extract_exclusion_variables(pattern: str) -> Set[str]:
-    """
-    Extract variables from exclusion patterns.
-    
-    Args:
-        pattern: The pattern string
-        
-    Returns:
-        Set of excluded variable names
-        
-    Raises:
-        UnbalancedPatternError: If exclusion markers are unbalanced
-    """
-    excluded_vars = set()
-    
-    if not pattern or "{-" not in pattern or "-}" not in pattern:
-        return excluded_vars
-    
-    # Find all exclusion sections
-    start = 0
-    while True:
-        start_marker = pattern.find("{-", start)
-        if start_marker == -1:
-            break
-        end_marker = pattern.find("-}", start_marker)
-        if end_marker == -1:
-            raise UnbalancedPatternError("Unbalanced exclusion markers", start_marker, pattern)
-        
-        # Extract excluded content
-        excluded_content = pattern[start_marker + 2:end_marker].strip()
-        
-        # Extract excluded variables
-        var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)(?:[+*?]|\{[0-9,]*\})?'
-        excluded_vars.update(re.findall(var_pattern, excluded_content))
-        
-        start = end_marker + 2
-    
-    return excluded_vars
 
 
+
+# src/matcher/pattern_tokenizer.py - Updated validate_pattern_structure function
 
 def validate_pattern_structure(pattern: str) -> None:
     """
@@ -316,6 +280,50 @@ def validate_pattern_structure(pattern: str) -> None:
         raise UnbalancedPatternError("Unmatched opening brace", brace_stack[-1], pattern)
     if exclusion_stack:
         raise UnbalancedPatternError("Unmatched exclusion start marker", exclusion_stack[-1], pattern)
+
+def extract_exclusion_variables(pattern: str) -> Set[str]:
+    """
+    Extract variables from exclusion patterns.
+    
+    Args:
+        pattern: The pattern string
+        
+    Returns:
+        Set of excluded variable names
+        
+    Raises:
+        UnbalancedPatternError: If exclusion markers are unbalanced
+    """
+    excluded_vars = set()
+    
+    if not pattern or "{-" not in pattern or "-}" not in pattern:
+        return excluded_vars
+    
+    # Find all exclusion sections
+    start = 0
+    while True:
+        start_marker = pattern.find("{-", start)
+        if start_marker == -1:
+            break
+        end_marker = pattern.find("-}", start_marker)
+        if end_marker == -1:
+            raise UnbalancedPatternError("Unbalanced exclusion markers", start_marker, pattern)
+        
+        # Extract excluded content
+        excluded_content = pattern[start_marker + 2:end_marker].strip()
+        print(f"Extracted exclusion content: '{excluded_content}'")
+        
+        # Extract excluded variables - handle base variables without quantifiers
+        var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)(?:[+*?]|\{[0-9,]*\})?'
+        for match in re.finditer(var_pattern, excluded_content):
+            var_name = match.group(1)
+            excluded_vars.add(var_name)
+            print(f"Exclusion handler added variable: '{var_name}'")
+        
+        start = end_marker + 2
+    
+    return excluded_vars
+
 
 def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[str, PatternToken]], int]:
     """

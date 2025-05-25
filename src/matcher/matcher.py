@@ -44,7 +44,6 @@ class MatchConfig:
     def get(self, key, default=None):
         """Dictionary-like get method for compatibility."""
         return self._config_dict.get(key, default)
-# Add to src/matcher/matcher.py
 
 class PatternExclusionHandler:
     """
@@ -79,11 +78,14 @@ class PatternExclusionHandler:
             # Extract excluded content
             excluded_content = pattern[start_marker + 2:end_marker].strip()
             self.exclusion_ranges.append((start_marker, end_marker))
+            print(f"Exclusion handler found content: '{excluded_content}'")
             
-            # Extract excluded variables
+            # Extract excluded variables - handle base variables without quantifiers
             var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)(?:[+*?]|\{[0-9,]*\})?'
-            excluded_vars = re.findall(var_pattern, excluded_content)
-            self.excluded_vars.update(excluded_vars)
+            for match in re.finditer(var_pattern, excluded_content):
+                var_name = match.group(1)
+                self.excluded_vars.add(var_name)
+                print(f"Exclusion handler added variable: '{var_name}'")
             
             start = end_marker + 2
     
@@ -97,7 +99,14 @@ class PatternExclusionHandler:
         Returns:
             True if the variable is excluded, False otherwise
         """
-        return var_name in self.excluded_vars
+        # Strip any quantifiers from the variable name
+        base_var = var_name
+        if var_name.endswith('+') or var_name.endswith('*') or var_name.endswith('?'):
+            base_var = var_name[:-1]
+        elif '{' in var_name and var_name.endswith('}'):
+            base_var = var_name[:var_name.find('{')]
+            
+        return base_var in self.excluded_vars
     
     def filter_excluded_rows(self, match: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -117,8 +126,16 @@ class PatternExclusionHandler:
         filtered_match["variables"] = match["variables"].copy()
         
         # Remove excluded variables
-        for var in self.excluded_vars:
-            if var in filtered_match["variables"]:
+        for var in list(filtered_match["variables"].keys()):
+            # Strip any quantifiers for comparison
+            base_var = var
+            if var.endswith('+') or var.endswith('*') or var.endswith('?'):
+                base_var = var[:-1]
+            elif '{' in var and var.endswith('}'):
+                base_var = var[:var.find('{')]
+                
+            if base_var in self.excluded_vars:
+                print(f"Filtering out excluded variable: {var}")
                 del filtered_match["variables"][var]
         
         # Update matched indices
@@ -128,9 +145,9 @@ class PatternExclusionHandler:
         filtered_match["matched_indices"] = sorted(set(matched_indices))
         
         return filtered_match
+
     
 class EnhancedMatcher:
-# Fix for src/matcher/matcher.py - EnhancedMatcher.__init__ method
 
     def __init__(self, dfa, measures=None, measure_semantics=None, exclusion_ranges=None, 
                 after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None):
@@ -166,6 +183,12 @@ class EnhancedMatcher:
         
         # Create pattern exclusion handler
         self.exclusion_handler = PatternExclusionHandler(original_pattern) if original_pattern else None
+        
+        # Extract excluded variables
+        self.excluded_vars = set()
+        if self.exclusion_handler:
+            self.excluded_vars = self.exclusion_handler.excluded_vars
+            print(f"Initialized matcher with excluded variables: {self.excluded_vars}")
 
     def _extract_dfa_metadata(self):
         """Extract and process metadata from the DFA for optimization."""
@@ -223,6 +246,265 @@ class EnhancedMatcher:
         })
         
         return index        
+    def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> Optional[Dict[str, Any]]:
+        """Find a single match using optimized transitions with proper variable handling."""
+        match_start_time = time.time()
+        state = self.start_state
+        current_idx = start_idx
+        var_assignments = {}
+        
+        print(f"Starting match at index {start_idx}, state: {self._get_state_description(state)}")
+        
+        # Update context with subset variables from DFA metadata
+        if hasattr(self.dfa, 'metadata') and 'subset_vars' in self.dfa.metadata:
+            context.subsets.update(self.dfa.metadata['subset_vars'])
+
+        # Optional early filtering based on anchor constraints
+        if hasattr(self, '_anchor_metadata') and not self._can_satisfy_anchors(len(rows)):
+            print(f"Partition cannot satisfy anchor constraints")
+            self.timing["find_match"] += time.time() - match_start_time
+            return None
+        
+        # Check start anchor constraints for the start state
+        if not self._check_anchors(state, start_idx, len(rows), "start"):
+            print(f"Start state anchor check failed at index {start_idx}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return None
+        
+        # Check for empty match - but only use it if we can't find a non-empty match
+        empty_match = None
+        if self.dfa.states[state].is_accept:
+            # For empty matches, also verify end anchor if present
+            if self._check_anchors(state, start_idx, len(rows), "end"):
+                print(f"Found potential empty match at index {start_idx} - start state is accepting")
+                empty_match = {
+                    "start": start_idx,
+                    "end": start_idx - 1,
+                    "variables": {},
+                    "state": state,
+                    "is_empty": True,
+                    "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                    "excluded_rows": []
+                }
+                # Don't return immediately - try to find a non-empty match first
+        
+        longest_match = None
+        trans_index = self.transition_index[state]
+        
+        # Check if we have both start and end anchors in the pattern
+        has_both_anchors = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("spans_partition", False)
+        # Check if we have only end anchor in the pattern
+        has_end_anchor = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("has_end_anchor", False)
+        
+        # Track excluded rows for proper exclusion handling
+        excluded_rows = []
+        
+        # Track the last non-excluded state for resuming after exclusion
+        last_non_excluded_state = state
+        
+        # Track if we're in a pattern with exclusions
+        has_exclusions = hasattr(self, 'excluded_vars') and self.excluded_vars
+        
+        while current_idx < len(rows):
+            row = rows[current_idx]
+            context.current_idx = current_idx
+            
+            # Update context with current variable assignments for condition evaluation
+            context.variables = var_assignments
+            context.current_var_assignments = var_assignments
+            
+            print(f"Testing row {current_idx}, data: {row}")
+            
+            # Use indexed transitions for faster lookups
+            next_state = None
+            matched_var = None
+            is_excluded_match = False
+            
+            # Try all transitions and use the first one that matches the condition
+            for var, target, condition in trans_index:
+                print(f"  Evaluating condition for var: {var}")
+                try:
+                    # Check if this is an excluded variable
+                    is_excluded = var in self.excluded_vars
+                    
+                    # Set the current variable being evaluated for self-references
+                    context.current_var = var
+                    
+                    # First check if target state's START anchor constraints are satisfied
+                    if not self._check_anchors(target, current_idx, len(rows), "start"):
+                        print(f"  Start anchor check failed for transition to state {target} with var {var}")
+                        continue
+                        
+                    # Then evaluate the condition with the current row and context
+                    result = condition(row, context)
+                    print(f"    Condition {'passed' if result else 'failed'} for {var}")
+                    
+                    if result:
+                        # If this is an excluded variable, mark for exclusion but continue matching
+                        if is_excluded:
+                            print(f"    Variable {var} is excluded - marking row for exclusion")
+                            excluded_rows.append(current_idx)
+                            is_excluded_match = True
+                        
+                        next_state = target
+                        matched_var = var
+                        break
+                except Exception as e:
+                    print(f"  Error evaluating condition for {var}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+                finally:
+                    # Clear the current variable after evaluation
+                    if hasattr(context, 'current_var'):
+                        delattr(context, 'current_var')
+            
+            # Handle exclusion matches properly - they should still advance the state
+            if is_excluded_match:
+                print(f"  Found excluded variable {matched_var} - will exclude row {current_idx} from output")
+                # For excluded variables, we still update the state but don't assign the variable
+                # This allows the pattern matching to continue correctly through exclusion sections
+                state = next_state
+                current_idx += 1
+                trans_index = self.transition_index[state]
+                
+                # Check if we've reached an accepting state after the exclusion
+                if self.dfa.states[state].is_accept:
+                    print(f"Reached accepting state {state} after exclusion at row {current_idx-1}")
+                    # Don't create a match here - continue to see if we can match more
+                
+                continue
+            
+            # For star patterns, we need to handle the case where no transition matches
+            # but we're in an accepting state
+            if next_state is None and self.dfa.states[state].is_accept:
+                print(f"No valid transition from accepting state {state} at row {current_idx}")
+                
+                # Update longest match to include all rows up to this point
+                if current_idx > start_idx:  # Only if we've matched at least one row
+                    # For patterns with both start and end anchors, we need to check if we've reached the end
+                    if has_both_anchors and current_idx < len(rows):
+                        print(f"Pattern has both anchors but we're not at the end of partition")
+                        break  # Don't accept partial matches for ^...$ patterns
+                    
+                    # For patterns with only end anchor, we need to check if we're at the last row
+                    if has_end_anchor and not has_both_anchors:
+                        # Only accept if we're at the last row
+                        if current_idx - 1 == len(rows) - 1:
+                            longest_match = {
+                                "start": start_idx,
+                                "end": current_idx - 1,
+                                "variables": {k: v[:] for k, v in var_assignments.items()},
+                                "state": state,
+                                "is_empty": False,
+                                "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                                "excluded_rows": excluded_rows.copy()
+                            }
+                        else:
+                            print(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
+                    else:
+                        # No end anchor, accept the match
+                        longest_match = {
+                            "start": start_idx,
+                            "end": current_idx - 1,
+                            "variables": {k: v[:] for k, v in var_assignments.items()},
+                            "state": state,
+                            "is_empty": False,
+                            "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                            "excluded_rows": excluded_rows.copy()
+                        }
+                    break
+                
+            if next_state is None:
+                print(f"No valid transition from state {state} at row {current_idx}")
+                break
+            
+            # Record variable assignment (only for non-excluded variables)
+            if matched_var and not is_excluded_match:
+                if matched_var not in var_assignments:
+                    var_assignments[matched_var] = []
+                var_assignments[matched_var].append(current_idx)
+                print(f"  Assigned row {current_idx} to variable {matched_var}")
+            
+            # Update state and move to next row
+            state = next_state
+            current_idx += 1
+            trans_index = self.transition_index[state]
+            
+            # Update longest match if accepting state
+            if self.dfa.states[state].is_accept:
+                # Check end anchor constraints ONLY when we reach an accepting state
+                if not self._check_anchors(state, current_idx - 1, len(rows), "end"):
+                    print(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
+                    # Continue to next row, but don't update longest_match
+                    continue
+                    
+                print(f"Reached accepting state {state} at row {current_idx-1}")
+                
+                # For patterns with both start and end anchors, we need to check if we've consumed the entire partition
+                if has_both_anchors and current_idx < len(rows):
+                    # If we have both anchors (^...$) and haven't reached the end of the partition,
+                    # we need to continue matching to try to consume the entire partition
+                    print(f"Pattern has both anchors but we're not at the end of partition yet")
+                    continue
+                
+                # For patterns with only end anchor, we need to check if we're at the last row
+                if has_end_anchor and not has_both_anchors:
+                    # Only accept if we're at the last row
+                    if current_idx - 1 != len(rows) - 1:
+                        print(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
+                        continue
+                
+                longest_match = {
+                    "start": start_idx,
+                    "end": current_idx - 1,
+                    "variables": {k: v[:] for k, v in var_assignments.items()},
+                    "state": state,
+                    "is_empty": False,
+                    "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                    "excluded_rows": excluded_rows.copy()
+                }
+                print(f"  Current longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                
+                # If we have both anchors and have reached the end of the partition, we can stop
+                if has_both_anchors and current_idx == len(rows):
+                    print(f"Found complete match spanning entire partition")
+                    break
+        
+        # For patterns with both anchors, verify we've consumed the entire partition
+        if longest_match and has_both_anchors:
+            if start_idx != 0 or longest_match["end"] != len(rows) - 1:
+                print(f"Match doesn't span entire partition for ^...$ pattern, rejecting")
+                longest_match = None
+        
+        # For patterns with only end anchor, verify the match ends at the last row
+        if longest_match and has_end_anchor and not has_both_anchors:
+            if longest_match["end"] != len(rows) - 1:
+                print(f"Match doesn't end at last row for $ pattern, rejecting")
+                longest_match = None
+        
+        # Special handling for patterns with exclusions
+        # If we have a match and it contains excluded rows, make sure they're properly tracked
+        if longest_match and excluded_rows:
+            longest_match["excluded_rows"] = sorted(set(excluded_rows))
+            print(f"Match contains excluded rows: {longest_match['excluded_rows']}")
+        
+        # Prefer non-empty match over empty match
+        if longest_match and longest_match["end"] >= longest_match["start"]:  # Ensure it's a valid match
+            print(f"Found non-empty match: {longest_match}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return longest_match
+        elif empty_match:
+            print(f"Using empty match as fallback: {empty_match}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return empty_match
+        else:
+            print(f"No match found starting at index {start_idx}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return None
+
+
+
     def find_matches(self, rows, config=None, measures=None):
         """Find all matches with optimized processing."""
         start_time = time.time()
@@ -274,9 +556,15 @@ class EnhancedMatcher:
 
                 # Update unmatched indices efficiently
                 if match.get("variables"):
-                    matched_indices = set(sum(match["variables"].values(), []))
+                    matched_indices = set()
+                    for var, indices in match["variables"].items():
+                        matched_indices.update(indices)
                     unmatched_indices -= matched_indices
                     processed_indices.update(matched_indices)
+                    
+                    # Also mark excluded rows as processed
+                    if match.get("excluded_rows"):
+                        processed_indices.update(match["excluded_rows"])
             else:
                 print("\nProcessing match with ONE ROW PER MATCH:")
                 print(f"Match: {match}")
@@ -284,9 +572,15 @@ class EnhancedMatcher:
                 if match_row:
                     results.append(match_row)
                     if match.get("variables"):
-                        matched_indices = set(sum(match["variables"].values(), []))
+                        matched_indices = set()
+                        for var, indices in match["variables"].items():
+                            matched_indices.update(indices)
                         unmatched_indices -= matched_indices
                         processed_indices.update(matched_indices)
+                        
+                        # Also mark excluded rows as processed
+                        if match.get("excluded_rows"):
+                            processed_indices.update(match["excluded_rows"])
 
             # Update start index based on skip mode
             if match.get("is_empty", False):
@@ -304,6 +598,10 @@ class EnhancedMatcher:
                 # Mark all indices in the match as processed
                 for idx in range(old_start_idx, match["end"] + 1):
                     processed_indices.add(idx)
+                    
+                # Also mark excluded rows as processed
+                if match.get("excluded_rows"):
+                    processed_indices.update(match["excluded_rows"])
 
             match_number += 1
 
@@ -322,6 +620,7 @@ class EnhancedMatcher:
         self.timing["total"] = time.time() - start_time
         print(f"Find matches completed in {self.timing['total']:.6f} seconds")
         return results
+
 
 
 
@@ -574,224 +873,7 @@ class EnhancedMatcher:
             pass
             
         return True
-
-    def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> Optional[Dict[str, Any]]:
-        """Find a single match using optimized transitions with proper variable handling."""
-        match_start_time = time.time()
-        state = self.start_state
-        current_idx = start_idx
-        var_assignments = {}
-        
-        print(f"Starting match at index {start_idx}, state: {self._get_state_description(state)}")
-        
-        # Update context with subset variables from DFA metadata
-        if hasattr(self.dfa, 'metadata') and 'subset_vars' in self.dfa.metadata:
-            context.subsets.update(self.dfa.metadata['subset_vars'])
-
-        # Optional early filtering based on anchor constraints
-        if hasattr(self, '_anchor_metadata') and not self._can_satisfy_anchors(len(rows)):
-            print(f"Partition cannot satisfy anchor constraints")
-            self.timing["find_match"] += time.time() - match_start_time
-            return None
-        
-        # Check start anchor constraints for the start state
-        if not self._check_anchors(state, start_idx, len(rows), "start"):
-            print(f"Start state anchor check failed at index {start_idx}")
-            self.timing["find_match"] += time.time() - match_start_time
-            return None
-        
-        # Check for empty match - but only use it if we can't find a non-empty match
-        empty_match = None
-        if self.dfa.states[state].is_accept:
-            # For empty matches, also verify end anchor if present
-            if self._check_anchors(state, start_idx, len(rows), "end"):
-                print(f"Found potential empty match at index {start_idx} - start state is accepting")
-                empty_match = {
-                    "start": start_idx,
-                    "end": start_idx - 1,
-                    "variables": {},
-                    "state": state,
-                    "is_empty": True
-                }
-                # Don't return immediately - try to find a non-empty match first
-        
-        longest_match = None
-        trans_index = self.transition_index[state]
-        
-        # Check if we have both start and end anchors in the pattern
-        has_both_anchors = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("spans_partition", False)
-        # Check if we have only end anchor in the pattern
-        has_end_anchor = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("has_end_anchor", False)
-        
-        # Add pattern_variables to context for PERMUTE pattern navigation
-        if hasattr(self, 'original_pattern') and 'PERMUTE' in self.original_pattern:
-            # Extract A, B, C from PERMUTE(A, B, C)
-            pattern_str = self.original_pattern
-            permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', pattern_str, re.IGNORECASE)
-            if permute_match:
-                variables = [v.strip() for v in permute_match.group(1).split(',')]
-                context.pattern_variables = variables
-                # Important: Store the ORIGINAL pattern order, not the permuted order
-        
-        while current_idx < len(rows):
-            row = rows[current_idx]
-            context.current_idx = current_idx
-            
-            # Update context with current variable assignments for condition evaluation
-            context.variables = var_assignments
-            # Add tracking for current variable assignments
-            context.current_var_assignments = var_assignments
-            
-            print(f"Testing row {current_idx}, data: {row}")
-            
-            # Use indexed transitions for faster lookups
-            next_state = None
-            matched_var = None
-            
-            # Try all transitions and use the first one that matches the condition
-            # This is critical for correct variable assignment based on DEFINE conditions
-            for var, target, condition in trans_index:
-                print(f"  Evaluating condition for var: {var}")
-                try:
-                    # Set the current variable being evaluated for self-references
-                    context.current_var = var
-                    
-                    # First check if target state's START anchor constraints are satisfied
-                    # We don't check end anchors here, only at match acceptance time
-                    if not self._check_anchors(target, current_idx, len(rows), "start"):
-                        print(f"  Start anchor check failed for transition to state {target} with var {var}")
-                        continue
-                        
-                    # Then evaluate the condition with the current row and context
-                    result = condition(row, context)
-                    print(f"    Condition {'passed' if result else 'failed'} for {var}")
-                    if result:
-                        next_state = target
-                        matched_var = var
-                        break
-                except Exception as e:
-                    print(f"  Error evaluating condition for {var}: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
-                finally:
-                    # Clear the current variable after evaluation
-                    if hasattr(context, 'current_var'):
-                        delattr(context, 'current_var')
-            
-            # For star patterns, we need to handle the case where no transition matches
-            # but we're in an accepting state
-            if next_state is None and self.dfa.states[state].is_accept:
-                print(f"No valid transition from accepting state {state} at row {current_idx}")
-                # Update longest match to include all rows up to this point
-                if current_idx > start_idx:  # Only if we've matched at least one row
-                    # For patterns with both start and end anchors, we need to check if we've reached the end
-                    if has_both_anchors and current_idx < len(rows):
-                        print(f"Pattern has both anchors but we're not at the end of partition")
-                        break  # Don't accept partial matches for ^...$ patterns
-                    
-                    # For patterns with only end anchor, we need to check if we're at the last row
-                    if has_end_anchor and not has_both_anchors:
-                        # Only accept if we're at the last row
-                        if current_idx - 1 == len(rows) - 1:
-                            longest_match = {
-                                "start": start_idx,
-                                "end": current_idx - 1,
-                                "variables": {k: v[:] for k, v in var_assignments.items()},
-                                "state": state,
-                                "is_empty": False
-                            }
-                        else:
-                            print(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
-                    else:
-                        # No end anchor, accept the match
-                        longest_match = {
-                            "start": start_idx,
-                            "end": current_idx - 1,
-                            "variables": {k: v[:] for k, v in var_assignments.items()},
-                            "state": state,
-                            "is_empty": False
-                        }
-                    break
-                
-            if next_state is None:
-                print(f"No valid transition from state {state} at row {current_idx}")
-                break
-                    
-            # Record variable assignment
-            if matched_var:
-                if matched_var not in var_assignments:
-                    var_assignments[matched_var] = []
-                var_assignments[matched_var].append(current_idx)
-                print(f"  Assigned row {current_idx} to variable {matched_var}")
-            
-            state = next_state
-            current_idx += 1
-            trans_index = self.transition_index[state]
-            
-            # Update longest match if accepting state
-            if self.dfa.states[state].is_accept:
-                # Check end anchor constraints ONLY when we reach an accepting state
-                if not self._check_anchors(state, current_idx - 1, len(rows), "end"):
-                    print(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
-                    # Continue to next row, but don't update longest_match
-                    continue
-                    
-                print(f"Reached accepting state {state} at row {current_idx-1}")
-                
-                # For patterns with both start and end anchors, we need to check if we've consumed the entire partition
-                if has_both_anchors and current_idx < len(rows):
-                    # If we have both anchors (^...$) and haven't reached the end of the partition,
-                    # we need to continue matching to try to consume the entire partition
-                    print(f"Pattern has both anchors but we're not at the end of partition yet")
-                    continue
-                
-                # For patterns with only end anchor, we need to check if we're at the last row
-                if has_end_anchor and not has_both_anchors:
-                    # Only accept if we're at the last row
-                    if current_idx - 1 != len(rows) - 1:
-                        print(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
-                        continue
-                
-                longest_match = {
-                    "start": start_idx,
-                    "end": current_idx - 1,
-                    "variables": {k: v[:] for k, v in var_assignments.items()},
-                    "state": state,
-                    "is_empty": False
-                }
-                print(f"  Current longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
-                
-                # If we have both anchors and have reached the end of the partition, we can stop
-                if has_both_anchors and current_idx == len(rows):
-                    print(f"Found complete match spanning entire partition")
-                    break
-        
-        # For patterns with both anchors, verify we've consumed the entire partition
-        if longest_match and has_both_anchors:
-            if start_idx != 0 or longest_match["end"] != len(rows) - 1:
-                print(f"Match doesn't span entire partition for ^...$ pattern, rejecting")
-                longest_match = None
-        
-        # For patterns with only end anchor, verify the match ends at the last row
-        if longest_match and has_end_anchor and not has_both_anchors:
-            if longest_match["end"] != len(rows) - 1:
-                print(f"Match doesn't end at last row for $ pattern, rejecting")
-                longest_match = None
-        
-        # Prefer non-empty match over empty match
-        if longest_match and longest_match["end"] >= longest_match["start"]:  # Ensure it's a valid match
-            print(f"Found non-empty match: {longest_match}")
-            self.timing["find_match"] += time.time() - match_start_time
-            return longest_match
-        elif empty_match:
-            print(f"Using empty match as fallback: {empty_match}")
-            self.timing["find_match"] += time.time() - match_start_time
-            return empty_match
-        else:
-            print(f"No match found starting at index {start_idx}")
-            self.timing["find_match"] += time.time() - match_start_time
-            return None
+    
 
     def _process_permute_match(self, match, original_variables):
         """Process a match from a PERMUTE pattern with lexicographical ordering."""
@@ -841,76 +923,29 @@ class EnhancedMatcher:
     def _process_all_rows_match(self, match, rows, measures, match_number, config=None):
         """
         Process ALL rows in a match with proper handling for multiple rows and exclusions.
+        
+        Args:
+            match: The match to process
+            rows: Input rows
+            measures: Measure expressions
+            match_number: Sequential match number
+            config: Match configuration
+            
+        Returns:
+            List of result rows
         """
         process_start = time.time()
         results = []
         
-        # Extract excluded variables
-        excluded_vars = set()
-        if self.original_pattern:
-            try:
-                # Look for patterns within exclusion markers
-                pattern = self.original_pattern
-                exclusion_sections = []
-                start = 0
-                while True:
-                    start_marker = pattern.find("{-", start)
-                    if start_marker == -1:
-                        break
-                    end_marker = pattern.find("-}", start_marker)
-                    if end_marker == -1:
-                        print(f"Warning: Unbalanced exclusion markers in pattern: {pattern}")
-                        break
-                    excluded_content = pattern[start_marker + 2:end_marker].strip()
-                    exclusion_sections.append(excluded_content)
-                    print(f"Exclusion content: '{excluded_content}'")
-                    start = end_marker + 2
-                    
-                # Look for variables in each exclusion section
-                for excluded_content in exclusion_sections:
-                    for var in match["variables"].keys():
-                        # More precise regex pattern to match whole words and with quantifiers
-                        if re.search(r'\b' + re.escape(var) + r'\b', excluded_content):
-                            excluded_vars.add(var)
-                        # Match with quantifiers
-                        elif re.search(r'\b' + re.escape(var) + r'[+*?]', excluded_content) or \
-                            re.search(r'\b' + re.escape(var) + r'\{[0-9,]*\}', excluded_content):
-                            excluded_vars.add(var)
-            except Exception as e:
-                print(f"Error processing pattern exclusions: {e}")
+        # Extract excluded variables and rows
+        excluded_vars = match.get("excluded_vars", set())
+        excluded_rows = match.get("excluded_rows", [])
         
-        print(f"Variables in exclusion pattern: {excluded_vars}")
-        
-        # Separate included indices from excluded indices
-        matched_indices = []
-        excluded_indices = set()
-        for var, indices in match["variables"].items():
-            if var in excluded_vars:
-                excluded_indices.update(indices)
-            else:
-                matched_indices.extend(indices)
-        
-        matched_indices = sorted(set(matched_indices))
-        
-        print(f"Processing match {match_number}, included indices: {matched_indices}")
-        if excluded_indices:
-            print(f"Excluded indices: {sorted(excluded_indices)}")
-        
-        # Create context once for all rows with optimized structures
-        context = RowContext()
-        context.rows = rows
-        context.variables = match["variables"]
-        context.match_number = match_number
-        context.subsets = self.subsets.copy() if self.subsets else {}
-        
-        # Create a single evaluator for better caching
-        measure_evaluator = MeasureEvaluator(context)
-        
-        # Track individual measure timing
-        measure_timings = defaultdict(float)
+        print(f"Excluded variables: {excluded_vars}")
+        print(f"Excluded rows: {excluded_rows}")
         
         # Handle empty matches
-        if match.get("is_empty", False):
+        if match.get("is_empty", False) or (match["start"] > match["end"]):
             if config and config.show_empty:
                 # For empty matches, use the original row data at the start index
                 if match["start"] < len(rows):
@@ -929,42 +964,115 @@ class EnhancedMatcher:
                     
                     results.append(empty_row)
                     print(f"Added empty match row for index {match['start']}")
-        else:
-            # Process each matched row (excluding excluded rows)
-            for idx in matched_indices:
-                if idx >= len(rows) or idx in excluded_indices:
-                    continue
-                    
-                # Create result row from original data
-                result = dict(rows[idx])
-                context.current_idx = idx
-                
-                # Calculate measures with performance tracking
-                for alias, expr in measures.items():
-                    measure_start = time.time()
-                    try:
-                        result[alias] = measure_evaluator.evaluate(expr, "RUNNING")
-                        print(f"Evaluated measure {alias} for row {idx} with RUNNING semantics: {result[alias]}")
-                    except Exception as e:
-                        print(f"Error evaluating measure {alias} for row {idx}: {e}")
-                        result[alias] = None
-                    measure_timings[alias] += time.time() - measure_start
-                
-                # Add match metadata
-                result["MATCH_NUMBER"] = match_number
-                result["IS_EMPTY_MATCH"] = False
-                
-                results.append(result)
-                print(f"Added row {idx} to results")
+            return results
         
-        # Log measure timings
-        if measure_timings:
-            print("Measure evaluation timings:")
-            for alias, duration in measure_timings.items():
-                print(f"  {alias}: {duration:.6f} seconds")
+        # Get all matched indices, excluding excluded rows
+        matched_indices = []
+        for var, indices in match["variables"].items():
+            matched_indices.extend(indices)
+        
+        # Sort indices for consistent processing
+        matched_indices = sorted(set(matched_indices))
+        
+        print(f"Processing match {match_number}, included indices: {matched_indices}")
+        if excluded_rows:
+            print(f"Excluded rows: {sorted(excluded_rows)}")
+        
+        # Create context once for all rows with optimized structures
+        context = RowContext()
+        context.rows = rows
+        context.variables = match["variables"]
+        context.match_number = match_number
+        context.subsets = self.subsets.copy() if self.subsets else {}
+        context.excluded_rows = excluded_rows
+        
+        # Create a single evaluator for better caching
+        measure_evaluator = MeasureEvaluator(context)
+        
+        # For Trino compatibility, we need to include all rows from start to end,
+        # skipping only the excluded rows
+        all_indices = list(range(match["start"], match["end"] + 1))
+        
+        # Pre-calculate running sums for efficiency
+        running_sums = {}
+        for alias, expr in measures.items():
+            if expr.upper().startswith("SUM("):
+                # Extract column name
+                col_match = re.match(r'SUM\(([^)]+)\)', expr, re.IGNORECASE)
+                if col_match:
+                    col_name = col_match.group(1).strip()
+                    
+                    # Calculate running sum for each position
+                    total = 0
+                    running_sums[alias] = {}
+                    
+                    for idx in all_indices:
+                        if idx not in excluded_rows and idx < len(rows):
+                            row_val = rows[idx].get(col_name)
+                            if row_val is not None:
+                                try:
+                                    total += float(row_val)
+                                except (ValueError, TypeError):
+                                    pass
+                        running_sums[alias][idx] = total
+        
+        # Process each row in the match range
+        for idx in all_indices:
+            # Skip excluded rows
+            if idx in excluded_rows:
+                continue
+                
+            # Skip rows outside the valid range
+            if idx < 0 or idx >= len(rows):
+                continue
+                
+            # Create result row from original data
+            result = dict(rows[idx])
+            context.current_idx = idx
+            
+            # Calculate measures
+            for alias, expr in measures.items():
+                try:
+                    semantics = self.measure_semantics.get(alias, "RUNNING")
+                    
+                    # Special handling for CLASSIFIER
+                    if expr.upper() == "CLASSIFIER()":
+                        # Determine pattern variable for this row
+                        pattern_var = None
+                        for var, indices in match["variables"].items():
+                            if idx in indices:
+                                pattern_var = var
+                                break
+                        result[alias] = pattern_var
+                        print(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {pattern_var}")
+                    
+                    # Special handling for running sum
+                    elif expr.upper().startswith("SUM(") and semantics == "RUNNING":
+                        if alias in running_sums and idx in running_sums[alias]:
+                            result[alias] = running_sums[alias][idx]
+                            print(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
+                        else:
+                            # Fallback to standard evaluation
+                            result[alias] = measure_evaluator.evaluate(expr, semantics)
+                            print(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
+                    
+                    # Standard evaluation for other measures
+                    else:
+                        result[alias] = measure_evaluator.evaluate(expr, semantics)
+                        print(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
+                        
+                except Exception as e:
+                    print(f"Error evaluating measure {alias} for row {idx}: {e}")
+                    result[alias] = None
+            
+            # Add match metadata
+            result["MATCH_NUMBER"] = match_number
+            result["IS_EMPTY_MATCH"] = False
+            
+            results.append(result)
+            print(f"Added row {idx} to results")
         
         return results
-
 
 
     
