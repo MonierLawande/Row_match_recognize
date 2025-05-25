@@ -1,19 +1,13 @@
 # src/matcher/measure_evaluator.py
 
-import re
-import statistics
-import time
-from collections import defaultdict
-from typing import Dict, Any, List, Optional, Set, Union, Tuple
-from src.matcher.row_context import RowContext
-# src/matcher/measure_evaluator.py
-
+import math
 import re
 import statistics
 import time
 from collections import defaultdict
 from functools import lru_cache
 from typing import Dict, Any, List, Optional, Set, Union, Tuple
+from src.matcher.row_context import RowContext
 from src.matcher.row_context import RowContext
 class ClassifierError(Exception):
     """Error in CLASSIFIER function evaluation."""
@@ -181,7 +175,7 @@ class MeasureEvaluator:
                 
                 # For RUNNING semantics, calculate sum up to current position
                 if is_running:
-                    # Get all matched indices (excluding excluded rows)
+                    # Get all matched indices (including excluded rows for aggregation)
                     matched_indices = []
                     excluded_rows = getattr(self.context, 'excluded_rows', [])
                     
@@ -192,10 +186,11 @@ class MeasureEvaluator:
                     # Sort indices and filter to only include up to current position
                     matched_indices = sorted([idx for idx in matched_indices if idx <= self.context.current_idx])
                     
-                    # Calculate sum, skipping excluded rows
+                    # Calculate sum, INCLUDING excluded rows in the aggregation
+                    # (They are excluded from output but INCLUDED in RUNNING aggregations per SQL:2016)
                     total = 0
                     for idx in matched_indices:
-                        if idx not in excluded_rows and idx < len(self.context.rows):
+                        if idx < len(self.context.rows):
                             row_val = self.context.rows[idx].get(col_name)
                             if row_val is not None:
                                 try:
@@ -216,10 +211,11 @@ class MeasureEvaluator:
                     # Sort indices
                     matched_indices = sorted(matched_indices)
                     
-                    # Calculate sum, skipping excluded rows
+                    # Calculate sum, INCLUDING excluded rows in the aggregation
+                    # (They are excluded from output but INCLUDED in FINAL aggregations per SQL:2016)
                     total = 0
                     for idx in matched_indices:
-                        if idx not in excluded_rows and idx < len(self.context.rows):
+                        if idx < len(self.context.rows):
                             row_val = self.context.rows[idx].get(col_name)
                             if row_val is not None:
                                 try:
@@ -235,7 +231,7 @@ class MeasureEvaluator:
             func_name = agg_match.group(1).upper()
             col_name = agg_match.group(2).strip()
             
-            # Get all matched indices (excluding excluded rows)
+            # Get all matched indices (including excluded rows for aggregation)
             matched_indices = []
             excluded_rows = getattr(self.context, 'excluded_rows', [])
             
@@ -250,8 +246,9 @@ class MeasureEvaluator:
             # Sort indices
             matched_indices = sorted(matched_indices)
             
-            # Filter out excluded rows
-            matched_indices = [idx for idx in matched_indices if idx not in excluded_rows and idx < len(self.context.rows)]
+            # INCLUDE excluded rows in aggregation per SQL:2016 standard
+            # (They are excluded from output but INCLUDED in RUNNING/FINAL aggregations)
+            matched_indices = [idx for idx in matched_indices if idx < len(self.context.rows)]
             
             # Handle COUNT(*) special case
             if func_name == "COUNT" and col_name == "*":

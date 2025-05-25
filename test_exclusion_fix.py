@@ -1,12 +1,28 @@
 #!/usr/bin/env python3
+"""
+Test script to verify the exclusion pattern aggregation bug fix.
+
+Expected output for RUNNING SUM with exclusion patterns:
+- Row 0 (Alice): running_sum = 1200 (salary: 1200)
+- Row 1 (Bob): running_sum = 2500 (salary: 1300, sum: 1200 + 1300 = 2500)
+- Row 3 (David): running_sum = 4500 (salary: 1100, sum: 1200 + 1300 + 900 + 1100 = 4500)
+
+Note: Row 2 (Charlie, salary: 900) should be INCLUDED in the aggregation but EXCLUDED from output.
+"""
 
 import pandas as pd
-from src.executor.match_recognize import match_recognize
+import sys
+import os
 
-def test_exclusion_pattern():
-    """Test the exclusion pattern fix with the exact case from your debug output."""
+# Add the src directory to the path  
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+from executor.match_recognize import match_recognize
+
+def test_exclusion_pattern_fix():
+    """Test the exclusion pattern aggregation fix."""
     
-    # Create the test data matching your debug output
+    # Create test data - using the same data from the debug output
     data = [
         {"id": 1, "name": "Alice", "department": "Sales", "region": "West", "hire_date": "2021-01-01", "salary": 1200},
         {"id": 2, "name": "Bob", "department": "Sales", "region": "West", "hire_date": "2021-01-02", "salary": 1300},
@@ -16,7 +32,11 @@ def test_exclusion_pattern():
     
     df = pd.DataFrame(data)
     
-    # The query with exclusion pattern
+    print("Input data:")
+    print(df[['name', 'salary']])
+    print()
+    
+    # Test query with exclusion pattern - matching the debug case
     query = """
     SELECT * FROM memory.default.employees MATCH_RECOGNIZE(
         PARTITION BY department, region
@@ -34,21 +54,71 @@ def test_exclusion_pattern():
     );
     """
     
-    print("Testing exclusion pattern: A C* {- B+ -} C+")
-    print("Data:")
-    for i, row in enumerate(data):
-        print(f"  Row {i}: {row['name']} - salary={row['salary']}")
+    print("Query with exclusion pattern: A C* {- B+ -} C+")
+    print("Expected match: Alice(A) + Bob(C) + Charlie(excluded B) + Diana(C)")
+    print()
     
-    print("\nExpected behavior:")
-    print("  Alice (A) matches A AS salary > 1000 ✓")
-    print("  Bob (C) matches C AS salary > 1000 ✓") 
-    print("  Charlie (excluded B) matches B AS salary < 1000 - should be excluded ✗")
-    print("  Diana (C) matches C+ AS salary > 1000 ✓")
-    print("  Expected single match: Alice(A) + Bob(C) + Charlie(excluded) + Diana(C)")
-    
+    # Execute the query
     try:
         result = match_recognize(query, df)
-        print(f"\nActual result:")
+        print("Result:")
+        print(result[['name', 'pattern_var', 'current_salary', 'running_sum']])
+        print()
+        
+        # Extract running_sum values for analysis
+        if not result.empty and 'running_sum' in result.columns:
+            running_sums = result['running_sum'].tolist()
+            names = result['name'].tolist()
+            
+            print("RUNNING SUM Analysis:")
+            for i, (name, sum_val) in enumerate(zip(names, running_sums)):
+                print(f"  Row {i}: {name} -> running_sum = {sum_val}")
+            print()
+            
+            # Expected values according to Trino behavior:
+            # Alice: 1200 (just Alice)
+            # Bob: 2500 (Alice + Bob = 1200 + 1300)  
+            # Diana: 4500 (Alice + Bob + Charlie + Diana = 1200 + 1300 + 900 + 1100)
+            expected_running_sums = [1200.0, 2500.0, 4500.0]  # Trino-compatible output
+            
+            print("Expected running_sum values (Trino-compatible):", expected_running_sums)
+            print("Actual running_sum values:", running_sums)
+            
+            if running_sums == expected_running_sums:
+                print("✅ SUCCESS: Exclusion pattern aggregation bug is FIXED!")
+                print("The implementation now correctly includes excluded rows in RUNNING aggregations.")
+                return True
+            else:
+                print("❌ FAILED: Bug still exists.")
+                print("Expected:", expected_running_sums)
+                print("Got:", running_sums)
+                
+                # Show the difference
+                print("\nDifference analysis:")
+                if len(running_sums) >= 3:
+                    print(f"  Diana's running_sum should be 4500 (including Charlie's 900)")
+                    print(f"  Actual Diana's running_sum: {running_sums[2]}")
+                    if running_sums[2] == 3600.0:
+                        print("  This indicates Charlie's salary (900) was excluded from aggregation - BUG!")
+                    elif running_sums[2] == 4500.0:
+                        print("  Charlie's salary (900) was correctly included in aggregation - FIXED!")
+                return False
+        else:
+            print("❌ FAILED: No running_sum column found in result")
+            return False
+            
+    except Exception as e:
+        print(f"Error executing query: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+if __name__ == "__main__":
+    success = test_exclusion_pattern_fix()
+    if success:
+        print("\n🎉 All tests passed! The exclusion pattern aggregation bug has been fixed.")
+    else:
+        print("\n❌ Tests failed. The bug still needs to be fixed.")
         print(result)
         
         # Analyze the result

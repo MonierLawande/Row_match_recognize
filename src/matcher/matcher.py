@@ -1007,7 +1007,9 @@ class EnhancedMatcher:
                     running_sums[alias] = {}
                     
                     for idx in all_indices:
-                        if idx not in excluded_rows and idx < len(rows):
+                        # INCLUDE excluded rows in running sum calculation per SQL:2016
+                        # (They are excluded from output but INCLUDED in RUNNING aggregations)
+                        if idx < len(rows):
                             row_val = rows[idx].get(col_name)
                             if row_val is not None:
                                 try:
