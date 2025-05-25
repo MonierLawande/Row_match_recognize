@@ -250,12 +250,72 @@ def extract_exclusion_variables(pattern: str) -> Set[str]:
         excluded_content = pattern[start_marker + 2:end_marker].strip()
         
         # Extract excluded variables
-        var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)(?:[+*?]|\\{[0-9,]*\\})?'
+        var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)(?:[+*?]|\{[0-9,]*\})?'
         excluded_vars.update(re.findall(var_pattern, excluded_content))
         
         start = end_marker + 2
     
     return excluded_vars
+
+
+
+def validate_pattern_structure(pattern: str) -> None:
+    """
+    Validate overall pattern structure before tokenization.
+    
+    Args:
+        pattern: The pattern string to validate
+        
+    Raises:
+        PatternSyntaxError: If pattern structure is invalid
+    """
+    # Check for balanced parentheses
+    paren_stack = []
+    brace_stack = []
+    exclusion_stack = []
+    
+    i = 0
+    while i < len(pattern):
+        # Handle exclusion syntax {- ... -}
+        if i + 1 < len(pattern) and pattern[i:i+2] == "{-":
+            exclusion_stack.append(i)
+            i += 2  # Skip both characters
+            continue
+            
+        if i + 1 < len(pattern) and pattern[i:i+2] == "-}":
+            if not exclusion_stack:
+                raise UnbalancedPatternError("Unmatched exclusion end marker", i, pattern)
+            exclusion_stack.pop()
+            i += 2  # Skip both characters
+            continue
+            
+        # Handle regular characters
+        if pattern[i] == '(':
+            paren_stack.append(i)
+        elif pattern[i] == ')':
+            if not paren_stack:
+                raise UnbalancedPatternError("Unmatched closing parenthesis", i, pattern)
+            paren_stack.pop()
+        elif pattern[i] == '{' and (i == 0 or pattern[i-1] != '-'):  # Not part of -}
+            brace_stack.append(i)
+        elif pattern[i] == '}' and (i + 1 >= len(pattern) or pattern[i+1] != '-'):  # Not part of {-
+            if not brace_stack:
+                raise UnbalancedPatternError("Unmatched closing brace", i, pattern)
+            brace_stack.pop()
+            
+        # Check for invalid quantifier positions
+        if pattern[i] in "*+?" and (i == 0 or pattern[i-1] in "|("):
+            raise QuantifierError(f"Invalid quantifier '{pattern[i]}' position", i, pattern)
+            
+        i += 1
+    
+    # Check for unmatched opening constructs
+    if paren_stack:
+        raise UnbalancedPatternError("Unmatched opening parenthesis", paren_stack[-1], pattern)
+    if brace_stack:
+        raise UnbalancedPatternError("Unmatched opening brace", brace_stack[-1], pattern)
+    if exclusion_stack:
+        raise UnbalancedPatternError("Unmatched exclusion start marker", exclusion_stack[-1], pattern)
 
 def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[str, PatternToken]], int]:
     """
@@ -358,59 +418,6 @@ def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[
     # If we get here, we didn't find the closing parenthesis
     raise PermutePatternError("Unterminated PERMUTE expression", start_pos - 1, pattern)
 
-def validate_pattern_structure(pattern: str) -> None:
-    """
-    Validate overall pattern structure before tokenization.
-    
-    Args:
-        pattern: The pattern string to validate
-        
-    Raises:
-        PatternSyntaxError: If pattern structure is invalid
-    """
-    # Check for balanced parentheses
-    paren_stack = []
-    brace_stack = []
-    exclusion_stack = []
-    
-    for i, char in enumerate(pattern):
-        if char == '(':
-            paren_stack.append(i)
-        elif char == ')':
-            if not paren_stack:
-                raise UnbalancedPatternError("Unmatched closing parenthesis", i, pattern)
-            paren_stack.pop()
-            
-        elif char == '{':
-            if i + 1 < len(pattern) and pattern[i + 1] == '-':
-                exclusion_stack.append(i)
-            else:
-                brace_stack.append(i)
-        elif char == '}':
-            if not brace_stack:
-                raise UnbalancedPatternError("Unmatched closing brace", i, pattern)
-            brace_stack.pop()
-            
-        elif char == '-' and i + 1 < len(pattern) and pattern[i + 1] == '}':
-            if not exclusion_stack:
-                raise UnbalancedPatternError("Unmatched exclusion end marker", i, pattern)
-            exclusion_stack.pop()
-    
-    # Check for unmatched opening constructs
-    if paren_stack:
-        raise UnbalancedPatternError("Unmatched opening parenthesis", paren_stack[-1], pattern)
-    if brace_stack:
-        raise UnbalancedPatternError("Unmatched opening brace", brace_stack[-1], pattern)
-    if exclusion_stack:
-        raise UnbalancedPatternError("Unmatched exclusion start marker", exclusion_stack[-1], pattern)
-    
-    # Check for invalid quantifier positions
-    for i, char in enumerate(pattern):
-        if char in "*+?" and (i == 0 or pattern[i-1] in "|({"):
-            raise QuantifierError(f"Invalid quantifier '{char}' position", i, pattern)
-
-# Updates for src/matcher/pattern_tokenizer.py
-
 def tokenize_pattern(pattern: str) -> List[PatternToken]:
     """
     Enhanced tokenizer with comprehensive support for all pattern syntax features.
@@ -439,6 +446,17 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
         
         if char.isspace():
             i += 1
+            continue
+            
+        # Handle exclusion syntax {- ... -}
+        if i + 1 < len(pattern) and pattern[i:i+2] == "{-":
+            tokens.append(PatternToken(PatternTokenType.EXCLUSION_START, "{-"))
+            i += 2
+            continue
+            
+        if i + 1 < len(pattern) and pattern[i:i+2] == "-}":
+            tokens.append(PatternToken(PatternTokenType.EXCLUSION_END, "-}"))
+            i += 2
             continue
             
         # Enhanced PERMUTE handling with recursive nesting and quantifiers
@@ -486,14 +504,7 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
             )
             
             tokens.append(permute_token)
-        
-        # Handle pattern exclusion
-        elif char == '{' and i + 1 < len(pattern) and pattern[i + 1] == '-':
-            tokens.append(PatternToken(PatternTokenType.EXCLUSION_START, "{-"))
-            i += 2
-        elif char == '-' and i + 1 < len(pattern) and pattern[i + 1] == '}':
-            tokens.append(PatternToken(PatternTokenType.EXCLUSION_END, "-}"))
-            i += 2
+            continue
         
         # Handle anchors
         elif char == '^':
@@ -539,7 +550,7 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
         else:
             # Extract literal variable name
             var_start = i
-            while i < len(pattern) and pattern[i] not in "|()*+?{}^$ \t\n\r":
+            while i < len(pattern) and pattern[i] not in "|()*+?{}^$ \t\n\r" and not (i + 1 < len(pattern) and (pattern[i:i+2] == "{-" or pattern[i:i+2] == "-}")):
                 i += 1
             
             if i > var_start:
@@ -555,6 +566,8 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
                     quantifier, 
                     is_greedy
                 ))
+            else:
+                i += 1
     
     # Handle end anchor if present
     if pattern.endswith('$'):
@@ -564,7 +577,6 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
     
     return tokens
 
-def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[str, PatternToken]], int]:
     """
     Process variables in a PERMUTE expression, handling nested PERMUTE patterns.
     
