@@ -15,9 +15,9 @@ class ClassifierError(Exception):
 
 # Updates for src/matcher/measure_evaluator.py
 
-def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, List[int]], all_rows: List[Dict[str, Any]], cache: Dict[str, Any] = None, subsets: Dict[str, List[str]] = None) -> Tuple[bool, Any]:
+def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, List[int]], all_rows: List[Dict[str, Any]], cache: Dict[str, Any] = None, subsets: Dict[str, List[str]] = None, current_idx: int = None, is_running: bool = False, is_permute: bool = False) -> Tuple[bool, Any]:
     """
-    Evaluate a pattern variable reference with proper subset handling.
+    Evaluate a pattern variable reference with proper subset handling, RUNNING semantics, and PERMUTE support.
     
     Args:
         expr: The expression to evaluate
@@ -25,19 +25,46 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
         all_rows: List of all rows in the partition
         cache: Optional cache for variable reference results
         subsets: Optional dictionary of subset variable definitions
+        current_idx: Current row index for RUNNING semantics
+        is_running: Whether we're in RUNNING mode
+        is_permute: Whether this is a PERMUTE pattern
         
     Returns:
         Tuple of (handled, value) where handled is True if this was a pattern variable reference
     """
-    # Use cache if provided
-    if cache is not None and expr in cache:
-        return True, cache[expr]
+    # Clean the expression - remove any whitespace
+    expr = expr.strip()
+    
+    print(f"DEBUG_EVAL: expr='{expr}', vars={list(var_assignments.keys())}, current_idx={current_idx}, is_running={is_running}, is_permute={is_permute}")
+    
+    # Use cache if provided (but cache key should include current_idx, is_running, and is_permute for proper caching)
+    cache_key = f"{expr}_{current_idx}_{is_running}_{is_permute}" if is_running or is_permute else expr
+    if cache is not None and cache_key in cache:
+        print(f"DEBUG_EVAL: Cache hit for {cache_key}, returning {cache[cache_key]}")
+        return True, cache[cache_key]
     
     # Handle direct pattern variable references like A.salary or X.value
-    var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\\.([A-Za-z_][A-Za-z0-9_]*)$', expr)
+    var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$', expr)
     if var_col_match:
+        print(f"DEBUG_EVAL: Matched! groups: {var_col_match.groups()}")
         var_name = var_col_match.group(1)
         col_name = var_col_match.group(2)
+        print(f"DEBUG_EVAL: var_name={var_name}, col_name={col_name}")
+        
+        # For PERMUTE patterns in ONE ROW PER MATCH mode, always use FINAL semantics
+        # This ensures we get the actual value for each variable regardless of order
+        if is_permute and not is_running:
+            print(f"DEBUG_EVAL: Using PERMUTE-specific logic for {var_name}")
+            var_indices = var_assignments.get(var_name, [])
+            if var_indices:
+                # Use the last matched position for this variable
+                idx = max(var_indices)
+                if idx < len(all_rows):
+                    value = all_rows[idx].get(col_name)
+                    print(f"DEBUG_EVAL: PERMUTE match found value {value} at index {idx}")
+                    if cache is not None:
+                        cache[cache_key] = value
+                    return True, value
         
         # Check if this is a subset variable
         if subsets and var_name in subsets:
@@ -48,31 +75,63 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
             component_positions = {}
             for component in components:
                 if component in var_assignments and var_assignments[component]:
-                    component_positions[component] = max(var_assignments[component])
+                    # For RUNNING semantics, only consider positions at or before current_idx
+                    valid_positions = var_assignments[component]
+                    if is_running and current_idx is not None:
+                        valid_positions = [pos for pos in valid_positions if pos <= current_idx]
+                    
+                    if valid_positions:
+                        component_positions[component] = max(valid_positions)
             
             # If we have any components, get the one with the latest position
             if component_positions:
                 latest_component = max(component_positions.items(), key=lambda x: x[1])[0]
                 var_indices = var_assignments[latest_component]
+                
+                # For RUNNING semantics, ensure the variable position is at or before current_idx
+                if is_running and current_idx is not None:
+                    valid_indices = [idx for idx in var_indices if idx <= current_idx]
+                    if not valid_indices:
+                        if cache is not None:
+                            cache[cache_key] = None
+                        return True, None
+                    var_indices = valid_indices
+                
                 if var_indices and var_indices[0] < len(all_rows):
                     value = all_rows[var_indices[0]].get(col_name)
                     if cache is not None:
-                        cache[expr] = value
+                        cache[cache_key] = value
                     return True, value
             
+            if cache is not None:
+                cache[cache_key] = None
             return True, None
         
         # Direct variable lookup
         var_indices = var_assignments.get(var_name, [])
+        
+        # For RUNNING semantics, only return value if the variable's position is at or before current_idx
+        if is_running and current_idx is not None:
+            valid_indices = [idx for idx in var_indices if idx <= current_idx]
+            if not valid_indices:
+                if cache is not None:
+                    cache[cache_key] = None
+                return True, None
+            var_indices = valid_indices
+        
         if var_indices and var_indices[0] < len(all_rows):
             value = all_rows[var_indices[0]].get(col_name)
             if cache is not None:
-                cache[expr] = value
+                cache[cache_key] = value
             return True, value
+        
+        if cache is not None:
+            cache[cache_key] = None
         return True, None
     
     # Not a pattern variable reference
     return False, None
+
 
 
 class MeasureEvaluator:
@@ -113,11 +172,11 @@ class MeasureEvaluator:
 
     def evaluate(self, expr: str, semantics: str = None) -> Any:
         """
-        Evaluate a measure expression with proper RUNNING/FINAL semantics.
+        Evaluate a measure expression with proper RUNNING/FINAL semantics and PERMUTE support.
         
         This implementation handles all standard SQL:2016 pattern matching measures
         including CLASSIFIER(), MATCH_NUMBER(), and aggregate functions with proper
-        handling of exclusions.
+        handling of exclusions and PERMUTE patterns.
         
         Args:
             expr: The expression to evaluate
@@ -286,13 +345,23 @@ class MeasureEvaluator:
             elif func_name == "COUNT":
                 return len(values)
         
-        # Try optimized pattern variable reference evaluation
+        # Determine if this is a PERMUTE pattern
+        is_permute = False
+        if hasattr(self.context, 'pattern_metadata'):
+            is_permute = self.context.pattern_metadata.get('permute', False)
+        elif hasattr(self.context, 'pattern_variables') and len(self.context.pattern_variables) > 0:
+            is_permute = True
+        
+        # Try optimized pattern variable reference evaluation with PERMUTE support
         handled, value = evaluate_pattern_variable_reference(
             expr, 
             self.context.variables, 
             self.context.rows,
             self._var_ref_cache,
-            getattr(self.context, 'subsets', None)  # Pass subsets if available
+            getattr(self.context, 'subsets', None),
+            self.context.current_idx,
+            is_running,
+            is_permute  # Pass the PERMUTE flag
         )
         if handled:
             return value
