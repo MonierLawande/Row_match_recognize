@@ -611,79 +611,57 @@ def compile_condition(condition_str, variable=None):
         A callable function that takes (row, context) and returns a boolean
     """
     # Handle undefined pattern variables (when condition_str is "TRUE")
-    # This applies to ANY variable not explicitly defined in the DEFINE clause
     if condition_str == "TRUE":
         return lambda row, ctx: True
     
-    # Handle special case for START variable (always True) - backward compatibility
-    if variable == "START":
-        return lambda row, ctx: True
-    
-    # Replace PREV(column) with appropriate context access
-    def replace_prev(match):
-        col = match.group(1)
-        steps = int(match.group(2)) if match.group(2) else 1
-        return f"ctx.prev('{col}', {steps})"
-    
-    # Replace PREV(column, N) with appropriate context access
-    condition_str = re.sub(r"PREV\(([^,)]+)(?:,\s*(\d+))?\)", replace_prev, condition_str)
-    
-    # Fix SQL comparison operators to Python
+    # First, fix SQL comparison operators to Python
     condition_str = re.sub(r'\s*=\s*', ' == ', condition_str)
     condition_str = re.sub(r'\s*<>\s*', ' != ', condition_str)
     condition_str = re.sub(r'\bAND\b', ' and ', condition_str, flags=re.IGNORECASE)
     condition_str = re.sub(r'\bOR\b', ' or ', condition_str, flags=re.IGNORECASE)
     condition_str = re.sub(r'\bNOT\b', ' not ', condition_str, flags=re.IGNORECASE)
     
-    # Replace direct column references with row access, being careful with string literals
-    def replace_column(match):
-        col = match.group(1)
-        return f"row.get('{col}')"
+    # IMPORTANT: Process PREV function BEFORE replacing column references
+    # This ensures we don't get nested row.get() calls inside PREV arguments
     
-    # More sophisticated pattern to avoid replacing variables inside string literals
-    # This pattern matches column names but not when they're inside quotes
-    def smart_column_replace(text):
-        result = ""
-        i = 0
-        in_single_quote = False
-        in_double_quote = False
-        
-        while i < len(text):
-            char = text[i]
-            if char == "'" and not in_double_quote:
-                in_single_quote = not in_single_quote
-                result += char
-            elif char == '"' and not in_single_quote:
-                in_double_quote = not in_double_quote
-                result += char
-            elif not in_single_quote and not in_double_quote:
-                # Check if we're at the start of a potential column name
-                if char.isalpha() or char == '_':
-                    # Find the end of the identifier
-                    start = i
-                    while i < len(text) and (text[i].isalnum() or text[i] == '_'):
-                        i += 1
-                    
-                    identifier = text[start:i]
-                    
-                    # Check if this looks like a column reference (not a keyword)
-                    # We want to transform column names but not SQL keywords
-                    if (identifier.lower() not in ['and', 'or', 'not', 'true', 'false', 'null', 'between', 'like', 'in'] and
-                        not (start > 0 and text[start-1] in ["'", '"']) and
-                        not (i < len(text) and text[i] == "(")):  # Not a function call
-                        result += f"row.get('{identifier}')"
-                    else:
-                        result += identifier
-                    i -= 1  # Adjust for the loop increment
-                else:
-                    result += char
-            else:
-                result += char
-            i += 1
-        
-        return result
+    # First, identify all PREV function calls and their arguments
+    prev_calls = []
+    prev_pattern = r'PREV\(([^,)]+)(?:,\s*(\d+))?\)'
+    for match in re.finditer(prev_pattern, condition_str):
+        col_name = match.group(1).strip()
+        steps = match.group(2) if match.group(2) else '1'
+        prev_calls.append((match.span(), col_name, steps))
     
-    condition_str = smart_column_replace(condition_str)
+    # Replace PREV calls with placeholders to protect them during column replacement
+    placeholder_map = {}
+    for i, (span, col_name, steps) in enumerate(prev_calls):
+        placeholder = f"__PREV_PLACEHOLDER_{i}__"
+        placeholder_map[placeholder] = f"ctx.prev('{col_name}', {steps})"
+        start, end = span
+        condition_str = condition_str[:start] + placeholder + condition_str[end:]
+    
+    # Now replace column references with row.get() calls
+    keywords = ['and', 'or', 'not', 'true', 'false', 'null', 'between', 'like', 'in']
+    
+    def replace_identifiers(text):
+        # Use regex to find identifiers that aren't part of function calls or quoted strings
+        pattern = r'\b([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\()'
+        
+        def replace_match(m):
+            identifier = m.group(1)
+            # Skip keywords and placeholders
+            if identifier.lower() not in keywords and not identifier.startswith('__PREV_PLACEHOLDER_'):
+                return f"row.get('{identifier}')"
+            return identifier
+            
+        return re.sub(pattern, replace_match, text)
+    
+    # Apply the identifier replacement
+    condition_str = replace_identifiers(condition_str)
+    
+    # Now restore the PREV placeholders with their actual function calls
+    for placeholder, replacement in placeholder_map.items():
+        condition_str = condition_str.replace(placeholder, replacement)
     
     # Create the lambda function
     try:

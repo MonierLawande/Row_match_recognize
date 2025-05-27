@@ -216,6 +216,7 @@ class RowContext:
 
 
 
+
     def next(self, steps: int = 1) -> Optional[Dict[str, Any]]:
         """
         Get next row within partition with robust boundary handling.
