@@ -33,13 +33,64 @@ from typing import List, Optional, Dict
 
 
 def smart_split(raw_text):
-    parts = None
-    if ")" in raw_text:
-        parts = re.split(r'(?<=\))\s*AS\s*', raw_text, maxsplit=1, flags=re.IGNORECASE)
-        if len(parts) == 2:
-            return parts
-    parts = re.split(r'\s*AS\s*', raw_text, maxsplit=1, flags=re.IGNORECASE)
-    return parts
+    """Split measure expression into expression and alias parts, handling complex cases correctly."""
+    if not raw_text:
+        return [raw_text]
+    
+    # Handle simple case first - no AS keyword
+    if ' AS ' not in raw_text.upper():
+        return [raw_text]
+    
+    # For complex expressions with parentheses and dots, we need to be more careful
+    # Find the last occurrence of " AS " that's not inside quotes or parentheses
+    raw_upper = raw_text.upper()
+    
+    # Look for AS keyword from right to left to find the alias
+    as_positions = []
+    pos = 0
+    in_quotes = False
+    paren_depth = 0
+    quote_char = None
+    
+    # First pass: find all potential AS positions
+    i = 0
+    while i < len(raw_text) - 3:  # -3 because we need at least " AS " (4 chars)
+        char = raw_text[i]
+        
+        # Handle quotes
+        if char in ['"', "'"]:
+            if not in_quotes:
+                in_quotes = True
+                quote_char = char
+            elif char == quote_char:
+                in_quotes = False
+                quote_char = None
+        
+        # Handle parentheses (only when not in quotes)
+        elif not in_quotes:
+            if char == '(':
+                paren_depth += 1
+            elif char == ')':
+                paren_depth -= 1
+        
+        # Look for " AS " pattern when not in quotes or nested parentheses
+        if (not in_quotes and paren_depth == 0 and 
+            i < len(raw_text) - 3 and 
+            raw_text[i:i+4].upper() == ' AS '):
+            as_positions.append(i)
+            i += 4  # Skip past " AS "
+        else:
+            i += 1
+    
+    if not as_positions:
+        return [raw_text]
+    
+    # Use the last " AS " as the split point (rightmost)
+    last_as_pos = as_positions[-1]
+    expr = raw_text[:last_as_pos].strip()
+    alias = raw_text[last_as_pos + 4:].strip()
+    
+    return [expr, alias]
 
 
 
@@ -269,7 +320,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
     def extract_measures(self, ctx):
         measures = []
         for md in ctx.measureDefinition():
-            raw_text = md.getText()
+            raw_text = self.get_text(md)  # Use get_text to preserve spaces
             semantics = "RUNNING"  # Default semantics
             raw_expr = raw_text.strip()
             
@@ -330,14 +381,18 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             # Fallback to raw mode if we can't determine the specific type
             return RowsPerMatchClause(raw_mode)
     def get_text(self, ctx):
-        """Get the text representation of a parse tree node."""
+        """Get the text representation of a parse tree node with preserved whitespace."""
         if ctx is None:
             return ""
-        if hasattr(ctx, 'getText'):
+        # Always use input stream to preserve original whitespace and formatting
+        if hasattr(ctx, 'start') and hasattr(ctx, 'stop'):
+            start = ctx.start.start
+            stop = ctx.stop.stop
+            return ctx.start.getInputStream().getText(start, stop)
+        # Fallback to getText() if input stream access is not available
+        elif hasattr(ctx, 'getText'):
             return ctx.getText()
-        start = ctx.start.start
-        stop = ctx.stop.stop
-        return ctx.start.getInputStream().getText(start, stop)
+        return ""
 
     
     def extract_after_match_skip(self, ctx):
@@ -642,18 +697,28 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         
         # Get subset variables and their mappings
         subset_vars = {}
-        subset_components = set()
+        subset_union_vars = set()  # SUBSET union variables (like U, V, early_events)
+        subset_components = set()  # Components of subset variables (like A, B in U = (A, B))
         if self.ast.subset:
             for subset_clause in self.ast.subset:
-                subset_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\((.*?)\)', subset_clause.subset_text)
+                # Handle both regular and quoted identifiers
+                subset_match = re.match(r'((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*))\s*=\s*\((.*?)\)', subset_clause.subset_text)
                 if subset_match:
                     subset_name = subset_match.group(1)
-                    subset_elements = [v.strip() for v in subset_match.group(2).split(',')]
-                    subset_vars[subset_name] = subset_elements
-                    if subset_name in pattern_vars:
-                        # If the union variable is in the pattern, its components are valid
-                        subset_components.update(subset_elements)
-                    logger.debug(f"Extracted subset mapping: {subset_name} -> {subset_elements}")
+                    subset_elements = [v.strip().strip('"') for v in subset_match.group(2).split(',')]
+                    # Clean subset name by removing quotes if present
+                    clean_subset_name = subset_name.strip('"')
+                    subset_vars[clean_subset_name] = subset_elements
+                    
+                    # SUBSET union variables are valid references in MEASURES clauses
+                    subset_union_vars.add(clean_subset_name)
+                    # Also add quoted version if it was quoted
+                    if subset_name.startswith('"'):
+                        subset_union_vars.add(subset_name)
+                    
+                    # Subset components must be defined in DEFINE clause
+                    subset_components.update(subset_elements)
+                    logger.debug(f"Extracted subset mapping: {clean_subset_name} -> {subset_elements}")
         
         # Track all referenced variables
         referenced_vars = set()
@@ -681,8 +746,19 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         # Filter out any known functions from referenced variables
         referenced_vars = referenced_vars - known_functions
         
-        # Check for missing references
-        all_valid_vars = pattern_vars.union(subset_components)
+        # Extract all variables that appear in the pattern text (not just those that were successfully tokenized)
+        # This handles cases where variables like START appear in the pattern but aren't in defined_vars
+        pattern_variables_in_text = set()
+        var_pattern = r'\b([A-Za-z_][A-Za-z0-9_]*)\b'
+        potential_vars = re.findall(var_pattern, pattern_text)
+        for var in potential_vars:
+            # Skip operators, keywords, and quantifiers
+            if var.upper() not in {'AND', 'OR', 'NOT', 'PERMUTE'} and not var.isdigit():
+                pattern_variables_in_text.add(var)
+        
+        # Check for missing references - allow variables that appear in pattern text
+        # SUBSET union variables are valid references in MEASURES clauses
+        all_valid_vars = pattern_vars.union(subset_components).union(pattern_variables_in_text).union(subset_union_vars)
         missing = referenced_vars - all_valid_vars
         if missing and "PERMUTE" not in pattern_text.upper():
             raise ParserError(f"Referenced variable(s) {missing} not found in the PATTERN clause or SUBSET definitions.", 
@@ -705,6 +781,8 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         logger.debug(f"Pattern variables: {pattern_vars}")
         logger.debug(f"Referenced variables: {referenced_vars}")
         logger.debug(f"Defined variables: {defined_vars}")
+        logger.debug(f"Subset union variables: {subset_union_vars}")
+        logger.debug(f"Subset components: {subset_components}")
         logger.debug(f"Subset variables: {subset_vars}")
 
     def extract_permute_variables(self, pattern_text):

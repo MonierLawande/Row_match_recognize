@@ -338,10 +338,13 @@ class PatternClause:
                         matched = True
                         break
             
-            # If no defined variable matched, try to match a single character variable
+            # If no defined variable matched, try to match a full variable name
             if not matched and pattern[i].isalpha():
-                var_name = pattern[i]
-                i += 1
+                # Extract full variable name (all consecutive alphanumeric characters)
+                var_start = i
+                while i < len(pattern) and (pattern[i].isalnum() or pattern[i] == '_'):
+                    i += 1
+                var_name = pattern[var_start:i]
                 matched = True
             
             # If we matched a variable, look for a quantifier
@@ -419,8 +422,11 @@ class PatternClause:
                 continue
             
             if cleaned[i].isalpha():
-                var_name = cleaned[i]
-                i += 1
+                # Extract full variable name (all consecutive alphanumeric characters)
+                var_start = i
+                while i < len(cleaned) and (cleaned[i].isalnum() or cleaned[i] == '_'):
+                    i += 1
+                var_name = cleaned[var_start:i]
                 
                 # Look for quantifier
                 quant = ""
@@ -493,29 +499,32 @@ class PatternClause:
             # Get all variables mentioned in PERMUTE clauses
             permute_vars = re.findall(r'PERMUTE\s*\(\s*(.*?)\s*\)', main_pattern, re.IGNORECASE | re.DOTALL)
             for vars_str in permute_vars:
-                # Split by comma, but respect nested parentheses
+                # Split by comma, respecting nested parentheses
+                parts = []
                 depth = 0
-                current_var = []
-                for char in vars_str + ',':  # Add trailing comma for easy processing
-                    if char == '(' and depth == 0:
+                current_part = []
+                
+                for char in vars_str:
+                    if char == '(':
                         depth += 1
-                        continue
-                    elif char == '(' and depth > 0:
-                        depth += 1
-                        current_var.append(char)
-                    elif char == ')' and depth > 1:
+                    elif char == ')':
                         depth -= 1
-                        current_var.append(char)
-                    elif char == ')' and depth == 1:
-                        depth -= 1
-                        continue
                     elif char == ',' and depth == 0:
-                        var = ''.join(current_var).strip()
-                        if var:
-                            potential_variables.add(var)
-                        current_var = []
-                    else:
-                        current_var.append(char)
+                        parts.append(''.join(current_part).strip())
+                        current_part = []
+                        continue
+                    current_part.append(char)
+                
+                if current_part:
+                    parts.append(''.join(current_part).strip())
+                
+                for part in parts:
+                    part = part.strip()
+                    if part and not part.upper().startswith('PERMUTE'):
+                        # Extract variable name from part (remove any quantifiers)
+                        var_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)', part)
+                        if var_match:
+                            potential_variables.add(var_match.group(1))
             
             # Add all defined variables to the potential set
             for var in defined_vars:

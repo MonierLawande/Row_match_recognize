@@ -43,8 +43,9 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
         print(f"DEBUG_EVAL: Cache hit for {cache_key}, returning {cache[cache_key]}")
         return True, cache[cache_key]
     
-    # Handle direct pattern variable references like A.salary or X.value
-    var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$', expr)
+    # Handle direct pattern variable references like A.salary, X.value, or "START".value
+    # Support both regular identifiers and quoted identifiers
+    var_col_match = re.match(r'^((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_]*))\.([A-Za-z_][A-Za-z0-9_]*)$', expr)
     if var_col_match:
         print(f"DEBUG_EVAL: Matched! groups: {var_col_match.groups()}")
         var_name = var_col_match.group(1)

@@ -336,6 +336,9 @@ class EnhancedMatcher:
                         continue
                         
                     # Then evaluate the condition with the current row and context
+                    # IMPORTANT FIX: Ensure we're passing the correct row and context
+                    # The condition should have access to the current row and the full context
+                    # This is critical for PREV function to work correctly
                     result = condition(row, context)
                     print(f"    Condition {'passed' if result else 'failed'} for {var}")
                     
@@ -414,7 +417,7 @@ class EnhancedMatcher:
                             "excluded_rows": excluded_rows.copy()
                         }
                     break
-                
+            
             if next_state is None:
                 print(f"No valid transition from state {state} at row {current_idx}")
                 break
