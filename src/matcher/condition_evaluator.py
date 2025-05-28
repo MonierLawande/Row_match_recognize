@@ -585,7 +585,29 @@ import ast
 # Type alias for condition functions
 ConditionFn = Callable[[Dict[str, Any], 'ConditionContext'], bool]
 
+def _preprocess_sql_condition(condition_expr):
+    """Convert SQL-style expressions to Python-compatible expressions."""
+    if not condition_expr:
+        return condition_expr
+    
+    # Handle SQL boolean literals
+    condition_expr = re.sub(r'\bTRUE\b', 'True', condition_expr, flags=re.IGNORECASE)
+    condition_expr = re.sub(r'\bFALSE\b', 'False', condition_expr, flags=re.IGNORECASE)
+    
+    # Handle SQL NULL
+    condition_expr = re.sub(r'\bNULL\b', 'None', condition_expr, flags=re.IGNORECASE)
+    
+    # Handle SQL comparison operators
+    condition_expr = re.sub(r'\bAND\b', 'and', condition_expr, flags=re.IGNORECASE)
+    condition_expr = re.sub(r'\bOR\b', 'or', condition_expr, flags=re.IGNORECASE)
+    condition_expr = re.sub(r'\bNOT\b', 'not', condition_expr, flags=re.IGNORECASE)
+    
+    return condition_expr
+
 def compile_condition(condition_expr, row_context=None, current_row_idx=None, current_var=None):
+    # Preprocess SQL-style condition to Python-compatible format
+    processed_condition = _preprocess_sql_condition(condition_expr)
+    
     # Handle compilation mode - return function for later evaluation
     if row_context is None and current_row_idx is None:
         # Create closure that will evaluate condition at runtime
@@ -599,7 +621,7 @@ def compile_condition(condition_expr, row_context=None, current_row_idx=None, cu
             evaluator = ConditionEvaluator(context)
             try:
                 # Parse condition using AST and evaluate with our visitor
-                tree = ast.parse(condition_expr, mode='eval')
+                tree = ast.parse(processed_condition, mode='eval')
                 result = evaluator.visit(tree.body)
                 return bool(result)
             except Exception as e:
@@ -626,7 +648,7 @@ def compile_condition(condition_expr, row_context=None, current_row_idx=None, cu
         
         evaluator = ConditionEvaluator(row_context)
         try:
-            tree = ast.parse(condition_expr, mode='eval')
+            tree = ast.parse(processed_condition, mode='eval')
             result = evaluator.visit(tree.body)
             return bool(result)
         except Exception as e:
