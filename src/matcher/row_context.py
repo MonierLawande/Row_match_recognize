@@ -194,28 +194,19 @@ class RowContext:
 
     
     
-    def prev(self, column_name=None, steps: int = 1):
+    def prev(self, steps: int = 1) -> Optional[Dict[str, Any]]:
         """
-        Get value from previous row within partition with Trino-compatible behavior.
+        Get previous row within partition with robust boundary handling.
         
         Args:
-            column_name: Optional column name to retrieve
             steps: Number of rows to look backwards
             
         Returns:
-            Previous row or column value, or None if out of bounds
+            Previous row or None if out of bounds
         """
-        prev_idx = self.current_idx - steps
-        
-        if prev_idx >= 0 and prev_idx < len(self.rows):
-            prev_row = self.rows[prev_idx]
-            if column_name is not None and column_name in prev_row:
-                return prev_row[column_name]
-            return prev_row
+        if self.current_idx - steps >= 0 and self.current_idx - steps < len(self.rows):
+            return self.rows[self.current_idx - steps]
         return None
-
-
-
 
     def next(self, steps: int = 1) -> Optional[Dict[str, Any]]:
         """

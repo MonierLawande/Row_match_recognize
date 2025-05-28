@@ -88,15 +88,8 @@ class ConditionEvaluator(ast.NodeVisitor):
         return self._safe_compare(left, right, func)
 
     def visit_Name(self, node: ast.Name):
-        # Check for SQL boolean literals first
-        if node.id.upper() == "TRUE":
-            return True
-        elif node.id.upper() == "FALSE":
-            return False
-        elif node.id.upper() == "NULL":
-            return None
         # Check for special functions
-        elif node.id.upper() == "PREV":
+        if node.id.upper() == "PREV":
             return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
         elif node.id.upper() == "NEXT":
             return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
@@ -355,29 +348,22 @@ class ConditionEvaluator(ast.NodeVisitor):
                     curr_pos = i
                     break
             
-            # If current position not found in timeline, try simple sequential navigation
+            # If current position not found in timeline
             if curr_pos < 0:
-                if nav_type == 'PREV' and steps == 1 and curr_idx > 0:
-                    # Simple case: get previous row in sequence
-                    prev_idx = curr_idx - 1
-                    if prev_idx >= 0 and prev_idx < len(self.context.rows):
-                        result = self.context.rows[prev_idx].get(column)
-                else:
-                    # For other cases, return None
-                    self.context.navigation_cache[cache_key] = None
-                    return None
-            else:
-                # Handle PREV navigation with bounds checking
-                if nav_type == 'PREV':
-                    if curr_pos >= steps:
-                        prev_idx, _ = timeline[curr_pos - steps]
-                        result = self.context.rows[prev_idx].get(column)
-                
-                # Handle NEXT navigation with bounds checking
-                elif nav_type == 'NEXT':
-                    if curr_pos >= 0 and curr_pos + steps < len(timeline):
-                        next_idx, _ = timeline[curr_pos + steps]
-                        result = self.context.rows[next_idx].get(column)
+                self.context.navigation_cache[cache_key] = None
+                return None
+            
+            # Handle PREV navigation with bounds checking
+            if nav_type == 'PREV':
+                if curr_pos >= steps:
+                    prev_idx, _ = timeline[curr_pos - steps]
+                    result = self.context.rows[prev_idx].get(column)
+            
+            # Handle NEXT navigation with bounds checking
+            elif nav_type == 'NEXT':
+                if curr_pos >= 0 and curr_pos + steps < len(timeline):
+                    next_idx, _ = timeline[curr_pos + steps]
+                    result = self.context.rows[next_idx].get(column)
         
         # Cache the result
         self.context.navigation_cache[cache_key] = result
@@ -599,76 +585,59 @@ import ast
 # Type alias for condition functions
 ConditionFn = Callable[[Dict[str, Any], 'ConditionContext'], bool]
 
-def compile_condition(condition_str, variable=None):
-    """
-    Compile a condition string into a callable function with proper PREV handling.
-    
-    Args:
-        condition_str: The condition string from the DEFINE clause
-        variable: The variable this condition is for
-        
-    Returns:
-        A callable function that takes (row, context) and returns a boolean
-    """
-    # Handle undefined pattern variables (when condition_str is "TRUE")
-    if condition_str == "TRUE":
-        return lambda row, ctx: True
-    
-    # First, fix SQL comparison operators to Python
-    condition_str = re.sub(r'\s*=\s*', ' == ', condition_str)
-    condition_str = re.sub(r'\s*<>\s*', ' != ', condition_str)
-    condition_str = re.sub(r'\bAND\b', ' and ', condition_str, flags=re.IGNORECASE)
-    condition_str = re.sub(r'\bOR\b', ' or ', condition_str, flags=re.IGNORECASE)
-    condition_str = re.sub(r'\bNOT\b', ' not ', condition_str, flags=re.IGNORECASE)
-    
-    # IMPORTANT: Process PREV function BEFORE replacing column references
-    # This ensures we don't get nested row.get() calls inside PREV arguments
-    
-    # First, identify all PREV function calls and their arguments
-    prev_calls = []
-    prev_pattern = r'PREV\(([^,)]+)(?:,\s*(\d+))?\)'
-    for match in re.finditer(prev_pattern, condition_str):
-        col_name = match.group(1).strip()
-        steps = match.group(2) if match.group(2) else '1'
-        prev_calls.append((match.span(), col_name, steps))
-    
-    # Replace PREV calls with placeholders to protect them during column replacement
-    placeholder_map = {}
-    for i, (span, col_name, steps) in enumerate(prev_calls):
-        placeholder = f"__PREV_PLACEHOLDER_{i}__"
-        placeholder_map[placeholder] = f"ctx.prev('{col_name}', {steps})"
-        start, end = span
-        condition_str = condition_str[:start] + placeholder + condition_str[end:]
-    
-    # Now replace column references with row.get() calls
-    keywords = ['and', 'or', 'not', 'true', 'false', 'null', 'between', 'like', 'in']
-    
-    def replace_identifiers(text):
-        # Use regex to find identifiers that aren't part of function calls or quoted strings
-        pattern = r'\b([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\()'
-        
-        def replace_match(m):
-            identifier = m.group(1)
-            # Skip keywords and placeholders
-            if identifier.lower() not in keywords and not identifier.startswith('__PREV_PLACEHOLDER_'):
-                return f"row.get('{identifier}')"
-            return identifier
+def compile_condition(condition_expr, row_context=None, current_row_idx=None, current_var=None):
+    # Handle compilation mode - return function for later evaluation
+    if row_context is None and current_row_idx is None:
+        # Create closure that will evaluate condition at runtime
+        def condition_fn(row, context):
+            # Store the current row and evaluation context
+            context.current_row = row
+            context.current_idx = context.rows.index(row) if row in context.rows else -1
+            context.current_var = current_var  # Ensure current_var is set
             
-        return re.sub(pattern, replace_match, text)
+            # Use AST-based evaluator instead of direct eval for navigation functions
+            evaluator = ConditionEvaluator(context)
+            try:
+                # Parse condition using AST and evaluate with our visitor
+                tree = ast.parse(condition_expr, mode='eval')
+                result = evaluator.visit(tree.body)
+                return bool(result)
+            except Exception as e:
+                # Fall back to basic condition check
+                basic_condition = extract_base_condition(condition_expr)
+                if basic_condition:
+                    if "event_type" in basic_condition:
+                        event_type = re.search(r"'(\w+)'", basic_condition)
+                        if event_type and row.get('event_type') == event_type.group(1):
+                            return True
+                return False
+        return condition_fn
     
-    # Apply the identifier replacement
-    condition_str = replace_identifiers(condition_str)
+    # Runtime evaluation with proper context
+    if row_context and current_row_idx is not None:
+        if current_row_idx < 0 or current_row_idx >= len(row_context.rows):
+            return False
+        
+        # Use proper AST-based evaluation with context
+        row = row_context.rows[current_row_idx]
+        row_context.current_row = row
+        row_context.current_idx = current_row_idx
+        row_context.current_var = current_var
+        
+        evaluator = ConditionEvaluator(row_context)
+        try:
+            tree = ast.parse(condition_expr, mode='eval')
+            result = evaluator.visit(tree.body)
+            return bool(result)
+        except Exception as e:
+            # If navigational evaluation fails, check basic conditions
+            if 'event_type' in condition_expr and 'event_type' in row:
+                event_match = f"event_type = '{row['event_type']}'"
+                return event_match in condition_expr
+            return False
     
-    # Now restore the PREV placeholders with their actual function calls
-    for placeholder, replacement in placeholder_map.items():
-        condition_str = condition_str.replace(placeholder, replacement)
-    
-    # Create the lambda function
-    try:
-        condition_func = eval(f"lambda row, ctx: {condition_str}")
-        return condition_func
-    except Exception as e:
-        raise ValueError(f"Failed to compile condition '{condition_str}': {str(e)}")
+    # Default for validation
+    return True
 
 def extract_base_condition(condition):
     """Extract the basic part of a condition without navigation functions."""

@@ -573,7 +573,7 @@ class NFABuilder:
         # Get condition from DEFINE clause or use TRUE
         condition = define.get(var_base, "TRUE")
         print(f"Creating transition for variable '{var_base}' with condition: '{condition}'")
-        condition_fn = compile_condition(condition, var_base)
+        condition_fn = compile_condition(condition)
         
         # Create transition with condition
         self.states[start].add_transition(condition_fn, end, var_base)
