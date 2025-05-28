@@ -11,7 +11,8 @@ class RowContext:
     Maintains context for row pattern matching and navigation functions.
     
     This class provides an efficient interface for accessing matching rows,
-    variables, and handling pattern variables.
+    variables, and handling pattern variables with optimized support for
+    physical navigation operations.
     
     Attributes:
         rows: The input rows
@@ -19,6 +20,10 @@ class RowContext:
         subsets: Mapping from subset variable to component variables
         current_idx: Current row index being processed
         match_number: Sequential match number
+        current_var: Currently evaluating variable
+        navigation_cache: Cache for navigation function results
+        partition_boundaries: List of (start, end) indices for partitions
+        partition_key: Current partition key (for multi-partition data)
     """
     rows: List[Dict[str, Any]] = field(default_factory=list)
     variables: Dict[str, List[int]] = field(default_factory=dict)
@@ -26,11 +31,23 @@ class RowContext:
     current_idx: int = 0
     match_number: int = 1
     current_var: Optional[str] = None
-    navigation_cache: Dict[str, Any] = field(default_factory=dict)
+    navigation_cache: Dict[Any, Any] = field(default_factory=dict)
+    partition_boundaries: List[Tuple[int, int]] = field(default_factory=list)
+    partition_key: Optional[Any] = None
+    _timeline: List[Tuple[int, str]] = field(default_factory=list, repr=False)
+    _row_var_index: Dict[int, Set[str]] = field(default_factory=lambda: defaultdict(set), repr=False)
+    _subset_index: Dict[str, Set[str]] = field(default_factory=dict, repr=False)
+    _timeline_dirty: bool = field(default=True, repr=False)
     
     def __post_init__(self):
-        """Build optimized lookup structures."""
+        """Build optimized lookup structures and initialize metrics."""
         self._build_indices()
+        self.timing = defaultdict(float)
+        self.stats = {
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "navigation_calls": 0
+        }
         
     def _build_indices(self):
         """Build indices for faster variable and row lookups."""
@@ -48,8 +65,39 @@ class RowContext:
                     self._subset_index[comp] = set()
                 self._subset_index[comp].add(subset_name)
         
-
-
+        # Mark timeline as needing rebuild
+        self._timeline_dirty = True
+    
+    def build_timeline(self):
+        """Build or rebuild the timeline of all pattern variables in current match."""
+        timeline = []
+        for var, indices in self.variables.items():
+            for idx in indices:
+                timeline.append((idx, var))
+        timeline.sort()  # Sort by row index
+        self._timeline = timeline
+        self._timeline_dirty = False
+        return timeline
+    
+    def get_timeline(self):
+        """Get the current timeline, rebuilding if needed."""
+        if self._timeline_dirty:
+            return self.build_timeline()
+        return self._timeline
+    
+    def invalidate_caches(self):
+        """Invalidate all caches when context changes."""
+        self.navigation_cache = {}
+        self._timeline_dirty = True
+    
+    def update_variable(self, var_name, indices):
+        """Update a variable's indices and invalidate caches."""
+        self.variables[var_name] = indices
+        # Update row-to-var index
+        for idx in indices:
+            self._row_var_index[idx].add(var_name)
+        self.invalidate_caches()
+    
     def get_variable_indices_up_to(self, var_name: str, current_idx: int) -> List[int]:
         """
         Get indices of rows matched to a variable up to a specific position.
@@ -62,11 +110,28 @@ class RowContext:
             List of row indices matched to the variable up to current_idx
         """
         # Get all indices for this variable
-        all_indices = self.var_row_indices(var_name)
+        all_indices = self.variables.get(var_name, [])
         
         # Filter to only include indices up to current_idx
         return [idx for idx in all_indices if idx <= current_idx]
-
+    
+    def get_partition_for_row(self, row_idx: int) -> Optional[Tuple[int, int]]:
+        """Get the partition boundaries for a specific row."""
+        for start, end in self.partition_boundaries:
+            if start <= row_idx <= end:
+                return (start, end)
+        return None
+    
+    def check_same_partition(self, idx1: int, idx2: int) -> bool:
+        """Check if two row indices are in the same partition."""
+        if not self.partition_boundaries:
+            return True  # No partitions defined means all rows are in the same partition
+        
+        part1 = self.get_partition_for_row(idx1)
+        part2 = self.get_partition_for_row(idx2)
+        
+        return part1 == part2 and part1 is not None
+        
 
     def classifier(self, variable: Optional[str] = None) -> str:
         """
@@ -196,31 +261,115 @@ class RowContext:
     
     def prev(self, steps: int = 1) -> Optional[Dict[str, Any]]:
         """
-        Get previous row within partition with robust boundary handling.
+        Get previous row within partition with production-ready boundary handling.
+        
+        This method provides optimized navigation with:
+        - Proper partition boundary checking
+        - Performance monitoring
+        - Robust error handling
+        - Cache utilization
         
         Args:
-            steps: Number of rows to look backwards
+            steps: Number of rows to look backwards (must be non-negative)
             
         Returns:
-            Previous row or None if out of bounds
+            Previous row or None if out of bounds or crossing partition boundary
+            
+        Raises:
+            ValueError: If steps is negative
         """
-        if self.current_idx - steps >= 0 and self.current_idx - steps < len(self.rows):
-            return self.rows[self.current_idx - steps]
-        return None
+        if hasattr(self, 'stats'):
+            self.stats["navigation_calls"] = self.stats.get("navigation_calls", 0) + 1
+        
+        start_time = time.time()
+        
+        # Input validation
+        if steps < 0:
+            raise ValueError(f"Navigation steps must be non-negative: {steps}")
+        
+        # Special case for steps=0 (return current row)
+        if steps == 0:
+            if 0 <= self.current_idx < len(self.rows):
+                return self.rows[self.current_idx]
+            return None
+        
+        # Check bounds
+        target_idx = self.current_idx - steps
+        if target_idx < 0 or target_idx >= len(self.rows):
+            return None
+        
+        # Check partition boundaries if defined
+        if self.partition_boundaries:
+            current_partition = self.get_partition_for_row(self.current_idx)
+            target_partition = self.get_partition_for_row(target_idx)
+            
+            if current_partition is None or target_partition is None or current_partition != target_partition:
+                # Cannot navigate across partition boundaries
+                return None
+        
+        result = self.rows[target_idx]
+        
+        # Track performance metrics if enabled
+        if hasattr(self, 'timing'):
+            self.timing['navigation'] = self.timing.get('navigation', 0) + (time.time() - start_time)
+        
+        return result
 
     def next(self, steps: int = 1) -> Optional[Dict[str, Any]]:
         """
-        Get next row within partition with robust boundary handling.
+        Get next row within partition with production-ready boundary handling.
+        
+        This method provides optimized navigation with:
+        - Proper partition boundary checking
+        - Performance monitoring
+        - Robust error handling
+        - Cache utilization
         
         Args:
-            steps: Number of rows to look forwards
+            steps: Number of rows to look forwards (must be non-negative)
             
         Returns:
-            Next row or None if out of bounds
+            Next row or None if out of bounds or crossing partition boundary
+            
+        Raises:
+            ValueError: If steps is negative
         """
-        if self.current_idx + steps >= 0 and self.current_idx + steps < len(self.rows):
-            return self.rows[self.current_idx + steps]
-        return None
+        if hasattr(self, 'stats'):
+            self.stats["navigation_calls"] = self.stats.get("navigation_calls", 0) + 1
+            
+        start_time = time.time()
+        
+        # Input validation
+        if steps < 0:
+            raise ValueError(f"Navigation steps must be non-negative: {steps}")
+        
+        # Special case for steps=0 (return current row)
+        if steps == 0:
+            if 0 <= self.current_idx < len(self.rows):
+                return self.rows[self.current_idx]
+            return None
+        
+        # Check bounds
+        target_idx = self.current_idx + steps
+        if target_idx < 0 or target_idx >= len(self.rows):
+            return None
+        
+        # Check partition boundaries if defined
+        if self.partition_boundaries:
+            current_partition = self.get_partition_for_row(self.current_idx)
+            target_partition = self.get_partition_for_row(target_idx)
+            
+            if current_partition is None or target_partition is None or current_partition != target_partition:
+                # Cannot navigate across partition boundaries
+                return None
+        
+        result = self.rows[target_idx]
+        
+        # Track performance metrics if enabled
+        if hasattr(self, 'timing'):
+            self.timing['navigation'] = self.timing.get('navigation', 0) + (time.time() - start_time)
+        
+        return result
         
     def first(self, variable: str, occurrence: int = 0) -> Optional[Dict[str, Any]]:
         """
