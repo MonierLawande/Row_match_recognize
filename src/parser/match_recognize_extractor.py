@@ -6,7 +6,7 @@ from antlr4 import InputStream, CommonTokenStream
 from src.grammar.TrinoParser import TrinoParser
 from src.grammar.TrinoParserVisitor import TrinoParserVisitor
 from src.grammar.TrinoLexer import TrinoLexer
-from src.ast.ast_nodes import (
+from src.ast_nodes.ast_nodes import (
     PartitionByClause,
     OrderByClause,   SortItem, 
     Measure,
