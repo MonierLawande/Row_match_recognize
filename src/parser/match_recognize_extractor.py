@@ -767,31 +767,34 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     subset_components.update(subset_elements)
                     logger.debug(f"Extracted subset mapping: {clean_subset_name} -> {subset_elements}")
         
-        # Track all referenced variables
-        referenced_vars = set()
+        # Track all referenced pattern variables (not data columns)
+        referenced_pattern_vars = set()
         
-        # 1. Check variables used in MEASURES
+        # 1. Check pattern variables used in MEASURES
         if self.ast.measures:
             for measure in self.ast.measures.measures:
-                # Extract variables from column references like A.totalprice
+                # Extract pattern variables from column references like A.totalprice
                 column_refs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', measure.expression)
-                referenced_vars.update([ref[0] for ref in column_refs])
+                referenced_pattern_vars.update([ref[0] for ref in column_refs])
                 
-                # Extract variables from functions but exclude known function names
-                func_pattern = r'(?:FIRST|LAST|PREV|NEXT)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)'
-                func_refs = re.findall(func_pattern, measure.expression, re.IGNORECASE)
-                referenced_vars.update(func_refs)
+                # For navigation functions like FIRST(price), LAST(price), the argument can be:
+                # 1. A data column name (like 'price') - should NOT be validated as pattern variable
+                # 2. A pattern variable reference (like 'A.price') - the 'A' part should be validated
+                # We only extract pattern variables, not data column references
+                func_pattern = r'(?:FIRST|LAST|PREV|NEXT)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)'
+                func_pattern_refs = re.findall(func_pattern, measure.expression, re.IGNORECASE)
+                referenced_pattern_vars.update([ref[0] for ref in func_pattern_refs])
                 
                 extracted_vars = []
                 if column_refs:
                     extracted_vars.extend([ref[0] for ref in column_refs])
-                if func_refs:
-                    extracted_vars.extend(func_refs)
+                if func_pattern_refs:
+                    extracted_vars.extend([ref[0] for ref in func_pattern_refs])
                 
-                logger.debug(f"Extracted variables from measure '{measure.expression}': {extracted_vars}")
+                logger.debug(f"Extracted pattern variables from measure '{measure.expression}': {extracted_vars}")
         
-        # Filter out any known functions from referenced variables
-        referenced_vars = referenced_vars - known_functions
+        # Filter out any known functions from referenced pattern variables
+        referenced_pattern_vars = referenced_pattern_vars - known_functions
         
         # Extract all variables that appear in the pattern text (not just those that were successfully tokenized)
         # This handles cases where variables like START appear in the pattern but aren't in defined_vars
@@ -803,12 +806,12 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             if var.upper() not in {'AND', 'OR', 'NOT', 'PERMUTE'} and not var.isdigit():
                 pattern_variables_in_text.add(var)
         
-        # Check for missing references - allow variables that appear in pattern text
+        # Check for missing pattern variable references - allow variables that appear in pattern text
         # SUBSET union variables are valid references in MEASURES clauses
-        all_valid_vars = pattern_vars.union(subset_components).union(pattern_variables_in_text).union(subset_union_vars)
-        missing = referenced_vars - all_valid_vars
+        all_valid_pattern_vars = pattern_vars.union(subset_components).union(pattern_variables_in_text).union(subset_union_vars)
+        missing = referenced_pattern_vars - all_valid_pattern_vars
         if missing and "PERMUTE" not in pattern_text.upper():
-            raise ParserError(f"Referenced variable(s) {missing} not found in the PATTERN clause or SUBSET definitions.", 
+            raise ParserError(f"Referenced pattern variable(s) {missing} not found in the PATTERN clause or SUBSET definitions.", 
                             line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         
         # NOTE: Do not validate that all defined variables are used in patterns
@@ -818,7 +821,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         
         # Enhanced logging
         logger.debug(f"Pattern variables: {pattern_vars}")
-        logger.debug(f"Referenced variables: {referenced_vars}")
+        logger.debug(f"Referenced pattern variables: {referenced_pattern_vars}")
         logger.debug(f"Defined variables: {defined_vars}")
         logger.debug(f"Subset union variables: {subset_union_vars}")
         logger.debug(f"Subset components: {subset_components}")
