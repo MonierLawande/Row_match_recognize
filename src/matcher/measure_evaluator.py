@@ -225,55 +225,32 @@ class MeasureEvaluator:
         if expr.upper().strip() == "MATCH_NUMBER()":
             return self.context.match_number
         
-        # Special handling for SUM with exclusions
+        # Special handling for SUM with pattern variable references
         if expr.upper().startswith("SUM("):
-            # Extract the column name from SUM(column)
+            # Extract the column expression from SUM(column_expr)
             sum_match = re.match(r'SUM\(([^)]+)\)', expr, re.IGNORECASE)
             if sum_match:
-                col_name = sum_match.group(1).strip()
+                col_expr = sum_match.group(1).strip()
                 
-                # For RUNNING semantics, calculate sum up to current position
-                if is_running:
-                    # Get all matched indices (including excluded rows for aggregation)
-                    matched_indices = []
-                    excluded_rows = getattr(self.context, 'excluded_rows', [])
+                # Parse pattern variable reference (e.g., B.totalprice)
+                var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$', col_expr)
+                if var_col_match:
+                    var_name = var_col_match.group(1)
+                    col_name = var_col_match.group(2)
                     
-                    # Get all indices from all variables
-                    for var, indices in self.context.variables.items():
-                        matched_indices.extend(indices)
+                    # Get indices for the specific variable
+                    if var_name not in self.context.variables:
+                        return 0
+                        
+                    var_indices = self.context.variables[var_name]
                     
-                    # Sort indices and filter to only include up to current position
-                    matched_indices = sorted([idx for idx in matched_indices if idx <= self.context.current_idx])
+                    # For RUNNING semantics, only include indices up to current position
+                    if is_running:
+                        var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
                     
-                    # Calculate sum, INCLUDING excluded rows in the aggregation
-                    # (They are excluded from output but INCLUDED in RUNNING aggregations per SQL:2016)
+                    # Calculate sum
                     total = 0
-                    for idx in matched_indices:
-                        if idx < len(self.context.rows):
-                            row_val = self.context.rows[idx].get(col_name)
-                            if row_val is not None:
-                                try:
-                                    total += float(row_val)
-                                except (ValueError, TypeError):
-                                    pass
-                    
-                    return total
-                else:
-                    # For FINAL semantics, calculate sum over all matched rows
-                    matched_indices = []
-                    excluded_rows = getattr(self.context, 'excluded_rows', [])
-                    
-                    # Get all indices from all variables
-                    for var, indices in self.context.variables.items():
-                        matched_indices.extend(indices)
-                    
-                    # Sort indices
-                    matched_indices = sorted(matched_indices)
-                    
-                    # Calculate sum, INCLUDING excluded rows in the aggregation
-                    # (They are excluded from output but INCLUDED in FINAL aggregations per SQL:2016)
-                    total = 0
-                    for idx in matched_indices:
+                    for idx in var_indices:
                         if idx < len(self.context.rows):
                             row_val = self.context.rows[idx].get(col_name)
                             if row_val is not None:
@@ -288,46 +265,55 @@ class MeasureEvaluator:
         agg_match = re.match(r'(MIN|MAX|AVG|COUNT)\(([^)]+)\)', expr, re.IGNORECASE)
         if agg_match:
             func_name = agg_match.group(1).upper()
-            col_name = agg_match.group(2).strip()
-            
-            # Get all matched indices (including excluded rows for aggregation)
-            matched_indices = []
-            excluded_rows = getattr(self.context, 'excluded_rows', [])
-            
-            # Get all indices from all variables
-            for var, indices in self.context.variables.items():
-                matched_indices.extend(indices)
-            
-            # For RUNNING semantics, only include rows up to current position
-            if is_running:
-                matched_indices = [idx for idx in matched_indices if idx <= self.context.current_idx]
-            
-            # Sort indices
-            matched_indices = sorted(matched_indices)
-            
-            # INCLUDE excluded rows in aggregation per SQL:2016 standard
-            # (They are excluded from output but INCLUDED in RUNNING/FINAL aggregations)
-            matched_indices = [idx for idx in matched_indices if idx < len(self.context.rows)]
+            col_expr = agg_match.group(2).strip()
             
             # Handle COUNT(*) special case
-            if func_name == "COUNT" and col_name == "*":
-                return len(matched_indices)
+            if func_name == "COUNT" and col_expr == "*":
+                # Get all matched indices
+                matched_indices = []
+                for var, indices in self.context.variables.items():
+                    matched_indices.extend(indices)
+                
+                # For RUNNING semantics, only include rows up to current position
+                if is_running:
+                    matched_indices = [idx for idx in matched_indices if idx <= self.context.current_idx]
+                
+                return len(set(matched_indices))
+            
+            # Parse pattern variable reference (e.g., B.totalprice)
+            var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$', col_expr)
+            if not var_col_match:
+                return None
+                
+            var_name = var_col_match.group(1)
+            col_name = var_col_match.group(2)
+            
+            # Get indices for the specific variable
+            if var_name not in self.context.variables:
+                return None
+                
+            var_indices = self.context.variables[var_name]
+            
+            # For RUNNING semantics, only include indices up to current position
+            if is_running:
+                var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
             
             # Collect values for aggregation
             values = []
-            for idx in matched_indices:
-                row_val = self.context.rows[idx].get(col_name)
-                if row_val is not None:
-                    try:
-                        # Convert to numeric if possible
-                        if isinstance(row_val, (str, bool)):
-                            row_val = float(row_val)
-                        values.append(row_val)
-                    except (ValueError, TypeError):
-                        # Skip non-numeric values for numeric aggregates
-                        if func_name in ("MIN", "MAX", "AVG"):
-                            continue
-                        values.append(row_val)
+            for idx in var_indices:
+                if idx < len(self.context.rows):
+                    row_val = self.context.rows[idx].get(col_name)
+                    if row_val is not None:
+                        try:
+                            # Convert to numeric if possible
+                            if isinstance(row_val, (str, bool)):
+                                row_val = float(row_val)
+                            values.append(row_val)
+                        except (ValueError, TypeError):
+                            # Skip non-numeric values for numeric aggregates
+                            if func_name in ("MIN", "MAX", "AVG"):
+                                continue
+                            values.append(row_val)
             
             # Calculate aggregate
             if not values:
@@ -366,8 +352,15 @@ class MeasureEvaluator:
         if handled:
             return value
         
-        # Handle navigation functions
-        if any(expr.upper().startswith(f"{func}(") for func in ["FIRST", "LAST", "PREV", "NEXT"]):
+        # Enhanced navigation function detection
+        # Check for both simple and nested navigation functions
+        simple_nav_pattern = r'^(FIRST|LAST|PREV|NEXT)\s*\('
+        nested_nav_pattern = r'^(FIRST|LAST|PREV|NEXT)\s*\(\s*(FIRST|LAST|PREV|NEXT)'
+        
+        is_simple_nav = re.match(simple_nav_pattern, expr, re.IGNORECASE) is not None
+        is_nested_nav = re.match(nested_nav_pattern, expr, re.IGNORECASE) is not None
+        
+        if is_simple_nav or is_nested_nav:
             return self._evaluate_navigation(expr, is_running)
         
         # Try to evaluate as a raw expression
@@ -617,6 +610,12 @@ class MeasureEvaluator:
         """
         Handle navigation functions like FIRST, LAST, PREV, NEXT with proper semantics.
         
+        This enhanced implementation supports:
+        1. Simple navigation functions (FIRST(A.price), LAST(B.quantity))
+        2. Nested navigation functions (PREV(FIRST(A.price)), NEXT(LAST(B.quantity)))
+        3. Navigation with offsets (FIRST(A.price, 3), PREV(price, 2))
+        4. Combinations with proper semantics handling
+        
         Args:
             expr: The navigation expression (e.g., "LAST(A.value)")
             is_running: Whether to use RUNNING semantics
@@ -624,12 +623,32 @@ class MeasureEvaluator:
         Returns:
             The result of the navigation function
         """
-        # Cache key for memoization
+        # Check for nested navigation pattern first
+        nested_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*((?:FIRST|LAST|NEXT|PREV)[^)]+\))\s*(?:,\s*(\d+))?\s*\)'
+        nested_match = re.match(nested_pattern, expr, re.IGNORECASE)
+        
+        if nested_match:
+            # For nested navigation, delegate to specialized function
+            # This will also respect RUNNING semantics by using current_idx
+            from src.matcher.condition_evaluator import evaluate_nested_navigation
+            
+            current_idx = self.context.current_idx
+            
+            # For RUNNING semantics, limit to current row
+            if is_running:
+                # When using RUNNING semantics, we only consider rows up to the current position
+                # This affects nested navigation functions
+                return evaluate_nested_navigation(expr, self.context, current_idx, None)
+            else:
+                # With FINAL semantics, we consider all rows in the match
+                return evaluate_nested_navigation(expr, self.context, current_idx, None)
+        
+        # Cache key for memoization - include running semantics in the key
         cache_key = (expr, is_running, self.context.current_idx)
         if hasattr(self, '_var_ref_cache') and cache_key in self._var_ref_cache:
             return self._var_ref_cache[cache_key]
         
-        # Extract function name and arguments
+        # Extract function name and arguments for simple navigation
         match = re.match(r'(FIRST|LAST|PREV|NEXT)\s*\(\s*(.+?)\s*\)', expr, re.IGNORECASE)
         if not match:
             return None
