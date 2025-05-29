@@ -71,8 +71,14 @@ class ConditionEvaluator(ast.NodeVisitor):
 
     def _safe_compare(self, left, right, op):
         """Perform SQL-style comparison with NULL handling."""
-        # If either operand is NULL, comparison is False
+        # If either operand is NULL, we need special handling
         if left is None or right is None:
+            # For navigation functions that return None due to unavailable context
+            # (like PREV() on row 0), we should signal that this condition
+            # cannot be evaluated rather than automatically failing
+            if hasattr(self.context, '_evaluation_context_invalid'):
+                # Signal that this condition cannot be evaluated due to missing context
+                raise ValueError("Navigation context unavailable - condition cannot be evaluated")
             return False
             
         return op(left, right)
@@ -633,6 +639,11 @@ class ConditionEvaluator(ast.NodeVisitor):
                             result = None
                     else:
                         # Not enough rows before current position
+                        # Mark context as invalid if we're trying to access PREV from row 0
+                        # or don't have enough previous rows in the pattern match
+                        if curr_idx == 0 or curr_pos < steps:
+                            # Signal that this is a context issue, not a NULL value
+                            self.context._evaluation_context_invalid = True
                         result = None
                 
                 # Enhanced NEXT navigation with comprehensive bounds checking and partition enforcement
@@ -1037,10 +1048,23 @@ def compile_condition(condition_expr, row_context=None, current_row_idx=None, cu
             # Use AST-based evaluator instead of direct eval for navigation functions
             evaluator = ConditionEvaluator(context)
             try:
+                # Clear any previous context invalid flag
+                if hasattr(context, '_evaluation_context_invalid'):
+                    delattr(context, '_evaluation_context_invalid')
+                
                 # Parse condition using AST and evaluate with our visitor
                 tree = ast.parse(processed_condition, mode='eval')
                 result = evaluator.visit(tree.body)
                 return bool(result)
+            except ValueError as ve:
+                # Handle navigation context unavailable error
+                if "Navigation context unavailable" in str(ve):
+                    # This indicates the condition cannot be evaluated at this row
+                    # due to missing navigation context (e.g., PREV() on row 0)
+                    # Return False but signal this should be handled differently
+                    context._navigation_context_error = True
+                    return False
+                raise ve
             except Exception as e:
                 # Fall back to basic condition check
                 basic_condition = extract_base_condition(condition_expr)
@@ -1065,9 +1089,21 @@ def compile_condition(condition_expr, row_context=None, current_row_idx=None, cu
         
         evaluator = ConditionEvaluator(row_context)
         try:
+            # Clear any previous context invalid flag
+            if hasattr(row_context, '_evaluation_context_invalid'):
+                delattr(row_context, '_evaluation_context_invalid')
+            
             tree = ast.parse(processed_condition, mode='eval')
             result = evaluator.visit(tree.body)
             return bool(result)
+        except ValueError as ve:
+            # Handle navigation context unavailable error
+            if "Navigation context unavailable" in str(ve):
+                # This indicates the condition cannot be evaluated at this row
+                # Signal this for the matcher to handle appropriately
+                row_context._navigation_context_error = True
+                return False
+            raise ve
         except Exception as e:
             # If navigational evaluation fails, check basic conditions
             if 'event_type' in condition_expr and 'event_type' in row:

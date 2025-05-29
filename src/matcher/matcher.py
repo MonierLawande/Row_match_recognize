@@ -337,7 +337,19 @@ class EnhancedMatcher:
                         
                     # Then evaluate the condition with the current row and context
                     print(f"    DEBUG: Calling condition function with row={row}")
+                    
+                    # Clear any previous navigation context error flag
+                    if hasattr(context, '_navigation_context_error'):
+                        delattr(context, '_navigation_context_error')
+                    
                     result = condition(row, context)
+                    
+                    # Check if condition failed due to navigation context unavailability
+                    if not result and hasattr(context, '_navigation_context_error'):
+                        print(f"    Condition failed for {var} due to navigation context unavailable (likely PREV() on row 0)")
+                        # Skip this row for this pattern - pattern matching may need to start later
+                        continue
+                    
                     print(f"    Condition {'passed' if result else 'failed'} for {var}")
                     print(f"    DEBUG: condition result={result}, type={type(result)}")
                     
