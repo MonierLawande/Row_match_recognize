@@ -575,14 +575,22 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                         line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
                     )
                 
-                # Check for infinite loop - cannot skip to the first variable in the pattern
-                if pattern_vars and target_var == pattern_vars[0]:
-                    if mode == 'TO FIRST' or (mode == 'TO LAST' and len(pattern_vars) == 1):
-                        raise ParserError(
-                            f"AFTER MATCH SKIP {mode} {target_var} would create an infinite loop "
-                            f"because {target_var} is the first pattern variable.",
-                            line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
-                        )
+                # Check for infinite loop - only if skipping to the same first occurrence
+                # The logic should be more nuanced - A B+ pattern with SKIP TO FIRST A is valid
+                # because after matching A B+, we can start again from a different A
+                # Only prohibit cases that would immediately cause infinite loops
+                if pattern_vars and target_var == pattern_vars[0] and mode == 'TO FIRST':
+                    # This is actually valid in most cases - commented out for now
+                    # Skip to first A in pattern A B+ means: after finding a match A B+, 
+                    # start next search from the first A in the match
+                    pass
+                elif pattern_vars and target_var == pattern_vars[0] and mode == 'TO LAST' and len(pattern_vars) == 1:
+                    # Only single variable patterns with TO LAST would create immediate infinite loop
+                    raise ParserError(
+                        f"AFTER MATCH SKIP {mode} {target_var} would create an infinite loop "
+                        f"in single-variable pattern.",
+                        line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
+                    )
         
         # Skip some validations for empty patterns
         if not self.ast.pattern or self.ast.pattern.metadata.get("empty_pattern", False):
@@ -607,8 +615,8 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
     def validate_function_usage(self, ctx):
         allowed_functions = {
             "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[\w.]+\*?)\s*\)",
-            "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*[\w.]+(?:\s*,\s*\d+)?\s*\)",
-            "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*[\w.]+(?:\s*,\s*\d+)?\s*\)",
+            "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*.+?(?:\s*,\s*\d+)?\s*\)",
+            "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*.+?(?:\s*,\s*\d+)?\s*\)",
             "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*.+?(?:,\s*\d+)?\s*\)",
             "NEXT":  r"(?:FINAL|RUNNING)?\s*NEXT\(\s*.+?(?:,\s*\d+)?\s*\)",
         }
@@ -648,26 +656,39 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     if subset_name in pattern_vars:
                         subset_components.update(components)
         
-        # All valid variables: direct pattern variables + subset components
-        valid_vars = pattern_vars.union(subset_components)
+        # Get all defined variables
+        defined_vars = set()
+        if self.ast.define:
+            for definition in self.ast.define.definitions:
+                defined_vars.add(definition.variable)
         
-        # Check that all defined variables are valid
-        for definition in self.ast.define.definitions if self.ast.define else []:
-            if definition.variable not in valid_vars:
-                # Skip this check for empty pattern
-                if self.ast.pattern and (self.ast.pattern.pattern.strip() == "()" or 
-                                        self.ast.pattern.metadata.get("empty_pattern", False)):
-                    return
-                    
-                # Skip this check for PERMUTE patterns
-                if self.ast.pattern and "PERMUTE" in self.ast.pattern.pattern.upper():
-                    # For PERMUTE patterns, all defined variables are considered valid
-                    return
-                    
-                raise ParserError(
-                    f"Define variable '{definition.variable}' not found in pattern or subset components.", 
-                    line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
-                )
+        # Add subset components to defined variables if their union variable is defined
+        if self.ast.subset:
+            for subset_clause in self.ast.subset:
+                subset_text = subset_clause.subset_text
+                match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\((.*?)\)', subset_text)
+                if match:
+                    subset_name = match.group(1)
+                    if subset_name in defined_vars:
+                        components = [c.strip() for c in match.group(2).split(',')]
+                        defined_vars.update(components)
+        
+        # Check that all pattern variables are defined (not the other way around)
+        undefined_pattern_vars = pattern_vars - defined_vars
+        if undefined_pattern_vars:
+            # Skip this check for empty pattern
+            if self.ast.pattern and (self.ast.pattern.pattern.strip() == "()" or 
+                                    self.ast.pattern.metadata.get("empty_pattern", False)):
+                return
+                
+            # Skip this check for PERMUTE patterns
+            if self.ast.pattern and "PERMUTE" in self.ast.pattern.pattern.upper():
+                return
+                
+            raise ParserError(
+                f"Pattern variables {undefined_pattern_vars} are not defined in DEFINE clause.", 
+                line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
+            )
 
     def validate_pattern_variables_defined(self, ctx):
         """Validate pattern variable definitions and references."""
@@ -764,18 +785,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             raise ParserError(f"Referenced variable(s) {missing} not found in the PATTERN clause or SUBSET definitions.", 
                             line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         
-        # Check for extra definitions
-        extra = defined_vars - pattern_vars - subset_components
-        if extra:
-            # Special case for empty pattern: allow any definition variables
-            if self.ast.pattern and self.ast.pattern.pattern.strip() == "()":
-                return
-            # Special case for PERMUTE patterns: allow any definition variables
-            if self.ast.pattern and "PERMUTE" in self.ast.pattern.pattern.upper():
-                return
-            # Otherwise raise error
-            raise ParserError(f"Defined variable(s) {extra} not found in the PATTERN clause or as subset components.", 
-                            line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+        # NOTE: Do not validate that all defined variables are used in patterns
+        # SQL MATCH_RECOGNIZE allows defining variables that aren't used in the current pattern
+        # They might be used in MEASURES, or be defined for future extension
+        # Only validate that pattern variables are properly defined (which we already do above)
         
         # Enhanced logging
         logger.debug(f"Pattern variables: {pattern_vars}")

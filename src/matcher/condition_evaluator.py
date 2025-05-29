@@ -83,6 +83,8 @@ class ConditionEvaluator(ast.NodeVisitor):
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         
+        print(f"DEBUG visit_Compare: left={left}, right={right}, current_row={self.current_row}")
+        
         # Use safe comparison with NULL handling
         op = node.ops[0]
         
@@ -99,7 +101,9 @@ class ConditionEvaluator(ast.NodeVisitor):
         if func is None:
             raise ValueError(f"Operator {op} not supported")
             
-        return self._safe_compare(left, right, func)
+        result = self._safe_compare(left, right, func)
+        print(f"DEBUG visit_Compare result: {result}")
+        return result
 
     def visit_Name(self, node: ast.Name):
         # Check for special functions
@@ -123,11 +127,14 @@ class ConditionEvaluator(ast.NodeVisitor):
             return self._get_variable_column_value
                 
         # Regular variable - get from current row
+        value = None
         if self.current_row is not None:
-            return self.current_row.get(node.id)
+            value = self.current_row.get(node.id)
         elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
-            return self.context.rows[self.context.current_idx].get(node.id)
-        return None
+            value = self.context.rows[self.context.current_idx].get(node.id)
+        
+        print(f"DEBUG visit_Name: node.id={node.id}, value={value}, current_row={self.current_row}")
+        return value
 
     def _extract_navigation_args(self, node: ast.Call):
         """Extract arguments from a navigation function call with support for nesting."""
