@@ -1,11 +1,5 @@
-# src/__init__.py
+# Main package __init__.py
 
-from .ast import *
-from .parser import *
-from .validator import *
-
-__all__ = (
-    ast.__all__ +
-    parser.__all__ +
-    validator.__all__
-)
+# Simple initialization without complex imports that might cause circular dependencies
+__version__ = "1.0.0"
+__all__ = []
