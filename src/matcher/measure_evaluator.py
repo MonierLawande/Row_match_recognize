@@ -363,9 +363,30 @@ class MeasureEvaluator:
         if is_simple_nav or is_nested_nav:
             return self._evaluate_navigation(expr, is_running)
         
-        # Try to evaluate as a raw expression
+        # Try AST-based evaluation for complex expressions (arithmetic, etc.)
         try:
-            return self.context.rows[self.context.current_idx].get(expr)
+            from src.matcher.condition_evaluator import ConditionEvaluator
+            import ast
+            
+            # Set up context for AST evaluation
+            self.context.current_row = self.context.rows[self.context.current_idx] if self.context.current_idx < len(self.context.rows) else None
+            
+            # Create a specialized condition evaluator for measure expressions
+            evaluator = ConditionEvaluator(self.context)
+            
+            # Parse and evaluate the expression using AST
+            try:
+                tree = ast.parse(expr, mode='eval')
+                result = evaluator.visit(tree.body)
+                return result
+            except (SyntaxError, ValueError) as ast_error:
+                # If AST parsing fails, try as a simple column reference
+                try:
+                    return self.context.rows[self.context.current_idx].get(expr)
+                except Exception:
+                    print(f"Error evaluating expression '{expr}' with AST: {ast_error}")
+                    return None
+                    
         except Exception as e:
             print(f"Error evaluating expression '{expr}': {e}")
             return None
@@ -725,6 +746,46 @@ class MeasureEvaluator:
                 next_idx = self.context.current_idx + steps
                 if next_idx >= 0 and next_idx < len(self.context.rows):
                     result = self.context.rows[next_idx].get(field_name)
+        
+        # Handle FIRST/LAST with simple field references (no variable prefix)
+        elif func_name in ('FIRST', 'LAST'):
+            field_name = args[0]
+            
+            # Get occurrence (default is 0 for first occurrence)
+            occurrence = 0
+            if len(args) > 1:
+                try:
+                    occurrence = int(args[1])
+                except ValueError:
+                    pass
+            
+            # Collect all row indices from all matched variables
+            all_indices = []
+            for var_name in self.context.variables:
+                var_indices = self.context.variables[var_name]
+                all_indices.extend(var_indices)
+            
+            # For RUNNING semantics, only consider rows up to current position
+            if is_running:
+                all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
+            
+            # Sort indices to ensure correct order and remove duplicates
+            all_indices = sorted(set(all_indices))
+            
+            if all_indices:
+                if func_name == 'FIRST':
+                    # Get the appropriate occurrence from the start
+                    if occurrence < len(all_indices):
+                        idx = all_indices[occurrence]
+                        if idx < len(self.context.rows):
+                            result = self.context.rows[idx].get(field_name)
+                
+                elif func_name == 'LAST':
+                    # Get the appropriate occurrence from the end
+                    if occurrence < len(all_indices):
+                        idx = all_indices[-(occurrence+1)]  # Count from the end
+                        if idx < len(self.context.rows):
+                            result = self.context.rows[idx].get(field_name)
         
         # Cache the result
         if hasattr(self, '_var_ref_cache'):

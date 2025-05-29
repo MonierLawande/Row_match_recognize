@@ -212,15 +212,27 @@ class ConditionEvaluator(ast.NodeVisitor):
                         # Use the simpler navigation function for reliability
                         return self.evaluate_navigation_function('NEXT', column, steps)
                     elif func_name == "FIRST":
-                        var = args[0]
-                        col = args[1] if len(args) > 1 else None
-                        occ = args[2] if len(args) > 2 else 0
-                        return self._get_navigation_value(var, col, 'FIRST', occ)
+                        # Handle FIRST(column) vs FIRST(var.column)
+                        if len(args) == 1 and isinstance(args[0], str):
+                            # FIRST(price) - use current variable context
+                            column = args[0]
+                            return self._get_navigation_value(None, column, 'FIRST', 1)
+                        else:
+                            var = args[0]
+                            col = args[1] if len(args) > 1 else None
+                            occ = args[2] if len(args) > 2 else 0
+                            return self._get_navigation_value(var, col, 'FIRST', occ)
                     elif func_name == "LAST":
-                        var = args[0]
-                        col = args[1] if len(args) > 1 else None
-                        occ = args[2] if len(args) > 2 else 0
-                        return self._get_navigation_value(var, col, 'LAST', occ)
+                        # Handle LAST(column) vs LAST(var.column)
+                        if len(args) == 1 and isinstance(args[0], str):
+                            # LAST(price) - use current variable context
+                            column = args[0]
+                            return self._get_navigation_value(None, column, 'LAST', 1)
+                        else:
+                            var = args[0]
+                            col = args[1] if len(args) > 1 else None
+                            occ = args[2] if len(args) > 2 else 0
+                            return self._get_navigation_value(var, col, 'LAST', occ)
 
         func = self.visit(node.func)
         if callable(func):
@@ -471,19 +483,33 @@ class ConditionEvaluator(ast.NodeVisitor):
             
             # Enhanced logical positioning functions (FIRST/LAST)
             if nav_type in ('FIRST', 'LAST'):
-                if var_name not in self.context.variables or not self.context.variables[var_name]:
+                if var_name is None:
+                    # FIRST(column) or LAST(column) - look across all variables in the match
+                    all_indices = []
+                    for var, indices in self.context.variables.items():
+                        all_indices.extend(indices)
+                    
+                    if not all_indices:
+                        self.context.navigation_cache[cache_key] = None
+                        return None
+                    
+                    # Sort indices and select first or last
+                    all_indices = sorted(set(all_indices))
+                    idx = all_indices[0] if nav_type == 'FIRST' else all_indices[-1]
+                    
+                elif var_name not in self.context.variables or not self.context.variables[var_name]:
                     self.context.navigation_cache[cache_key] = None
                     return None
-                
-                # Get sorted indices with duplication handling
-                var_indices = sorted(set(self.context.variables[var_name]))
-                
-                if not var_indices:
-                    self.context.navigation_cache[cache_key] = None
-                    return None
-                
-                # Select appropriate index based on navigation type
-                idx = var_indices[0] if nav_type == 'FIRST' else var_indices[-1]
+                else:
+                    # Get sorted indices with duplication handling
+                    var_indices = sorted(set(self.context.variables[var_name]))
+                    
+                    if not var_indices:
+                        self.context.navigation_cache[cache_key] = None
+                        return None
+                    
+                    # Select appropriate index based on navigation type
+                    idx = var_indices[0] if nav_type == 'FIRST' else var_indices[-1]
                 
                 # Check partition boundaries if defined
                 if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
