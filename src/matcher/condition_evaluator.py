@@ -83,8 +83,6 @@ class ConditionEvaluator(ast.NodeVisitor):
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         
-        print(f"DEBUG visit_Compare: left={left}, right={right}, current_row={self.current_row}")
-        
         # Use safe comparison with NULL handling
         op = node.ops[0]
         
@@ -101,9 +99,7 @@ class ConditionEvaluator(ast.NodeVisitor):
         if func is None:
             raise ValueError(f"Operator {op} not supported")
             
-        result = self._safe_compare(left, right, func)
-        print(f"DEBUG visit_Compare result: {result}")
-        return result
+        return self._safe_compare(left, right, func)
 
     def visit_Name(self, node: ast.Name):
         # Check for special functions
@@ -133,7 +129,6 @@ class ConditionEvaluator(ast.NodeVisitor):
         elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
             value = self.context.rows[self.context.current_idx].get(node.id)
         
-        print(f"DEBUG visit_Name: node.id={node.id}, value={value}, current_row={self.current_row}")
         return value
 
     def _extract_navigation_args(self, node: ast.Call):
@@ -989,6 +984,14 @@ def _preprocess_sql_condition(condition_expr):
     condition_expr = re.sub(r'\bAND\b', 'and', condition_expr, flags=re.IGNORECASE)
     condition_expr = re.sub(r'\bOR\b', 'or', condition_expr, flags=re.IGNORECASE)
     condition_expr = re.sub(r'\bNOT\b', 'not', condition_expr, flags=re.IGNORECASE)
+    
+    # Convert SQL equality to Python comparison expression
+    # Handle patterns like "column = 'value'" -> "column == 'value'"
+    # This regex looks for variable = 'quoted_string' patterns
+    condition_expr = re.sub(r'\b(\w+)\s*=\s*([\'"][^\'\"]*[\'"])', r'\1 == \2', condition_expr)
+    
+    # Handle patterns like "column = unquoted_value" -> "column == unquoted_value"
+    condition_expr = re.sub(r'\b(\w+)\s*=\s*([^=\s]+(?:\s*[^=\s]+)*)', r'\1 == \2', condition_expr)
     
     return condition_expr
 

@@ -135,7 +135,11 @@ def validate_quantifier_format(quant: str, position: int, pattern: str) -> None:
     if quant.startswith('{') and quant.endswith('}'):
         content = quant[1:-1]
         
-        # Check basic format
+        # Check for negative numbers first (these should be rejected)
+        if '-' in content:
+            raise QuantifierError(f"Negative values not allowed in quantifier: {quant}", position, pattern)
+        
+        # Check basic format - only allow positive digits and commas
         if not re.match(r'^\d+(?:,\d*)?$', content):
             raise QuantifierError(f"Invalid quantifier format: {quant}", position, pattern)
             
@@ -554,6 +558,28 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
             
             i = next_pos
             
+        # Handle isolated quantifiers (not attached to variables) - this is an error
+        elif char == '{':
+            # Check if this is an isolated quantifier
+            temp_i = i
+            brace_depth = 0
+            while temp_i < len(pattern):
+                if pattern[temp_i] == '{':
+                    brace_depth += 1
+                elif pattern[temp_i] == '}':
+                    brace_depth -= 1
+                    if brace_depth == 0:
+                        break
+                temp_i += 1
+            
+            if temp_i < len(pattern) and brace_depth == 0:
+                # This is a complete quantifier pattern
+                quantifier_text = pattern[i:temp_i+1]
+                raise QuantifierError(f"Isolated quantifier '{quantifier_text}' not attached to any variable", i, pattern)
+            else:
+                # Unclosed brace - let it fall through to be caught later
+                i += 1
+        
         # Handle literal with quantifier
         else:
             # Extract literal variable name

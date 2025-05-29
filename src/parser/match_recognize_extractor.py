@@ -508,9 +508,26 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 }
                 return pattern_clause
                 
-            # Remove only the outer parentheses if they exist
+            # Only remove outer parentheses if they truly wrap the entire pattern
+            # Check if the opening parenthesis at position 0 matches the closing parenthesis at the end
             if original_pattern.startswith('(') and original_pattern.endswith(')'):
-                pattern_text = original_pattern[1:-1]
+                # Count parentheses to see if the first one matches the last one
+                paren_count = 0
+                matches_outer = True
+                for i, char in enumerate(original_pattern):
+                    if char == '(':
+                        paren_count += 1
+                    elif char == ')':
+                        paren_count -= 1
+                        # If we reach 0 before the end, the first '(' doesn't wrap the whole pattern
+                        if paren_count == 0 and i < len(original_pattern) - 1:
+                            matches_outer = False
+                            break
+                
+                if matches_outer and paren_count == 0:
+                    pattern_text = original_pattern[1:-1]
+                else:
+                    pattern_text = original_pattern
             else:
                 pattern_text = original_pattern
             
@@ -610,6 +627,15 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         if self.ast.rows_per_match and "WITH UNMATCHED ROWS" in self.ast.rows_per_match.mode.upper():
             if "{-" in pattern_text and "-}" in pattern_text:
                 raise ParserError("Pattern exclusions are not allowed with ALL ROWS PER MATCH WITH UNMATCHED ROWS.", line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+        
+        # Import and call detailed pattern validation from tokenizer
+        try:
+            from src.matcher.pattern_tokenizer import tokenize_pattern
+            tokenize_pattern(pattern_text)  # This will raise exceptions for invalid patterns
+        except Exception as e:
+            # Convert tokenizer exceptions to ParserError
+            raise ParserError(f"Invalid pattern syntax: {e}", line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+            
         logger.debug(f"PATTERN clause validated successfully: {pattern_text}")
 
     def validate_function_usage(self, ctx):

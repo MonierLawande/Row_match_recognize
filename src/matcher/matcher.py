@@ -336,8 +336,10 @@ class EnhancedMatcher:
                         continue
                         
                     # Then evaluate the condition with the current row and context
+                    print(f"    DEBUG: Calling condition function with row={row}")
                     result = condition(row, context)
                     print(f"    Condition {'passed' if result else 'failed'} for {var}")
+                    print(f"    DEBUG: condition result={result}, type={type(result)}")
                     
                     if result:
                         # If this is an excluded variable, mark for exclusion but continue matching
