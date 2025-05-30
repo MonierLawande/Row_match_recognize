@@ -6,6 +6,7 @@ from src.matcher.pattern_tokenizer import PatternToken, PatternTokenType, parse_
 from src.matcher.condition_evaluator import compile_condition
 import itertools
 import re
+from typing import List, Dict, FrozenSet, Set, Any, Optional, Tuple, Union
 
 # A condition function: given a row and current match context, return True if the row qualifies.
 ConditionFn = Callable[[Dict[str, Any], Any], bool]
@@ -544,31 +545,44 @@ class NFABuilder:
         # but they will be filtered from output during result processing
         return excl_start, excl_end
 
-
-
-    def create_var_states(self, var: str, define: Dict[str, str]) -> Tuple[int, int]:
-        """Create states for a pattern variable with support for subset variables."""
+    def create_var_states(self, var: Union[str, PatternToken], define: Dict[str, str]) -> Tuple[int, int]:
+        """Create states for a pattern variable with support for subset variables and PatternToken objects."""
         start = self.new_state()
         end = self.new_state()
         
-        # Extract any quantifier from the variable name
-        var_base = var
-        quantifier = None
-        
-        # Handle quantifiers
-        if var.endswith('?'):
-            var_base = var[:-1]
-            quantifier = '?'
-        elif var.endswith('+'):
-            var_base = var[:-1]
-            quantifier = '+'
-        elif var.endswith('*'):
-            var_base = var[:-1]
-            quantifier = '*'
-        elif '{' in var and var.endswith('}'):
-            open_idx = var.find('{')
-            var_base = var[:open_idx]
-            quantifier = var[open_idx:]
+        # Handle PatternToken objects (for nested PERMUTE patterns)
+        if hasattr(var, 'type') and hasattr(var, 'value'):
+            # This is a PatternToken object
+            if var.type == PatternTokenType.PERMUTE:
+                # Process nested PERMUTE token
+                nested_start, nested_end = self._process_permute(var, define)
+                self.add_epsilon(start, nested_start)
+                self.add_epsilon(nested_end, end)
+                return start, end
+            else:
+                # Use the value from the token
+                var_base = var.value
+                quantifier = var.quantifier
+        else:
+            # Extract any quantifier from the variable name for string variables
+            var_base = var
+            quantifier = None
+            
+            # Handle quantifiers
+            if isinstance(var, str):
+                if var.endswith('?'):
+                    var_base = var[:-1]
+                    quantifier = '?'
+                elif var.endswith('+'):
+                    var_base = var[:-1]
+                    quantifier = '+'
+                elif var.endswith('*'):
+                    var_base = var[:-1]
+                    quantifier = '*'
+                elif '{' in var and var.endswith('}'):
+                    open_idx = var.find('{')
+                    var_base = var[:open_idx]
+                    quantifier = var[open_idx:]
         
         # Get condition from DEFINE clause or use TRUE
         condition = define.get(var_base, "TRUE")
@@ -591,7 +605,6 @@ class NFABuilder:
             start, end = self._apply_quantifier(start, end, min_rep, max_rep, greedy)
         
         return start, end
-# enhanced/automata.py - Part 6: NFABuilder PERMUTE Pattern Handling
 
     def _process_permute(self, token: PatternToken, define: Dict[str, str]) -> Tuple[int, int]:
         """
