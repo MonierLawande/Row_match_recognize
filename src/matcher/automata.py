@@ -684,55 +684,28 @@ class NFABuilder:
                     var_start, var_end = self.create_var_states(var, define)
                     processed_vars.append((var_start, var_end))
         
-        # Generate all permutations for smaller sets
-        if len(processed_vars) <= 6:  # Threshold for explicit generation
-            # Generate all permutations
-            all_perms = list(itertools.permutations(range(len(processed_vars))))
+        # Generate all permutations explicitly - this is the only correct approach
+        # CRITICAL FIX: Create fresh states for each permutation to avoid cross-contamination
+        all_perms = list(itertools.permutations(range(len(processed_vars))))
+        
+        # Process each permutation as a separate sequential path
+        for perm in all_perms:
+            branch_start = self.new_state()
+            branch_current = branch_start
             
-            # Process each permutation
-            for perm in all_perms:
-                branch_start = self.new_state()
-                branch_current = branch_start
+            # Build the permutation branch as a sequential chain with FRESH states
+            for var_idx in perm:
+                # CRITICAL: Create fresh states for this variable in this permutation
+                # Do NOT reuse processed_vars states to avoid epsilon contamination
+                original_var = variables[var_idx]
+                fresh_var_start, fresh_var_end = self.create_var_states(original_var, define)
                 
-                # Build the permutation branch
-                for var_idx in perm:
-                    var_start, var_end = processed_vars[var_idx]
-                    self.add_epsilon(branch_current, var_start)
-                    branch_current = var_end
-                
-                # Connect this permutation branch
-                self.add_epsilon(perm_start, branch_start)
-                self.add_epsilon(branch_current, perm_end)
-        else:
-            # For larger sets, use optimized structure
-            print(f"Large permutation set detected ({len(processed_vars)} variables), using optimized structure")
+                self.add_epsilon(branch_current, fresh_var_start)
+                branch_current = fresh_var_end
             
-            # Create optimized structure for permutations
-            any_branch_start = self.new_state()
-            any_branch_current = any_branch_start
-            
-            # Create parallel paths for all variables
-            var_ends = []
-            
-            # Add all variables
-            for var_start, var_end in processed_vars:
-                self.add_epsilon(any_branch_current, var_start)
-                var_ends.append(var_end)
-            
-            # Connect to junction point
-            junction = self.new_state()
-            for var_end in var_ends:
-                self.add_epsilon(var_end, junction)
-            
-            # Add structure for remaining permutation options
-            if len(processed_vars) > 1:
-                recursive_state = self.new_state()
-                self.add_epsilon(junction, recursive_state)
-                self.add_epsilon(recursive_state, perm_end)
-            
-            # Connect the optimized branch
-            self.add_epsilon(perm_start, any_branch_start)
-            self.add_epsilon(junction, perm_end)
+            # Connect this permutation branch to the main flow
+            self.add_epsilon(perm_start, branch_start)
+            self.add_epsilon(branch_current, perm_end)
         
         # Apply quantifiers to the entire PERMUTE pattern if present
         if token.quantifier:

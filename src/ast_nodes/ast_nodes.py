@@ -593,7 +593,10 @@ class PatternClause:
                 }
                 return
                 
-            raise ValueError(f"Pattern variables {undefined_pattern_vars} are not defined in DEFINE clause")
+            # SQL MATCH_RECOGNIZE Standard: Variables without DEFINE conditions default to TRUE
+            # This is valid behavior - pattern variables without explicit conditions should always match
+            print(f"Pattern variables {undefined_pattern_vars} have no DEFINE conditions - defaulting to TRUE (always match)")
+            # Don't raise an error - this is valid SQL behavior
 
         self.metadata = {
             "variables": full_variables,

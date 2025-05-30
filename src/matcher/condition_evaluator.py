@@ -145,6 +145,12 @@ class ConditionEvaluator(ast.NodeVisitor):
             if isinstance(arg, ast.Name):
                 # For navigation functions, Name nodes should be treated as column names
                 args.append(arg.id)
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # Handle pattern variable references like A.value -> split to var and column
+                var_name = arg.value.id
+                col_name = arg.attr
+                # For navigation functions like FIRST(A.value), we need both parts
+                args.extend([var_name, col_name])
             elif isinstance(arg, ast.Constant):
                 # Constant values (numbers, strings)
                 args.append(arg.value)

@@ -571,6 +571,66 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             return pattern_clause
         return PatternClause("")  # Return empty pattern clause if no pattern found
 
+    def _extract_nested_permute_variables(self, pattern_text: str) -> List[str]:
+        """
+        Extract all variables from nested PERMUTE patterns.
+        
+        For example:
+        - PERMUTE(A, B, C) -> ['A', 'B', 'C']
+        - PERMUTE(A, PERMUTE(B, C)) -> ['A', 'B', 'C']
+        - PERMUTE(PERMUTE(A, B), C) -> ['A', 'B', 'C']
+        """
+        variables = []
+        
+        def extract_variables_recursive(text):
+            """Recursively extract variables from PERMUTE expressions"""
+            # Find all PERMUTE expressions
+            permute_pattern = r'PERMUTE\s*\(\s*([^()]*(?:\([^)]*\)[^()]*)*)\s*\)'
+            
+            while True:
+                match = re.search(permute_pattern, text, re.IGNORECASE)
+                if not match:
+                    break
+                    
+                content = match.group(1)
+                
+                # Split content by commas, but be careful about nested parentheses
+                parts = []
+                current_part = ""
+                paren_depth = 0
+                
+                for char in content:
+                    if char == '(':
+                        paren_depth += 1
+                    elif char == ')':
+                        paren_depth -= 1
+                    elif char == ',' and paren_depth == 0:
+                        if current_part.strip():
+                            parts.append(current_part.strip())
+                        current_part = ""
+                        continue
+                    current_part += char
+                
+                if current_part.strip():
+                    parts.append(current_part.strip())
+                
+                # Process each part
+                for part in parts:
+                    part = part.strip()
+                    if 'PERMUTE' in part.upper():
+                        # This is a nested PERMUTE, process it recursively
+                        extract_variables_recursive(part)
+                    else:
+                        # This is a regular variable
+                        if part and part not in variables:
+                            variables.append(part)
+                
+                # Replace the processed PERMUTE with empty string to avoid reprocessing
+                text = text[:match.start()] + text[match.end():]
+        
+        extract_variables_recursive(pattern_text)
+        return variables
+
 
     def validate_clauses(self, ctx):
         """Validate required clauses and relationships between clauses."""
@@ -711,10 +771,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             if self.ast.pattern and "PERMUTE" in self.ast.pattern.pattern.upper():
                 return
                 
-            raise ParserError(
-                f"Pattern variables {undefined_pattern_vars} are not defined in DEFINE clause.", 
-                line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()
-            )
+            # SQL MATCH_RECOGNIZE Standard: Variables without DEFINE conditions default to TRUE
+            # This is valid behavior - pattern variables without explicit conditions should always match
+            logger.debug(f"Pattern variables {undefined_pattern_vars} have no DEFINE conditions - defaulting to TRUE (always match)")
+            # Don't raise an error - this is valid SQL behavior
 
     def validate_pattern_variables_defined(self, ctx):
         """Validate pattern variable definitions and references."""
@@ -835,7 +895,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             variables = [v.strip() for v in match.group(1).split(',')]
             return variables
         return []
-
+    
 class FullQueryExtractor(TrinoParserVisitor):
     def __init__(self, original_query: str):
         self.original_query = original_query
@@ -911,3 +971,5 @@ def parse_full_query(query: str, dialect='default') -> FullQueryAST:
     extractor = FullQueryExtractor(query)
     extractor.visit(tree)
     return FullQueryAST(extractor.select_clause, extractor.from_clause, extractor.match_recognize)
+
+
