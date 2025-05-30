@@ -588,7 +588,7 @@ class NFABuilder:
         # Apply quantifier if present
         if quantifier:
             min_rep, max_rep, greedy = parse_quantifier(quantifier)
-            start, end = self._apply_quantifier(start, end, min_rep, max_rep, greedy)
+            start, end = self._apply_quantifier(quantifier)
         
         return start, end
 # enhanced/automata.py - Part 6: NFABuilder PERMUTE Pattern Handling
@@ -653,7 +653,6 @@ class NFABuilder:
                     # Extract quantifier from the variable
                     var_base = var
                     quantifier = None
-
                     
                     if var.endswith('*'):
                         var_base = var[:-1]
@@ -695,13 +694,21 @@ class NFABuilder:
             
             # Build the permutation branch as a sequential chain with FRESH states
             for var_idx in perm:
-                # CRITICAL: Create fresh states for this variable in this permutation
-                # Do NOT reuse processed_vars states to avoid epsilon contamination
+                # Get the original variable for this position in the permutation
                 original_var = variables[var_idx]
-                fresh_var_start, fresh_var_end = self.create_var_states(original_var, define)
                 
-                self.add_epsilon(branch_current, fresh_var_start)
-                branch_current = fresh_var_end
+                # Create fresh states for this variable in this permutation
+                # This is critical to avoid epsilon transition contamination between paths
+                if isinstance(original_var, PatternToken) and original_var.type == PatternTokenType.PERMUTE:
+                    # For nested PERMUTE, create a fresh copy of its states
+                    inner_start, inner_end = self._process_permute(original_var, define)
+                    self.add_epsilon(branch_current, inner_start)
+                    branch_current = inner_end
+                else:
+                    # For regular variables, create fresh states
+                    fresh_var_start, fresh_var_end = self.create_var_states(original_var, define)
+                    self.add_epsilon(branch_current, fresh_var_start)
+                    branch_current = fresh_var_end
             
             # Connect this permutation branch to the main flow
             self.add_epsilon(perm_start, branch_start)
@@ -712,6 +719,16 @@ class NFABuilder:
             min_rep, max_rep, greedy = parse_quantifier(token.quantifier)
             perm_start, perm_end = self._apply_quantifier(
                 perm_start, perm_end, min_rep, max_rep, greedy)
+        
+        # Add metadata to mark this as a PERMUTE pattern
+        self.metadata["permute"] = True
+        
+        # Store the original order of variables for lexicographical ordering
+        if "permute_variables" not in self.metadata:
+            self.metadata["permute_variables"] = []
+        self.metadata["permute_variables"].extend(
+            [v for v in variables if isinstance(v, str)]
+        )
         
         return perm_start, perm_end
 # enhanced/automata.py - Part 7: NFABuilder Quantifier Handling
