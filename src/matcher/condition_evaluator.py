@@ -5,9 +5,14 @@ import operator
 import re
 import math
 import time
+import warnings
 from typing import Dict, Any, Optional, Callable, List, Union, Tuple, Set
 from dataclasses import dataclass
 from src.matcher.row_context import RowContext
+from src.utils.logging_config import get_logger, PerformanceTimer
+
+# Module logger
+logger = get_logger(__name__)
 
 # Define the type for condition functions
 ConditionFn = Callable[[Dict[str, Any], RowContext], bool]
@@ -295,7 +300,7 @@ class ConditionEvaluator(ast.NodeVisitor):
         # If we have current_var set, this is a direct check for self-reference
         if hasattr(ctx, 'current_var') and ctx.current_var == var_name:
             is_self_reference = True
-            print(f"  Self-reference detected: {var_name}.{col_name}")
+            logger.debug(f"Self-reference detected: {var_name}.{col_name}")
         
         # Otherwise check if current row is already assigned to this variable
         if not is_self_reference and hasattr(ctx, 'current_var_assignments'):
@@ -799,14 +804,20 @@ class ConditionEvaluator(ast.NodeVisitor):
         # Get the value from the target row
         return self.context.rows[target_idx].get(column)
 
-    def visit_Num(self, node: ast.Num):
-        return node.n
-
     def visit_Constant(self, node: ast.Constant):
+        """Handle all constant types (numbers, strings, booleans, None)"""
         return node.value
 
+    def visit_Num(self, node: ast.Num):
+        """Handle numeric literals for Python < 3.8 compatibility"""
+        # For Python 3.8+, ast.Num is deprecated in favor of ast.Constant
+        # This method provides backward compatibility
+        return node.n
+
     def visit_Str(self, node: ast.Str):
-        """Handle string literals for Python < 3.8"""
+        """Handle string literals for Python < 3.8 compatibility"""
+        # For Python 3.8+, ast.Str is deprecated in favor of ast.Constant
+        # This method provides backward compatibility
         return node.s
 
     def visit_BoolOp(self, node: ast.BoolOp):

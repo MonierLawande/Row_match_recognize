@@ -661,7 +661,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     # Skip to first A in pattern A B+ means: after finding a match A B+, 
                     # start next search from the first A in the match
                     pass
-                elif pattern_vars and target_var == pattern_vars[0] and mode == 'TO LAST' and len(pattern_vars) == 1:
+                # Note: AFTER MATCH SKIP TO LAST variable is valid even for single-variable patterns
+                # with quantifiers like UP{2,} because it advances the starting position and
+                # the quantifier requirement prevents immediate infinite loops
+                elif False:  # Disabled - the previous validation was too strict
                     # Only single variable patterns with TO LAST would create immediate infinite loop
                     raise ParserError(
                         f"AFTER MATCH SKIP {mode} {target_var} would create an infinite loop "

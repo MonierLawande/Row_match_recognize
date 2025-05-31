@@ -8,7 +8,10 @@ from collections import defaultdict
 from functools import lru_cache
 from typing import Dict, Any, List, Optional, Set, Union, Tuple
 from src.matcher.row_context import RowContext
-from src.matcher.row_context import RowContext
+from src.utils.logging_config import get_logger, PerformanceTimer
+
+# Module logger
+logger = get_logger(__name__)
 class ClassifierError(Exception):
     """Error in CLASSIFIER function evaluation."""
     pass
@@ -35,33 +38,32 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
     # Clean the expression - remove any whitespace
     expr = expr.strip()
     
-    print(f"DEBUG_EVAL: expr='{expr}', vars={list(var_assignments.keys())}, current_idx={current_idx}, is_running={is_running}, is_permute={is_permute}")
+    logger.debug(f"Evaluating pattern variable reference: {expr}, current_idx={current_idx}, is_running={is_running}, is_permute={is_permute}")
     
     # Use cache if provided (but cache key should include current_idx, is_running, and is_permute for proper caching)
     cache_key = f"{expr}_{current_idx}_{is_running}_{is_permute}" if is_running or is_permute else expr
     if cache is not None and cache_key in cache:
-        print(f"DEBUG_EVAL: Cache hit for {cache_key}, returning {cache[cache_key]}")
+        logger.debug(f"Cache hit for {cache_key}")
         return True, cache[cache_key]
     
     # Handle direct pattern variable references like A.salary or X.value
     var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$', expr)
     if var_col_match:
-        print(f"DEBUG_EVAL: Matched! groups: {var_col_match.groups()}")
         var_name = var_col_match.group(1)
         col_name = var_col_match.group(2)
-        print(f"DEBUG_EVAL: var_name={var_name}, col_name={col_name}")
+        logger.debug(f"Pattern variable reference matched: var={var_name}, col={col_name}")
         
         # For PERMUTE patterns in ONE ROW PER MATCH mode, always use FINAL semantics
         # This ensures we get the actual value for each variable regardless of order
         if is_permute and not is_running:
-            print(f"DEBUG_EVAL: Using PERMUTE-specific logic for {var_name}")
+            logger.debug(f"Using PERMUTE-specific logic for {var_name}")
             var_indices = var_assignments.get(var_name, [])
             if var_indices:
                 # Use the last matched position for this variable
                 idx = max(var_indices)
                 if idx < len(all_rows):
                     value = all_rows[idx].get(col_name)
-                    print(f"DEBUG_EVAL: PERMUTE match found value {value} at index {idx}")
+                    logger.debug(f"PERMUTE match found value {value} at index {idx}")
                     if cache is not None:
                         cache[cache_key] = value
                     return True, value
@@ -188,10 +190,10 @@ class MeasureEvaluator:
         # Use passed semantics or instance default
         is_running = (semantics == 'RUNNING') if semantics else not self.final
         
-        print(f"Evaluating expression: {expr} with {('FINAL' if not is_running else 'RUNNING')} semantics")
-        print(f"Context variables: {self.context.variables}")
-        print(f"Number of rows: {len(self.context.rows)}")
-        print(f"Current index: {self.context.current_idx}")
+        logger.debug(f"Evaluating expression: {expr} with {('FINAL' if not is_running else 'RUNNING')} semantics")
+        logger.debug(f"Context variables: {self.context.variables}")
+        logger.debug(f"Number of rows: {len(self.context.rows)}")
+        logger.debug(f"Current index: {self.context.current_idx}")
         
         # Store original expression for reference
         self.original_expr = expr
@@ -384,11 +386,11 @@ class MeasureEvaluator:
                 try:
                     return self.context.rows[self.context.current_idx].get(expr)
                 except Exception:
-                    print(f"Error evaluating expression '{expr}' with AST: {ast_error}")
+                    logger.error(f"Error evaluating expression '{expr}' with AST: {ast_error}")
                     return None
                     
         except Exception as e:
-            print(f"Error evaluating expression '{expr}': {e}")
+            logger.error(f"Error evaluating expression '{expr}': {e}")
             return None
 
 
@@ -894,7 +896,7 @@ class MeasureEvaluator:
                         values.append(val)
                     except (ValueError, TypeError):
                         # Log warning but continue processing
-                        print(f"Warning: Non-numeric value '{val}' found in column {col_name}")
+                        logger.warning(f"Non-numeric value '{val}' found in column {col_name}")
                         continue
         
         return values
@@ -968,7 +970,7 @@ class MeasureEvaluator:
             f"Context: current_idx={self.context.current_idx}, "
             f"running={not self.final}"
         )
-        print(error_msg)  # Replace with proper logging in production
+        logger.error(error_msg)
 
     def _evaluate_aggregate(self, func_name: str, args_str: str, is_running: bool) -> Any:
         """

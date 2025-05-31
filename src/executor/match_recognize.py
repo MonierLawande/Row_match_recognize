@@ -13,6 +13,21 @@ from src.matcher.matcher import EnhancedMatcher, MatchConfig, SkipMode, RowsPerM
 from src.matcher.row_context import RowContext
 from src.matcher.condition_evaluator import compile_condition, validate_navigation_conditions
 from src.matcher.measure_evaluator import MeasureEvaluator
+from src.utils.logging_config import get_logger, PerformanceTimer
+
+# Module logger
+logger = get_logger(__name__)
+
+# Simple pattern cache - production-ready caching without external dependencies
+_PATTERN_CACHE = {}
+_CACHE_STATS = {
+    'hits': 0, 
+    'misses': 0, 
+    'compilation_time_saved': 0.0,
+    'memory_used_mb': 0.0
+}
+
+
 
 
 
@@ -377,19 +392,17 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         include_unmatched = False
         
         if mr_clause.rows_per_match:
-            clean_text = mr_clause.rows_per_match.raw_mode.upper().replace(" ", "")
-            
-            if "ALL" in clean_text:
-                if "WITHUNMATCHED" in clean_text:
-                    rows_per_match = RowsPerMatch.ALL_ROWS_WITH_UNMATCHED
-                    include_unmatched = True
-                    show_empty = True
-                elif "OMITEMPTY" in clean_text:
-                    rows_per_match = RowsPerMatch.ALL_ROWS
-                    show_empty = False
-                else:
-                    rows_per_match = RowsPerMatch.ALL_ROWS_SHOW_EMPTY
-                    show_empty = True
+            # Use the parsed flags instead of raw text parsing
+            if mr_clause.rows_per_match.with_unmatched:
+                rows_per_match = RowsPerMatch.ALL_ROWS_WITH_UNMATCHED
+                include_unmatched = True
+                show_empty = True
+            elif mr_clause.rows_per_match.show_empty is False:
+                rows_per_match = RowsPerMatch.ALL_ROWS
+                show_empty = False
+            elif "ALL" in mr_clause.rows_per_match.raw_mode.upper():
+                rows_per_match = RowsPerMatch.ALL_ROWS_SHOW_EMPTY
+                show_empty = True
         
         # Validate pattern exclusions
         if rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED:
@@ -462,24 +475,64 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         # --- BUILD PATTERN MATCHING AUTOMATA ---
         
         automata_start = time.time()
+        
+        # Simple cache key generation
+        import hashlib
+        cache_key = hashlib.md5(f"{pattern_text}{str(define)}{str(subset_dict)}".encode()).hexdigest()
+        
         try:
-            # Build pattern matching automata
-            pattern_tokens = tokenize_pattern(pattern_text)
-            nfa_builder = NFABuilder()
-            nfa = nfa_builder.build(pattern_tokens, define, subset_dict)
-            dfa_builder = DFABuilder(nfa)
-            dfa = dfa_builder.build()
-            
-            # Create matcher with all necessary parameters
-            matcher = EnhancedMatcher(
-                dfa=dfa,
-                measures=measures,
-                measure_semantics=measure_semantics,
-                exclusion_ranges=nfa.exclusion_ranges,
-                after_match_skip=skip_mode,
-                subsets=subset_dict,
-                original_pattern=pattern_text
-            )
+            # Try to get compiled pattern from cache first
+            if cache_key in _PATTERN_CACHE:
+                # Cache hit - use cached DFA and NFA
+                dfa, nfa, cached_time = _PATTERN_CACHE[cache_key]
+                _CACHE_STATS['hits'] += 1
+                _CACHE_STATS['compilation_time_saved'] += cached_time
+                logger.info(f"Pattern compilation cache HIT for pattern: {pattern_text}")
+                
+                # Create matcher with cached automata
+                matcher = EnhancedMatcher(
+                    dfa=dfa,
+                    measures=measures,
+                    measure_semantics=measure_semantics,
+                    exclusion_ranges=nfa.exclusion_ranges,
+                    after_match_skip=skip_mode,
+                    subsets=subset_dict,
+                    original_pattern=pattern_text
+                )
+            else:
+                # Cache miss - compile pattern and cache the result
+                _CACHE_STATS['misses'] += 1
+                logger.info(f"Pattern compilation cache MISS for pattern: {pattern_text}")
+                compilation_start = time.time()
+                
+                # Build pattern matching automata
+                pattern_tokens = tokenize_pattern(pattern_text)
+                nfa_builder = NFABuilder()
+                nfa = nfa_builder.build(pattern_tokens, define, subset_dict)
+                dfa_builder = DFABuilder(nfa)
+                dfa = dfa_builder.build()
+                
+                compilation_time = time.time() - compilation_start
+                
+                # Cache the compiled pattern for future use (simple cache - keep last 100 patterns)
+                if len(_PATTERN_CACHE) > 100:
+                    # Remove oldest entry (simple FIFO eviction)
+                    oldest_key = next(iter(_PATTERN_CACHE))
+                    del _PATTERN_CACHE[oldest_key]
+                
+                _PATTERN_CACHE[cache_key] = (dfa, nfa, compilation_time)
+                
+                # Create matcher with newly compiled automata
+                matcher = EnhancedMatcher(
+                    dfa=dfa,
+                    measures=measures,
+                    measure_semantics=measure_semantics,
+                    exclusion_ranges=nfa.exclusion_ranges,
+                    after_match_skip=skip_mode,
+                    subsets=subset_dict,
+                    original_pattern=pattern_text
+                )
+                
         except Exception as e:
             raise ValueError(f"Failed to build pattern matching automata: {str(e)}")
         metrics["automata_build_time"] = time.time() - automata_start
@@ -591,7 +644,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         if inner_positions and max(inner_positions) - min(inner_positions) + 1 == len(inner_positions):
                             filtered_matches.append(match)
                         else:
-                            print(f"Rejecting match with sequence {sequence}: inner variables {inner_vars} are not adjacent")
+                            logger.debug(f"Rejecting match with sequence {sequence}: inner variables {inner_vars} are not adjacent")
                     
                     # Replace all_matches with filtered matches
                     all_matches = filtered_matches
@@ -674,9 +727,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         try:
                             semantics = measure_semantics.get(alias, "FINAL")
                             result_row[alias] = evaluator.evaluate(expr, semantics)
-                            print(f"Setting {alias} to {result_row[alias]} from evaluator")
+                            logger.debug(f"Setting {alias} to {result_row[alias]} from evaluator")
                         except Exception as e:
-                            print(f"Error evaluating measure {alias}: {e}")
+                            logger.warning(f"Error evaluating measure {alias}: {e}")
                             result_row[alias] = None
                     
                     final_results.append(result_row)
@@ -771,9 +824,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                     semantics = measure_semantics.get(alias, "RUNNING")
                                     # Standard evaluation for all expressions - no special case handling
                                     result[alias] = evaluator.evaluate(expr, semantics)
-                                    print(f"DEBUG: Set {alias}={result[alias]} for row {idx}")
+                                    logger.debug(f"DEBUG: Set {alias}={result[alias]} for row {idx}")
                                 except Exception as e:
-                                    print(f"Error evaluating measure {alias} for row {idx}: {e}")
+                                    logger.warning(f"Error evaluating measure {alias} for row {idx}: {e}")
                                     result[alias] = None
                             
                             # Add match metadata
@@ -794,25 +847,25 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 result_df = pd.DataFrame(results)
                 
                 # Debug the measure columns
-                print("\nDEBUG: Checking measure columns in final DataFrame:")
+                logger.debug("Checking measure columns in final DataFrame:")
                 for alias in measures.keys():
                     if alias in result_df.columns:
-                        print(f"  Measure '{alias}' exists with values: {result_df[alias].head(3).tolist()}")
+                        logger.debug(f"  Measure '{alias}' exists with values: {result_df[alias].head(3).tolist()}")
                     else:
-                        print(f"  Measure '{alias}' is MISSING from result DataFrame")
+                        logger.debug(f"  Measure '{alias}' is MISSING from result DataFrame")
                 
                 # Ensure measure columns are properly preserved
                 for alias in measures.keys():
                     if alias in result_df.columns:
                         # Check if the column has all None values when it shouldn't
                         if result_df[alias].isna().all():
-                            print(f"WARNING: Measure column '{alias}' has all None values!")
+                            logger.warning(f"Measure column '{alias}' has all None values!")
                             
                             # Try to recover values from raw results if possible
                             for i, row in enumerate(results):
                                 if alias in row and row[alias] is not None:
                                     result_df.at[i, alias] = row[alias]
-                                    print(f"  Fixed value at row {i}: {row[alias]}")
+                                    logger.info(f"  Fixed value at row {i}: {row[alias]}")
                 
                 # Handle empty result case
                 if result_df.empty:
@@ -868,15 +921,38 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     
     except Exception as e:
         # Log the error with detailed information
-        print(f"Error executing MATCH_RECOGNIZE query: {str(e)}")
-        print(f"Query: {query}")
-        print(f"Metrics: {metrics}")
+        logger.error(f"Error executing MATCH_RECOGNIZE query: {str(e)}")
+        logger.error(f"Query: {query}")
+        logger.error(f"Metrics: {metrics}")
         # Re-raise the exception
         raise
     finally:
         # Always record total time
         metrics["total_time"] = time.time() - start_time
-        print(f"Query execution metrics: {metrics}")
+        logger.info(f"Query execution metrics: {metrics}")
+        
+        # Display cache statistics
+        total_requests = _CACHE_STATS['hits'] + _CACHE_STATS['misses']
+        cache_stats = {
+            'total_hits': _CACHE_STATS['hits'],
+            'total_misses': _CACHE_STATS['misses'], 
+            'total_compilation_time_saved': _CACHE_STATS['compilation_time_saved'],
+            'memory_used_mb': len(_PATTERN_CACHE) * 0.1  # Rough estimate
+        }
+        logger.info(f"Pattern cache statistics: {cache_stats}")
+        
+        # Calculate cache effectiveness
+        if total_requests > 0:
+            hit_rate = (_CACHE_STATS['hits'] / total_requests) * 100
+            logger.info(f"Cache hit rate: {hit_rate:.1f}% ({_CACHE_STATS['hits']}/{total_requests})")
+            
+            if _CACHE_STATS['compilation_time_saved'] > 0:
+                logger.info(f"Compilation time saved: {_CACHE_STATS['compilation_time_saved']:.3f}s")
+        
+        # Display memory usage
+        if cache_stats['memory_used_mb'] > 0:
+            memory_mb = cache_stats['memory_used_mb']
+            logger.info(f"Cache memory usage: {memory_mb:.2f} MB")
 
 
 def get_unmatched_rows(all_rows: List[Dict[str, Any]], matched_indices: Set[int]) -> List[int]:
@@ -999,7 +1075,7 @@ def post_validate_permute_match(match: Dict[str, Any], define_conditions: Dict[s
                     sequence.append(var)
                     break
     except Exception as e:
-        print(f"Error extracting variable sequence: {e}")
+        logger.warning(f"Error extracting variable sequence: {e}")
         return False
         
     # For nested PERMUTE patterns, validate the sequence structure
@@ -1023,7 +1099,7 @@ def post_validate_permute_match(match: Dict[str, Any], define_conditions: Dict[s
             
             # Inner variables must be adjacent (consecutive positions)
             if inner_positions and max(inner_positions) - min(inner_positions) + 1 != len(inner_positions):
-                print(f"Rejecting match with sequence {sequence}: inner variables {inner_vars} are not adjacent")
+                logger.info(f"Rejecting match with sequence {sequence}: inner variables {inner_vars} are not adjacent")
                 return False
             
             # Check if outer variable is in the correct position
@@ -1034,13 +1110,13 @@ def post_validate_permute_match(match: Dict[str, Any], define_conditions: Dict[s
                     break
             
             if outer_position is None:
-                print(f"Rejecting match with sequence {sequence}: outer variable {outer_var} not found")
+                logger.info(f"Rejecting match with sequence {sequence}: outer variable {outer_var} not found")
                 return False
             
             # Outer variable must be either before or after the inner variables block
             if inner_positions and outer_position != min(inner_positions) - 1 and outer_position != max(inner_positions) + 1:
                 if not (outer_position == 0 or outer_position == len(sequence) - 1):
-                    print(f"Rejecting match with sequence {sequence}: outer variable {outer_var} is not adjacent to inner variables block")
+                    logger.info(f"Rejecting match with sequence {sequence}: outer variable {outer_var} is not adjacent to inner variables block")
                     return False
     
     # For non-nested PERMUTE patterns, all permutations are valid
