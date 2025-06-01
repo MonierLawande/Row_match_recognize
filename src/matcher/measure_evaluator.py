@@ -12,9 +12,54 @@ from src.utils.logging_config import get_logger, PerformanceTimer
 
 # Module logger
 logger = get_logger(__name__)
+
 class ClassifierError(Exception):
     """Error in CLASSIFIER function evaluation."""
     pass
+
+def _is_table_prefix(var_name: str, var_assignments: Dict[str, List[int]], subsets: Dict[str, List[str]] = None) -> bool:
+    """
+    Check if a variable name looks like a table prefix rather than a pattern variable.
+    
+    Args:
+        var_name: The variable name to check
+        var_assignments: Dictionary of defined pattern variables
+        subsets: Dictionary of defined subset variables
+        
+    Returns:
+        True if this looks like a forbidden table prefix, False otherwise
+    """
+    # If it's a defined pattern variable or subset variable, it's not a table prefix
+    if var_name in var_assignments:
+        return False
+    if subsets and var_name in subsets:
+        return False
+    
+    # Common table name patterns that should be rejected
+    table_patterns = [
+        r'^[a-z]+_table$',      # ending with _table
+        r'^tbl_[a-z]+$',        # starting with tbl_
+        r'^[a-z]+_tbl$',        # ending with _tbl
+        r'^[a-z]+_tab$',        # ending with _tab
+        r'^[a-z]+s$',           # plural forms (likely table names)
+        r'^[a-z]+_data$',       # ending with _data
+        r'^data_[a-z]+$',       # starting with data_
+    ]
+    
+    # Check against common table naming patterns
+    for pattern in table_patterns:
+        if re.match(pattern, var_name.lower()):
+            return True
+    
+    # Check for overly long names (likely table names)
+    if len(var_name) > 20:
+        return True
+    
+    # If it contains underscores and is longer than typical pattern variable names
+    if '_' in var_name and len(var_name) > 10:
+        return True
+    
+    return False
 
 # Updates for src/matcher/measure_evaluator.py
 
@@ -51,6 +96,14 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
     if var_col_match:
         var_name = var_col_match.group(1)
         col_name = var_col_match.group(2)
+        
+        # Table prefix validation: prevent forbidden table.column references
+        # Check if this looks like a table prefix (common table naming patterns)
+        if _is_table_prefix(var_name, var_assignments, subsets):
+            raise ValueError(f"Forbidden table prefix reference: '{expr}'. "
+                           f"In MATCH_RECOGNIZE, use pattern variable references like 'A.{col_name}' "
+                           f"instead of table references like '{var_name}.{col_name}'")
+        
         logger.debug(f"Pattern variable reference matched: var={var_name}, col={col_name}")
         
         # For PERMUTE patterns in ONE ROW PER MATCH mode, always use FINAL semantics
@@ -382,8 +435,14 @@ class MeasureEvaluator:
                 result = evaluator.visit(tree.body)
                 return result
             except (SyntaxError, ValueError) as ast_error:
-                # If AST parsing fails, try as a simple column reference
+                # If AST parsing fails, try as a universal pattern variable (non-prefixed column reference)
                 try:
+                    # Universal pattern variable: refers to all rows in current match
+                    result = self._evaluate_universal_pattern_variable(expr)
+                    if result is not None:
+                        return result
+                    
+                    # Fallback to simple column reference for compatibility
                     return self.context.rows[self.context.current_idx].get(expr)
                 except Exception:
                     logger.error(f"Error evaluating expression '{expr}' with AST: {ast_error}")
@@ -391,6 +450,43 @@ class MeasureEvaluator:
                     
         except Exception as e:
             logger.error(f"Error evaluating expression '{expr}': {e}")
+            return None
+
+    def _evaluate_universal_pattern_variable(self, column_name: str) -> Any:
+        """
+        Evaluate a universal pattern variable (non-prefixed column reference).
+        
+        According to SQL:2016, a universal pattern variable refers to all rows in the 
+        current match and returns the value from the current row being processed.
+        
+        Args:
+            column_name: The column name without any pattern variable prefix
+            
+        Returns:
+            The value of the column from the current row, or None if not found
+        """
+        try:
+            # Validate that this is a simple column name (no dots, no special characters)
+            if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', column_name):
+                return None
+            
+            # Check if this column name conflicts with any defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and column_name in self.context.pattern_variables:
+                logger.warning(f"Column name '{column_name}' conflicts with pattern variable name")
+                return None
+            
+            # For universal pattern variables, we get the value from the current row
+            if self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                current_row = self.context.rows[self.context.current_idx]
+                if column_name in current_row:
+                    value = current_row[column_name]
+                    logger.debug(f"Universal pattern variable '{column_name}' resolved to: {value}")
+                    return value
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error evaluating universal pattern variable '{column_name}': {e}")
             return None
 
 

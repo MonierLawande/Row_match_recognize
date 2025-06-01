@@ -133,7 +133,27 @@ class ConditionEvaluator(ast.NodeVisitor):
             # Special function for pattern variable access
             return self._get_variable_column_value
                 
-        # Regular variable - get from current row
+        # Regular variable - handle as universal pattern variable
+        # First check if this might be a universal pattern variable (non-prefixed column)
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', node.id):
+            # Check if this conflicts with defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and node.id in self.context.pattern_variables:
+                logger.warning(f"Column name '{node.id}' conflicts with pattern variable name")
+                return None
+            
+            # Universal pattern variable: get from current row
+            value = None
+            if self.current_row is not None:
+                value = self.current_row.get(node.id)
+            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(node.id)
+            
+            if value is not None:
+                logger.debug(f"Universal pattern variable '{node.id}' resolved to: {value}")
+            
+            return value
+        
+        # Fallback for non-standard identifiers
         value = None
         if self.current_row is not None:
             value = self.current_row.get(node.id)
@@ -262,10 +282,15 @@ class ConditionEvaluator(ast.NodeVisitor):
         raise ValueError(f"Function {func} not callable")
 
     def visit_Attribute(self, node: ast.Attribute):
-        """Handle pattern variable references (A.price)"""
+        """Handle pattern variable references (A.price) with table prefix validation"""
         if isinstance(node.value, ast.Name):
             var = node.value.id
             col = node.attr
+            
+            # Table prefix validation: prevent forbidden table.column references
+            if self._is_table_prefix_in_context(var):
+                raise ValueError(f"Forbidden table prefix reference: '{var}.{col}'. "
+                               f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
             
             # Handle pattern variable references
             return self._get_variable_column_value(var, col, self.context)
@@ -276,6 +301,28 @@ class ConditionEvaluator(ast.NodeVisitor):
             return getattr(obj, node.attr, None)
         
         return None
+
+    def _is_table_prefix_in_context(self, var_name: str) -> bool:
+        """
+        Check if a variable name looks like a table prefix in the current context.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if this looks like a forbidden table prefix, False otherwise
+        """
+        # If it's a defined pattern variable, it's not a table prefix
+        if hasattr(self.context, 'var_assignments') and var_name in self.context.var_assignments:
+            return False
+        if hasattr(self.context, 'subsets') and self.context.subsets and var_name in self.context.subsets:
+            return False
+        
+        # Use the same logic as the standalone function
+        from src.matcher.measure_evaluator import _is_table_prefix
+        return _is_table_prefix(var_name, 
+                               getattr(self.context, 'var_assignments', {}),
+                               getattr(self.context, 'subsets', {}))
 
         # Updates for src/matcher/condition_evaluator.py
 
