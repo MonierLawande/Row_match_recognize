@@ -855,18 +855,6 @@ class ConditionEvaluator(ast.NodeVisitor):
         """Handle all constant types (numbers, strings, booleans, None)"""
         return node.value
 
-    def visit_Num(self, node: ast.Num):
-        """Handle numeric literals for Python < 3.8 compatibility"""
-        # For Python 3.8+, ast.Num is deprecated in favor of ast.Constant
-        # This method provides backward compatibility
-        return node.n
-
-    def visit_Str(self, node: ast.Str):
-        """Handle string literals for Python < 3.8 compatibility"""
-        # For Python 3.8+, ast.Str is deprecated in favor of ast.Constant
-        # This method provides backward compatibility
-        return node.s
-
     def visit_BoolOp(self, node: ast.BoolOp):
         if isinstance(node.op, ast.And):
             # Short-circuit evaluation for AND
