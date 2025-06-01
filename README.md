@@ -144,9 +144,9 @@ Our system was benchmarked against Trino’s native `MATCH_RECOGNIZE` using real
 
 ## 📚 References
 
-- [Oracle MATCH_RECOGNIZE Docs](https://docs.oracle.com)
-- [Flink SQL MATCH_RECOGNIZE](https://nightlies.apache.org/flink/flink-docs)
-- [Trino Row Pattern Recognition](https://trino.io/docs/current/sql/match_recognize.html)
+- [Oracle MATCH_RECOGNIZE Docs](https://docs.oracle.com/cd/E29542_01/apirefs.1111/e12048/pattern_recog.htm#CQLLR1531)
+- [Flink SQL MATCH_RECOGNIZE](https://nightlies.apache.org/flink/flink-docs-release-1.15/docs/dev/table/sql/queries/match_recognize/)
+- [Trino Row Pattern Recognition](https://trino.io/docs/current/sql/match-recognize.html)
 
 ---
 
