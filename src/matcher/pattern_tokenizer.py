@@ -93,6 +93,11 @@ def parse_quantifier(quant: str) -> Tuple[int, Optional[int], bool]:
     Raises:
         ValueError: If the quantifier format is invalid
     """
+    # Handle single '?' first (optional quantifier) before checking for reluctant quantifiers
+    if quant == '?':
+        return (0, 1, True)
+    
+    # Check for reluctant quantifiers (ending with '?')
     greedy = not quant.endswith('?')
     if not greedy:
         quant = quant[:-1]
