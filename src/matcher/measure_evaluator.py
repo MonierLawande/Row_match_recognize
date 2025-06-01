@@ -788,40 +788,64 @@ class MeasureEvaluator:
             var_name = var_field_match.group(1)
             field_name = var_field_match.group(2)
             
-            # Get occurrence (default is 0)
-            occurrence = 0
-            if len(args) > 1:
-                try:
-                    occurrence = int(args[1])
-                except ValueError:
-                    pass
-            
-            # Get variable indices
-            var_indices = []
-            if var_name in self.context.variables:
-                var_indices = self.context.variables[var_name]
-            
-            # For RUNNING semantics, only consider rows up to current position
-            if is_running:
-                var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
-            
-            # Sort indices to ensure correct order
-            var_indices = sorted(var_indices)
-            
-            if var_indices:
-                if func_name == 'FIRST':
-                    # Get the appropriate occurrence from the start
-                    if occurrence < len(var_indices):
-                        idx = var_indices[occurrence]
-                        if idx < len(self.context.rows):
-                            result = self.context.rows[idx].get(field_name)
+            # For PREV/NEXT, we navigate relative to current position
+            if func_name in ('PREV', 'NEXT'):
+                # Get steps (default is 1)
+                steps = 1
+                if len(args) > 1:
+                    try:
+                        steps = int(args[1])
+                    except ValueError:
+                        pass
                 
-                elif func_name == 'LAST':
-                    # Get the appropriate occurrence from the end
-                    if occurrence < len(var_indices):
-                        idx = var_indices[-(occurrence+1)]  # Count from the end
-                        if idx < len(self.context.rows):
-                            result = self.context.rows[idx].get(field_name)
+                if func_name == 'PREV':
+                    prev_idx = self.context.current_idx - steps
+                    if prev_idx >= 0 and prev_idx < len(self.context.rows):
+                        result = self.context.rows[prev_idx].get(field_name)
+                    # Note: if prev_idx < 0, result remains None (boundary condition)
+                
+                elif func_name == 'NEXT':
+                    next_idx = self.context.current_idx + steps
+                    if next_idx >= 0 and next_idx < len(self.context.rows):
+                        result = self.context.rows[next_idx].get(field_name)
+                    # Note: if next_idx >= len(rows), result remains None (boundary condition)
+            
+            # For FIRST/LAST, we use variable-specific logic
+            else:
+                # Get occurrence (default is 0)
+                occurrence = 0
+                if len(args) > 1:
+                    try:
+                        occurrence = int(args[1])
+                    except ValueError:
+                        pass
+                
+                # Get variable indices
+                var_indices = []
+                if var_name in self.context.variables:
+                    var_indices = self.context.variables[var_name]
+                
+                # For RUNNING semantics, only consider rows up to current position
+                if is_running:
+                    var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+                
+                # Sort indices to ensure correct order
+                var_indices = sorted(var_indices)
+                
+                if var_indices:
+                    if func_name == 'FIRST':
+                        # Get the appropriate occurrence from the start
+                        if occurrence < len(var_indices):
+                            idx = var_indices[occurrence]
+                            if idx < len(self.context.rows):
+                                result = self.context.rows[idx].get(field_name)
+                    
+                    elif func_name == 'LAST':
+                        # Get the appropriate occurrence from the end
+                        if occurrence < len(var_indices):
+                            idx = var_indices[-(occurrence+1)]  # Count from the end
+                            if idx < len(self.context.rows):
+                                result = self.context.rows[idx].get(field_name)
         
         # Handle simple field references for PREV/NEXT
         elif func_name in ('PREV', 'NEXT'):

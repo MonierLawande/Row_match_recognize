@@ -76,14 +76,9 @@ class ConditionEvaluator(ast.NodeVisitor):
 
     def _safe_compare(self, left, right, op):
         """Perform SQL-style comparison with NULL handling."""
-        # If either operand is NULL, we need special handling
+        # Only apply NULL handling for SQL comparisons involving NULL values
+        # Regular comparisons between non-NULL values should work normally
         if left is None or right is None:
-            # For navigation functions that return None due to unavailable context
-            # (like PREV() on row 0), we should signal that this condition
-            # cannot be evaluated rather than automatically failing
-            if hasattr(self.context, '_evaluation_context_invalid'):
-                # Signal that this condition cannot be evaluated due to missing context
-                raise ValueError("Navigation context unavailable - condition cannot be evaluated")
             return False
             
         return op(left, right)
@@ -239,15 +234,33 @@ class ConditionEvaluator(ast.NodeVisitor):
                     args = self._extract_navigation_args(node)
                     
                     if func_name == "PREV":
-                        column = args[0] 
-                        steps = args[1] if len(args) > 1 else 1
-                        # Use the simpler navigation function for reliability
-                        return self.evaluate_navigation_function('PREV', column, steps)
+                        # Handle PREV - use simple row navigation for now to debug
+                        if len(args) >= 2:
+                            # PREV(B.value) format - for now, use simple row navigation
+                            var_name = args[0]
+                            column = args[1]
+                            steps = args[2] if len(args) > 2 else 1
+                            # Use simple row navigation instead of variable-assignment-aware
+                            return self.evaluate_navigation_function('PREV', column, steps)
+                        else:
+                            # PREV(column) format - simple row navigation
+                            column = args[0] 
+                            steps = args[1] if len(args) > 1 else 1
+                            return self.evaluate_navigation_function('PREV', column, steps)
                     elif func_name == "NEXT":
-                        column = args[0]
-                        steps = args[1] if len(args) > 1 else 1
-                        # Use the simpler navigation function for reliability
-                        return self.evaluate_navigation_function('NEXT', column, steps)
+                        # Handle NEXT - use simple row navigation for now to debug
+                        if len(args) >= 2:
+                            # NEXT(A.value) format - for now, use simple row navigation
+                            var_name = args[0]
+                            column = args[1]
+                            steps = args[2] if len(args) > 2 else 1
+                            # Use simple row navigation instead of variable-assignment-aware
+                            return self.evaluate_navigation_function('NEXT', column, steps)
+                        else:
+                            # NEXT(column) format - simple row navigation
+                            column = args[0]
+                            steps = args[1] if len(args) > 1 else 1
+                            return self.evaluate_navigation_function('NEXT', column, steps)
                     elif func_name == "FIRST":
                         # Handle FIRST(column) vs FIRST(var.column)
                         if len(args) == 1 and isinstance(args[0], str):
@@ -696,12 +709,9 @@ class ConditionEvaluator(ast.NodeVisitor):
                         else:
                             result = None
                     else:
-                        # Not enough rows before current position
-                        # Mark context as invalid if we're trying to access PREV from row 0
-                        # or don't have enough previous rows in the pattern match
-                        if curr_idx == 0 or curr_pos < steps:
-                            # Signal that this is a context issue, not a NULL value
-                            self.context._evaluation_context_invalid = True
+                        # Not enough rows before current position - this is a boundary condition
+                        # For DEFINE clauses with variable-specific PREV, return NULL (not context invalid)
+                        # This allows proper SQL NULL comparison semantics: value > NULL = FALSE
                         result = None
                 
                 # Enhanced NEXT navigation with comprehensive bounds checking and partition enforcement
