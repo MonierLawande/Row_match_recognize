@@ -8,10 +8,58 @@ from collections import defaultdict
 from functools import lru_cache
 from typing import Dict, Any, List, Optional, Set, Union, Tuple
 from src.matcher.row_context import RowContext
-from src.matcher.row_context import RowContext
+from src.utils.logging_config import get_logger, PerformanceTimer
+
+# Module logger
+logger = get_logger(__name__)
+
 class ClassifierError(Exception):
     """Error in CLASSIFIER function evaluation."""
     pass
+
+def _is_table_prefix(var_name: str, var_assignments: Dict[str, List[int]], subsets: Dict[str, List[str]] = None) -> bool:
+    """
+    Check if a variable name looks like a table prefix rather than a pattern variable.
+    
+    Args:
+        var_name: The variable name to check
+        var_assignments: Dictionary of defined pattern variables
+        subsets: Dictionary of defined subset variables
+        
+    Returns:
+        True if this looks like a forbidden table prefix, False otherwise
+    """
+    # If it's a defined pattern variable or subset variable, it's not a table prefix
+    if var_name in var_assignments:
+        return False
+    if subsets and var_name in subsets:
+        return False
+    
+    # Common table name patterns that should be rejected
+    table_patterns = [
+        r'^[a-z]+_table$',      # ending with _table
+        r'^tbl_[a-z]+$',        # starting with tbl_
+        r'^[a-z]+_tbl$',        # ending with _tbl
+        r'^[a-z]+_tab$',        # ending with _tab
+        r'^[a-z]+s$',           # plural forms (likely table names)
+        r'^[a-z]+_data$',       # ending with _data
+        r'^data_[a-z]+$',       # starting with data_
+    ]
+    
+    # Check against common table naming patterns
+    for pattern in table_patterns:
+        if re.match(pattern, var_name.lower()):
+            return True
+    
+    # Check for overly long names (likely table names)
+    if len(var_name) > 20:
+        return True
+    
+    # If it contains underscores and is longer than typical pattern variable names
+    if '_' in var_name and len(var_name) > 10:
+        return True
+    
+    return False
 
 # Updates for src/matcher/measure_evaluator.py
 
@@ -35,33 +83,40 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
     # Clean the expression - remove any whitespace
     expr = expr.strip()
     
-    print(f"DEBUG_EVAL: expr='{expr}', vars={list(var_assignments.keys())}, current_idx={current_idx}, is_running={is_running}, is_permute={is_permute}")
+    logger.debug(f"Evaluating pattern variable reference: {expr}, current_idx={current_idx}, is_running={is_running}, is_permute={is_permute}")
     
     # Use cache if provided (but cache key should include current_idx, is_running, and is_permute for proper caching)
     cache_key = f"{expr}_{current_idx}_{is_running}_{is_permute}" if is_running or is_permute else expr
     if cache is not None and cache_key in cache:
-        print(f"DEBUG_EVAL: Cache hit for {cache_key}, returning {cache[cache_key]}")
+        logger.debug(f"Cache hit for {cache_key}")
         return True, cache[cache_key]
     
     # Handle direct pattern variable references like A.salary or X.value
     var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$', expr)
     if var_col_match:
-        print(f"DEBUG_EVAL: Matched! groups: {var_col_match.groups()}")
         var_name = var_col_match.group(1)
         col_name = var_col_match.group(2)
-        print(f"DEBUG_EVAL: var_name={var_name}, col_name={col_name}")
+        
+        # Table prefix validation: prevent forbidden table.column references
+        # Check if this looks like a table prefix (common table naming patterns)
+        if _is_table_prefix(var_name, var_assignments, subsets):
+            raise ValueError(f"Forbidden table prefix reference: '{expr}'. "
+                           f"In MATCH_RECOGNIZE, use pattern variable references like 'A.{col_name}' "
+                           f"instead of table references like '{var_name}.{col_name}'")
+        
+        logger.debug(f"Pattern variable reference matched: var={var_name}, col={col_name}")
         
         # For PERMUTE patterns in ONE ROW PER MATCH mode, always use FINAL semantics
         # This ensures we get the actual value for each variable regardless of order
         if is_permute and not is_running:
-            print(f"DEBUG_EVAL: Using PERMUTE-specific logic for {var_name}")
+            logger.debug(f"Using PERMUTE-specific logic for {var_name}")
             var_indices = var_assignments.get(var_name, [])
             if var_indices:
                 # Use the last matched position for this variable
                 idx = max(var_indices)
                 if idx < len(all_rows):
                     value = all_rows[idx].get(col_name)
-                    print(f"DEBUG_EVAL: PERMUTE match found value {value} at index {idx}")
+                    logger.debug(f"PERMUTE match found value {value} at index {idx}")
                     if cache is not None:
                         cache[cache_key] = value
                     return True, value
@@ -188,10 +243,10 @@ class MeasureEvaluator:
         # Use passed semantics or instance default
         is_running = (semantics == 'RUNNING') if semantics else not self.final
         
-        print(f"Evaluating expression: {expr} with {('FINAL' if not is_running else 'RUNNING')} semantics")
-        print(f"Context variables: {self.context.variables}")
-        print(f"Number of rows: {len(self.context.rows)}")
-        print(f"Current index: {self.context.current_idx}")
+        logger.debug(f"Evaluating expression: {expr} with {('FINAL' if not is_running else 'RUNNING')} semantics")
+        logger.debug(f"Context variables: {self.context.variables}")
+        logger.debug(f"Number of rows: {len(self.context.rows)}")
+        logger.debug(f"Current index: {self.context.current_idx}")
         
         # Store original expression for reference
         self.original_expr = expr
@@ -380,15 +435,58 @@ class MeasureEvaluator:
                 result = evaluator.visit(tree.body)
                 return result
             except (SyntaxError, ValueError) as ast_error:
-                # If AST parsing fails, try as a simple column reference
+                # If AST parsing fails, try as a universal pattern variable (non-prefixed column reference)
                 try:
+                    # Universal pattern variable: refers to all rows in current match
+                    result = self._evaluate_universal_pattern_variable(expr)
+                    if result is not None:
+                        return result
+                    
+                    # Fallback to simple column reference for compatibility
                     return self.context.rows[self.context.current_idx].get(expr)
                 except Exception:
-                    print(f"Error evaluating expression '{expr}' with AST: {ast_error}")
+                    logger.error(f"Error evaluating expression '{expr}' with AST: {ast_error}")
                     return None
                     
         except Exception as e:
-            print(f"Error evaluating expression '{expr}': {e}")
+            logger.error(f"Error evaluating expression '{expr}': {e}")
+            return None
+
+    def _evaluate_universal_pattern_variable(self, column_name: str) -> Any:
+        """
+        Evaluate a universal pattern variable (non-prefixed column reference).
+        
+        According to SQL:2016, a universal pattern variable refers to all rows in the 
+        current match and returns the value from the current row being processed.
+        
+        Args:
+            column_name: The column name without any pattern variable prefix
+            
+        Returns:
+            The value of the column from the current row, or None if not found
+        """
+        try:
+            # Validate that this is a simple column name (no dots, no special characters)
+            if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', column_name):
+                return None
+            
+            # Check if this column name conflicts with any defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and column_name in self.context.pattern_variables:
+                logger.warning(f"Column name '{column_name}' conflicts with pattern variable name")
+                return None
+            
+            # For universal pattern variables, we get the value from the current row
+            if self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                current_row = self.context.rows[self.context.current_idx]
+                if column_name in current_row:
+                    value = current_row[column_name]
+                    logger.debug(f"Universal pattern variable '{column_name}' resolved to: {value}")
+                    return value
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error evaluating universal pattern variable '{column_name}': {e}")
             return None
 
 
@@ -690,40 +788,64 @@ class MeasureEvaluator:
             var_name = var_field_match.group(1)
             field_name = var_field_match.group(2)
             
-            # Get occurrence (default is 0)
-            occurrence = 0
-            if len(args) > 1:
-                try:
-                    occurrence = int(args[1])
-                except ValueError:
-                    pass
-            
-            # Get variable indices
-            var_indices = []
-            if var_name in self.context.variables:
-                var_indices = self.context.variables[var_name]
-            
-            # For RUNNING semantics, only consider rows up to current position
-            if is_running:
-                var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
-            
-            # Sort indices to ensure correct order
-            var_indices = sorted(var_indices)
-            
-            if var_indices:
-                if func_name == 'FIRST':
-                    # Get the appropriate occurrence from the start
-                    if occurrence < len(var_indices):
-                        idx = var_indices[occurrence]
-                        if idx < len(self.context.rows):
-                            result = self.context.rows[idx].get(field_name)
+            # For PREV/NEXT, we navigate relative to current position
+            if func_name in ('PREV', 'NEXT'):
+                # Get steps (default is 1)
+                steps = 1
+                if len(args) > 1:
+                    try:
+                        steps = int(args[1])
+                    except ValueError:
+                        pass
                 
-                elif func_name == 'LAST':
-                    # Get the appropriate occurrence from the end
-                    if occurrence < len(var_indices):
-                        idx = var_indices[-(occurrence+1)]  # Count from the end
-                        if idx < len(self.context.rows):
-                            result = self.context.rows[idx].get(field_name)
+                if func_name == 'PREV':
+                    prev_idx = self.context.current_idx - steps
+                    if prev_idx >= 0 and prev_idx < len(self.context.rows):
+                        result = self.context.rows[prev_idx].get(field_name)
+                    # Note: if prev_idx < 0, result remains None (boundary condition)
+                
+                elif func_name == 'NEXT':
+                    next_idx = self.context.current_idx + steps
+                    if next_idx >= 0 and next_idx < len(self.context.rows):
+                        result = self.context.rows[next_idx].get(field_name)
+                    # Note: if next_idx >= len(rows), result remains None (boundary condition)
+            
+            # For FIRST/LAST, we use variable-specific logic
+            else:
+                # Get occurrence (default is 0)
+                occurrence = 0
+                if len(args) > 1:
+                    try:
+                        occurrence = int(args[1])
+                    except ValueError:
+                        pass
+                
+                # Get variable indices
+                var_indices = []
+                if var_name in self.context.variables:
+                    var_indices = self.context.variables[var_name]
+                
+                # For RUNNING semantics, only consider rows up to current position
+                if is_running:
+                    var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+                
+                # Sort indices to ensure correct order
+                var_indices = sorted(var_indices)
+                
+                if var_indices:
+                    if func_name == 'FIRST':
+                        # Get the appropriate occurrence from the start
+                        if occurrence < len(var_indices):
+                            idx = var_indices[occurrence]
+                            if idx < len(self.context.rows):
+                                result = self.context.rows[idx].get(field_name)
+                    
+                    elif func_name == 'LAST':
+                        # Get the appropriate occurrence from the end
+                        if occurrence < len(var_indices):
+                            idx = var_indices[-(occurrence+1)]  # Count from the end
+                            if idx < len(self.context.rows):
+                                result = self.context.rows[idx].get(field_name)
         
         # Handle simple field references for PREV/NEXT
         elif func_name in ('PREV', 'NEXT'):
@@ -894,7 +1016,7 @@ class MeasureEvaluator:
                         values.append(val)
                     except (ValueError, TypeError):
                         # Log warning but continue processing
-                        print(f"Warning: Non-numeric value '{val}' found in column {col_name}")
+                        logger.warning(f"Non-numeric value '{val}' found in column {col_name}")
                         continue
         
         return values
@@ -968,7 +1090,7 @@ class MeasureEvaluator:
             f"Context: current_idx={self.context.current_idx}, "
             f"running={not self.final}"
         )
-        print(error_msg)  # Replace with proper logging in production
+        logger.error(error_msg)
 
     def _evaluate_aggregate(self, func_name: str, args_str: str, is_running: bool) -> Any:
         """

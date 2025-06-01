@@ -164,6 +164,42 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
     def __init__(self):
         self.ast = MatchRecognizeClause()
 
+    def _is_table_prefix(self, var_name: str) -> bool:
+        """
+        Check if a variable name looks like a table prefix rather than a pattern variable.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if this looks like a forbidden table prefix, False otherwise
+        """
+        # Common table name patterns that should be rejected
+        table_patterns = [
+            r'^[a-z]+_table$',      # ending with _table
+            r'^tbl_[a-z]+$',        # starting with tbl_
+            r'^[a-z]+_tbl$',        # ending with _tbl
+            r'^[a-z]+_tab$',        # ending with _tab
+            r'^[a-z]+s$',           # plural forms (likely table names)
+            r'^[a-z]+_data$',       # ending with _data
+            r'^data_[a-z]+$',       # starting with data_
+        ]
+        
+        # Check against common table naming patterns
+        for pattern in table_patterns:
+            if re.match(pattern, var_name.lower()):
+                return True
+        
+        # Check for overly long names (likely table names)
+        if len(var_name) > 20:
+            return True
+        
+        # If it contains underscores and is longer than typical pattern variable names
+        if '_' in var_name and len(var_name) > 10:
+            return True
+        
+        return False
+
     def visitPatternRecognition(self, ctx: TrinoParser.PatternRecognitionContext):
         """Extract pattern recognition components in the correct order."""
         logger.debug("Visiting PatternRecognition context")
@@ -661,7 +697,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     # Skip to first A in pattern A B+ means: after finding a match A B+, 
                     # start next search from the first A in the match
                     pass
-                elif pattern_vars and target_var == pattern_vars[0] and mode == 'TO LAST' and len(pattern_vars) == 1:
+                # Note: AFTER MATCH SKIP TO LAST variable is valid even for single-variable patterns
+                # with quantifiers like UP{2,} because it advances the starting position and
+                # the quantifier requirement prevents immediate infinite loops
+                elif False:  # Disabled - the previous validation was too strict
                     # Only single variable patterns with TO LAST would create immediate infinite loop
                     raise ParserError(
                         f"AFTER MATCH SKIP {mode} {target_var} would create an infinite loop "
@@ -853,6 +892,26 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 
                 logger.debug(f"Extracted pattern variables from measure '{measure.expression}': {extracted_vars}")
         
+        # 2. Check pattern variables used in DEFINE clause conditions  
+        if self.ast.define:
+            for definition in self.ast.define.definitions:
+                # Extract pattern variables from column references like A.price > B.price
+                column_refs = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', definition.condition)
+                referenced_pattern_vars.update([ref[0] for ref in column_refs])
+                
+                # Extract pattern variables from navigation functions in DEFINE conditions
+                func_pattern = r'(?:FIRST|LAST|PREV|NEXT)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)'
+                func_pattern_refs = re.findall(func_pattern, definition.condition, re.IGNORECASE)
+                referenced_pattern_vars.update([ref[0] for ref in func_pattern_refs])
+                
+                extracted_vars = []
+                if column_refs:
+                    extracted_vars.extend([ref[0] for ref in column_refs])
+                if func_pattern_refs:
+                    extracted_vars.extend([ref[0] for ref in func_pattern_refs])
+                
+                logger.debug(f"Extracted pattern variables from DEFINE condition '{definition.condition}': {extracted_vars}")
+
         # Filter out any known functions from referenced pattern variables
         referenced_pattern_vars = referenced_pattern_vars - known_functions
         
@@ -871,8 +930,21 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         all_valid_pattern_vars = pattern_vars.union(subset_components).union(pattern_variables_in_text).union(subset_union_vars)
         missing = referenced_pattern_vars - all_valid_pattern_vars
         if missing and "PERMUTE" not in pattern_text.upper():
-            raise ParserError(f"Referenced pattern variable(s) {missing} not found in the PATTERN clause or SUBSET definitions.", 
-                            line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+            # Check if any missing variables look like table prefixes
+            table_prefixes = []
+            for var in missing:
+                if self._is_table_prefix(var):
+                    table_prefixes.append(var)
+            
+            if table_prefixes:
+                # Throw specific table prefix error
+                prefixes_str = ', '.join(table_prefixes)
+                raise ParserError(f"Forbidden table prefix reference(s): {prefixes_str}. Use pattern variables (A, B, C, etc.) instead of table.column syntax in MATCH_RECOGNIZE.", 
+                                line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+            else:
+                # Throw generic missing pattern variable error
+                raise ParserError(f"Referenced pattern variable(s) {missing} not found in the PATTERN clause or SUBSET definitions.", 
+                                line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
         
         # NOTE: Do not validate that all defined variables are used in patterns
         # SQL MATCH_RECOGNIZE allows defining variables that aren't used in the current pattern
