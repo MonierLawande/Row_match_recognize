@@ -2,10 +2,6 @@ import re
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple, Dict, Any, Union
-from src.utils.logging_config import get_logger
-
-# Module logger
-logger = get_logger(__name__)
 
 class PatternTokenType(Enum):
     """Enum representing different types of pattern tokens."""
@@ -93,11 +89,6 @@ def parse_quantifier(quant: str) -> Tuple[int, Optional[int], bool]:
     Raises:
         ValueError: If the quantifier format is invalid
     """
-    # Handle single '?' first (optional quantifier) before checking for reluctant quantifiers
-    if quant == '?':
-        return (0, 1, True)
-    
-    # Check for reluctant quantifiers (ending with '?')
     greedy = not quant.endswith('?')
     if not greedy:
         quant = quant[:-1]
@@ -324,14 +315,14 @@ def extract_exclusion_variables(pattern: str) -> Set[str]:
         
         # Extract excluded content
         excluded_content = pattern[start_marker + 2:end_marker].strip()
-        logger.debug(f"Extracted exclusion content: '{excluded_content}'")
+        print(f"Extracted exclusion content: '{excluded_content}'")
         
         # Extract excluded variables - handle base variables without quantifiers
         var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)(?:[+*?]|\{[0-9,]*\})?'
         for match in re.finditer(var_pattern, excluded_content):
             var_name = match.group(1)
             excluded_vars.add(var_name)
-            logger.debug(f"Exclusion handler added variable: '{var_name}'")
+            print(f"Exclusion handler added variable: '{var_name}'")
         
         start = end_marker + 2
     
@@ -620,7 +611,102 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
     
     return tokens
 
-
+    """
+    Process variables in a PERMUTE expression, handling nested PERMUTE patterns.
+    
+    Args:
+        pattern: The full pattern string
+        start_pos: Position to start parsing from (after opening parenthesis)
+        
+    Returns:
+        Tuple of (variables_list, new_position)
+    """
+    variables = []
+    pos = start_pos
+    var_start = pos
+    nested_permute_depth = 0
+    
+    while pos < len(pattern):
+        # Handle nested PERMUTE
+        if pos + 7 <= len(pattern) and pattern[pos:pos+7].upper() == 'PERMUTE':
+            # Extract any variable before this nested PERMUTE
+            if pos > var_start:
+                var_text = pattern[var_start:pos].strip()
+                if var_text and not var_text.endswith(','):
+                    if var_text.endswith(','):
+                        var_text = var_text[:-1].strip()
+                    if var_text:
+                        variables.append(var_text)
+            
+            # Process the nested PERMUTE
+            nested_start = pos
+            pos += 7  # Skip "PERMUTE"
+            
+            # Skip whitespace
+            while pos < len(pattern) and pattern[pos].isspace():
+                pos += 1
+                
+            if pos >= len(pattern) or pattern[pos] != '(':
+                raise ValueError(f"Expected '(' after nested PERMUTE at position {pos}")
+                
+            # Find matching closing parenthesis for the nested PERMUTE
+            nested_paren_depth = 1
+            pos += 1  # Skip opening parenthesis
+            nested_content_start = pos
+            
+            while pos < len(pattern) and nested_paren_depth > 0:
+                if pattern[pos] == '(':
+                    nested_paren_depth += 1
+                elif pattern[pos] == ')':
+                    nested_paren_depth -= 1
+                pos += 1
+                
+            if nested_paren_depth > 0:
+                raise ValueError(f"Unmatched parenthesis in nested PERMUTE at position {nested_start}")
+                
+            # Extract nested PERMUTE content
+            nested_content_end = pos - 1  # Position of closing parenthesis
+            nested_content = pattern[nested_start:pos]
+            
+            # Recursively tokenize the nested PERMUTE
+            nested_tokens = tokenize_pattern(nested_content)
+            
+            if nested_tokens and nested_tokens[0].type == PatternTokenType.PERMUTE:
+                # Mark as nested and add to variables
+                nested_tokens[0].metadata["nested"] = True
+                variables.append(nested_tokens[0])
+                
+                # Check for quantifiers on the nested PERMUTE
+                if pos < len(pattern) and pattern[pos] in "*+?{":
+                    quantifier, is_greedy, pos = parse_quantifier_at(pattern, pos)
+                    if nested_tokens[0]:
+                        nested_tokens[0].quantifier = quantifier
+                        nested_tokens[0].greedy = is_greedy
+            
+            var_start = pos
+            
+        elif pattern[pos] == ',':
+            # Extract variable and skip comma
+            if pos > var_start:
+                var_text = pattern[var_start:pos].strip()
+                if var_text:
+                    variables.append(var_text)
+            pos += 1
+            var_start = pos
+            
+        elif pattern[pos] == ')':
+            # Extract final variable before closing parenthesis
+            if pos > var_start:
+                var_text = pattern[var_start:pos].strip()
+                if var_text:
+                    variables.append(var_text)
+            return variables, pos + 1  # Return position after closing parenthesis
+            
+        else:
+            pos += 1
+            
+    # If we get here, we didn't find the closing parenthesis
+    raise ValueError(f"Unterminated PERMUTE expression at position {start_pos - 1}")
 class PermuteHandler:
     """Handles PERMUTE patterns with lexicographical ordering and optimizations."""
     

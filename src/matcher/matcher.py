@@ -8,11 +8,7 @@ from src.matcher.dfa import DFA, FAIL_STATE
 from src.matcher.row_context import RowContext
 from src.matcher.measure_evaluator import MeasureEvaluator
 from src.matcher.pattern_tokenizer import PatternTokenType
-from src.utils.logging_config import get_logger, PerformanceTimer
 import re
-
-# Module logger
-logger = get_logger(__name__)
 
 class SkipMode(Enum):
     PAST_LAST_ROW = "PAST_LAST_ROW"
@@ -76,20 +72,20 @@ class PatternExclusionHandler:
                 break
             end_marker = pattern.find("-}", start_marker)
             if end_marker == -1:
-                logger.warning(f"Unbalanced exclusion markers in pattern: {pattern}")
+                print(f"Warning: Unbalanced exclusion markers in pattern: {pattern}")
                 break
             
             # Extract excluded content
             excluded_content = pattern[start_marker + 2:end_marker].strip()
             self.exclusion_ranges.append((start_marker, end_marker))
-            logger.debug(f"Exclusion handler found content: '{excluded_content}'")
+            print(f"Exclusion handler found content: '{excluded_content}'")
             
             # Extract excluded variables - handle base variables without quantifiers
             var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)(?:[+*?]|\{[0-9,]*\})?'
             for match in re.finditer(var_pattern, excluded_content):
                 var_name = match.group(1)
                 self.excluded_vars.add(var_name)
-                logger.debug(f"Exclusion handler added variable: '{var_name}'")
+                print(f"Exclusion handler added variable: '{var_name}'")
             
             start = end_marker + 2
     
@@ -139,7 +135,7 @@ class PatternExclusionHandler:
                 base_var = var[:var.find('{')]
                 
             if base_var in self.excluded_vars:
-                logger.debug(f"Filtering out excluded variable: {var}")
+                print(f"Filtering out excluded variable: {var}")
                 del filtered_match["variables"][var]
         
         # Update matched indices
@@ -192,7 +188,7 @@ class EnhancedMatcher:
         self.excluded_vars = set()
         if self.exclusion_handler:
             self.excluded_vars = self.exclusion_handler.excluded_vars
-            logger.debug(f"Initialized matcher with excluded variables: {self.excluded_vars}")
+            print(f"Initialized matcher with excluded variables: {self.excluded_vars}")
 
     def _extract_dfa_metadata(self):
         """Extract and process metadata from the DFA for optimization."""
@@ -257,7 +253,7 @@ class EnhancedMatcher:
         current_idx = start_idx
         var_assignments = {}
         
-        logger.debug(f"Starting match at index {start_idx}, state: {self._get_state_description(state)}")
+        print(f"Starting match at index {start_idx}, state: {self._get_state_description(state)}")
         
         # Update context with subset variables from DFA metadata
         if hasattr(self.dfa, 'metadata') and 'subset_vars' in self.dfa.metadata:
@@ -265,13 +261,13 @@ class EnhancedMatcher:
 
         # Optional early filtering based on anchor constraints
         if hasattr(self, '_anchor_metadata') and not self._can_satisfy_anchors(len(rows)):
-            logger.debug(f"Partition cannot satisfy anchor constraints")
+            print(f"Partition cannot satisfy anchor constraints")
             self.timing["find_match"] += time.time() - match_start_time
             return None
         
         # Check start anchor constraints for the start state
         if not self._check_anchors(state, start_idx, len(rows), "start"):
-            logger.debug(f"Start state anchor check failed at index {start_idx}")
+            print(f"Start state anchor check failed at index {start_idx}")
             self.timing["find_match"] += time.time() - match_start_time
             return None
         
@@ -280,7 +276,7 @@ class EnhancedMatcher:
         if self.dfa.states[state].is_accept:
             # For empty matches, also verify end anchor if present
             if self._check_anchors(state, start_idx, len(rows), "end"):
-                logger.debug(f"Found potential empty match at index {start_idx} - start state is accepting")
+                print(f"Found potential empty match at index {start_idx} - start state is accepting")
                 empty_match = {
                     "start": start_idx,
                     "end": start_idx - 1,
@@ -317,7 +313,7 @@ class EnhancedMatcher:
             context.variables = var_assignments
             context.current_var_assignments = var_assignments
             
-            logger.debug(f"Testing row {current_idx}, data: {row}")
+            print(f"Testing row {current_idx}, data: {row}")
             
             # Use indexed transitions for faster lookups
             next_state = None
@@ -326,7 +322,7 @@ class EnhancedMatcher:
             
             # Try all transitions and use the first one that matches the condition
             for var, target, condition in trans_index:
-                logger.debug(f"  Evaluating condition for var: {var}")
+                print(f"  Evaluating condition for var: {var}")
                 try:
                     # Check if this is an excluded variable
                     is_excluded = var in self.excluded_vars
@@ -336,11 +332,11 @@ class EnhancedMatcher:
                     
                     # First check if target state's START anchor constraints are satisfied
                     if not self._check_anchors(target, current_idx, len(rows), "start"):
-                        logger.debug(f"  Start anchor check failed for transition to state {target} with var {var}")
+                        print(f"  Start anchor check failed for transition to state {target} with var {var}")
                         continue
                         
                     # Then evaluate the condition with the current row and context
-                    logger.debug(f"    DEBUG: Calling condition function with row={row}")
+                    print(f"    DEBUG: Calling condition function with row={row}")
                     
                     # Clear any previous navigation context error flag
                     if hasattr(context, '_navigation_context_error'):
@@ -350,17 +346,17 @@ class EnhancedMatcher:
                     
                     # Check if condition failed due to navigation context unavailability
                     if not result and hasattr(context, '_navigation_context_error'):
-                        logger.debug(f"    Condition failed for {var} due to navigation context unavailable (likely PREV() on row 0)")
+                        print(f"    Condition failed for {var} due to navigation context unavailable (likely PREV() on row 0)")
                         # Skip this row for this pattern - pattern matching may need to start later
                         continue
                     
-                    logger.debug(f"    Condition {'passed' if result else 'failed'} for {var}")
-                    logger.debug(f"    DEBUG: condition result={result}, type={type(result)}")
+                    print(f"    Condition {'passed' if result else 'failed'} for {var}")
+                    print(f"    DEBUG: condition result={result}, type={type(result)}")
                     
                     if result:
                         # If this is an excluded variable, mark for exclusion but continue matching
                         if is_excluded:
-                            logger.debug(f"    Variable {var} is excluded - marking row for exclusion")
+                            print(f"    Variable {var} is excluded - marking row for exclusion")
                             excluded_rows.append(current_idx)
                             is_excluded_match = True
                         
@@ -368,8 +364,9 @@ class EnhancedMatcher:
                         matched_var = var
                         break
                 except Exception as e:
-                    logger.error(f"  Error evaluating condition for {var}: {str(e)}")
-                    logger.debug("Exception details:", exc_info=True)
+                    print(f"  Error evaluating condition for {var}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
                     continue
                 finally:
                     # Clear the current variable after evaluation
@@ -378,7 +375,7 @@ class EnhancedMatcher:
             
             # Handle exclusion matches properly - they should still advance the state
             if is_excluded_match:
-                logger.debug(f"  Found excluded variable {matched_var} - will exclude row {current_idx} from output")
+                print(f"  Found excluded variable {matched_var} - will exclude row {current_idx} from output")
                 # For excluded variables, we still update the state but don't assign the variable
                 # This allows the pattern matching to continue correctly through exclusion sections
                 state = next_state
@@ -387,7 +384,7 @@ class EnhancedMatcher:
                 
                 # Check if we've reached an accepting state after the exclusion
                 if self.dfa.states[state].is_accept:
-                    logger.debug(f"Reached accepting state {state} after exclusion at row {current_idx-1}")
+                    print(f"Reached accepting state {state} after exclusion at row {current_idx-1}")
                     # Don't create a match here - continue to see if we can match more
                 
                 continue
@@ -395,13 +392,13 @@ class EnhancedMatcher:
             # For star patterns, we need to handle the case where no transition matches
             # but we're in an accepting state
             if next_state is None and self.dfa.states[state].is_accept:
-                logger.debug(f"No valid transition from accepting state {state} at row {current_idx}")
+                print(f"No valid transition from accepting state {state} at row {current_idx}")
                 
                 # Update longest match to include all rows up to this point
                 if current_idx > start_idx:  # Only if we've matched at least one row
                     # For patterns with both start and end anchors, we need to check if we've reached the end
                     if has_both_anchors and current_idx < len(rows):
-                        logger.debug(f"Pattern has both anchors but we're not at the end of partition")
+                        print(f"Pattern has both anchors but we're not at the end of partition")
                         break  # Don't accept partial matches for ^...$ patterns
                     
                     # For patterns with only end anchor, we need to check if we're at the last row
@@ -418,7 +415,7 @@ class EnhancedMatcher:
                                 "excluded_rows": excluded_rows.copy()
                             }
                         else:
-                            logger.debug(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
+                            print(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
                     else:
                         # No end anchor, accept the match
                         longest_match = {
@@ -433,7 +430,7 @@ class EnhancedMatcher:
                     break
                 
             if next_state is None:
-                logger.debug(f"No valid transition from state {state} at row {current_idx}")
+                print(f"No valid transition from state {state} at row {current_idx}")
                 break
             
             # Record variable assignment (only for non-excluded variables)
@@ -441,7 +438,7 @@ class EnhancedMatcher:
                 if matched_var not in var_assignments:
                     var_assignments[matched_var] = []
                 var_assignments[matched_var].append(current_idx)
-                logger.debug(f"  Assigned row {current_idx} to variable {matched_var}")
+                print(f"  Assigned row {current_idx} to variable {matched_var}")
             
             # Update state and move to next row
             state = next_state
@@ -452,24 +449,24 @@ class EnhancedMatcher:
             if self.dfa.states[state].is_accept:
                 # Check end anchor constraints ONLY when we reach an accepting state
                 if not self._check_anchors(state, current_idx - 1, len(rows), "end"):
-                    logger.debug(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
+                    print(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
                     # Continue to next row, but don't update longest_match
                     continue
                     
-                logger.debug(f"Reached accepting state {state} at row {current_idx-1}")
+                print(f"Reached accepting state {state} at row {current_idx-1}")
                 
                 # For patterns with both start and end anchors, we need to check if we've consumed the entire partition
                 if has_both_anchors and current_idx < len(rows):
                     # If we have both anchors (^...$) and haven't reached the end of the partition,
                     # we need to continue matching to try to consume the entire partition
-                    logger.debug(f"Pattern has both anchors but we're not at the end of partition yet")
+                    print(f"Pattern has both anchors but we're not at the end of partition yet")
                     continue
                 
                 # For patterns with only end anchor, we need to check if we're at the last row
                 if has_end_anchor and not has_both_anchors:
                     # Only accept if we're at the last row
                     if current_idx - 1 != len(rows) - 1:
-                        logger.debug(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
+                        print(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
                         continue
                 
                 longest_match = {
@@ -481,42 +478,42 @@ class EnhancedMatcher:
                     "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
                     "excluded_rows": excluded_rows.copy()
                 }
-                logger.debug(f"  Current longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                print(f"  Current longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                 
                 # If we have both anchors and have reached the end of the partition, we can stop
                 if has_both_anchors and current_idx == len(rows):
-                    logger.debug(f"Found complete match spanning entire partition")
+                    print(f"Found complete match spanning entire partition")
                     break
         
         # For patterns with both anchors, verify we've consumed the entire partition
         if longest_match and has_both_anchors:
             if start_idx != 0 or longest_match["end"] != len(rows) - 1:
-                logger.debug(f"Match doesn't span entire partition for ^...$ pattern, rejecting")
+                print(f"Match doesn't span entire partition for ^...$ pattern, rejecting")
                 longest_match = None
         
         # For patterns with only end anchor, verify the match ends at the last row
         if longest_match and has_end_anchor and not has_both_anchors:
             if longest_match["end"] != len(rows) - 1:
-                logger.debug(f"Match doesn't end at last row for $ pattern, rejecting")
+                print(f"Match doesn't end at last row for $ pattern, rejecting")
                 longest_match = None
         
         # Special handling for patterns with exclusions
         # If we have a match and it contains excluded rows, make sure they're properly tracked
         if longest_match and excluded_rows:
             longest_match["excluded_rows"] = sorted(set(excluded_rows))
-            logger.debug(f"Match contains excluded rows: {longest_match['excluded_rows']}")
+            print(f"Match contains excluded rows: {longest_match['excluded_rows']}")
         
         # Prefer non-empty match over empty match
         if longest_match and longest_match["end"] >= longest_match["start"]:  # Ensure it's a valid match
-            logger.debug(f"Found non-empty match: {longest_match}")
+            print(f"Found non-empty match: {longest_match}")
             self.timing["find_match"] += time.time() - match_start_time
             return longest_match
         elif empty_match:
-            logger.debug(f"Using empty match as fallback: {empty_match}")
+            print(f"Using empty match as fallback: {empty_match}")
             self.timing["find_match"] += time.time() - match_start_time
             return empty_match
         else:
-            logger.debug(f"No match found starting at index {start_idx}")
+            print(f"No match found starting at index {start_idx}")
             self.timing["find_match"] += time.time() - match_start_time
             return None
 
@@ -524,7 +521,6 @@ class EnhancedMatcher:
 
     def find_matches(self, rows, config=None, measures=None):
         """Find all matches with optimized processing."""
-        logger.info(f"FIND_MATCHES DEBUG: Starting find_matches with {len(rows)} rows")
         start_time = time.time()
         results = []
         match_number = 1
@@ -538,8 +534,7 @@ class EnhancedMatcher:
         show_empty = config.show_empty if config else True
         include_unmatched = config.include_unmatched if config else False
 
-        logger.info(f"FIND_MATCHES DEBUG: all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
-        logger.info(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
+        print(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
 
         # Safety counter to prevent infinite loops
         max_iterations = len(rows) * 2  # Allow at most 2 iterations per row
@@ -547,25 +542,20 @@ class EnhancedMatcher:
 
         while start_idx < len(rows) and iteration_count < max_iterations:
             iteration_count += 1
-            logger.debug(f"ITERATOR DEBUG: iteration {iteration_count}, start_idx={start_idx}, processed_indices={sorted(processed_indices)}")
 
             # Skip already processed indices
             if start_idx in processed_indices:
-                logger.debug(f"ITERATOR DEBUG: Skipping already processed index {start_idx}")
                 start_idx += 1
                 continue
 
-            logger.debug(f"ITERATOR DEBUG: Looking for match starting at index {start_idx}")
             # Find next match using optimized transitions
             match = self._find_single_match(rows, start_idx, RowContext(rows=rows))
             if not match:
                 # Mark this index as processed and move on
-                logger.debug(f"ITERATOR DEBUG: No match found at index {start_idx}, marking as processed")
                 processed_indices.add(start_idx)
                 start_idx += 1
                 continue
 
-            logger.debug(f"ITERATOR DEBUG: Found match at index {start_idx}: {match}")
             # Store the match for post-processing
             match["match_number"] = match_number
             self._matches.append(match)
@@ -573,7 +563,7 @@ class EnhancedMatcher:
             # Process the match
             if all_rows:
                 match_time_start = time.time()
-                logger.info(f"Processing match {match_number} with ALL ROWS PER MATCH")
+                print(f"Processing match {match_number} with ALL ROWS PER MATCH")
                 match_rows = self._process_all_rows_match(match, rows, measures, match_number, config)
                 results.extend(match_rows)
                 self.timing["process_match"] += time.time() - match_time_start
@@ -590,8 +580,8 @@ class EnhancedMatcher:
                     if match.get("excluded_rows"):
                         processed_indices.update(match["excluded_rows"])
             else:
-                logger.info("\nProcessing match with ONE ROW PER MATCH:")
-                logger.info(f"Match: {match}")
+                print("\nProcessing match with ONE ROW PER MATCH:")
+                print(f"Match: {match}")
                 match_row = self._process_one_row_match(match, rows, measures, match_number)
                 if match_row:
                     results.append(match_row)
@@ -607,20 +597,18 @@ class EnhancedMatcher:
                             processed_indices.update(match["excluded_rows"])
 
             # Update start index based on skip mode
-            old_start_idx = start_idx
             if match.get("is_empty", False):
                 # For empty matches, always move to the next position
                 processed_indices.add(start_idx)
                 start_idx += 1
-                logger.debug(f"ITERATOR DEBUG: Empty match, advancing from {old_start_idx} to {start_idx}")
             else:
                 # For non-empty matches, use the skip mode
+                old_start_idx = start_idx
                 if config and config.skip_mode:
                     start_idx = self._get_skip_position(config.skip_mode, config.skip_var, match)
                 else:
                     start_idx = match["end"] + 1
 
-                logger.debug(f"ITERATOR DEBUG: Non-empty match, advancing from {old_start_idx} to {start_idx}")
                 # Mark all indices in the match as processed
                 for idx in range(old_start_idx, match["end"] + 1):
                     processed_indices.add(idx)
@@ -628,16 +616,12 @@ class EnhancedMatcher:
                 # Also mark excluded rows as processed
                 if match.get("excluded_rows"):
                     processed_indices.update(match["excluded_rows"])
-                    logger.debug(f"ITERATOR DEBUG: Also marked excluded rows as processed: {match['excluded_rows']}")
 
             match_number += 1
-            logger.debug(f"ITERATOR DEBUG: End of iteration {iteration_count}, start_idx={start_idx}, match_number={match_number}")
-            logger.debug(f"ITERATOR DEBUG: processed_indices now: {sorted(processed_indices)}")
-            logger.info("="*50)
 
         # Check if we hit the iteration limit
         if iteration_count >= max_iterations:
-            logger.warning(f"WARNING: Reached maximum iteration count ({max_iterations}). Possible infinite loop detected.")
+            print(f"WARNING: Reached maximum iteration count ({max_iterations}). Possible infinite loop detected.")
 
         # Add unmatched rows if requested
         if include_unmatched or (config and config.rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED):
@@ -648,7 +632,7 @@ class EnhancedMatcher:
                     processed_indices.add(idx)
 
         self.timing["total"] = time.time() - start_time
-        logger.info(f"Find matches completed in {self.timing['total']:.6f} seconds")
+        print(f"Find matches completed in {self.timing['total']:.6f} seconds")
         return results
 
 
@@ -669,121 +653,30 @@ class EnhancedMatcher:
     def _get_skip_position(self, skip_mode: SkipMode, skip_var: Optional[str], match: Dict[str, Any]) -> int:
         """
         Determine the next position to start matching based on skip mode.
-        
-        Production-ready implementation with comprehensive validation and error handling
-        according to SQL:2016 specification for AFTER MATCH SKIP clause.
         """
         start_idx = match["start"]
         end_idx = match["end"]
         
-        logger.debug(f"Calculating skip position: mode={skip_mode}, skip_var={skip_var}, match_range=[{start_idx}:{end_idx}]")
-        
         if skip_mode == SkipMode.PAST_LAST_ROW:
-            # Default behavior: skip past the last row of the match
-            next_pos = end_idx + 1
-            logger.debug(f"PAST_LAST_ROW: skipping to position {next_pos}")
-            return next_pos
+            return end_idx + 1
             
         elif skip_mode == SkipMode.TO_NEXT_ROW:
-            # Skip to the row after the first row of the match
-            next_pos = start_idx + 1
-            logger.debug(f"TO_NEXT_ROW: skipping to position {next_pos}")
-            return next_pos
-            
-        elif skip_mode == SkipMode.TO_FIRST and skip_var:
-            return self._get_variable_skip_position(skip_var, match, is_first=True)
-            
-        elif skip_mode == SkipMode.TO_LAST and skip_var:
-            return self._get_variable_skip_position(skip_var, match, is_first=False)
-            
-        else:
-            # Fallback: move to next position to avoid infinite loops
-            logger.warning(f"Invalid skip configuration: mode={skip_mode}, skip_var={skip_var}. Using default.")
             return start_idx + 1
+            
+        elif skip_mode in (SkipMode.TO_FIRST, SkipMode.TO_LAST) and skip_var:
+            if skip_var in match["variables"]:
+                var_indices = match["variables"][skip_var]
+                if skip_mode == SkipMode.TO_FIRST:
+                    return min(var_indices) + 1
+                else:  # TO_LAST
+                    return max(var_indices) + 1
+                    
+        # Default: move to next position
+        return start_idx + 1
+        # src/matcher/matcher.py
 
-    def _get_variable_skip_position(self, skip_var: str, match: Dict[str, Any], is_first: bool) -> int:
-        """
-        Calculate skip position based on pattern variable position.
-        
-        Implements production-ready validation for TO FIRST/LAST variable skipping.
-        """
-        start_idx = match["start"]
-        
-        # Validate that the skip variable exists in the match
-        if skip_var not in match["variables"]:
-            logger.error(f"Skip variable '{skip_var}' not found in match variables: {list(match['variables'].keys())}")
-            # Standard behavior: if variable is not present, treat as failure and skip to next row
-            return start_idx + 1
-            
-        var_indices = match["variables"][skip_var]
-        if not var_indices:
-            logger.error(f"Skip variable '{skip_var}' has no matched indices")
-            return start_idx + 1
-            
-        # Calculate target position based on FIRST or LAST
-        if is_first:
-            target_idx = min(var_indices)
-            skip_type = "TO_FIRST"
-        else:
-            target_idx = max(var_indices) 
-            skip_type = "TO_LAST"
-            
-        # Critical validation: prevent infinite loops
-        # Cannot skip to the first row of the current match
-        if target_idx == start_idx:
-            logger.error(f"AFTER MATCH SKIP {skip_type} {skip_var} would create infinite loop: "
-                        f"target position {target_idx} equals match start {start_idx}")
-            # Standard mandates this should fail - skip to next row to avoid infinite loop
-            return start_idx + 1
-            
-        # For TO FIRST/TO LAST: resume AT the variable position (SQL:2016 standard)
-        # For TO FIRST: skip to the first occurrence of the variable
-        # For TO LAST: skip to the last occurrence of the variable
-        next_pos = target_idx
-        logger.debug(f"{skip_type} {skip_var}: target_idx={target_idx}, skipping to position {next_pos}")
-        
-        return next_pos
+        # src/matcher/matcher.py
 
-    def validate_after_match_skip(self, skip_mode: SkipMode, skip_var: Optional[str], pattern_variables: Set[str]) -> bool:
-        """
-        Validate AFTER MATCH SKIP configuration according to SQL:2016 standard.
-        
-        Production-ready validation that prevents common errors and infinite loops.
-        
-        Args:
-            skip_mode: The skip mode being used
-            skip_var: The target variable for TO FIRST/LAST modes  
-            pattern_variables: Set of all variables defined in the pattern
-            
-        Returns:
-            True if configuration is valid, False otherwise
-            
-        Raises:
-            ValueError: For invalid configurations that would cause infinite loops
-        """
-        logger.debug(f"Validating AFTER MATCH SKIP configuration: mode={skip_mode}, var={skip_var}")
-        
-        if skip_mode in (SkipMode.PAST_LAST_ROW, SkipMode.TO_NEXT_ROW):
-            # These modes don't require variable validation
-            return True
-            
-        elif skip_mode in (SkipMode.TO_FIRST, SkipMode.TO_LAST):
-            if not skip_var:
-                raise ValueError(f"AFTER MATCH SKIP {skip_mode.value} requires a target variable")
-                
-            # Validate that the target variable exists in the pattern
-            if skip_var not in pattern_variables:
-                raise ValueError(f"AFTER MATCH SKIP target variable '{skip_var}' not found in pattern variables: {sorted(pattern_variables)}")
-                
-            # Additional validation for preventing infinite loops
-            # This is checked at runtime, but we can warn about potential issues here
-            logger.debug(f"AFTER MATCH SKIP {skip_mode.value} {skip_var} validated successfully")
-            return True
-            
-        else:
-            raise ValueError(f"Unknown AFTER MATCH SKIP mode: {skip_mode}")
-
-    # ...existing code...
     def _process_empty_match(self, start_idx: int, rows: List[Dict[str, Any]], measures: Dict[str, str], match_number: int) -> Dict[str, Any]:
         """
         Process an empty match according to SQL standard, preserving original row data.
@@ -900,20 +793,20 @@ class EnhancedMatcher:
                 # Evaluate the expression with appropriate semantics
                 semantics = self.measure_semantics.get(alias, "FINAL")
                 result[alias] = evaluator.evaluate(expr, semantics)
-                logger.debug(f"Setting {alias} to {result[alias]} from evaluator")
+                print(f"Setting {alias} to {result[alias]} from evaluator")
                 
             except Exception as e:
-                logger.error(f"Error evaluating measure {alias}: {e}")
+                print(f"Error evaluating measure {alias}: {e}")
                 result[alias] = None
         
         # Print debug information
-        logger.info("\nMatch information:")
-        logger.info(f"Match number: {match_number}")
-        logger.info(f"Match start: {match['start']}, end: {match['end']}")
-        logger.info(f"Variables: {var_assignments}")
-        logger.info("\nResult row:")
+        print("\nMatch information:")
+        print(f"Match number: {match_number}")
+        print(f"Match start: {match['start']}, end: {match['end']}")
+        print(f"Variables: {var_assignments}")
+        print("\nResult row:")
         for key, value in result.items():
-            logger.info(f"{key}: {value}")
+            print(f"{key}: {value}")
         
         return result
 
@@ -959,13 +852,13 @@ class EnhancedMatcher:
         # Check start anchor if requested
         if check_type in ("start", "both") and state_info.anchor_type == PatternTokenType.ANCHOR_START:
             if row_idx != 0:
-                logger.debug(f"Start anchor failed: row_idx={row_idx} is not at partition start")
+                print(f"Start anchor failed: row_idx={row_idx} is not at partition start")
                 return False
                 
         # Check end anchor if requested and only for accepting states
         if check_type in ("end", "both") and state_info.anchor_type == PatternTokenType.ANCHOR_END:
             if state_info.is_accept and row_idx != total_rows - 1:
-                logger.debug(f"End anchor failed: row_idx={row_idx} is not at partition end")
+                print(f"End anchor failed: row_idx={row_idx} is not at partition end")
                 return False
                     
         return True
@@ -1062,8 +955,8 @@ class EnhancedMatcher:
         excluded_vars = match.get("excluded_vars", set())
         excluded_rows = match.get("excluded_rows", [])
         
-        logger.debug(f"Excluded variables: {excluded_vars}")
-        logger.debug(f"Excluded rows: {excluded_rows}")
+        print(f"Excluded variables: {excluded_vars}")
+        print(f"Excluded rows: {excluded_rows}")
         
         # Handle empty matches
         if match.get("is_empty", False) or (match["start"] > match["end"]):
@@ -1084,7 +977,7 @@ class EnhancedMatcher:
                     empty_row["IS_EMPTY_MATCH"] = True
                     
                     results.append(empty_row)
-                    logger.debug(f"Added empty match row for index {match['start']}")
+                    print(f"Added empty match row for index {match['start']}")
             return results
         
         # Get all matched indices, excluding excluded rows
@@ -1095,9 +988,9 @@ class EnhancedMatcher:
         # Sort indices for consistent processing
         matched_indices = sorted(set(matched_indices))
         
-        logger.info(f"Processing match {match_number}, included indices: {matched_indices}")
+        print(f"Processing match {match_number}, included indices: {matched_indices}")
         if excluded_rows:
-            logger.debug(f"Excluded rows: {sorted(excluded_rows)}")
+            print(f"Excluded rows: {sorted(excluded_rows)}")
         
         # Create context once for all rows with optimized structures
         context = RowContext()
@@ -1167,25 +1060,25 @@ class EnhancedMatcher:
                                 pattern_var = var
                                 break
                         result[alias] = pattern_var
-                        logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {pattern_var}")
+                        print(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {pattern_var}")
                     
                     # Special handling for running sum
                     elif expr.upper().startswith("SUM(") and semantics == "RUNNING":
                         if alias in running_sums and idx in running_sums[alias]:
                             result[alias] = running_sums[alias][idx]
-                            logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
+                            print(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
                         else:
                             # Fallback to standard evaluation
                             result[alias] = measure_evaluator.evaluate(expr, semantics)
-                            logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
+                            print(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
                     
                     # Standard evaluation for other measures
                     else:
                         result[alias] = measure_evaluator.evaluate(expr, semantics)
-                        logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
+                        print(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
                         
                 except Exception as e:
-                    logger.error(f"Error evaluating measure {alias} for row {idx}: {e}")
+                    print(f"Error evaluating measure {alias} for row {idx}: {e}")
                     result[alias] = None
             
             # Add match metadata
@@ -1193,7 +1086,7 @@ class EnhancedMatcher:
             result["IS_EMPTY_MATCH"] = False
             
             results.append(result)
-            logger.debug(f"Added row {idx} to results")
+            print(f"Added row {idx} to results")
         
         return results
 
