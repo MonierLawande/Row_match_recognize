@@ -230,59 +230,51 @@ class ConditionEvaluator(ast.NodeVisitor):
                         getattr(self.context, 'current_var', None)
                     )
                 else:
-                    # For simple navigation, use the existing approach
-                    args = self._extract_navigation_args(node)
+                    # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
+                    if len(node.args) == 0:
+                        raise ValueError(f"{func_name} function requires at least one argument")
                     
-                    if func_name == "PREV":
-                        # Handle PREV - use simple row navigation for now to debug
-                        if len(args) >= 2:
-                            # PREV(B.value) format - for now, use simple row navigation
-                            var_name = args[0]
-                            column = args[1]
-                            steps = args[2] if len(args) > 2 else 1
-                            # Use simple row navigation instead of variable-assignment-aware
-                            return self.evaluate_navigation_function('PREV', column, steps)
+                    # Get the first argument which should be either ast.Name or ast.Attribute
+                    first_arg = node.args[0]
+                    
+                    if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                        # Pattern: NEXT(A.value) - variable.column format
+                        var_name = first_arg.value.id
+                        column = first_arg.attr
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Use simple row navigation for PREV/NEXT
+                            return self.evaluate_navigation_function(func_name, column, steps)
                         else:
-                            # PREV(column) format - simple row navigation
-                            column = args[0] 
-                            steps = args[1] if len(args) > 1 else 1
-                            return self.evaluate_navigation_function('PREV', column, steps)
-                    elif func_name == "NEXT":
-                        # Handle NEXT - use simple row navigation for now to debug
-                        if len(args) >= 2:
-                            # NEXT(A.value) format - for now, use simple row navigation
-                            var_name = args[0]
-                            column = args[1]
-                            steps = args[2] if len(args) > 2 else 1
-                            # Use simple row navigation instead of variable-assignment-aware
-                            return self.evaluate_navigation_function('NEXT', column, steps)
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Name):
+                        # Pattern: NEXT(column) - simple column format
+                        column = first_arg.id
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Use simple row navigation for PREV/NEXT
+                            return self.evaluate_navigation_function(func_name, column, steps)
                         else:
-                            # NEXT(column) format - simple row navigation
-                            column = args[0]
-                            steps = args[1] if len(args) > 1 else 1
-                            return self.evaluate_navigation_function('NEXT', column, steps)
-                    elif func_name == "FIRST":
-                        # Handle FIRST(column) vs FIRST(var.column)
-                        if len(args) == 1 and isinstance(args[0], str):
-                            # FIRST(price) - use current variable context
-                            column = args[0]
-                            return self._get_navigation_value(None, column, 'FIRST', 1)
-                        else:
-                            var = args[0]
-                            col = args[1] if len(args) > 1 else None
-                            occ = args[2] if len(args) > 2 else 0
-                            return self._get_navigation_value(var, col, 'FIRST', occ)
-                    elif func_name == "LAST":
-                        # Handle LAST(column) vs LAST(var.column)
-                        if len(args) == 1 and isinstance(args[0], str):
-                            # LAST(price) - use current variable context
-                            column = args[0]
-                            return self._get_navigation_value(None, column, 'LAST', 1)
-                        else:
-                            var = args[0]
-                            col = args[1] if len(args) > 1 else None
-                            occ = args[2] if len(args) > 2 else 0
-                            return self._get_navigation_value(var, col, 'LAST', occ)
+                            # Use variable-aware navigation for FIRST/LAST with no specific variable
+                            return self._get_navigation_value(None, column, func_name, steps)
+                    else:
+                        raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
 
         func = self.visit(node.func)
         if callable(func):
