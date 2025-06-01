@@ -126,13 +126,7 @@ result = MatchRecognize(sql).run(df)
 print(result)
 ```
 
----
 
-## Performance
-
-Our system was benchmarked against Trino’s native `MATCH_RECOGNIZE` using real-world time series data. It shows competitive performance for in-memory datasets and eliminates the overhead of cross-platform data movement.
-
----
 
 ## Limitations
 
