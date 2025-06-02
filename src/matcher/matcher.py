@@ -911,6 +911,18 @@ class EnhancedMatcher:
                 logger.error(f"Error evaluating measure {alias}: {e}")
                 result[alias] = None
         
+        # Ensure we always return a meaningful result for valid matches
+        # Add match metadata that indicates a match was found
+        result["MATCH_NUMBER"] = match_number
+        
+        # If no measures were specified, add a basic match indicator
+        if not measures:
+            # Add original data from one of the matched rows (typically the first row of the match)
+            start_row = rows[match["start"]]
+            for key, value in start_row.items():
+                if key not in result:  # Don't overwrite existing values
+                    result[key] = value
+        
         # Print debug information
         logger.info("\nMatch information:")
         logger.info(f"Match number: {match_number}")

@@ -523,11 +523,21 @@ class NFABuilder:
             # Add metadata about pattern structure for optimization and validation
             self._analyze_pattern_structure(tokens)
             
+            # Debug: Check state list before NFA creation
+            print(f"DEBUG: About to create NFA with start={start}, accept={accept}, states_count={len(self.states)}")
+            for i, state in enumerate(self.states):
+                print(f"DEBUG: State {i} before NFA creation: transitions={len(state.transitions)}, epsilon={state.epsilon}")
+            
             # Create the NFA with all metadata
             nfa = NFA(start, accept, self.states, self.exclusion_ranges, self.metadata)
             
-            # Apply optimizations
-            nfa.optimize()
+            # Debug: Check NFA after creation
+            print(f"DEBUG: NFA created with states_count={len(nfa.states)}")
+            for i, state in enumerate(nfa.states):
+                print(f"DEBUG: NFA State {i} after creation: transitions={len(state.transitions)}, epsilon={state.epsilon}")
+            
+            # Apply optimizations - temporarily disabled for debugging
+            # nfa.optimize()
             
             # Validate NFA structure
             if not nfa.validate():
@@ -537,6 +547,12 @@ class NFABuilder:
             return nfa
             
         except Exception as e:
+            # Debug: Print the actual error that's being caught
+            print(f"ERROR in NFABuilder.build: {e}")
+            print(f"ERROR type: {type(e).__name__}")
+            import traceback
+            traceback.print_exc()
+            
             # Create a minimal valid NFA in case of error
             error_state = self.new_state()
             error_accept = self.new_state()
@@ -548,8 +564,8 @@ class NFABuilder:
                 "tokens": str(tokens)
             }
             
-            # Return a minimal NFA that won't match anything
-            return NFA(error_state, error_accept, [NFAState(), NFAState()], [], error_metadata)
+            # Return a minimal NFA that won't match anything - FIX the indices
+            return NFA(0, 1, [NFAState(), NFAState()], [], error_metadata)
 
     def _analyze_pattern_structure(self, tokens: List[PatternToken]):
         """
