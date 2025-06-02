@@ -280,7 +280,7 @@ class MeasureEvaluator:
         if expr.upper().strip() == "MATCH_NUMBER()":
             return self.context.match_number
         
-        # Special handling for SUM with pattern variable references
+        # Special handling for SUM with both pattern variable references and universal column references
         if expr.upper().startswith("SUM("):
             # Extract the column expression from SUM(column_expr)
             sum_match = re.match(r'SUM\(([^)]+)\)', expr, re.IGNORECASE)
@@ -315,6 +315,31 @@ class MeasureEvaluator:
                                     pass
                     
                     return total
+                else:
+                    # Handle universal column reference (e.g., SUM(salary))
+                    # For universal references, sum across all matched rows in the current pattern
+                    if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', col_expr):
+                        # Get all matched row indices
+                        all_indices = []
+                        for var, indices in self.context.variables.items():
+                            all_indices.extend(indices)
+                        
+                        # For RUNNING semantics, only include rows up to current position
+                        if is_running:
+                            all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
+                        
+                        # Calculate sum across all matched rows
+                        total = 0
+                        for idx in set(all_indices):  # Use set to avoid duplicates
+                            if idx < len(self.context.rows):
+                                row_val = self.context.rows[idx].get(col_expr)
+                                if row_val is not None:
+                                    try:
+                                        total += float(row_val)
+                                    except (ValueError, TypeError):
+                                        pass
+                        
+                        return total
         
         # Handle other aggregate functions (MIN, MAX, AVG, etc.)
         agg_match = re.match(r'(MIN|MAX|AVG|COUNT)\(([^)]+)\)', expr, re.IGNORECASE)
@@ -623,14 +648,48 @@ class MeasureEvaluator:
         # For ONE ROW PER MATCH with FINAL semantics, we need to return the variable
         # that matched the row based on the DEFINE conditions, not just the last variable
         if not running and var_name is None:
-            # Check which variable this row was assigned to
+            # Use optimized row-to-variable index for deterministic behavior
+            if hasattr(self.context, '_row_var_index') and current_idx in self.context._row_var_index:
+                vars_for_row = self.context._row_var_index[current_idx]
+                if vars_for_row:
+                    # If multiple variables match this row, use timeline for correct order
+                    if len(vars_for_row) == 1:
+                        return next(iter(vars_for_row))
+                    else:
+                        # Use timeline to determine correct variable in pattern order
+                        timeline = self.context.get_timeline()
+                        timeline_vars = [var for idx, var in timeline if idx == current_idx]
+                        if timeline_vars:
+                            return timeline_vars[0]
+                        # Fallback to alphabetical ordering
+                        return min(vars_for_row)
+            
+            # Fallback: Check which variable this row was assigned to
             for var, indices in self.context.variables.items():
                 if current_idx in indices:
                     return var
         
         # Case 1: CLASSIFIER() without arguments - find the matching variable for current row
         if var_name is None:
-            # First check direct variable assignments
+            # Use optimized row-to-variable index if available (more deterministic)
+            if hasattr(self.context, '_row_var_index') and current_idx in self.context._row_var_index:
+                vars_for_row = self.context._row_var_index[current_idx]
+                if vars_for_row:
+                    # If multiple variables match this row, use the timeline to determine the correct one
+                    if len(vars_for_row) == 1:
+                        return next(iter(vars_for_row))
+                    else:
+                        # Multiple variables for this row - check timeline for order
+                        timeline = self.context.get_timeline()
+                        # Find all entries for this row in the timeline
+                        timeline_vars = [var for idx, var in timeline if idx == current_idx]
+                        # Return the first one in timeline order (pattern matching order)
+                        if timeline_vars:
+                            return timeline_vars[0]
+                        # Fallback to alphabetical for deterministic behavior
+                        return min(vars_for_row)
+            
+            # Fallback to direct variable assignments (preserving original logic)
             for var, indices in self.context.variables.items():
                 if current_idx in indices:
                     return var

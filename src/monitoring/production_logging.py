@@ -132,6 +132,20 @@ class PerformanceTracker:
             start_time=time.time()
         )
         
+        # Ensure all attributes are initialized with default values
+        if not hasattr(metrics, 'cache_hits') or metrics.cache_hits is None:
+            metrics.cache_hits = 0
+        if not hasattr(metrics, 'cache_misses') or metrics.cache_misses is None:
+            metrics.cache_misses = 0
+        if not hasattr(metrics, 'error_count') or metrics.error_count is None:
+            metrics.error_count = 0
+        if not hasattr(metrics, 'input_rows') or metrics.input_rows is None:
+            metrics.input_rows = 0
+        if not hasattr(metrics, 'output_rows') or metrics.output_rows is None:
+            metrics.output_rows = 0
+        if not hasattr(metrics, 'memory_used_mb') or metrics.memory_used_mb is None:
+            metrics.memory_used_mb = 0.0
+        
         # Add context information
         for key, value in context.items():
             if hasattr(metrics, key):
@@ -245,6 +259,13 @@ def track_performance(operation: str, logger: Optional[StructuredLogger] = None,
         raise
     finally:
         tracker.complete_operation(metrics)
+        
+        if logger:
+            logger.debug(
+                f"Completed operation: {operation}",
+                duration_ms=metrics.duration_ms,
+                **context
+            )
         
         if logger:
             logger.debug(
