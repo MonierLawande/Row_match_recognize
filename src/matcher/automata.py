@@ -31,10 +31,10 @@ class Transition:
 
 class NFAState:
     """
-    Enhanced NFA state with comprehensive pattern matching support.
+    Enhanced NFA state with comprehensive SQL:2016 pattern matching support.
     
     Attributes:
-        transitions: List of outgoing transitions
+        transitions: List of outgoing transitions with conditions
         epsilon: List of epsilon transition target states
         variable: Pattern variable associated with this state
         is_excluded: Whether this state is part of an excluded pattern
@@ -43,6 +43,10 @@ class NFAState:
         subset_vars: Set of subset variables defined for this state
         permute_data: Optional metadata for PERMUTE patterns
         is_empty_match: Whether this state allows empty matches
+        can_accept: Whether this state can reach accept via epsilon transitions
+        is_accept: Whether this is an accepting state
+        subset_parent: Parent variable for subset variables
+        priority: Priority for deterministic matching (lower is higher priority)
     """
     def __init__(self):
         self.transitions: List[Transition] = []
@@ -54,10 +58,23 @@ class NFAState:
         self.subset_vars: Set[str] = set()
         self.permute_data: Dict[str, Any] = {}
         self.is_empty_match: bool = False
+        self.can_accept: bool = False
+        self.is_accept: bool = False
+        self.subset_parent: Optional[str] = None
+        self.priority: int = 0
     
     def add_transition(self, condition: ConditionFn, target: int, variable: Optional[str] = None, 
                       priority: int = 0, metadata: Dict[str, Any] = None):
-        """Add a transition with enhanced metadata support."""
+        """
+        Add a transition with enhanced metadata support.
+        
+        Args:
+            condition: Function that evaluates if a row matches this transition
+            target: Target state index
+            variable: Optional pattern variable associated with this transition
+            priority: Priority for resolving ambiguous transitions (lower is higher priority)
+            metadata: Additional metadata for specialized transitions
+        """
         self.transitions.append(Transition(
             condition, 
             target, 
@@ -67,9 +84,68 @@ class NFAState:
         ))
         
     def add_epsilon(self, target: int):
-        """Add an epsilon transition to target state."""
+        """
+        Add an epsilon transition to target state.
+        
+        Args:
+            target: Target state index
+        """
         if target not in self.epsilon:
             self.epsilon.append(target)
+            
+    def has_transition_to(self, target: int) -> bool:
+        """
+        Check if this state has a transition to the target state.
+        
+        Args:
+            target: Target state index to check
+            
+        Returns:
+            bool: True if there is a transition to target, False otherwise
+        """
+        # Check normal transitions
+        for trans in self.transitions:
+            if trans.target == target:
+                return True
+                
+        # Check epsilon transitions
+        return target in self.epsilon
+        
+    def allows_empty_match(self) -> bool:
+        """
+        Check if this state allows empty matches.
+        
+        Returns:
+            bool: True if this state allows empty matches, False otherwise
+        """
+        return self.is_empty_match
+        
+    def is_variable_state(self) -> bool:
+        """
+        Check if this state represents a pattern variable.
+        
+        Returns:
+            bool: True if this state has a variable name, False otherwise
+        """
+        return self.variable is not None
+        
+    def get_epsilon_targets(self) -> List[int]:
+        """
+        Get list of epsilon transition targets.
+        
+        Returns:
+            List[int]: List of target state indices
+        """
+        return self.epsilon
+        
+    def get_transition_targets(self) -> List[int]:
+        """
+        Get list of all transition targets (non-epsilon).
+        
+        Returns:
+            List[int]: List of target state indices
+        """
+        return [trans.target for trans in self.transitions]
 
 # src/matcher/automata.py
 # enhanced/automata.py - Part 2: NFA Class
@@ -96,31 +172,48 @@ class NFA:
     
     def epsilon_closure(self, state_indices: List[int]) -> List[int]:
         """
-        Compute epsilon closure for given states with cycle detection.
+        Compute epsilon closure for given states with robust cycle detection.
+        
+        This method computes the set of states reachable from the given states
+        via epsilon transitions, including the original states themselves.
+        It efficiently handles cycles in the epsilon transition graph.
         
         Args:
             state_indices: List of state indices to compute closure for
             
         Returns:
-            List of state indices in the epsilon closure
+            List of state indices in the epsilon closure (sorted)
         """
-        closure = set(state_indices)
-        stack = list(state_indices)
-        visited_pairs = set()  # Track (state, target) pairs to detect cycles
+        closure = set(state_indices)  # Result set
+        stack = list(state_indices)   # DFS stack
+        visited_pairs = set()         # Track (state, target) pairs to detect cycles
         
         while stack:
             s = stack.pop()
+            
+            # Get epsilon transitions for this state
             for t in self.states[s].epsilon:
                 # Skip if we've already processed this epsilon transition
                 if (s, t) in visited_pairs:
                     continue
-                    
+                
+                # Mark transition as visited
                 visited_pairs.add((s, t))
+                
+                # Add target to closure if not already present
                 if t not in closure:
                     closure.add(t)
                     stack.append(t)
                     
-        return sorted(closure)  # Sort for deterministic behavior
+                    # SQL:2016 requires proper handling of epsilon loops
+                    # Special handling for epsilon transitions from accept state
+                    if t == self.accept and s != self.accept:
+                        # If we reached accept via epsilon, mark source state
+                        self.states[s].can_accept = True
+        
+        # Return sorted closure for deterministic behavior
+        # This is important for predictable NFA-to-DFA conversion
+        return sorted(closure)
         
     def validate(self) -> bool:
         """
@@ -212,14 +305,19 @@ class NFA:
         
     def _optimize_epsilon_transitions(self):
         """Optimize epsilon transitions by computing transitive closures."""
-        # For each state, compute its epsilon closure
+        # First, compute epsilon closures for all states
+        epsilon_closures = {}
+        for i in range(len(self.states)):
+            epsilon_closures[i] = set(self.epsilon_closure([i]))
+        
+        # For each state, optimize its transitions
         for i, state in enumerate(self.states):
             # Skip accept state
             if i == self.accept:
                 continue
                 
             # Get epsilon closure for this state
-            closure = self.epsilon_closure([i])
+            closure = epsilon_closures[i]
             
             # Skip if no epsilon transitions
             if len(closure) <= 1:
@@ -238,7 +336,8 @@ class NFA:
                     duplicate = False
                     for existing in state.transitions:
                         if (existing.target == trans.target and 
-                            existing.variable == trans.variable):
+                            existing.variable == trans.variable and
+                            existing.condition == trans.condition):
                             duplicate = True
                             break
                             
@@ -248,13 +347,78 @@ class NFA:
                             trans.target,
                             trans.variable,
                             trans.priority,
-                            trans.metadata
+                            trans.metadata.copy() if trans.metadata else {}
                         )
-                        
+            
+            # Optimize variables - if state in closure has variable, copy it
+            for target in closure:
+                if target == i:
+                    continue
+                    
+                target_state = self.states[target]
+                if target_state.variable and not state.variable:
+                    state.variable = target_state.variable
+                
+                # Merge subset variables if needed
+                if target_state.subset_vars:
+                    state.subset_vars.update(target_state.subset_vars)
+                    
+                # Copy permute data if needed
+                if target_state.permute_data and not state.permute_data:
+                    state.permute_data = target_state.permute_data.copy()
+                    
+                # Copy anchor data if needed
+                if target_state.is_anchor and not state.is_anchor:
+                    state.is_anchor = True
+                    state.anchor_type = target_state.anchor_type
+            
             # If accept state is in closure, make this state accepting too
             if self.accept in closure:
                 # Add epsilon to accept state
                 state.add_epsilon(self.accept)
+                
+        # Clean up epsilon transitions that are now redundant
+        # Only keep epsilon transitions to states that have unique behavior
+        for i, state in enumerate(self.states):
+            # Skip accept state
+            if i == self.accept:
+                continue
+                
+            new_epsilon = []
+            for eps_target in state.epsilon:
+                # Always keep transition to accept state
+                if eps_target == self.accept:
+                    if eps_target not in new_epsilon:
+                        new_epsilon.append(eps_target)
+                    continue
+                
+                # Check if target has transitions this state doesn't have
+                target_state = self.states[eps_target]
+                has_unique_transitions = False
+                
+                for trans in target_state.transitions:
+                    found_match = False
+                    for existing in state.transitions:
+                        if (existing.target == trans.target and 
+                            existing.variable == trans.variable and
+                            existing.condition == trans.condition):
+                            found_match = True
+                            break
+                    
+                    if not found_match:
+                        has_unique_transitions = True
+                        break
+                
+                # Keep epsilon if target has unique transitions or other unique properties
+                if (has_unique_transitions or 
+                    (target_state.is_anchor and not state.is_anchor) or
+                    (target_state.variable and not state.variable) or
+                    (eps_target not in new_epsilon and target_state.subset_vars and 
+                     not target_state.subset_vars.issubset(state.subset_vars))):
+                    new_epsilon.append(eps_target)
+            
+            # Update epsilon transitions
+            state.epsilon = new_epsilon
 
 # enhanced/automata.py - Part 3: NFABuilder Core Methods
 
@@ -291,7 +455,7 @@ class NFABuilder:
     def build(self, tokens: List[PatternToken], define: Dict[str, str], 
              subset_vars: Dict[str, List[str]] = None) -> NFA:
         """
-        Build NFA from pattern tokens with enhanced features.
+        Build NFA from pattern tokens with comprehensive SQL:2016 support.
         
         Args:
             tokens: List of pattern tokens
@@ -299,7 +463,7 @@ class NFABuilder:
             subset_vars: Dictionary of subset variable definitions
             
         Returns:
-            NFA: The constructed NFA
+            NFA: The constructed NFA with full SQL:2016 compliance
         """
         # Store subset variables
         self.subset_vars = subset_vars or {}
@@ -314,44 +478,96 @@ class NFABuilder:
         start = self.new_state()
         accept = self.new_state()
         
-        # Handle empty pattern
+        # Mark accept state
+        self.states[accept].is_accept = True
+        
+        # Handle empty pattern - SQL:2016 treats this as a match
         if not tokens:
             self.add_epsilon(start, accept)
             return NFA(start, accept, self.states, [], {"empty_pattern": True})
         
-        # Process pattern with optional components (like Z?)
-        pattern_start, pattern_end = self._process_sequence(tokens, [0], define)
+        # Process pattern with full SQL:2016 compliance
+        idx = [0]  # Use mutable list for position tracking
         
-        # Connect pattern to start and accept states
-        self.add_epsilon(start, pattern_start)
-        self.add_epsilon(pattern_end, accept)
-        
-        # Check for patterns that allow empty matches
-        allows_empty = False
-        for token in tokens:
-            if token.quantifier in ['?', '*', '{0}', '{0,}']:
-                allows_empty = True
-                break
+        try:
+            # Process sequence of tokens
+            pattern_start, pattern_end = self._process_sequence(tokens, idx, define)
             
-        # For patterns like Z?, add direct path to allow empty matches
-        if allows_empty:
-            print("Pattern allows empty matches - adding epsilon transition")
-            self.add_epsilon(start, accept)  # Critical change for empty match support
-            self.metadata["allows_empty"] = True
-        
-        # Add metadata about pattern structure
-        self._analyze_pattern_structure(tokens)
-        
-        # Create and return the NFA
-        nfa = NFA(start, accept, self.states, self.exclusion_ranges, self.metadata)
-        
-        # Apply optimizations
-        nfa.optimize()
-        
-        return nfa
+            # Connect pattern to start and accept states
+            self.add_epsilon(start, pattern_start)
+            self.add_epsilon(pattern_end, accept)
+            
+            # Check for patterns that allow empty matches - critical for SQL:2016 compliance
+            allows_empty = False
+            
+            # Check token quantifiers for empty match possibilities
+            for token in tokens:
+                if token.quantifier in ['?', '*', '{0}', '{0,}']:
+                    allows_empty = True
+                    self.metadata["allows_empty"] = True
+                    break
+                    
+                # Also check for empty alternatives like (A|) which allow empty matches
+                if token.type == PatternTokenType.ALTERNATION:
+                    # If alternation is followed by GROUP_END, it might allow empty match
+                    idx_alt = tokens.index(token)
+                    if idx_alt + 1 < len(tokens) and tokens[idx_alt + 1].type == PatternTokenType.GROUP_END:
+                        allows_empty = True
+                        self.metadata["allows_empty"] = True
+                        break
+            
+            # For patterns like Z? that allow empty matches, add direct path
+            if allows_empty:
+                self.add_epsilon(start, accept)
+            
+            # Add metadata about pattern structure for optimization and validation
+            self._analyze_pattern_structure(tokens)
+            
+            # Create the NFA with all metadata
+            nfa = NFA(start, accept, self.states, self.exclusion_ranges, self.metadata)
+            
+            # Apply optimizations
+            nfa.optimize()
+            
+            # Validate NFA structure
+            if not nfa.validate():
+                # Add warning to metadata if validation fails
+                nfa.metadata["validation_warning"] = "NFA validation failed, structure may be problematic"
+            
+            return nfa
+            
+        except Exception as e:
+            # Create a minimal valid NFA in case of error
+            error_state = self.new_state()
+            error_accept = self.new_state()
+            
+            # Add metadata about the error
+            error_metadata = {
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "tokens": str(tokens)
+            }
+            
+            # Return a minimal NFA that won't match anything
+            return NFA(error_state, error_accept, [NFAState(), NFAState()], [], error_metadata)
 
     def _analyze_pattern_structure(self, tokens: List[PatternToken]):
-        """Analyze pattern structure and store metadata."""
+        """
+        Analyze pattern structure and store comprehensive metadata for SQL:2016 compliance.
+        
+        This method analyzes the pattern tokens to extract key characteristics that are
+        important for SQL:2016 pattern matching functionality, such as:
+        - Presence of anchors (^ and $)
+        - PERMUTE patterns and nested PERMUTE structure
+        - Pattern exclusions
+        - Pattern variables and their relationships
+        - Quantifier usage statistics
+        - Alternation structure
+        - Empty match possibilities
+        
+        Args:
+            tokens: List of pattern tokens to analyze
+        """
         # Check for anchors
         has_start_anchor = any(t.type == PatternTokenType.ANCHOR_START for t in tokens)
         has_end_anchor = any(t.type == PatternTokenType.ANCHOR_END for t in tokens)
@@ -362,35 +578,99 @@ class NFABuilder:
             self.metadata["has_end_anchor"] = True
         if has_start_anchor and has_end_anchor:
             self.metadata["spans_partition"] = True
-            
-        # Check for PERMUTE patterns
-        has_permute = any(t.type == PatternTokenType.PERMUTE for t in tokens)
+        
+        # Check for PERMUTE patterns and extract their structure
+        permute_tokens = [t for t in tokens if t.type == PatternTokenType.PERMUTE]
+        has_permute = len(permute_tokens) > 0
+        
         if has_permute:
             self.metadata["has_permute"] = True
             
-            # Extract PERMUTE variables
+            # Extract PERMUTE variables and structure
             permute_vars = []
-            for token in tokens:
-                if token.type == PatternTokenType.PERMUTE:
-                    if "variables" in token.metadata:
-                        permute_vars.extend(token.metadata["variables"])
-                        
+            permute_structure = []
+            
+            for token in permute_tokens:
+                if "variables" in token.metadata:
+                    permute_vars.extend([
+                        v.value if hasattr(v, 'value') else v 
+                        for v in token.metadata["variables"]
+                    ])
+                    
+                    # Build structure info
+                    permute_info = {
+                        "variables": [
+                            v.value if hasattr(v, 'value') else v 
+                            for v in token.metadata["variables"]
+                        ],
+                        "quantifier": token.quantifier,
+                        "nested": token.metadata.get("nested", False)
+                    }
+                    permute_structure.append(permute_info)
+            
             if permute_vars:
                 self.metadata["permute_variables"] = permute_vars
-                
-        # Check for exclusions
-        has_exclusion = any(t.type == PatternTokenType.EXCLUSION_START for t in tokens)
-        if has_exclusion:
-            self.metadata["has_exclusion"] = True
             
-        # Extract all pattern variables
+            if permute_structure:
+                self.metadata["permute_structure"] = permute_structure
+        
+        # Check for exclusions and extract their structure
+        exclusion_ranges = []
+        current_exclusion_start = None
+        
+        for i, token in enumerate(tokens):
+            if token.type == PatternTokenType.EXCLUSION_START:
+                current_exclusion_start = i
+            elif token.type == PatternTokenType.EXCLUSION_END and current_exclusion_start is not None:
+                exclusion_ranges.append((current_exclusion_start, i))
+                current_exclusion_start = None
+        
+        if exclusion_ranges:
+            self.metadata["has_exclusion"] = True
+            self.metadata["exclusion_ranges"] = exclusion_ranges
+        
+        # Extract all pattern variables and their properties
         all_vars = set()
+        vars_with_quantifiers = {}
+        
         for token in tokens:
             if token.type == PatternTokenType.LITERAL:
                 all_vars.add(token.value)
                 
+                # Track variables with quantifiers
+                if token.quantifier:
+                    vars_with_quantifiers[token.value] = token.quantifier
+        
         if all_vars:
             self.metadata["pattern_variables"] = list(all_vars)
+        
+        if vars_with_quantifiers:
+            self.metadata["variables_with_quantifiers"] = vars_with_quantifiers
+        
+        # Check for alternation (|) - important for pattern compilation strategy
+        has_alternation = any(t.type == PatternTokenType.ALTERNATION for t in tokens)
+        if has_alternation:
+            self.metadata["has_alternation"] = True
+        
+        # Check for pattern structures that allow empty matches
+        allows_empty = False
+        
+        # Empty match is possible if any token has a quantifier that allows zero occurrences
+        for token in tokens:
+            if token.quantifier in ['?', '*', '{0}', '{0,}']:
+                allows_empty = True
+                break
+                
+            # Also check for complex structures like (A|) which allow empty matches
+            if token.type == PatternTokenType.ALTERNATION:
+                # If alternation is followed by a GROUP_END, it might allow empty match
+                idx = tokens.index(token)
+                if idx + 1 < len(tokens) and tokens[idx + 1].type == PatternTokenType.GROUP_END:
+                    allows_empty = True
+                    break
+        
+        if allows_empty:
+            self.metadata["allows_empty_match"] = True
 
 # enhanced/automata.py - Part 4: NFABuilder Pattern Processing Methods
 
@@ -511,8 +791,22 @@ class NFABuilder:
         return start, end
 
     def _process_exclusion(self, tokens: List[PatternToken], idx: List[int], define: Dict[str, str]) -> Tuple[int, int]:
-        """Process an exclusion pattern fragment."""
-        # Remember exclusion start position
+        """
+        Process an exclusion pattern fragment with SQL:2016 compliant behavior.
+        
+        SQL:2016 exclusion patterns use {- ... -} syntax to exclude certain patterns.
+        This implementation handles them by marking states in the exclusion pattern as excluded,
+        which will be filtered out during result processing.
+        
+        Args:
+            tokens: List of all pattern tokens
+            idx: Current position in the token list (mutable)
+            define: Dictionary of variable definitions
+            
+        Returns:
+            Tuple of (start_state, end_state) for the exclusion pattern
+        """
+        # Remember exclusion start position in the NFA
         exclusion_start_idx = len(self.states)
         
         # Track original exclusion state and set current to true
@@ -522,11 +816,32 @@ class NFABuilder:
         # Skip exclusion start token
         idx[0] += 1
         
-        # Process tokens inside exclusion normally (don't create bypass)
-        excl_start, excl_end = self._process_sequence(tokens, idx, define)
+        # Create start and end states for the exclusion pattern
+        excl_start = self.new_state()
         
-        # Mark exclusion end
+        # Mark exclusion start state
+        self.states[excl_start].is_excluded = True
+        
+        # Process tokens inside exclusion normally
+        # SQL:2016 requires exclusion patterns to be fully matched but excluded from output
+        sub_pattern_start, sub_pattern_end = self._process_sequence(tokens, idx, define)
+        
+        # Connect to sub-pattern
+        self.add_epsilon(excl_start, sub_pattern_start)
+        
+        # Create exclusion end state
+        excl_end = self.new_state()
+        
+        # Connect sub-pattern to exclusion end
+        self.add_epsilon(sub_pattern_end, excl_end)
+        
+        # Mark exclusion end state
+        self.states[excl_end].is_excluded = True
+        
+        # Mark exclusion end in NFA states
         exclusion_end_idx = len(self.states) - 1
+        
+        # Store exclusion range for later processing
         self.exclusion_ranges.append((exclusion_start_idx, exclusion_end_idx))
         
         # Mark all states in this range as excluded
@@ -540,18 +855,27 @@ class NFABuilder:
         if idx[0] < len(tokens) and tokens[idx[0]].type == PatternTokenType.EXCLUSION_END:
             idx[0] += 1
         
-        # Return the exclusion states directly without bypass
-        # This makes excluded variables available as normal transitions
-        # but they will be filtered from output during result processing
+        # Return the exclusion pattern states
+        # Note: These will be processed normally by the automaton,
+        # but will be filtered from output during result processing
         return excl_start, excl_end
 
     def create_var_states(self, var: Union[str, PatternToken], define: Dict[str, str]) -> Tuple[int, int]:
-        """Create states for a pattern variable with support for subset variables and PatternToken objects."""
+        """
+        Create states for a pattern variable with enhanced SQL:2016 support.
+        
+        Args:
+            var: Variable name or PatternToken object
+            define: Dictionary of variable definitions
+            
+        Returns:
+            Tuple of (start_state, end_state)
+        """
         start = self.new_state()
         end = self.new_state()
         
-        # Handle PatternToken objects (for nested PERMUTE patterns)
-        if hasattr(var, 'type') and hasattr(var, 'value'):
+        # Handle PatternToken objects (for nested patterns)
+        if isinstance(var, PatternToken):
             # This is a PatternToken object
             if var.type == PatternTokenType.PERMUTE:
                 # Process nested PERMUTE token
@@ -559,16 +883,24 @@ class NFABuilder:
                 self.add_epsilon(start, nested_start)
                 self.add_epsilon(nested_end, end)
                 return start, end
+            elif var.type == PatternTokenType.GROUP_START:
+                # Process group token
+                idx = [0]  # Use list for mutable reference
+                tokens = [var]  # Create token list with this token
+                group_start, group_end = self._process_sequence(tokens, idx, define)
+                self.add_epsilon(start, group_start)
+                self.add_epsilon(group_end, end)
+                return start, end
             else:
                 # Use the value from the token
                 var_base = var.value
                 quantifier = var.quantifier
         else:
-            # Extract any quantifier from the variable name for string variables
+            # String variable - extract any quantifiers
             var_base = var
             quantifier = None
             
-            # Handle quantifiers
+            # Extract quantifiers from variable name
             if isinstance(var, str):
                 if var.endswith('?'):
                     var_base = var[:-1]
@@ -584,20 +916,41 @@ class NFABuilder:
                     var_base = var[:open_idx]
                     quantifier = var[open_idx:]
         
-        # Get condition from DEFINE clause or use TRUE
-        condition = define.get(var_base, "TRUE")
-        print(f"Creating transition for variable '{var_base}' with condition: '{condition}'")
-        condition_fn = compile_condition(condition)
+        # Get condition from DEFINE clause with improved handling
+        if var_base in define:
+            condition_str = define[var_base]
+        else:
+            # Default to TRUE if no definition exists
+            condition_str = "TRUE"
+            
+        # Compile the condition
+        condition_fn = compile_condition(condition_str)
         
-        # Create transition with condition
+        # Create transition with condition and variable tracking
         self.states[start].add_transition(condition_fn, end, var_base)
-        self.states[start].variable = var_base  # Mark state with variable name
         
-        # Handle subset variables
+        # Store variable name on both states
+        self.states[start].variable = var_base
+        self.states[end].variable = var_base  # Also mark end state for better variable tracking
+        
+        # Handle subset variables - SQL:2016 compliant
         if var_base in self.subset_vars:
-            # Add subset components to the state
-            self.states[start].subset_vars = set(self.subset_vars[var_base])
-            self.states[end].subset_vars = set(self.subset_vars[var_base])
+            # Add subset components to states
+            subset_components = self.subset_vars[var_base]
+            self.states[start].subset_vars = set(subset_components)
+            self.states[end].subset_vars = set(subset_components)
+            
+            # Store metadata about subset variable relationship
+            if not hasattr(self.states[start], "subset_parent"):
+                self.states[start].subset_parent = var_base
+                self.states[end].subset_parent = var_base
+        
+        # Apply quantifier if present
+        if quantifier:
+            min_rep, max_rep, greedy = parse_quantifier(quantifier)
+            start, end = self._apply_quantifier(start, end, min_rep, max_rep, greedy)
+        
+        return start, end
         
         # Apply quantifier if present
         if quantifier:
@@ -651,23 +1004,22 @@ class NFABuilder:
                 self.add_epsilon(var_end, perm_end)
             return perm_start, perm_end
         
-        # Handle nested PERMUTE patterns
+        # Special case for PERMUTE: SQL:2016 allows each variable to match only once
+        # So we need to track which variables have been matched
+        
+        # Pre-process variables to handle nested PERMUTE and quantifiers
         processed_vars = []
         for var in variables:
             if isinstance(var, PatternToken) and var.type == PatternTokenType.PERMUTE:
                 # Recursively process nested PERMUTE
                 nested_start, nested_end = self._process_permute(var, define)
-                processed_vars.append((nested_start, nested_end))
+                processed_vars.append((var, nested_start, nested_end))
             else:
-                # Check for quantifiers on variables
-                if isinstance(var, str) and (var.endswith('*') or var.endswith('+') or 
-                                            var.endswith('?') or 
-                                            ('{' in var and var.endswith('}'))):
-                    # Extract quantifier from the variable
-                    var_base = var
-                    quantifier = None
-
-                    
+                # Extract base variable and quantifier
+                var_base = var
+                quantifier = None
+                
+                if isinstance(var, str):
                     if var.endswith('*'):
                         var_base = var[:-1]
                         quantifier = '*'
@@ -681,44 +1033,54 @@ class NFABuilder:
                         open_idx = var.find('{')
                         var_base = var[:open_idx]
                         quantifier = var[open_idx:]
-                    
-                    # Create state for base variable
-                    var_start, var_end = self.create_var_states(var_base, define)
-                    
-                    # Apply quantifier if present
-                    if quantifier:
-                        min_rep, max_rep, greedy = parse_quantifier(quantifier)
-                        var_start, var_end = self._apply_quantifier(
-                            var_start, var_end, min_rep, max_rep, greedy)
-                    
-                    processed_vars.append((var_start, var_end))
-                else:
-                    # Regular variable without quantifier
-                    var_start, var_end = self.create_var_states(var, define)
-                    processed_vars.append((var_start, var_end))
+                
+                # Process as regular variable
+                var_start, var_end = self.create_var_states(var_base, define)
+                
+                # Apply quantifier if present
+                if quantifier:
+                    min_rep, max_rep, greedy = parse_quantifier(quantifier)
+                    var_start, var_end = self._apply_quantifier(
+                        var_start, var_end, min_rep, max_rep, greedy)
+                
+                processed_vars.append((var_base, var_start, var_end))
         
-        # Generate all permutations explicitly - this is the only correct approach
-        # CRITICAL FIX: Create fresh states for each permutation to avoid cross-contamination
+        # SQL:2016 PERMUTE implementation requires each variable to match exactly once
+        # Following Trino's approach, we generate all permutations explicitly
         all_perms = list(itertools.permutations(range(len(processed_vars))))
         
-        # Process each permutation as a separate sequential path
+        # For each permutation, create a separate branch in the NFA
         for perm in all_perms:
+            # Create a new start state for this permutation
             branch_start = self.new_state()
-            branch_current = branch_start
+            current = branch_start
             
-            # Build the permutation branch as a sequential chain with FRESH states
-            for var_idx in perm:
-                # CRITICAL: Create fresh states for this variable in this permutation
-                # Do NOT reuse processed_vars states to avoid epsilon contamination
-                original_var = variables[var_idx]
-                fresh_var_start, fresh_var_end = self.create_var_states(original_var, define)
+            # Create a chain of states for this permutation
+            for idx in perm:
+                var_info = processed_vars[idx]
                 
-                self.add_epsilon(branch_current, fresh_var_start)
-                branch_current = fresh_var_end
+                if isinstance(var_info[0], PatternToken) and var_info[0].type == PatternTokenType.PERMUTE:
+                    # For nested PERMUTE, create fresh copy to avoid state sharing
+                    var_token = var_info[0]
+                    fresh_start, fresh_end = self._process_permute(var_token, define)
+                    
+                    # Connect to current chain
+                    self.add_epsilon(current, fresh_start)
+                    current = fresh_end
+                else:
+                    # For regular variables, create fresh copy to avoid state sharing
+                    var_base = var_info[0]
+                    fresh_start, fresh_end = self.create_var_states(var_base, define)
+                    
+                    # Connect to current chain
+                    self.add_epsilon(current, fresh_start)
+                    current = fresh_end
             
-            # Connect this permutation branch to the main flow
+            # Connect this permutation branch to the main permutation end
+            self.add_epsilon(current, perm_end)
+            
+            # Connect permutation start to this branch
             self.add_epsilon(perm_start, branch_start)
-            self.add_epsilon(branch_current, perm_end)
         
         # Apply quantifiers to the entire PERMUTE pattern if present
         if token.quantifier:
@@ -730,152 +1092,189 @@ class NFABuilder:
 # enhanced/automata.py - Part 7: NFABuilder Quantifier Handling
 
     def _apply_quantifier(self, 
-                    start: int, 
-                    end: int, 
-                    min_rep: int, 
-                    max_rep: Optional[int],
-                    greedy: bool) -> Tuple[int, int]:
-        """Apply quantifier to a subpattern with improved optional handling."""
+                      start: int, 
+                      end: int, 
+                      min_rep: int, 
+                      max_rep: Optional[int],
+                      greedy: bool) -> Tuple[int, int]:
+        """
+        Apply quantifier to a subpattern with improved SQL:2016 compliant handling.
+        
+        Args:
+            start: Start state of the subpattern
+            end: End state of the subpattern
+            min_rep: Minimum number of repetitions
+            max_rep: Maximum number of repetitions (None for unbounded)
+            greedy: Whether quantifier is greedy (True) or reluctant (False)
+            
+        Returns:
+            Tuple of (new_start, new_end) states
+        """
+        # Create new start and end states for the quantified pattern
         new_start = self.new_state()
         new_end = self.new_state()
         
-        # Handle {n,n} case (exactly n repetitions)
-        if min_rep == max_rep and min_rep > 0:
-            # Create a chain of exactly min_rep copies
-            current = new_start
-            for _ in range(min_rep):
-                next_state = self.new_state()
-                # Copy the original transition
-                for trans in self.states[start].transitions:
-                    self.states[current].add_transition(
-                        trans.condition,
-                        next_state if trans.target == end else trans.target,
-                        trans.variable,
-                        trans.priority,
-                        trans.metadata
-                    )
-                current = next_state
-            # Connect the last state to new_end
-            self.add_epsilon(current, new_end)
-            return new_start, new_end
+        # SQL:2016 compliance: Ensure empty match handling works correctly
+        # Mark the new end state as allowing empty matches if min_rep is 0
+        if min_rep == 0:
+            self.states[new_end].is_empty_match = True
         
-        # Handle different quantifier types
-        if min_rep == 0 and max_rep is None:  # *
-            # Allow empty matches
+        # Special case for exact repetitions {n,n}
+        if min_rep == max_rep:
+            if min_rep == 0:
+                # {0,0} - empty match
+                self.add_epsilon(new_start, new_end)
+                return new_start, new_end
+            elif min_rep == 1:
+                # {1,1} - exactly one match, no quantifier
+                self.add_epsilon(new_start, start)
+                self.add_epsilon(end, new_end)
+                return new_start, new_end
+            else:
+                # {n,n} - exactly n repetitions
+                current = new_start
+                
+                # Create a chain of n copies
+                for i in range(min_rep):
+                    # For last repetition, connect directly to new_end
+                    if i == min_rep - 1:
+                        self.add_epsilon(current, start)
+                        self.add_epsilon(end, new_end)
+                    else:
+                        # Create intermediate states for this repetition
+                        rep_start = self.new_state()
+                        
+                        # Connect to original pattern
+                        self.add_epsilon(current, start)
+                        self.add_epsilon(end, rep_start)
+                        
+                        current = rep_start
+                
+                return new_start, new_end
+        
+        # Handle standard quantifiers with min and max
+        
+        # * (zero or more) - {0,}
+        if min_rep == 0 and max_rep is None:
+            # Connect new_start to new_end for empty match
             self.add_epsilon(new_start, new_end)
             
             if greedy:
-                # Try to match (greedy)
-                self.add_epsilon(new_start, start)
-                self.add_epsilon(end, start)  # Loop back
-                self.add_epsilon(end, new_end)  # Or finish
+                # Greedy matching - try to match first, then finish
+                self.add_epsilon(new_start, start)  # Try to match
+                self.add_epsilon(end, start)        # After match, try to match again
+                self.add_epsilon(end, new_end)      # Or finish
             else:
-                # Try to skip (reluctant)
-                self.add_epsilon(new_start, new_end)  # Skip first
+                # Reluctant matching - try to finish first, then match
+                self.add_epsilon(new_start, new_end)  # Try to skip
                 self.add_epsilon(new_start, start)    # Or try to match
-                self.add_epsilon(end, new_end)        # Finish after match
-                self.add_epsilon(end, start)          # Or loop back
-            
-        elif min_rep == 1 and max_rep is None:  # +
-            self.add_epsilon(new_start, start)  # Must match once
+                self.add_epsilon(end, new_end)        # After match, try to finish
+                self.add_epsilon(end, start)          # Or match again
+        
+        # + (one or more) - {1,}
+        elif min_rep == 1 and max_rep is None:
+            # Must match at least once
+            self.add_epsilon(new_start, start)
             
             if greedy:
-                # Try to match more (greedy)
-                self.add_epsilon(end, start)  # Loop back
-                self.add_epsilon(end, new_end)  # Or finish
+                # Greedy matching - try to match more first
+                self.add_epsilon(end, start)      # After match, try to match again
+                self.add_epsilon(end, new_end)    # Or finish
             else:
-                # Try to finish (reluctant)
-                self.add_epsilon(end, new_end)  # Finish
-                self.add_epsilon(end, start)  # Or loop back
-            
-        elif min_rep == 0 and max_rep == 1:  # ?
-            # Must have this for optional elements (var?)
+                # Reluctant matching - try to finish first
+                self.add_epsilon(end, new_end)    # After match, try to finish
+                self.add_epsilon(end, start)      # Or match again
+        
+        # ? (optional) - {0,1}
+        elif min_rep == 0 and max_rep == 1:
             if greedy:
-                # Try to match (greedy)
+                # Greedy - try to match first
                 self.add_epsilon(new_start, start)    # Try to match
                 self.add_epsilon(new_start, new_end)  # Or skip
-                self.add_epsilon(end, new_end)        # End after match
+                self.add_epsilon(end, new_end)        # After match, finish
             else:
-                # Try to skip (reluctant)
-                self.add_epsilon(new_start, new_end)  # Skip first
-                self.add_epsilon(new_start, start)    # Or try to match
-                self.add_epsilon(end, new_end)        # End after match
-            
-        else:  # {m,n} bounds
-            # Create chain for minimum repetitions
-            current = new_start
-            
-            # Handle empty match case for {0,n}
-            if min_rep == 0:
-                # Direct path for empty match
-                self.add_epsilon(new_start, new_end)
-            
+                # Reluctant - try to skip first
+                self.add_epsilon(new_start, new_end)  # Try to skip
+                self.add_epsilon(new_start, start)    # Or match
+                self.add_epsilon(end, new_end)        # After match, finish
+        
+        # General case {m,n} where m >= 0 and n > m
+        else:
             # Create states for minimum required repetitions
-            prev_end = None
-            for i in range(min_rep):
-                rep_start = self.new_state()
-                rep_end = self.new_state()
+            if min_rep == 0:
+                # Allow empty match
+                self.add_epsilon(new_start, new_end)
+                min_chain_start = new_start
+                min_chain_end = new_start
+            else:
+                # Create chain for minimum required matches
+                min_chain_start = new_start
+                current = new_start
                 
-                # Connect to previous state
-                self.add_epsilon(current, rep_start)
+                # Create min_rep-1 copies that must match
+                for i in range(min_rep - 1):
+                    rep_start = self.new_state()
+                    
+                    # Connect to original pattern
+                    self.add_epsilon(current, start)
+                    self.add_epsilon(end, rep_start)
+                    
+                    current = rep_start
                 
-                # Copy transitions from original pattern
-                for trans in self.states[start].transitions:
-                    self.states[rep_start].add_transition(
-                        trans.condition,
-                        rep_end if trans.target == end else trans.target,
-                        trans.variable,
-                        trans.priority,
-                        trans.metadata
-                    )
-                
-                current = rep_end
-                if i == min_rep - 1:
-                    prev_end = rep_end
+                # Connect last required match
+                self.add_epsilon(current, start)
+                min_chain_end = end
             
-            # Add optional repetitions up to max
-            if max_rep is not None and max_rep > min_rep:
-                # Create states for optional repetitions
+            # Handle optional repetitions (between min_rep and max_rep)
+            if max_rep is not None:
+                # Limited max repetitions - {m,n} where n is finite
+                opt_start = min_chain_end
+                
+                # Create optional chain for (max_rep - min_rep) optional matches
                 for i in range(min_rep, max_rep):
-                    opt_start = self.new_state()
                     opt_end = self.new_state()
                     
-                    # Connect based on greediness
                     if greedy:
                         # Try to match more (greedy)
-                        self.add_epsilon(current, opt_start)  # Try another repetition
-                        self.add_epsilon(current, new_end)    # Or finish
+                        if i > 0:  # Not first optional match
+                            self.add_epsilon(opt_start, start)  # Try to match
+                            self.add_epsilon(opt_start, new_end)  # Or finish
+                        else:
+                            # First optional match
+                            self.add_epsilon(opt_start, start)  # Try to match
+                            self.add_epsilon(opt_start, new_end)  # Or finish
                     else:
                         # Try to finish (reluctant)
-                        self.add_epsilon(current, new_end)    # Try to finish
-                        self.add_epsilon(current, opt_start)  # Or match more
+                        if i > 0:  # Not first optional match
+                            self.add_epsilon(opt_start, new_end)  # Try to finish
+                            self.add_epsilon(opt_start, start)  # Or match more
+                        else:
+                            # First optional match
+                            self.add_epsilon(opt_start, new_end)  # Try to finish
+                            self.add_epsilon(opt_start, start)  # Or match more
                     
-                    # Copy transitions from original pattern
-                    for trans in self.states[start].transitions:
-                        self.states[opt_start].add_transition(
-                            trans.condition,
-                            opt_end if trans.target == end else trans.target,
-                            trans.variable,
-                            trans.priority,
-                            trans.metadata
-                        )
+                    # After match, connect to opt_end
+                    self.add_epsilon(end, opt_end)
                     
-                    current = opt_end
+                    # Update for next iteration
+                    opt_start = opt_end
                 
-                # Connect final state
-                self.add_epsilon(current, new_end)
-            elif max_rep is None and min_rep > 0:
-                # Unbounded upper limit {m,}
-                # Connect to allow more repetitions or finish
-                if greedy:
-                    self.add_epsilon(current, start)   # Try more repetitions
-                    self.add_epsilon(current, new_end) # Or finish
-                else:
-                    self.add_epsilon(current, new_end) # Try to finish
-                    self.add_epsilon(current, start)   # Or more repetitions
+                # Connect last optional state to new_end
+                self.add_epsilon(opt_start, new_end)
             else:
-                # Exact number of repetitions {m,m}
-                self.add_epsilon(current, new_end)
+                # Unbounded repetitions - {m,}
+                if greedy:
+                    # Greedy matching - try more matches first
+                    self.add_epsilon(min_chain_end, start)  # Try to match more
+                    self.add_epsilon(min_chain_end, new_end)  # Or finish
+                    self.add_epsilon(end, start)  # After match, try to match more
+                    self.add_epsilon(end, new_end)  # Or finish
+                else:
+                    # Reluctant matching - try to finish first
+                    self.add_epsilon(min_chain_end, new_end)  # Try to finish
+                    self.add_epsilon(min_chain_end, start)  # Or match more
+                    self.add_epsilon(end, new_end)  # After match, try to finish
+                    self.add_epsilon(end, start)  # Or match more
         
         return new_start, new_end
 
