@@ -89,6 +89,12 @@ class ConditionEvaluator(ast.NodeVisitor):
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         
+        # DEBUG: Add logging for comparison debugging
+        if hasattr(self.context, '_debug_comparison') and self.context._debug_comparison:
+            print(f"DEBUG visit_Compare: left={left}, right={right}")
+            print(f"DEBUG visit_Compare: left AST = {ast.dump(node.left)}")
+            print(f"DEBUG visit_Compare: right AST = {ast.dump(node.comparators[0])}")
+        
         # Use safe comparison with NULL handling
         op = node.ops[0]
         
@@ -105,7 +111,13 @@ class ConditionEvaluator(ast.NodeVisitor):
         if func is None:
             raise ValueError(f"Operator {op} not supported")
             
-        return self._safe_compare(left, right, func)
+        result = self._safe_compare(left, right, func)
+        
+        # DEBUG: Add logging for comparison result
+        if hasattr(self.context, '_debug_comparison') and self.context._debug_comparison:
+            print(f"DEBUG visit_Compare: {left} {type(op).__name__} {right} = {result}")
+            
+        return result
 
     def visit_Name(self, node: ast.Name):
         # Check for special functions
@@ -298,7 +310,14 @@ class ConditionEvaluator(ast.NodeVisitor):
                                f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
             
             # Handle pattern variable references
-            return self._get_variable_column_value(var, col, self.context)
+            result = self._get_variable_column_value(var, col, self.context)
+            
+            # DEBUG: Add logging for attribute resolution
+            if hasattr(self.context, '_debug_comparison') and self.context._debug_comparison:
+                print(f"DEBUG visit_Attribute: {var}.{col} = {result}")
+                print(f"DEBUG visit_Attribute: current_idx={self.context.current_idx}, variables={self.context.variables}")
+            
+            return result
         
         # If we can't extract a pattern var reference, try regular attribute access
         obj = self.visit(node.value)

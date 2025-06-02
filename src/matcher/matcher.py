@@ -472,6 +472,8 @@ class EnhancedMatcher:
                         logger.debug(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
                         continue
                 
+                # For greedy quantifiers, we should continue trying to match as long as possible
+                # Only update longest_match but don't break - continue to find longer matches
                 longest_match = {
                     "start": start_idx,
                     "end": current_idx - 1,
@@ -481,12 +483,15 @@ class EnhancedMatcher:
                     "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
                     "excluded_rows": excluded_rows.copy()
                 }
-                logger.debug(f"  Current longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                logger.debug(f"  Updated longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                 
                 # If we have both anchors and have reached the end of the partition, we can stop
                 if has_both_anchors and current_idx == len(rows):
                     logger.debug(f"Found complete match spanning entire partition")
                     break
+                
+                # For greedy matching, continue to try to find longer matches
+                # Don't break here - let the main loop continue until no more transitions are possible
         
         # For patterns with both anchors, verify we've consumed the entire partition
         if longest_match and has_both_anchors:
