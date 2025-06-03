@@ -523,21 +523,11 @@ class NFABuilder:
             # Add metadata about pattern structure for optimization and validation
             self._analyze_pattern_structure(tokens)
             
-            # Debug: Check state list before NFA creation
-            print(f"DEBUG: About to create NFA with start={start}, accept={accept}, states_count={len(self.states)}")
-            for i, state in enumerate(self.states):
-                print(f"DEBUG: State {i} before NFA creation: transitions={len(state.transitions)}, epsilon={state.epsilon}")
-            
             # Create the NFA with all metadata
             nfa = NFA(start, accept, self.states, self.exclusion_ranges, self.metadata)
             
-            # Debug: Check NFA after creation
-            print(f"DEBUG: NFA created with states_count={len(nfa.states)}")
-            for i, state in enumerate(nfa.states):
-                print(f"DEBUG: NFA State {i} after creation: transitions={len(state.transitions)}, epsilon={state.epsilon}")
-            
-            # Apply optimizations - temporarily disabled for debugging
-            # nfa.optimize()
+            # Apply optimizations
+            nfa.optimize()
             
             # Validate NFA structure
             if not nfa.validate():

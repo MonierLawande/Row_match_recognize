@@ -103,12 +103,6 @@ class ConditionEvaluator(ast.NodeVisitor):
             logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
             logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
         
-        # DEBUG: Add logging for comparison debugging
-        if hasattr(self.context, '_debug_comparison') and self.context._debug_comparison:
-            print(f"DEBUG visit_Compare: left={left}, right={right}")
-            print(f"DEBUG visit_Compare: left AST = {ast.dump(node.left)}")
-            print(f"DEBUG visit_Compare: right AST = {ast.dump(node.comparators[0])}")
-        
         # Use safe comparison with NULL handling
         op = node.ops[0]
         
@@ -132,10 +126,6 @@ class ConditionEvaluator(ast.NodeVisitor):
             current_var = getattr(self.context, 'current_var', None)
             logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
         
-        # DEBUG: Add logging for comparison result
-        if hasattr(self.context, '_debug_comparison') and self.context._debug_comparison:
-            print(f"DEBUG visit_Compare: {left} {type(op).__name__} {right} = {result}")
-            
         return result
 
     def visit_Name(self, node: ast.Name):
@@ -340,11 +330,6 @@ class ConditionEvaluator(ast.NodeVisitor):
             
             # Handle pattern variable references
             result = self._get_variable_column_value(var, col, self.context)
-            
-            # DEBUG: Add logging for attribute resolution
-            if hasattr(self.context, '_debug_comparison') and self.context._debug_comparison:
-                print(f"DEBUG visit_Attribute: {var}.{col} = {result}")
-                print(f"DEBUG visit_Attribute: current_idx={self.context.current_idx}, variables={self.context.variables}")
             
             return result
         
