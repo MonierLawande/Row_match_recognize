@@ -300,6 +300,13 @@ class EnhancedMatcher:
         # Check if we have only end anchor in the pattern
         has_end_anchor = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("has_end_anchor", False)
         
+        # Debug anchor detection
+        logger.debug(f"Anchor metadata: has_end_anchor={has_end_anchor}, has_both_anchors={has_both_anchors}")
+        if hasattr(self, '_anchor_metadata'):
+            logger.debug(f"Full anchor metadata: {self._anchor_metadata}")
+        else:
+            logger.debug("No _anchor_metadata found")
+        
         # Track excluded rows for proper exclusion handling
         excluded_rows = []
         

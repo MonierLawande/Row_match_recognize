@@ -245,7 +245,8 @@ class DFABuilder:
     def __init__(self, nfa: NFA):
         self.nfa = nfa
         self.subset_cache: Dict[FrozenSet[int], int] = {}
-        self.metadata: Dict[str, Any] = {}
+        # Copy metadata from NFA to preserve anchor information
+        self.metadata: Dict[str, Any] = nfa.metadata.copy() if hasattr(nfa, 'metadata') and nfa.metadata else {}
 
     def build(self) -> DFA:
         """Build optimized DFA from NFA with enhanced features."""
