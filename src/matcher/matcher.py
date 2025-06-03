@@ -333,6 +333,7 @@ class EnhancedMatcher:
                     
                     # Set the current variable being evaluated for self-references
                     context.current_var = var
+                    logger.debug(f"  [DEBUG] Set context.current_var = {var}")
                     
                     # First check if target state's START anchor constraints are satisfied
                     if not self._check_anchors(target, current_idx, len(rows), "start"):
@@ -373,8 +374,8 @@ class EnhancedMatcher:
                     continue
                 finally:
                     # Clear the current variable after evaluation
-                    if hasattr(context, 'current_var'):
-                        delattr(context, 'current_var')
+                    logger.debug(f"  [DEBUG] Clearing context.current_var (was {getattr(context, 'current_var', 'None')})")
+                    context.current_var = None
             
             # Handle exclusion matches properly - they should still advance the state
             if is_excluded_match:

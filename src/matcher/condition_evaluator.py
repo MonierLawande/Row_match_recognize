@@ -100,7 +100,8 @@ class ConditionEvaluator(ast.NodeVisitor):
         # Debug logging for DEFINE mode comparisons
         logger = get_logger(__name__)
         if self.evaluation_mode == 'DEFINE':
-            logger.debug(f"COMPARE_DEBUG: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
         
         # DEBUG: Add logging for comparison debugging
         if hasattr(self.context, '_debug_comparison') and self.context._debug_comparison:
@@ -126,9 +127,10 @@ class ConditionEvaluator(ast.NodeVisitor):
             
         result = self._safe_compare(left, right, func)
         
-        # Debug logging for result
+        # Enhanced debug logging for result
         if self.evaluation_mode == 'DEFINE':
-            logger.debug(f"COMPARE_DEBUG: {left} {op.__class__.__name__} {right} = {result}")
+            current_var = getattr(self.context, 'current_var', None)
+            logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
         
         # DEBUG: Add logging for comparison result
         if hasattr(self.context, '_debug_comparison') and self.context._debug_comparison:
@@ -394,22 +396,28 @@ class ConditionEvaluator(ast.NodeVisitor):
         # Check if we're in DEFINE evaluation mode
         is_define_mode = self.evaluation_mode == 'DEFINE'
         
+        # DEBUG: Enhanced logging to trace exact values
+        current_var = getattr(ctx, 'current_var', None)
+        logger.debug(f"[DEBUG] _get_variable_column_value: var_name={var_name}, col_name={col_name}, is_define_mode={is_define_mode}, current_var={current_var}")
+        logger.debug(f"[DEBUG] ctx.current_idx={ctx.current_idx}, ctx.variables={ctx.variables}")
+        
         # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
         if is_define_mode:
-            # Get the current variable being evaluated from context
-            current_var = getattr(ctx, 'current_var', None)
-            
             # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
             # but A.price should use A's previously matched row
             if var_name == current_var or (current_var is None and var_name in self.visit_stack):
                 # Self-reference: use current row being tested
-                logger.debug(f"DEFINE mode - using current row for {var_name}.{col_name} (self-reference)")
+                logger.debug(f"[DEBUG] DEFINE mode - self-reference for {var_name}.{col_name}")
                 if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
                     value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Self-reference value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
                     return value
+                else:
+                    logger.debug(f"[DEBUG] Self-reference: invalid current_idx {ctx.current_idx}")
+                    return None
             else:
                 # Cross-reference: use previously matched row for this variable
-                logger.debug(f"DEFINE mode - using matched row for {var_name}.{col_name} (cross-reference)")
+                logger.debug(f"[DEBUG] DEFINE mode - cross-reference for {var_name}.{col_name}")
                 
                 # Check if this is a subset variable
                 if hasattr(ctx, 'subsets') and var_name in ctx.subsets:
@@ -426,16 +434,25 @@ class ConditionEvaluator(ast.NodeVisitor):
                                     last_idx = last_var_idx
                     
                     if last_idx >= 0 and last_idx < len(ctx.rows):
-                        return ctx.rows[last_idx].get(col_name)
+                        value = ctx.rows[last_idx].get(col_name)
+                        logger.debug(f"[DEBUG] Subset cross-reference value: {var_name}.{col_name} = {value} (from row {last_idx})")
+                        return value
                 
                 # Get the value from the last row matched to this variable
                 var_indices = ctx.variables.get(var_name, [])
+                logger.debug(f"[DEBUG] Looking for {var_name} in ctx.variables: {var_indices}")
                 if var_indices:
                     last_idx = max(var_indices)
                     if last_idx < len(ctx.rows):
-                        return ctx.rows[last_idx].get(col_name)
+                        value = ctx.rows[last_idx].get(col_name)
+                        logger.debug(f"[DEBUG] Cross-reference value: {var_name}.{col_name} = {value} (from row {last_idx})")
+                        return value
+                    else:
+                        logger.debug(f"[DEBUG] Cross-reference: invalid last_idx {last_idx}")
+                        return None
                 
                 # If no rows matched yet, this variable hasn't been matched
+                logger.debug(f"[DEBUG] Cross-reference: no rows matched for {var_name} yet")
                 return None
         
         # For non-DEFINE modes (MEASURES mode), use standard logic
@@ -1331,7 +1348,10 @@ def compile_condition(condition_expr, row_context=None, current_row_idx=None, cu
             # Store the current row and evaluation context
             context.current_row = row
             context.current_idx = context.rows.index(row) if row in context.rows else -1
-            context.current_var = current_var  # Ensure current_var is set
+            # CRITICAL FIX: Don't overwrite current_var if it's already set by the matcher
+            # Only set it if it's not already set (None) and we have a value from compilation
+            if not hasattr(context, 'current_var') or context.current_var is None:
+                context.current_var = current_var
             
             # Use AST-based evaluator instead of direct eval for navigation functions
             evaluator = ConditionEvaluator(context, evaluation_mode)
