@@ -360,6 +360,23 @@ class MeasureEvaluator:
                 
                 return len(set(matched_indices))
             
+            # Handle COUNT(var.*) special case (variable wildcard)
+            count_var_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\.\*$', col_expr)
+            if func_name == "COUNT" and count_var_match:
+                var_name = count_var_match.group(1)
+                
+                # Get indices for the specific variable
+                if var_name not in self.context.variables:
+                    return 0
+                    
+                var_indices = self.context.variables[var_name]
+                
+                # For RUNNING semantics, only include indices up to current position
+                if is_running:
+                    var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+                
+                return len(var_indices)
+            
             # Parse pattern variable reference (e.g., B.totalprice)
             var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$', col_expr)
             if not var_col_match:
@@ -452,7 +469,8 @@ class MeasureEvaluator:
             self.context.current_row = self.context.rows[self.context.current_idx] if self.context.current_idx < len(self.context.rows) else None
             
             # Create a specialized condition evaluator for measure expressions
-            evaluator = ConditionEvaluator(self.context)
+            # Use MEASURES mode for correct PREV/NEXT semantics in measure expressions
+            evaluator = ConditionEvaluator(self.context, evaluation_mode='MEASURES')
             
             # Parse and evaluate the expression using AST
             try:
@@ -1212,7 +1230,8 @@ class MeasureEvaluator:
                     result = self._evaluate_count_star(is_running)
                     
                 # Handle pattern variable COUNT(A.*) special case
-                elif func_name == 'count' and (pattern_count_match := re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.\*', args_str)):
+                elif func_name == 'count' and re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.\*', args_str):
+                    pattern_count_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.\*', args_str)
                     result = self._evaluate_count_var(pattern_count_match.group(1), is_running)
                     
                 # Handle regular aggregates
@@ -1228,6 +1247,19 @@ class MeasureEvaluator:
                 return result
                 
             except Exception as e:
+                # Enhanced logging for debugging COUNT(B.*) issue
+                import traceback
+                print(f"\n=== AGGREGATE EXCEPTION DEBUG ===")
+                print(f"Function: {func_name}({args_str})")
+                print(f"Running: {is_running}")
+                print(f"Current context: {self.context.current_idx}")
+                print(f"Variables: {self.context.variables}")
+                print(f"Exception type: {type(e).__name__}")
+                print(f"Exception message: {str(e)}")
+                print(f"Traceback:")
+                traceback.print_exc()
+                print("=== END AGGREGATE EXCEPTION DEBUG ===\n")
+                
                 # Log the error with context
                 self._log_aggregate_error(func_name, args_str, e)
                 return None

@@ -30,9 +30,17 @@ class NavigationFunctionInfo:
     raw_expression: str
 
 class ConditionEvaluator(ast.NodeVisitor):
-    def __init__(self, context: RowContext):
+    def __init__(self, context: RowContext, evaluation_mode='DEFINE'):
+        """
+        Initialize condition evaluator with context-aware navigation.
+        
+        Args:
+            context: RowContext for pattern matching
+            evaluation_mode: 'DEFINE' for physical navigation, 'MEASURES' for logical navigation
+        """
         self.context = context
         self.current_row = None
+        self.evaluation_mode = evaluation_mode  # 'DEFINE' or 'MEASURES'
         # Extended mathematical and utility functions
         self.math_functions = {
             # Basic math functions
@@ -89,6 +97,11 @@ class ConditionEvaluator(ast.NodeVisitor):
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         
+        # Debug logging for DEFINE mode comparisons
+        logger = get_logger(__name__)
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"COMPARE_DEBUG: left={left} ({type(left)}), right={right} ({type(right)})")
+        
         # DEBUG: Add logging for comparison debugging
         if hasattr(self.context, '_debug_comparison') and self.context._debug_comparison:
             print(f"DEBUG visit_Compare: left={left}, right={right}")
@@ -112,6 +125,10 @@ class ConditionEvaluator(ast.NodeVisitor):
             raise ValueError(f"Operator {op} not supported")
             
         result = self._safe_compare(left, right, func)
+        
+        # Debug logging for result
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"COMPARE_DEBUG: {left} {op.__class__.__name__} {right} = {result}")
         
         # DEBUG: Add logging for comparison result
         if hasattr(self.context, '_debug_comparison') and self.context._debug_comparison:
@@ -262,8 +279,13 @@ class ConditionEvaluator(ast.NodeVisitor):
                                 steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
                         
                         if func_name in ("PREV", "NEXT"):
-                            # Use simple row navigation for PREV/NEXT
-                            return self.evaluate_navigation_function(func_name, column, steps)
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
                         else:
                             # Use variable-aware navigation for FIRST/LAST
                             return self._get_navigation_value(var_name, column, func_name, steps)
@@ -280,8 +302,13 @@ class ConditionEvaluator(ast.NodeVisitor):
                                 steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
                         
                         if func_name in ("PREV", "NEXT"):
-                            # Use simple row navigation for PREV/NEXT
-                            return self.evaluate_navigation_function(func_name, column, steps)
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
                         else:
                             # Use variable-aware navigation for FIRST/LAST with no specific variable
                             return self._get_navigation_value(None, column, func_name, steps)
@@ -365,7 +392,10 @@ class ConditionEvaluator(ast.NodeVisitor):
         Returns:
             Column value from the matched row or current row
         """
-        # Check if we're evaluating a condition for the same variable (self-reference)
+        # Check if we're in DEFINE evaluation mode - this is key for the fix
+        is_define_mode = self.evaluation_mode == 'DEFINE'
+        
+        # Track if we're evaluating a condition for the same variable (self-reference)
         is_self_reference = False
         
         # If we have current_var set, this is a direct check for self-reference
@@ -378,8 +408,19 @@ class ConditionEvaluator(ast.NodeVisitor):
             if var_name in ctx.current_var_assignments and ctx.current_idx in ctx.current_var_assignments[var_name]:
                 is_self_reference = True
         
+        # CRITICAL FIX: In DEFINE mode, when checking if current row matches a pattern variable,
+        # use the current row's value for pattern variable references
+        if is_define_mode:
+            # When in DEFINE mode, pattern variables in conditions should use the current row's value
+            # This matches SQL:2016 standard and Trino's behavior
+            logger.debug(f"DEFINE mode - using current row for {var_name}.{col_name}")
+            if self.current_row is not None:
+                return self.current_row.get(col_name)
+            elif ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                return ctx.rows[ctx.current_idx].get(col_name)
+        
+        # For self-references in other modes, use the current row's value
         if is_self_reference:
-            # Self-reference: use the current row's value
             if self.current_row is not None:
                 return self.current_row.get(col_name)
             elif ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
@@ -820,19 +861,93 @@ class ConditionEvaluator(ast.NodeVisitor):
         # Combine into navigation expression
         return f"{func_name}({', '.join(args)})"
 
-    def evaluate_navigation_function(self, nav_type, column, steps=1, var_name=None):
+    def evaluate_physical_navigation(self, nav_type, column, steps=1):
         """
-        Simplified and robust navigation function that directly gets values from rows.
+        Physical navigation for DEFINE conditions.
         
-        This method provides a straightforward implementation focused on correctness:
-        - For PREV: Get the value from the row that is 'steps' positions before current_idx
-        - For NEXT: Get the value from the row that is 'steps' positions after current_idx
+        This method implements the correct SQL:2016 semantics for navigation functions
+        in DEFINE conditions, where PREV/NEXT refer to the previous/next row in the
+        input sequence (ordered by ORDER BY), not in the pattern match.
         
         Args:
             nav_type: Type of navigation ('PREV' or 'NEXT')
             column: Column name to retrieve
             steps: Number of steps to navigate (default: 1)
-            var_name: Optional variable name for context (unused in this implementation)
+            
+        Returns:
+            The value at the navigated position or None if navigation is invalid
+        """
+        # Debug logging
+        logger = get_logger(__name__)
+        logger.debug(f"PHYSICAL_NAV: {nav_type}({column}, {steps}) at current_idx={self.context.current_idx}")
+        
+        # Input validation
+        if steps < 0:
+            raise ValueError(f"Navigation steps must be non-negative: {steps}")
+            
+        if nav_type not in ('PREV', 'NEXT'):
+            raise ValueError(f"Invalid navigation type: {nav_type}")
+        
+        # Get current row index in the input sequence
+        curr_idx = self.context.current_idx
+        
+        # Bounds check for current index
+        if curr_idx < 0 or curr_idx >= len(self.context.rows):
+            logger.debug(f"PHYSICAL_NAV: curr_idx {curr_idx} out of bounds [0, {len(self.context.rows)})")
+            return None
+            
+        # Special case for steps=0 (return current row's value)
+        if steps == 0:
+            result = self.context.rows[curr_idx].get(column)
+            logger.debug(f"PHYSICAL_NAV: steps=0, returning current row value: {result}")
+            return result
+            
+        # Calculate target index based on navigation type
+        if nav_type == 'PREV':
+            target_idx = curr_idx - steps
+        else:  # NEXT
+            target_idx = curr_idx + steps
+            
+        logger.debug(f"PHYSICAL_NAV: target_idx={target_idx} (curr_idx={curr_idx}, nav={nav_type}, steps={steps})")
+            
+        # Check index bounds
+        if target_idx < 0 or target_idx >= len(self.context.rows):
+            logger.debug(f"PHYSICAL_NAV: target_idx {target_idx} out of bounds [0, {len(self.context.rows)})")
+            return None
+            
+        # Check partition boundaries if defined
+        # Physical navigation respects partition boundaries
+        if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
+            current_partition = self.context.get_partition_for_row(curr_idx)
+            target_partition = self.context.get_partition_for_row(target_idx)
+            
+            if (current_partition is None or target_partition is None or
+                current_partition != target_partition):
+                logger.debug(f"PHYSICAL_NAV: partition boundary violation")
+                return None
+                
+        # Get the value from the target row
+        result = self.context.rows[target_idx].get(column)
+        logger.debug(f"PHYSICAL_NAV: returning value from row {target_idx}: {result}")
+        return result
+
+    def evaluate_navigation_function(self, nav_type, column, steps=1, var_name=None):
+        """
+        Context-aware navigation function that uses different strategies based on evaluation mode.
+        
+        DEFINE Mode (Physical Navigation):
+        - PREV/NEXT navigate through the input table rows in ORDER BY sequence
+        - Used for condition evaluation: B.price < PREV(price)
+        
+        MEASURES Mode (Logical Navigation):
+        - PREV/NEXT navigate through pattern match results
+        - Used for value extraction: FIRST(A.order_date)
+        
+        Args:
+            nav_type: Type of navigation ('PREV' or 'NEXT')
+            column: Column name to retrieve
+            steps: Number of steps to navigate (default: 1)
+            var_name: Optional variable name for context
             
         Returns:
             The value at the navigated position or None if navigation is invalid
@@ -849,7 +964,20 @@ class ConditionEvaluator(ast.NodeVisitor):
             if 0 <= self.context.current_idx < len(self.context.rows):
                 return self.context.rows[self.context.current_idx].get(column)
             return None
-            
+        
+        # DEFINE Mode: Physical Navigation through input sequence
+        if self.evaluation_mode == 'DEFINE':
+            return self._physical_navigation(nav_type, column, steps)
+        
+        # MEASURES Mode: Logical Navigation through pattern matches
+        else:
+            return self._logical_navigation(nav_type, column, steps, var_name)
+    
+    def _physical_navigation(self, nav_type, column, steps):
+        """
+        Physical navigation for DEFINE conditions.
+        Navigate through input table rows in ORDER BY sequence.
+        """
         # Calculate target index based on navigation type
         if nav_type == 'PREV':
             target_idx = self.context.current_idx - steps
@@ -859,6 +987,26 @@ class ConditionEvaluator(ast.NodeVisitor):
         # Check index bounds
         if target_idx < 0 or target_idx >= len(self.context.rows):
             return None
+            
+        # Check partition boundaries if defined
+        if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
+            current_partition = self.context.get_partition_for_row(self.context.current_idx)
+            target_partition = self.context.get_partition_for_row(target_idx)
+            
+            if (current_partition is None or target_partition is None or
+                current_partition != target_partition):
+                return None
+                
+        # Get the value from the target row
+        return self.context.rows[target_idx].get(column)
+    
+    def _logical_navigation(self, nav_type, column, steps, var_name=None):
+        """
+        Logical navigation for MEASURES expressions.
+        Navigate through pattern match timeline.
+        """
+        # This uses the existing complex logic for pattern timeline navigation
+        return self._get_navigation_value(var_name, column, nav_type, steps)
             
         # Check partition boundaries if defined
         if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
@@ -1105,7 +1253,7 @@ def _preprocess_sql_condition(condition_expr):
     
     return condition_expr
 
-def compile_condition(condition_expr, row_context=None, current_row_idx=None, current_var=None):
+def compile_condition(condition_expr, row_context=None, current_row_idx=None, current_var=None, evaluation_mode='DEFINE'):
     # Preprocess SQL-style condition to Python-compatible format
     processed_condition = _preprocess_sql_condition(condition_expr)
     
@@ -1119,7 +1267,7 @@ def compile_condition(condition_expr, row_context=None, current_row_idx=None, cu
             context.current_var = current_var  # Ensure current_var is set
             
             # Use AST-based evaluator instead of direct eval for navigation functions
-            evaluator = ConditionEvaluator(context)
+            evaluator = ConditionEvaluator(context, evaluation_mode)
             try:
                 # Clear any previous context invalid flag
                 if hasattr(context, '_evaluation_context_invalid'):
@@ -1160,7 +1308,7 @@ def compile_condition(condition_expr, row_context=None, current_row_idx=None, cu
         row_context.current_idx = current_row_idx
         row_context.current_var = current_var
         
-        evaluator = ConditionEvaluator(row_context)
+        evaluator = ConditionEvaluator(row_context, evaluation_mode)
         try:
             # Clear any previous context invalid flag
             if hasattr(row_context, '_evaluation_context_invalid'):

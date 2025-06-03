@@ -939,8 +939,8 @@ class NFABuilder:
             # Default to TRUE if no definition exists
             condition_str = "TRUE"
             
-        # Compile the condition
-        condition_fn = compile_condition(condition_str)
+        # Compile the condition with DEFINE evaluation mode for pattern variables
+        condition_fn = compile_condition(condition_str, evaluation_mode='DEFINE')
         
         # Create transition with condition and variable tracking
         self.states[start].add_transition(condition_fn, end, var_base)
