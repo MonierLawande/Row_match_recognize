@@ -967,13 +967,6 @@ class NFABuilder:
             start, end = self._apply_quantifier(start, end, min_rep, max_rep, greedy)
         
         return start, end
-        
-        # Apply quantifier if present
-        if quantifier:
-            min_rep, max_rep, greedy = parse_quantifier(quantifier)
-            start, end = self._apply_quantifier(start, end, min_rep, max_rep, greedy)
-        
-        return start, end
 
     def _process_permute(self, token: PatternToken, define: Dict[str, str]) -> Tuple[int, int]:
         """

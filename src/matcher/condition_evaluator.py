@@ -376,13 +376,12 @@ class ConditionEvaluator(ast.NodeVisitor):
                                getattr(self.context, 'subsets', {}))
 
         # Updates for src/matcher/condition_evaluator.py
-
     def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
         """
         Get a column value from a pattern variable's matched rows with enhanced subset support.
         
-        For self-referential conditions (e.g., A.salary > 1000 when evaluating for A),
-        use the current row's value.
+        For self-referential conditions (e.g., B.price < A.price when evaluating for B),
+        use the current row's value for the variable being evaluated.
         
         Args:
             var_name: Pattern variable name
@@ -392,8 +391,54 @@ class ConditionEvaluator(ast.NodeVisitor):
         Returns:
             Column value from the matched row or current row
         """
-        # Check if we're in DEFINE evaluation mode - this is key for the fix
+        # Check if we're in DEFINE evaluation mode
         is_define_mode = self.evaluation_mode == 'DEFINE'
+        
+        # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
+        if is_define_mode:
+            # Get the current variable being evaluated from context
+            current_var = getattr(ctx, 'current_var', None)
+            
+            # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
+            # but A.price should use A's previously matched row
+            if var_name == current_var or (current_var is None and var_name in self.visit_stack):
+                # Self-reference: use current row being tested
+                logger.debug(f"DEFINE mode - using current row for {var_name}.{col_name} (self-reference)")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    return value
+            else:
+                # Cross-reference: use previously matched row for this variable
+                logger.debug(f"DEFINE mode - using matched row for {var_name}.{col_name} (cross-reference)")
+                
+                # Check if this is a subset variable
+                if hasattr(ctx, 'subsets') and var_name in ctx.subsets:
+                    # For subset variables, find the last row matched to any component variable
+                    component_vars = ctx.subsets[var_name]
+                    last_idx = -1
+                    
+                    for comp_var in component_vars:
+                        if comp_var in ctx.variables:
+                            var_indices = ctx.variables[comp_var]
+                            if var_indices:
+                                last_var_idx = max(var_indices)
+                                if last_var_idx > last_idx:
+                                    last_idx = last_var_idx
+                    
+                    if last_idx >= 0 and last_idx < len(ctx.rows):
+                        return ctx.rows[last_idx].get(col_name)
+                
+                # Get the value from the last row matched to this variable
+                var_indices = ctx.variables.get(var_name, [])
+                if var_indices:
+                    last_idx = max(var_indices)
+                    if last_idx < len(ctx.rows):
+                        return ctx.rows[last_idx].get(col_name)
+                
+                # If no rows matched yet, this variable hasn't been matched
+                return None
+        
+        # For non-DEFINE modes (MEASURES mode), use standard logic
         
         # Track if we're evaluating a condition for the same variable (self-reference)
         is_self_reference = False
@@ -401,23 +446,11 @@ class ConditionEvaluator(ast.NodeVisitor):
         # If we have current_var set, this is a direct check for self-reference
         if hasattr(ctx, 'current_var') and ctx.current_var == var_name:
             is_self_reference = True
-            logger.debug(f"Self-reference detected: {var_name}.{col_name}")
         
         # Otherwise check if current row is already assigned to this variable
         if not is_self_reference and hasattr(ctx, 'current_var_assignments'):
             if var_name in ctx.current_var_assignments and ctx.current_idx in ctx.current_var_assignments[var_name]:
                 is_self_reference = True
-        
-        # CRITICAL FIX: In DEFINE mode, when checking if current row matches a pattern variable,
-        # use the current row's value for pattern variable references
-        if is_define_mode:
-            # When in DEFINE mode, pattern variables in conditions should use the current row's value
-            # This matches SQL:2016 standard and Trino's behavior
-            logger.debug(f"DEFINE mode - using current row for {var_name}.{col_name}")
-            if self.current_row is not None:
-                return self.current_row.get(col_name)
-            elif ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
-                return ctx.rows[ctx.current_idx].get(col_name)
         
         # For self-references in other modes, use the current row's value
         if is_self_reference:
@@ -427,7 +460,7 @@ class ConditionEvaluator(ast.NodeVisitor):
                 return ctx.rows[ctx.current_idx].get(col_name)
         
         # Check if this is a subset variable
-        if var_name in ctx.subsets:
+        if hasattr(ctx, 'subsets') and var_name in ctx.subsets:
             # For subset variables, find the last row matched to any component variable
             component_vars = ctx.subsets[var_name]
             last_idx = -1
@@ -458,6 +491,8 @@ class ConditionEvaluator(ast.NodeVisitor):
             return ctx.rows[ctx.current_idx].get(col_name)
         
         return None
+
+
 
     def _get_navigation_value(self, var_name, column, nav_type, steps=1):
         """
@@ -975,30 +1010,62 @@ class ConditionEvaluator(ast.NodeVisitor):
     
     def _physical_navigation(self, nav_type, column, steps):
         """
-        Physical navigation for DEFINE conditions.
-        Navigate through input table rows in ORDER BY sequence.
-        """
-        # Calculate target index based on navigation type
-        if nav_type == 'PREV':
-            target_idx = self.context.current_idx - steps
-        else:  # NEXT
-            target_idx = self.context.current_idx + steps
+        Enhanced physical navigation for DEFINE conditions with production-ready optimizations.
+        
+        This implementation provides:
+        - Direct integration with optimized context navigation methods
+        - Consistent behavior across all pattern types
+        - Advanced error handling and boundary validation
+        - Performance optimization with early exits
+        - Enhanced null handling for proper SQL semantics
+        
+        Args:
+            nav_type: Navigation type ('PREV' or 'NEXT')
+            column: Column name to retrieve
+            steps: Number of steps to navigate
             
-        # Check index bounds
-        if target_idx < 0 or target_idx >= len(self.context.rows):
+        Returns:
+            The value at the navigated position or None if navigation is invalid
+        """
+        start_time = time.time()
+        
+        try:
+            # Use advanced navigation methods from context
+            if nav_type == 'PREV':
+                row = self.context.prev(steps)
+            else:  # NEXT
+                row = self.context.next(steps)
+                
+            # Get column value with proper null handling
+            result = None if row is None else row.get(column)
+            
+            # Track specific navigation type metrics
+            if hasattr(self.context, 'stats'):
+                metric_key = f"{nav_type.lower()}_navigation_calls"
+                self.context.stats[metric_key] = self.context.stats.get(metric_key, 0) + 1
+            
+            return result
+            
+        except Exception as e:
+            # Enhanced error handling with logging
+            logger = get_logger(__name__)
+            logger.error(f"Error in physical navigation ({nav_type}): {str(e)}")
+            
+            # Track errors
+            if hasattr(self.context, 'stats'):
+                self.context.stats["navigation_errors"] = self.context.stats.get("navigation_errors", 0) + 1
+                
+            # Set context error flag for pattern matching to handle
+            self.context._navigation_context_error = True
+            
+            # Return None for proper SQL NULL comparison semantics
             return None
             
-        # Check partition boundaries if defined
-        if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-            current_partition = self.context.get_partition_for_row(self.context.current_idx)
-            target_partition = self.context.get_partition_for_row(target_idx)
-            
-            if (current_partition is None or target_partition is None or
-                current_partition != target_partition):
-                return None
-                
-        # Get the value from the target row
-        return self.context.rows[target_idx].get(column)
+        finally:
+            # Track performance metrics
+            if hasattr(self.context, 'timing'):
+                navigation_time = time.time() - start_time
+                self.context.timing['physical_navigation'] = self.context.timing.get('physical_navigation', 0) + navigation_time
     
     def _logical_navigation(self, nav_type, column, steps, var_name=None):
         """
