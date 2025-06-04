@@ -1819,21 +1819,68 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
             
             # Get classifier value at target index
             if target_idx is not None and 0 <= target_idx < len(row_context.rows):
-                # Find which variable this row belongs to
+                # Use global classification methods instead of only looking in current match
                 classifier_value = None
-                for var_name, var_indices in row_context.variables.items():
-                    if target_idx in var_indices:
-                        classifier_value = var_name
-                        break
                 
-                if classifier_value is not None:
-                    row_context.navigation_cache[cache_key] = classifier_value
-                    return classifier_value
-                else:
-                    # Row doesn't belong to any variable (shouldn't happen, but handle gracefully)
-                    row_context.navigation_cache[cache_key] = None
-                    return None
+                # Method 1: Try using MeasureEvaluator for global classification if available
+                if hasattr(row_context, '_measure_evaluator') and row_context._measure_evaluator:
+                    try:
+                        # Temporarily set the current index to target index for classifier evaluation
+                        original_idx = row_context.current_idx
+                        row_context.current_idx = target_idx
+                        
+                        # Use the MeasureEvaluator's classifier evaluation which has global scope
+                        classifier_value = row_context._measure_evaluator.evaluate_classifier(running=True)
+                        
+                        # Restore original index
+                        row_context.current_idx = original_idx
+                    except Exception:
+                        # Fall back to context-based classification
+                        pass
+                
+                # Method 2: If MeasureEvaluator approach failed, try the row context classifier method
+                if classifier_value is None:
+                    try:
+                        # Temporarily set the current index to target index for classifier evaluation
+                        original_idx = row_context.current_idx
+                        row_context.current_idx = target_idx
+                        
+                        # Use the RowContext classifier method which has access to all variable assignments
+                        classifier_value = row_context.classifier()
+                        
+                        # Restore original index
+                        row_context.current_idx = original_idx
+                        
+                        # Convert empty string to None for consistency
+                        if classifier_value == "":
+                            classifier_value = None
+                    except Exception:
+                        # Fall back to original logic
+                        pass
+                
+                # Method 3: Use global variable assignments if available
+                if classifier_value is None and hasattr(row_context, '_global_variables'):
+                    try:
+                        # Look in global variable assignments that span across match boundaries
+                        for var_name, var_indices in row_context._global_variables.items():
+                            if target_idx in var_indices:
+                                classifier_value = var_name
+                                break
+                    except Exception:
+                        pass
+                
+                # Method 4: Fall back to current match variables (original logic)
+                if classifier_value is None:
+                    for var_name, var_indices in row_context.variables.items():
+                        if target_idx in var_indices:
+                            classifier_value = var_name
+                            break
+                
+                # Cache and return result
+                row_context.navigation_cache[cache_key] = classifier_value
+                return classifier_value
             else:
+                # Target index out of bounds
                 row_context.navigation_cache[cache_key] = None
                 return None
         
