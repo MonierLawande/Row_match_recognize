@@ -1782,8 +1782,8 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
         # Pattern for nested navigation with optional arguments: PREV(FIRST(A.price, 3), 2)
         nested_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*((?:FIRST|LAST|NEXT|PREV)[^)]+\))\s*(?:,\s*(\d+))?\s*\)'
         
-        # Pattern for simple navigation: NEXT(A.value, 1)
-        simple_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)(?:\s*,\s*(\d+))?\s*\)'
+        # Pattern for simple navigation: NEXT(A.value, 1) or NEXT(value, 1)
+        simple_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)(?:\s*,\s*(\d+))?\s*\)'
         
         # Pattern for CLASSIFIER function: FUNC(CLASSIFIER())
         classifier_pattern = r'(PREV|NEXT|FIRST|LAST)\s*\(\s*CLASSIFIER\s*\(\s*\)\s*\)'
@@ -1792,16 +1792,50 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
         if classifier_match:
             # Special handling for CLASSIFIER function
             func_type = classifier_match.group(1).upper()
-            if hasattr(row_context, 'get_classifier'):
-                classifier_value = row_context.get_classifier(current_row_idx)
-                if classifier_value:
-                    # Convert to using the classifier variable
-                    modified_expr = f"{func_type}({classifier_value}.{classifier_value})"
-                    return evaluate_nested_navigation(modified_expr, row_context, current_row_idx, current_var)
-                    
-            # If classifier handling fails, return None
-            row_context.navigation_cache[cache_key] = None
-            return None
+            
+            # Direct navigation of classifier values
+            target_idx = None
+            
+            if func_type == 'NEXT':
+                target_idx = current_row_idx + 1
+            elif func_type == 'PREV':
+                target_idx = current_row_idx - 1
+            elif func_type == 'FIRST':
+                # Find first row in current match
+                if hasattr(row_context, 'variables') and row_context.variables:
+                    all_indices = set()
+                    for var_indices in row_context.variables.values():
+                        all_indices.update(var_indices)
+                    if all_indices:
+                        target_idx = min(all_indices)
+            elif func_type == 'LAST':
+                # Find last row in current match
+                if hasattr(row_context, 'variables') and row_context.variables:
+                    all_indices = set()
+                    for var_indices in row_context.variables.values():
+                        all_indices.update(var_indices)
+                    if all_indices:
+                        target_idx = max(all_indices)
+            
+            # Get classifier value at target index
+            if target_idx is not None and 0 <= target_idx < len(row_context.rows):
+                # Find which variable this row belongs to
+                classifier_value = None
+                for var_name, var_indices in row_context.variables.items():
+                    if target_idx in var_indices:
+                        classifier_value = var_name
+                        break
+                
+                if classifier_value is not None:
+                    row_context.navigation_cache[cache_key] = classifier_value
+                    return classifier_value
+                else:
+                    # Row doesn't belong to any variable (shouldn't happen, but handle gracefully)
+                    row_context.navigation_cache[cache_key] = None
+                    return None
+            else:
+                row_context.navigation_cache[cache_key] = None
+                return None
         
         # Check for nested expressions first
         nested_match = re.match(nested_pattern, expr, re.IGNORECASE)
@@ -1837,46 +1871,104 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
                 row_context.navigation_cache[cache_key] = None
                 return None
                 
+            # First, we need to determine the appropriate row and field
+            # based on the inner function's result
+            inner_match = re.match(simple_pattern, inner_expr, re.IGNORECASE)
+            
+            # Initialize inner_field and inner_var for later use
+            inner_field = None
+            inner_var = None
+            
+            # Handle universal variable references (e.g., FIRST(value) instead of FIRST(A.value))
+            if not inner_match:
+                # Try pattern for universal variables: FUNC(field)
+                universal_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*([A-Za-z0-9_]+)(?:\s*,\s*(\d+))?\s*\)'
+                universal_match = re.match(universal_pattern, inner_expr, re.IGNORECASE)
+                if universal_match:
+                    # For universal variables, we need to infer the variable from context
+                    inner_func_type = universal_match.group(1).upper()
+                    inner_field = universal_match.group(2)
+                    
+                    # Use current variable as the reference for universal navigation
+                    if current_var:
+                        inner_var = current_var
+                    else:
+                        # Try to find any variable that has the field
+                        inner_var = None
+                        for var_name, var_indices in row_context.variables.items():
+                            if var_indices and inner_field in row_context.rows[var_indices[0]]:
+                                inner_var = var_name
+                                break
+                        
+                        if not inner_var:
+                            row_context.navigation_cache[cache_key] = None
+                            return None
+                else:
+                    row_context.navigation_cache[cache_key] = None
+                    return None
+            else:
+                # Extract variable and field from matched groups
+                inner_var = inner_match.group(2) if inner_match.group(2) else None
+                inner_field = inner_match.group(3)
+                
+                # If no variable specified, treat as universal variable reference
+                if not inner_var:
+                    # Use current variable or find a suitable one
+                    if current_var:
+                        inner_var = current_var
+                    else:
+                        # Try to find any variable that has the field
+                        inner_var = None
+                        for var_name, var_indices in row_context.variables.items():
+                            if var_indices and inner_field in row_context.rows[var_indices[0]]:
+                                inner_var = var_name
+                                break
+                        
+                        if not inner_var:
+                            row_context.navigation_cache[cache_key] = None
+                            return None
+            
             # Now apply the outer function based on its type
             result = None
             
-            # For nested functions, we need to determine the appropriate row and field
-            # based on the inner function's result
-            inner_match = re.match(simple_pattern, inner_expr, re.IGNORECASE)
-            if not inner_match:
-                row_context.navigation_cache[cache_key] = None
-                return None
-                
-            inner_var = inner_match.group(2)
-            inner_field = inner_match.group(3)
-            
-            # Find the appropriate target row index for the outer function
-            target_idx = None
-            
-            if outer_func == 'PREV':
-                # Move back outer_offset rows from the current position
-                target_idx = current_row_idx - outer_offset
-                
-                # Check partition boundaries
-                if hasattr(row_context, 'partition_boundaries') and row_context.partition_boundaries:
-                    current_partition = row_context.get_partition_for_row(current_row_idx)
-                    if target_idx < 0 or not row_context.check_same_partition(current_row_idx, target_idx):
-                        row_context.navigation_cache[cache_key] = None
-                        return None
-                
-            elif outer_func == 'NEXT':
+            # For NEXT/PREV of already evaluated inner results, we need to navigate from current position
+            if outer_func == 'NEXT':
                 # Move forward outer_offset rows from the current position
                 target_idx = current_row_idx + outer_offset
                 
-                # Check partition boundaries
+                # Check bounds and partition boundaries
+                if target_idx >= len(row_context.rows):
+                    row_context.navigation_cache[cache_key] = None
+                    return None
+                    
                 if hasattr(row_context, 'partition_boundaries') and row_context.partition_boundaries:
-                    current_partition = row_context.get_partition_for_row(current_row_idx)
-                    if target_idx >= len(row_context.rows) or not row_context.check_same_partition(current_row_idx, target_idx):
+                    if not row_context.check_same_partition(current_row_idx, target_idx):
                         row_context.navigation_cache[cache_key] = None
                         return None
                         
+                # Get the value from the target row using the same field as inner result
+                result = row_context.rows[target_idx].get(inner_field)
+                
+            elif outer_func == 'PREV':
+                # Move back outer_offset rows from the current position
+                target_idx = current_row_idx - outer_offset
+                
+                # Check bounds and partition boundaries
+                if target_idx < 0:
+                    row_context.navigation_cache[cache_key] = None
+                    return None
+                    
+                if hasattr(row_context, 'partition_boundaries') and row_context.partition_boundaries:
+                    if not row_context.check_same_partition(current_row_idx, target_idx):
+                        row_context.navigation_cache[cache_key] = None
+                        return None
+                        
+                # Get the value from the target row using the same field as inner result
+                result = row_context.rows[target_idx].get(inner_field)
+            
+            # For FIRST/LAST outer functions, we need different logic
             elif outer_func == 'FIRST':
-                # Find the first occurrence of inner_var
+                # Find the first occurrence of inner_var and apply offset
                 if inner_var in row_context.variables and row_context.variables[inner_var]:
                     target_idx = row_context.variables[inner_var][0]
                     
@@ -1888,6 +1980,9 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
                     if hasattr(row_context, 'partition_boundaries') and row_context.partition_boundaries and not row_context.check_same_partition(current_row_idx, target_idx):
                         row_context.navigation_cache[cache_key] = None
                         return None
+                        
+                    # Get the value from the target row
+                    result = row_context.rows[target_idx].get(inner_field)
                 else:
                     row_context.navigation_cache[cache_key] = None
                     return None
@@ -1906,16 +2001,13 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
                     if hasattr(row_context, 'partition_boundaries') and row_context.partition_boundaries and not row_context.check_same_partition(current_row_idx, target_idx):
                         row_context.navigation_cache[cache_key] = None
                         return None
+                        
+                    # Get the value from the target row
+                    result = row_context.rows[target_idx].get(inner_field)
                 else:
                     row_context.navigation_cache[cache_key] = None
                     return None
             
-            # Get the value from the target row if it's valid
-            if target_idx is not None and 0 <= target_idx < len(row_context.rows):
-                result = row_context.rows[target_idx].get(inner_field)
-            else:
-                result = None
-                
             # Cache result and return
             row_context.navigation_cache[cache_key] = result
             return result
@@ -1927,7 +2019,7 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
             return None
         
         func_type = match.group(1).upper()
-        var_name = match.group(2)
+        var_name = match.group(2) if match.group(2) else None  # Optional variable
         field = match.group(3)
         offset = int(match.group(4)) if match.group(4) else 1
         
@@ -1935,6 +2027,23 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
         if offset <= 0:
             row_context.navigation_cache[cache_key] = None
             return None
+        
+        # Handle universal variable references (no variable prefix)
+        if not var_name:
+            # Use current variable or find a suitable one
+            if current_var:
+                var_name = current_var
+            else:
+                # Try to find any variable that has the field
+                var_name = None
+                for var_n, var_indices in row_context.variables.items():
+                    if var_indices and field in row_context.rows[var_indices[0]]:
+                        var_name = var_n
+                        break
+                
+                if not var_name:
+                    row_context.navigation_cache[cache_key] = None
+                    return None
         
         # Enhanced validation with proper error handling
         if var_name not in row_context.variables:
