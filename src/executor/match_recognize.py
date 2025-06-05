@@ -818,6 +818,14 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 if mr_clause.measures:
                     ordered_cols.extend([m.alias for m in mr_clause.measures.measures if m.alias])
                 
+                # Include columns specified in the SELECT clause
+                if ast.select_clause and ast.select_clause.items:
+                    select_items = [item.expression.split('.')[-1] if '.' in item.expression else item.expression 
+                                   for item in ast.select_clause.items]
+                    for col in select_items:
+                        if col not in ordered_cols and col in result_df.columns:
+                            ordered_cols.append(col)
+                
                 # Only keep columns that exist in the result
                 ordered_cols = [col for col in ordered_cols if col in result_df.columns]
                 
@@ -958,11 +966,13 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 if mr_clause.measures:
                     ordered_cols.extend([m.alias for m in mr_clause.measures.measures if m.alias])
                 
-                # Then add all remaining original columns
-                original_cols = df.columns.tolist()
-                for col in original_cols:
-                    if col not in ordered_cols:
-                        ordered_cols.append(col)
+                # Only include columns specified in the SELECT clause
+                if ast.select_clause and ast.select_clause.items:
+                    select_items = [item.expression.split('.')[-1] if '.' in item.expression else item.expression 
+                                   for item in ast.select_clause.items]
+                    for col in select_items:
+                        if col not in ordered_cols and col in result_df.columns:
+                            ordered_cols.append(col)
                 
                 # Only keep columns that exist in the result
                 ordered_cols = [col for col in ordered_cols if col in result_df.columns]

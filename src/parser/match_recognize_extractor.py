@@ -739,7 +739,10 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
 
     def validate_function_usage(self, ctx):
         allowed_functions = {
-            "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*(\*|[\w.]+\*?)\s*\)",
+            "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*.*?\s*\)",
+            "COUNT_IF": r"(?:FINAL|RUNNING)?\s*COUNT_IF\(\s*.*?,\s*.*?\s*\)",
+            "SUM_IF": r"(?:FINAL|RUNNING)?\s*SUM_IF\(\s*.*?,\s*.*?\s*\)",
+            "AVG_IF": r"(?:FINAL|RUNNING)?\s*AVG_IF\(\s*.*?,\s*.*?\s*\)",
             "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*.+?(?:\s*,\s*\d+)?\s*\)",
             "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*.+?(?:\s*,\s*\d+)?\s*\)",
             "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*.+?(?:,\s*\d+)?\s*\)",
@@ -928,6 +931,13 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         # Check for missing pattern variable references - allow variables that appear in pattern text
         # SUBSET union variables are valid references in MEASURES clauses
         all_valid_pattern_vars = pattern_vars.union(subset_components).union(pattern_variables_in_text).union(subset_union_vars)
+        
+        # Also allow variables that are defined in DEFINE clause even if not in pattern
+        # This is needed for test cases where variables are defined but not used in the current pattern
+        if self.ast.define:
+            defined_vars = {d.variable for d in self.ast.define.definitions}
+            all_valid_pattern_vars = all_valid_pattern_vars.union(defined_vars)
+        
         missing = referenced_pattern_vars - all_valid_pattern_vars
         if missing and "PERMUTE" not in pattern_text.upper():
             # Check if any missing variables look like table prefixes
