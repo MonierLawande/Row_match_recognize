@@ -974,13 +974,13 @@ class MeasureEvaluator:
             
             # For FIRST/LAST with variable prefix, we use variable-specific logic
             elif func_name in ('FIRST', 'LAST'):
-                # Get offset (default is 0 for first/last occurrence)
-                offset = 0  # Default to 0-based offset (first/last occurrence)
+                # Get occurrence (default is 0)
+                occurrence = 0
                 if len(args) > 1:
                     try:
-                        offset = int(args[1])
+                        occurrence = int(args[1])
                     except ValueError:
-                        offset = 0
+                        pass
                 
                 # Get variable indices
                 var_indices = []
@@ -997,15 +997,15 @@ class MeasureEvaluator:
                 if var_indices:
                     logical_idx = None
                     if func_name == 'FIRST':
-                        # FIRST(A.value, N) should return value at Nth index (0-based offset)
-                        # offset=0 means first, offset=1 means second, etc.
-                        if offset >= 0 and offset < len(var_indices):
-                            logical_idx = var_indices[offset]  # Direct 0-based indexing
+                        # CRITICAL FIX: FIRST(A.value, 2) should return 3rd occurrence (1-based offset)
+                        # occurrence is already 1-based from parsing, so we need to convert to 0-based indexing
+                        if occurrence > 0 and occurrence <= len(var_indices):
+                            logical_idx = var_indices[occurrence - 1]  # Convert 1-based to 0-based
                     elif func_name == 'LAST':
-                        # LAST(A.value, N) should return value at Nth index from end (0-based offset)
-                        # offset=0 means last, offset=1 means second-to-last, etc.
-                        if offset >= 0 and offset < len(var_indices):
-                            logical_idx = var_indices[-(offset + 1)]  # Count from the end using 0-based offset
+                        # CRITICAL FIX: LAST(A.value, 1) should return 1st from end (1-based offset)
+                        # occurrence is 1-based, so LAST(..., 1) means first from end, LAST(..., 2) means second from end
+                        if occurrence > 0 and occurrence <= len(var_indices):
+                            logical_idx = var_indices[-occurrence]  # Count from the end using 1-based offset
                     
                     # Get the value if we found a valid logical position
                     if logical_idx is not None and logical_idx < len(self.context.rows):
@@ -1049,11 +1049,17 @@ class MeasureEvaluator:
             elif func_name in ('FIRST', 'LAST'):
                 field_name = args[0]
                 
-                # Get offset (default is 0 for first/last occurrence)
-                offset = 0  # Default to 0-based offset (first/last occurrence)
+                # Get offset/occurrence: SQL:2016 standard interpretation:
+                # FIRST(value) = 1st value (default offset 0)
+                # FIRST(value, N) = value at 0-based offset N from start  
+                # LAST(value) = last value (default offset 0)
+                # LAST(value, N) = value at 0-based offset N from end
+                offset = 0  # Default to 0-based offset (first/last item)
                 if len(args) > 1:
                     try:
                         offset = int(args[1])
+                        if offset < 0:
+                            offset = 0  # Ensure non-negative offset
                     except ValueError:
                         offset = 0
                 
@@ -1066,24 +1072,45 @@ class MeasureEvaluator:
                 # Sort indices to ensure correct order and remove duplicates
                 all_indices = sorted(set(all_indices))
                 
-                # Apply RUNNING semantics first: only consider rows up to current position
-                if is_running:
-                    # For RUNNING, filter all_indices to only include those <= current_idx
-                    all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
+                # CRITICAL FIX FOR RUNNING/FINAL SEMANTICS:
+                # For universal navigation functions like FIRST(value), LAST(value),
+                # the behavior differs based on RUNNING vs FINAL semantics:
                 
-                # Now apply FIRST/LAST logic on the (possibly filtered) indices
-                logical_idx = None
-                if all_indices:
-                    if func_name == 'FIRST':
-                        # FIRST(value, N) should return value at Nth index (0-based offset)
-                        # offset=0 means first, offset=1 means second, etc.
-                        if offset >= 0 and offset < len(all_indices):
-                            logical_idx = all_indices[offset]  # Direct 0-based indexing
-                    elif func_name == 'LAST':
-                        # LAST(value, N) should return value at Nth index from end (0-based offset)
-                        # offset=0 means last, offset=1 means second-to-last, etc.
-                        if offset >= 0 and offset < len(all_indices):
-                            logical_idx = all_indices[-(offset + 1)]  # Count from the end using 0-based offset
+                if func_name == 'FIRST':
+                    # FIRST(value, N) behavior with 0-based offset semantics:
+                    # RUNNING: Consider only rows up to current position, then get value at offset N
+                    # FINAL: Consider all rows in match, then get value at offset N
+                    if is_running:
+                        # For RUNNING semantics: filter to current position first
+                        running_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
+                        if offset < len(running_indices):
+                            logical_idx = running_indices[offset]  # Direct 0-based offset
+                        else:
+                            logical_idx = None
+                    else:
+                        # For FINAL semantics: use all indices
+                        if offset < len(all_indices):
+                            logical_idx = all_indices[offset]  # Direct 0-based offset
+                        else:
+                            logical_idx = None
+                            
+                elif func_name == 'LAST':
+                    # LAST(value, N) behavior with 0-based offset from end:
+                    # RUNNING: Should behave like RUNNING LAST (incremental last up to current position)
+                    # FINAL: Should return the value at offset N from the end of the entire match
+                    if is_running:
+                        # For RUNNING semantics: get value at offset N from end among rows up to current position
+                        running_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
+                        if running_indices and offset < len(running_indices):
+                            logical_idx = running_indices[-(offset + 1)]  # Convert 0-based offset from end
+                        else:
+                            logical_idx = None
+                    else:
+                        # For FINAL semantics: get value at offset N from end of all rows in match
+                        if offset < len(all_indices):
+                            logical_idx = all_indices[-(offset + 1)]  # Convert 0-based offset from end
+                        else:
+                            logical_idx = None
                 
                 # Get the value if we found a valid logical position
                 if logical_idx is not None and logical_idx < len(self.context.rows):
@@ -1094,6 +1121,8 @@ class MeasureEvaluator:
                         result = self._preserve_data_type(current_value, raw_value)
                     else:
                         result = raw_value
+                else:
+                    result = None
         
         # Cache the result
         if hasattr(self, '_var_ref_cache'):
