@@ -18,6 +18,70 @@ from src.utils.logging_config import get_logger, PerformanceTimer
 # Module logger
 logger = get_logger(__name__)
 
+def _create_dataframe_with_preserved_types(results: List[Dict[str, Any]]) -> pd.DataFrame:
+    """
+    Create a DataFrame from results while preserving None values and original data types.
+    
+    This function addresses pandas' automatic conversion of None to nan and integers to floats
+    by using object dtype for columns containing None values and inferring appropriate types
+    for others.
+    """
+    if not results:
+        return pd.DataFrame()
+    
+    # Get all column names
+    all_columns = set()
+    for result in results:
+        all_columns.update(result.keys())
+    
+    # Analyze each column to determine if it contains None values and infer best dtype
+    column_dtypes = {}
+    column_data = {col: [] for col in all_columns}
+    
+    # Collect all values for each column
+    for result in results:
+        for col in all_columns:
+            column_data[col].append(result.get(col))
+    
+    # Determine appropriate dtype for each column
+    for col, values in column_data.items():
+        has_none = any(v is None for v in values)
+        non_none_values = [v for v in values if v is not None]
+        
+        if has_none:
+            # If column has None values, use object dtype to preserve them
+            column_dtypes[col] = 'object'
+        elif non_none_values:
+            # Try to infer the best dtype for non-None values
+            try:
+                # Check if all non-None values are integers
+                if all(isinstance(v, int) or (isinstance(v, float) and v.is_integer()) for v in non_none_values):
+                    column_dtypes[col] = 'Int64'  # Nullable integer dtype
+                else:
+                    # Let pandas infer the type
+                    column_dtypes[col] = None
+            except:
+                column_dtypes[col] = 'object'
+        else:
+            # All values are None
+            column_dtypes[col] = 'object'
+    
+    # Create DataFrame with explicit dtypes
+    df_data = {}
+    for col in all_columns:
+        values = column_data[col]
+        dtype = column_dtypes[col]
+        
+        if dtype == 'object':
+            df_data[col] = pd.Series(values, dtype='object')
+        elif dtype == 'Int64':
+            # Convert to nullable integers, preserving None
+            df_data[col] = pd.Series(values, dtype='Int64')
+        else:
+            df_data[col] = pd.Series(values)
+    
+    return pd.DataFrame(df_data)
+
 # Simple pattern cache - production-ready caching without external dependencies
 _PATTERN_CACHE = {}
 _CACHE_STATS = {
@@ -843,8 +907,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             unmatched_row = _handle_unmatched_row(all_rows[idx], measures, partition_by)
                             results.append(unmatched_row)
                 
-                # Create result DataFrame
-                result_df = pd.DataFrame(results)
+                # Create result DataFrame with preserved data types
+                result_df = _create_dataframe_with_preserved_types(results)
                 
                 # Debug the measure columns
                 logger.debug("Checking measure columns in final DataFrame:")

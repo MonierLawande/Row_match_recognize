@@ -1,17 +1,47 @@
 # src/matcher/measure_evaluator.py
 
-import math
-import re
-import statistics
-import time
 from collections import defaultdict
 from functools import lru_cache
 from typing import Dict, Any, List, Optional, Set, Union, Tuple
+import re
+import math
+import numpy as np
+import time
 from src.matcher.row_context import RowContext
 from src.utils.logging_config import get_logger, PerformanceTimer
 
 # Module logger
 logger = get_logger(__name__)
+
+def _get_column_value_with_type_preservation(row: Dict[str, Any], column_name: str) -> Any:
+    """
+    Get column value from row with proper type preservation.
+    
+    This function ensures that:
+    1. Original data types are preserved (int stays int, not converted to float)
+    2. Missing values return None instead of NaN
+    3. Trino compatibility is maintained
+    
+    Args:
+        row: Dictionary representing a row
+        column_name: Name of the column to retrieve
+        
+    Returns:
+        The value with original type preserved, or None if missing
+    """
+    if row is None or column_name not in row:
+        return None
+    
+    value = row[column_name]
+    
+    # Handle NaN values - convert to None for Trino compatibility
+    if isinstance(value, float) and (math.isnan(value) or np.isnan(value)):
+        return None
+    
+    # Preserve original types - don't auto-convert to float
+    return value
+
+
 
 class ClassifierError(Exception):
     """Error in CLASSIFIER function evaluation."""
@@ -207,7 +237,47 @@ class MeasureEvaluator:
         # Create row-to-variable index for fast lookup
         self._build_row_variable_index()
 
-
+    def _preserve_data_type(self, original_value: Any, new_value: Any) -> Any:
+        """
+        Preserve the data type of the original value when setting a new value.
+        
+        This is crucial for Trino compatibility as it expects specific data types
+        and doesn't handle automatic type conversions well.
+        
+        Args:
+            original_value: The original value whose type should be preserved
+            new_value: The new value to type-cast
+            
+        Returns:
+            The new value cast to the type of the original value, or None if conversion fails
+        """
+        if new_value is None:
+            return None
+        
+        if original_value is None:
+            return new_value
+        
+        # Handle NaN values
+        if isinstance(new_value, float) and (math.isnan(new_value) or np.isnan(new_value)):
+            return None
+        
+        # Preserve integer types
+        if isinstance(original_value, int) and isinstance(new_value, (int, float)):
+            if isinstance(new_value, float) and new_value.is_integer():
+                return int(new_value)
+            elif isinstance(new_value, int):
+                return new_value
+        
+        # Preserve float types
+        if isinstance(original_value, float) and isinstance(new_value, (int, float)):
+            return float(new_value)
+        
+        # Preserve string types
+        if isinstance(original_value, str):
+            return str(new_value)
+        
+        # For other types, return as-is
+        return new_value
 
     def _build_row_variable_index(self):
         """Build an index of which variables each row belongs to for faster lookup."""
@@ -270,7 +340,7 @@ class MeasureEvaluator:
             self.context.current_idx = len(self.context.rows) - 1
         
         # Special handling for CLASSIFIER
-        classifier_pattern = r'CLASSIFIER\(\s*([A-Za-z][A-Za-z0-9_]*)?\s*\)'
+        classifier_pattern = r'CLASSIFIER\(\s*([A-ZaZ][A-Za-z0-9_]*)?\s*\)'
         classifier_match = re.match(classifier_pattern, expr, re.IGNORECASE)
         if classifier_match:
             var_name = classifier_match.group(1)
@@ -378,7 +448,7 @@ class MeasureEvaluator:
                 return len(var_indices)
             
             # Parse pattern variable reference (e.g., B.totalprice)
-            var_col_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$', col_expr)
+            var_col_match = re.match(r'^([A-Za-z_][A-ZaZ0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$', col_expr)
             if not var_col_match:
                 return None
                 
@@ -860,9 +930,11 @@ class MeasureEvaluator:
         
         result = None
         
-        # Handle variable.field references
+        # Check if we have variable.field reference (like A.value) or simple field reference (like value)
         var_field_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args[0])
+        
         if var_field_match:
+            # Handle variable.field references (like A.value)
             var_name = var_field_match.group(1)
             field_name = var_field_match.group(2)
             
@@ -879,17 +951,29 @@ class MeasureEvaluator:
                 if func_name == 'PREV':
                     prev_idx = self.context.current_idx - steps
                     if prev_idx >= 0 and prev_idx < len(self.context.rows):
-                        result = self.context.rows[prev_idx].get(field_name)
+                        raw_value = self.context.rows[prev_idx].get(field_name)
+                        # Preserve data type for Trino compatibility
+                        if raw_value is not None and self.context.current_idx < len(self.context.rows):
+                            current_value = self.context.rows[self.context.current_idx].get(field_name)
+                            result = self._preserve_data_type(current_value, raw_value)
+                        else:
+                            result = raw_value
                     # Note: if prev_idx < 0, result remains None (boundary condition)
                 
                 elif func_name == 'NEXT':
                     next_idx = self.context.current_idx + steps
                     if next_idx >= 0 and next_idx < len(self.context.rows):
-                        result = self.context.rows[next_idx].get(field_name)
+                        raw_value = self.context.rows[next_idx].get(field_name)
+                        # Preserve data type for Trino compatibility
+                        if raw_value is not None and self.context.current_idx < len(self.context.rows):
+                            current_value = self.context.rows[self.context.current_idx].get(field_name)
+                            result = self._preserve_data_type(current_value, raw_value)
+                        else:
+                            result = raw_value
                     # Note: if next_idx >= len(rows), result remains None (boundary condition)
             
-            # For FIRST/LAST, we use variable-specific logic
-            else:
+            # For FIRST/LAST with variable prefix, we use variable-specific logic
+            elif func_name in ('FIRST', 'LAST'):
                 # Get occurrence (default is 0)
                 occurrence = 0
                 if len(args) > 1:
@@ -903,89 +987,109 @@ class MeasureEvaluator:
                 if var_name in self.context.variables:
                     var_indices = self.context.variables[var_name]
                 
+                # Sort indices to ensure correct order
+                var_indices = sorted(var_indices)
+                
                 # For RUNNING semantics, only consider rows up to current position
                 if is_running:
                     var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
                 
-                # Sort indices to ensure correct order
-                var_indices = sorted(var_indices)
-                
                 if var_indices:
+                    logical_idx = None
                     if func_name == 'FIRST':
                         # Get the appropriate occurrence from the start
                         if occurrence < len(var_indices):
-                            idx = var_indices[occurrence]
-                            if idx < len(self.context.rows):
-                                result = self.context.rows[idx].get(field_name)
-                    
+                            logical_idx = var_indices[occurrence]
                     elif func_name == 'LAST':
                         # Get the appropriate occurrence from the end
                         if occurrence < len(var_indices):
-                            idx = var_indices[-(occurrence+1)]  # Count from the end
-                            if idx < len(self.context.rows):
-                                result = self.context.rows[idx].get(field_name)
+                            logical_idx = var_indices[-(occurrence+1)]  # Count from the end
+                    
+                    # Get the value if we found a valid logical position
+                    if logical_idx is not None and logical_idx < len(self.context.rows):
+                        raw_value = self.context.rows[logical_idx].get(field_name)
+                        # Preserve data type for Trino compatibility
+                        if raw_value is not None and self.context.current_idx < len(self.context.rows):
+                            current_value = self.context.rows[self.context.current_idx].get(field_name)
+                            result = self._preserve_data_type(current_value, raw_value)
+                        else:
+                            result = raw_value
         
-        # Handle simple field references for PREV/NEXT
-        elif func_name in ('PREV', 'NEXT'):
+        else:
+            # Handle simple field references (no variable prefix) for all functions
             field_name = args[0]
             
-            # Get steps (default is 1)
-            steps = 1
-            if len(args) > 1:
-                try:
-                    steps = int(args[1])
-                except ValueError:
-                    pass
-            
-            if func_name == 'PREV':
-                prev_idx = self.context.current_idx - steps
-                if prev_idx >= 0 and prev_idx < len(self.context.rows):
-                    result = self.context.rows[prev_idx].get(field_name)
-            
-            elif func_name == 'NEXT':
-                next_idx = self.context.current_idx + steps
-                if next_idx >= 0 and next_idx < len(self.context.rows):
-                    result = self.context.rows[next_idx].get(field_name)
-        
-        # Handle FIRST/LAST with simple field references (no variable prefix)
-        elif func_name in ('FIRST', 'LAST'):
-            field_name = args[0]
-            
-            # Get occurrence (default is 0 for first occurrence)
-            occurrence = 0
-            if len(args) > 1:
-                try:
-                    occurrence = int(args[1])
-                except ValueError:
-                    pass
-            
-            # Collect all row indices from all matched variables
-            all_indices = []
-            for var_name in self.context.variables:
-                var_indices = self.context.variables[var_name]
-                all_indices.extend(var_indices)
-            
-            # For RUNNING semantics, only consider rows up to current position
-            if is_running:
-                all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
-            
-            # Sort indices to ensure correct order and remove duplicates
-            all_indices = sorted(set(all_indices))
-            
-            if all_indices:
-                if func_name == 'FIRST':
-                    # Get the appropriate occurrence from the start
-                    if occurrence < len(all_indices):
-                        idx = all_indices[occurrence]
-                        if idx < len(self.context.rows):
-                            result = self.context.rows[idx].get(field_name)
+            # For PREV/NEXT, we navigate relative to current position
+            if func_name in ('PREV', 'NEXT'):
+                # Get steps (default is 1)
+                steps = 1
+                if len(args) > 1:
+                    try:
+                        steps = int(args[1])
+                    except ValueError:
+                        pass
                 
-                elif func_name == 'LAST':
-                    # Get the appropriate occurrence from the end
-                    if occurrence < len(all_indices):
-                        idx = all_indices[-(occurrence+1)]  # Count from the end
-                        if idx < len(self.context.rows):
-                            result = self.context.rows[idx].get(field_name)
+                if func_name == 'PREV':
+                    prev_idx = self.context.current_idx - steps
+                    if prev_idx >= 0 and prev_idx < len(self.context.rows):
+                        result = _get_column_value_with_type_preservation(self.context.rows[prev_idx], field_name)
+                    else:
+                        result = None
+                
+                elif func_name == 'NEXT':
+                    next_idx = self.context.current_idx + steps
+                    if next_idx >= 0 and next_idx < len(self.context.rows):
+                        result = _get_column_value_with_type_preservation(self.context.rows[next_idx], field_name)
+                    else:
+                        result = None
+            
+            # Handle FIRST/LAST with simple field references (no variable prefix)
+            elif func_name in ('FIRST', 'LAST'):
+                field_name = args[0]
+                
+                # Get occurrence (default is 0 for first occurrence)
+                occurrence = 0
+                if len(args) > 1:
+                    try:
+                        occurrence = int(args[1])
+                    except ValueError:
+                        pass
+                
+                # Collect all row indices from all matched variables
+                all_indices = []
+                for var_name in self.context.variables:
+                    var_indices = self.context.variables[var_name]
+                    all_indices.extend(var_indices)
+                
+                # Sort indices to ensure correct order and remove duplicates
+                all_indices = sorted(set(all_indices))
+                
+                # Apply RUNNING semantics first: only consider rows up to current position
+                if is_running:
+                    # For RUNNING, filter all_indices to only include those <= current_idx
+                    all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
+                
+                # Now apply FIRST/LAST logic on the (possibly filtered) indices
+                logical_idx = None
+                if all_indices:
+                    if func_name == 'FIRST':
+                        # Get the appropriate occurrence from the start
+                        if occurrence < len(all_indices):
+                            logical_idx = all_indices[occurrence]
+                    elif func_name == 'LAST':
+                        # Get the appropriate occurrence from the end
+                        if occurrence < len(all_indices):
+                            logical_idx = all_indices[-(occurrence+1)]  # Count from the end
+                
+                # Get the value if we found a valid logical position
+                if logical_idx is not None and logical_idx < len(self.context.rows):
+                    raw_value = self.context.rows[logical_idx].get(field_name)
+                    # Preserve data type for Trino compatibility
+                    if raw_value is not None and self.context.current_idx < len(self.context.rows):
+                        current_value = self.context.rows[self.context.current_idx].get(field_name)
+                        result = self._preserve_data_type(current_value, raw_value)
+                    else:
+                        result = raw_value
         
         # Cache the result
         if hasattr(self, '_var_ref_cache'):
