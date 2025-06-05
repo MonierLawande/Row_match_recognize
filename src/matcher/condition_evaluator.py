@@ -1873,67 +1873,93 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
                     row_context.navigation_cache[cache_key] = None
                     return None
             
-            # CRITICAL FIX: First evaluate the inner expression to get actual target index/value
-            inner_result = evaluate_nested_navigation(inner_expr, row_context, current_row_idx, current_var)
+            # CRITICAL FIX: Properly handle nested navigation NEXT(FIRST(value), offset)
+            # For nested navigation, we need to find the position from the inner function
+            # and then navigate from that position using the outer function
             
-            # If inner evaluation failed, cache the failure and return None
-            if inner_result is None:
-                row_context.navigation_cache[cache_key] = None
-                return None
-            
-            # ENHANCED NESTED LOGIC: Parse inner expression to understand what we're working with
+            # Parse inner expression to get the position/index rather than the value
             inner_simple_match = re.match(simple_pattern, inner_expr, re.IGNORECASE)
             
             if inner_simple_match:
-                inner_var = inner_simple_match.group(2) if inner_simple_match.group(2) else current_var
+                inner_func_type = inner_simple_match.group(1).upper()
+                inner_var = inner_simple_match.group(2) if inner_simple_match.group(2) else None
                 inner_field = inner_simple_match.group(3)
+                inner_offset = int(inner_simple_match.group(4)) if inner_simple_match.group(4) else 1
                 
-                # Now apply the outer function based on its type
+                # Find the target index from the inner function first
+                inner_target_idx = None
+                
+                if inner_var:
+                    # Variable-specific reference like FIRST(A.value)
+                    if inner_var in row_context.variables:
+                        var_indices = sorted(row_context.variables[inner_var])
+                        
+                        # Apply RUNNING semantics if needed
+                        if is_running:
+                            var_indices = [idx for idx in var_indices if idx <= current_row_idx]
+                        
+                        if var_indices:
+                            if inner_func_type == 'FIRST':
+                                if inner_offset <= len(var_indices):
+                                    inner_target_idx = var_indices[inner_offset - 1]  # Convert 1-based to 0-based
+                            elif inner_func_type == 'LAST':
+                                if inner_offset <= len(var_indices):
+                                    inner_target_idx = var_indices[-inner_offset]  # Count from end
+                else:
+                    # Universal reference like FIRST(value) - look across all variables
+                    all_indices = set()
+                    for var_indices in row_context.variables.values():
+                        all_indices.update(var_indices)
+                    
+                    if all_indices:
+                        all_indices = sorted(all_indices)
+                        
+                        # Apply RUNNING semantics if needed
+                        if is_running:
+                            all_indices = [idx for idx in all_indices if idx <= current_row_idx]
+                        
+                        if all_indices:
+                            if inner_func_type == 'FIRST':
+                                if inner_offset <= len(all_indices):
+                                    inner_target_idx = all_indices[inner_offset - 1]  # Convert 1-based to 0-based
+                            elif inner_func_type == 'LAST':
+                                if inner_offset <= len(all_indices):
+                                    inner_target_idx = all_indices[-inner_offset]  # Count from end
+                
+                # Now apply the outer function from the inner target position
                 result = None
-                
-                if outer_func == 'NEXT':
-                    # Move forward outer_offset rows from current position
-                    target_idx = current_row_idx + outer_offset
-                    
-                    if (target_idx < len(row_context.rows) and
-                        (not hasattr(row_context, 'partition_boundaries') or 
-                         not row_context.partition_boundaries or
-                         row_context.check_same_partition(current_row_idx, target_idx))):
-                        result = row_context.rows[target_idx].get(inner_field)
-                    
-                elif outer_func == 'PREV':
-                    # Move back outer_offset rows from current position
-                    target_idx = current_row_idx - outer_offset
-                    
-                    if (target_idx >= 0 and
-                        (not hasattr(row_context, 'partition_boundaries') or 
-                         not row_context.partition_boundaries or
-                         row_context.check_same_partition(current_row_idx, target_idx))):
-                        result = row_context.rows[target_idx].get(inner_field)
-                
-                elif outer_func == 'FIRST':
-                    # Find the outer_offset-th occurrence of inner_var
-                    if inner_var in row_context.variables:
-                        var_indices = sorted(row_context.variables[inner_var])
-                        if outer_offset <= len(var_indices):
-                            target_idx = var_indices[outer_offset - 1]  # 1-based to 0-based
-                            if (target_idx < len(row_context.rows) and
-                                (not hasattr(row_context, 'partition_boundaries') or 
-                                 not row_context.partition_boundaries or
-                                 row_context.check_same_partition(current_row_idx, target_idx))):
-                                result = row_context.rows[target_idx].get(inner_field)
-                    
-                elif outer_func == 'LAST':
-                    # Find the outer_offset-th occurrence from the end of inner_var
-                    if inner_var in row_context.variables:
-                        var_indices = sorted(row_context.variables[inner_var])
-                        if outer_offset <= len(var_indices):
-                            target_idx = var_indices[-outer_offset]  # Count from end
-                            if (target_idx < len(row_context.rows) and
-                                (not hasattr(row_context, 'partition_boundaries') or 
-                                 not row_context.partition_boundaries or
-                                 row_context.check_same_partition(current_row_idx, target_idx))):
-                                result = row_context.rows[target_idx].get(inner_field)
+                if inner_target_idx is not None:
+                    if outer_func == 'NEXT':
+                        # Move forward outer_offset rows from the inner target position
+                        target_idx = inner_target_idx + outer_offset
+                        
+                        if (target_idx < len(row_context.rows) and
+                            (not hasattr(row_context, 'partition_boundaries') or 
+                             not row_context.partition_boundaries or
+                             row_context.check_same_partition(inner_target_idx, target_idx))):
+                            result = row_context.rows[target_idx].get(inner_field)
+                        
+                    elif outer_func == 'PREV':
+                        # Move back outer_offset rows from the inner target position
+                        target_idx = inner_target_idx - outer_offset
+                        
+                        if (target_idx >= 0 and
+                            (not hasattr(row_context, 'partition_boundaries') or 
+                             not row_context.partition_boundaries or
+                             row_context.check_same_partition(inner_target_idx, target_idx))):
+                            result = row_context.rows[target_idx].get(inner_field)
+                        
+                    elif outer_func == 'FIRST':
+                        # For nested FIRST, we need to find the outer_offset-th occurrence
+                        # But since we already have the inner target position, this doesn't make much sense
+                        # FIRST(FIRST(...)) would just be FIRST(..., outer_offset)
+                        # This case is likely not valid in proper SQL semantics
+                        result = None
+                        
+                    elif outer_func == 'LAST':
+                        # Similar to FIRST case - LAST(FIRST(...)) is not typical
+                        # This case is likely not valid in proper SQL semantics
+                        result = None
                 
                 # Cache result and return
                 row_context.navigation_cache[cache_key] = result

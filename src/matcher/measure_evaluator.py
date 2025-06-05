@@ -974,13 +974,13 @@ class MeasureEvaluator:
             
             # For FIRST/LAST with variable prefix, we use variable-specific logic
             elif func_name in ('FIRST', 'LAST'):
-                # Get occurrence (default is 0)
-                occurrence = 0
+                # Get offset (default is 0 for first/last occurrence)
+                offset = 0  # Default to 0-based offset (first/last occurrence)
                 if len(args) > 1:
                     try:
-                        occurrence = int(args[1])
+                        offset = int(args[1])
                     except ValueError:
-                        pass
+                        offset = 0
                 
                 # Get variable indices
                 var_indices = []
@@ -997,13 +997,15 @@ class MeasureEvaluator:
                 if var_indices:
                     logical_idx = None
                     if func_name == 'FIRST':
-                        # Get the appropriate occurrence from the start
-                        if occurrence < len(var_indices):
-                            logical_idx = var_indices[occurrence]
+                        # FIRST(A.value, N) should return value at Nth index (0-based offset)
+                        # offset=0 means first, offset=1 means second, etc.
+                        if offset >= 0 and offset < len(var_indices):
+                            logical_idx = var_indices[offset]  # Direct 0-based indexing
                     elif func_name == 'LAST':
-                        # Get the appropriate occurrence from the end
-                        if occurrence < len(var_indices):
-                            logical_idx = var_indices[-(occurrence+1)]  # Count from the end
+                        # LAST(A.value, N) should return value at Nth index from end (0-based offset)
+                        # offset=0 means last, offset=1 means second-to-last, etc.
+                        if offset >= 0 and offset < len(var_indices):
+                            logical_idx = var_indices[-(offset + 1)]  # Count from the end using 0-based offset
                     
                     # Get the value if we found a valid logical position
                     if logical_idx is not None and logical_idx < len(self.context.rows):
@@ -1047,13 +1049,13 @@ class MeasureEvaluator:
             elif func_name in ('FIRST', 'LAST'):
                 field_name = args[0]
                 
-                # Get occurrence (default is 0 for first occurrence)
-                occurrence = 0
+                # Get offset (default is 0 for first/last occurrence)
+                offset = 0  # Default to 0-based offset (first/last occurrence)
                 if len(args) > 1:
                     try:
-                        occurrence = int(args[1])
+                        offset = int(args[1])
                     except ValueError:
-                        pass
+                        offset = 0
                 
                 # Collect all row indices from all matched variables
                 all_indices = []
@@ -1073,13 +1075,15 @@ class MeasureEvaluator:
                 logical_idx = None
                 if all_indices:
                     if func_name == 'FIRST':
-                        # Get the appropriate occurrence from the start
-                        if occurrence < len(all_indices):
-                            logical_idx = all_indices[occurrence]
+                        # FIRST(value, N) should return value at Nth index (0-based offset)
+                        # offset=0 means first, offset=1 means second, etc.
+                        if offset >= 0 and offset < len(all_indices):
+                            logical_idx = all_indices[offset]  # Direct 0-based indexing
                     elif func_name == 'LAST':
-                        # Get the appropriate occurrence from the end
-                        if occurrence < len(all_indices):
-                            logical_idx = all_indices[-(occurrence+1)]  # Count from the end
+                        # LAST(value, N) should return value at Nth index from end (0-based offset)
+                        # offset=0 means last, offset=1 means second-to-last, etc.
+                        if offset >= 0 and offset < len(all_indices):
+                            logical_idx = all_indices[-(offset + 1)]  # Count from the end using 0-based offset
                 
                 # Get the value if we found a valid logical position
                 if logical_idx is not None and logical_idx < len(self.context.rows):
