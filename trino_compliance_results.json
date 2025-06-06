@@ -1,0 +1,190 @@
+{
+  "total": 19,
+  "passed": 18,
+  "failed": 1,
+  "errors": 0,
+  "success_rate": 94.73684210526315,
+  "compliance_level": "\ud83d\udfe1 GOOD - Minor compatibility issues",
+  "results": [
+    {
+      "test_case": "simple_pattern_a_b_plus_c_plus",
+      "test_method": "testSimpleQuery",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "default_running_last_value",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "explicit_last_value",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "running_last_value",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "final_last_value",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "first_value",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "running_first_value",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "final_first_value",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "last_with_offset",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "first_with_offset",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "FAILED",
+        "message": "Results do not match Trino output",
+        "expected": [
+          [
+            1,
+            30
+          ],
+          [
+            2,
+            30
+          ],
+          [
+            3,
+            30
+          ]
+        ],
+        "actual": [
+          [
+            1,
+            null
+          ],
+          [
+            2,
+            null
+          ],
+          [
+            3,
+            30
+          ]
+        ]
+      }
+    },
+    {
+      "test_case": "prev_value",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "next_value",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "nested_next_first",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "out_of_bounds_navigation",
+      "test_method": "testNavigationFunctions",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "kleene_star_quantifier",
+      "test_method": "testPatternQuantifiers",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "plus_quantifier",
+      "test_method": "testPatternQuantifiers",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "question_mark_quantifier",
+      "test_method": "testPatternQuantifiers",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "classifier_and_next_classifier",
+      "test_method": "testClassifierFunctionPastCurrentRow",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    },
+    {
+      "test_case": "partitioned_running_sum",
+      "test_method": "testPartitioning",
+      "result": {
+        "status": "PASSED",
+        "message": "Results match Trino exactly"
+      }
+    }
+  ]
+}
