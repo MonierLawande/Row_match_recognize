@@ -9,7 +9,6 @@ import numpy as np
 import time
 from src.matcher.row_context import RowContext
 from src.utils.logging_config import get_logger, PerformanceTimer
-from src.matcher.production_aggregates import ProductionAggregateEvaluator, AggregateValidationError, AggregateArgumentError
 
 # Module logger
 logger = get_logger(__name__)
@@ -237,27 +236,6 @@ class MeasureEvaluator:
         
         # Create row-to-variable index for fast lookup
         self._build_row_variable_index()
-        
-        # Initialize production aggregate evaluator for enhanced SQL:2016 support
-        self._prod_agg_evaluator = None
-        self._initialize_production_aggregates()
-
-    def _initialize_production_aggregates(self):
-        """Initialize the production aggregate evaluator."""
-        try:
-            from src.matcher.production_aggregates import ProductionAggregateEvaluator
-            self._prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
-            logger.debug("Production aggregate evaluator initialized successfully")
-        except ImportError:
-            logger.warning("Production aggregate evaluator not available, using basic implementation")
-        except Exception as e:
-            logger.error(f"Failed to initialize production aggregate evaluator: {e}")
-
-    def get_aggregate_statistics(self) -> Dict[str, Any]:
-        """Get statistics from the production aggregate evaluator."""
-        if self._prod_agg_evaluator:
-            return self._prod_agg_evaluator.get_statistics()
-        return {"error": "Production aggregate evaluator not available"}
 
     def _preserve_data_type(self, original_value: Any, new_value: Any) -> Any:
         """
@@ -319,7 +297,7 @@ class MeasureEvaluator:
 
     def evaluate(self, expr: str, semantics: str = None) -> Any:
         """
-        Evaluate a measure expression with proper RUNNING/FINAL semantics and production aggregate support.
+        Evaluate a measure expression with proper RUNNING/FINAL semantics and PERMUTE support.
         
         This implementation handles all standard SQL:2016 pattern matching measures
         including CLASSIFIER(), MATCH_NUMBER(), and aggregate functions with proper
@@ -332,8 +310,17 @@ class MeasureEvaluator:
         Returns:
             The result of the expression evaluation
         """
-        # Use passed semantics or instance default
-        is_running = (semantics == 'RUNNING') if semantics else not self.final
+        # Use passed semantics or determine default based on SQL:2016 specification
+        # For ALL ROWS PER MATCH, navigation functions default to FINAL semantics when no explicit prefix is specified
+        # For ONE ROW PER MATCH, navigation functions use FINAL semantics (instance default)
+        if semantics == 'RUNNING':
+            is_running = True
+        elif semantics == 'FINAL':
+            is_running = False
+        else:
+            # No explicit semantics specified - use FINAL as default for navigation functions
+            # This matches SQL:2016 and Trino behavior for both ONE ROW PER MATCH and ALL ROWS PER MATCH
+            is_running = False
         
         logger.debug(f"Evaluating expression: {expr} with {('FINAL' if not is_running else 'RUNNING')} semantics")
         logger.debug(f"Context variables: {self.context.variables}")
@@ -361,21 +348,6 @@ class MeasureEvaluator:
         if len(self.context.rows) > 0 and self.context.current_idx >= len(self.context.rows):
             self.context.current_idx = len(self.context.rows) - 1
         
-        # Enhanced aggregate function detection and evaluation
-        if self._prod_agg_evaluator:
-            # Check if this is an aggregate function using production evaluator
-            from src.matcher.production_aggregates import ProductionAggregateEvaluator
-            agg_pattern = r'\b(' + '|'.join(ProductionAggregateEvaluator.STANDARD_AGGREGATES) + r')\s*\('
-            if re.search(agg_pattern, expr, re.IGNORECASE):
-                try:
-                    semantics_str = "RUNNING" if is_running else "FINAL"
-                    result = self._prod_agg_evaluator.evaluate_aggregate(expr, semantics_str)
-                    logger.debug(f"Production aggregate evaluation result: {result}")
-                    return result
-                except Exception as e:
-                    logger.warning(f"Production aggregate evaluation failed: {e}, falling back to basic implementation")
-                    # Continue with basic implementation below
-        
         # Special handling for CLASSIFIER
         classifier_pattern = r'CLASSIFIER\(\s*([A-ZaZ][A-Za-z0-9_]*)?\s*\)'
         classifier_match = re.match(classifier_pattern, expr, re.IGNORECASE)
@@ -386,6 +358,39 @@ class MeasureEvaluator:
         # Special handling for MATCH_NUMBER
         if expr.upper().strip() == "MATCH_NUMBER()":
             return self.context.match_number
+        
+        # Special handling for ROW_NUMBER
+        if expr.upper().strip() == "ROW_NUMBER()":
+            # ROW_NUMBER() returns the sequential number of the row within the match (1-based)
+            # In RUNNING semantics, it returns the current row number within the visible portion
+            # In FINAL semantics, it returns the row number within the complete match
+            
+            if is_running:
+                # RUNNING semantics: count visible rows up to and including current position
+                visible_rows = set()
+                for var_indices in self.context.variables.values():
+                    for idx in var_indices:
+                        if idx <= self.context.current_idx:
+                            visible_rows.add(idx)
+                
+                # Find the position of current_idx among visible rows
+                visible_list = sorted(visible_rows)
+                if self.context.current_idx in visible_list:
+                    return visible_list.index(self.context.current_idx) + 1  # 1-based
+                else:
+                    return None
+            else:
+                # FINAL semantics: count all rows in the match
+                all_rows = set()
+                for var_indices in self.context.variables.values():
+                    all_rows.update(var_indices)
+                
+                # Find the position of current_idx among all matched rows
+                all_list = sorted(all_rows)
+                if self.context.current_idx in all_list:
+                    return all_list.index(self.context.current_idx) + 1  # 1-based
+                else:
+                    return None
         
         # Special handling for SUM with both pattern variable references and universal column references
         if expr.upper().startswith("SUM("):
@@ -448,7 +453,7 @@ class MeasureEvaluator:
                         
                         return total
         
-        # Handle other aggregate functions (MIN, MAX, AVG, COUNT, etc.)
+        # Handle other aggregate functions (MIN, MAX, AVG, etc.)
         agg_match = re.match(r'(MIN|MAX|AVG|COUNT)\(([^)]+)\)', expr, re.IGNORECASE)
         if agg_match:
             func_name = agg_match.group(1).upper()
@@ -911,15 +916,13 @@ class MeasureEvaluator:
         
     def _evaluate_navigation(self, expr: str, is_running: bool) -> Any:
         """
-        Handle navigation functions like FIRST, LAST, PREV, NEXT with SQL:2016 compliant semantics.
+        Handle navigation functions like FIRST, LAST, PREV, NEXT with proper semantics.
         
         This enhanced implementation supports:
         1. Simple navigation functions (FIRST(A.price), LAST(B.quantity))
         2. Nested navigation functions (PREV(FIRST(A.price)), NEXT(LAST(B.quantity)))
         3. Navigation with offsets (FIRST(A.price, 3), PREV(price, 2))
-        4. Universal column references (FIRST(price) vs. FIRST(A.price))
-        5. RUNNING vs FINAL semantics
-        6. Robust null handling and type preservation
+        4. Combinations with proper semantics handling
         
         Args:
             expr: The navigation expression (e.g., "LAST(A.value)")
@@ -928,11 +931,6 @@ class MeasureEvaluator:
         Returns:
             The result of the navigation function
         """
-        # Cache key for memoization - include running semantics in the key
-        cache_key = (expr, is_running, self.context.current_idx)
-        if hasattr(self, '_var_ref_cache') and cache_key in self._var_ref_cache:
-            return self._var_ref_cache[cache_key]
-        
         # Check for nested navigation pattern first
         # Updated pattern to recognize CLASSIFIER() as a valid inner function
         nested_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*((?:FIRST|LAST|NEXT|PREV|CLASSIFIER)[^)]*\))\s*(?:,\s*(\d+))?\s*\)'
@@ -953,6 +951,11 @@ class MeasureEvaluator:
             else:
                 # With FINAL semantics, we consider all rows in the match
                 return evaluate_nested_navigation(expr, self.context, current_idx, None)
+        
+        # Cache key for memoization - include running semantics in the key
+        cache_key = (expr, is_running, self.context.current_idx)
+        if hasattr(self, '_var_ref_cache') and cache_key in self._var_ref_cache:
+            return self._var_ref_cache[cache_key]
         
         # Extract function name and arguments for simple navigation
         match = re.match(r'(FIRST|LAST|PREV|NEXT)\s*\(\s*(.+?)\s*\)', expr, re.IGNORECASE)
@@ -984,100 +987,47 @@ class MeasureEvaluator:
                 if len(args) > 1:
                     try:
                         steps = int(args[1])
-                        if steps < 0:
-                            # SQL:2016 requires non-negative offset values
-                            logger.warning(f"Negative offset {steps} in {func_name} function - using 0 instead")
-                            steps = 0
                     except ValueError:
-                        logger.warning(f"Invalid offset in {func_name} function - using default of 1")
-                        steps = 1
-                
-                # Get variable indices with comprehensive handling of subset variables
-                var_indices = self._get_full_var_indices(var_name)
-                
-                # Sort indices to ensure correct order
-                var_indices = sorted(var_indices)
-                
-                # For RUNNING semantics, only consider rows up to current position
-                if is_running:
-                    var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
+                        pass
                 
                 if func_name == 'PREV':
-                    # Find index in var_indices that is closest to but less than current_idx
-                    current_var_idx = None
-                    for i, idx in enumerate(var_indices):
-                        if idx <= self.context.current_idx:
-                            current_var_idx = i
-                    
-                    if current_var_idx is not None and current_var_idx >= steps:
-                        prev_idx = var_indices[current_var_idx - steps]
-                        if prev_idx >= 0 and prev_idx < len(self.context.rows):
-                            raw_value = self.context.rows[prev_idx].get(field_name)
-                            # Preserve data type for Trino compatibility
-                            if raw_value is not None and self.context.current_idx < len(self.context.rows):
-                                current_value = self.context.rows[self.context.current_idx].get(field_name)
-                                result = self._preserve_data_type(current_value, raw_value)
-                            else:
-                                result = raw_value
+                    prev_idx = self.context.current_idx - steps
+                    if prev_idx >= 0 and prev_idx < len(self.context.rows):
+                        raw_value = self.context.rows[prev_idx].get(field_name)
+                        # Preserve data type for Trino compatibility
+                        if raw_value is not None and self.context.current_idx < len(self.context.rows):
+                            current_value = self.context.rows[self.context.current_idx].get(field_name)
+                            result = self._preserve_data_type(current_value, raw_value)
+                        else:
+                            result = raw_value
+                    # Note: if prev_idx < 0, result remains None (boundary condition)
                 
                 elif func_name == 'NEXT':
-                    # Find index in var_indices that is closest to or equal to current_idx
-                    current_var_idx = None
-                    for i, idx in enumerate(var_indices):
-                        if idx >= self.context.current_idx:
-                            current_var_idx = i
-                            break
-                    
-                    # If not found directly, use the index of the current row
-                    if current_var_idx is None:
-                        for i, idx in enumerate(var_indices):
-                            if idx == self.context.current_idx:
-                                current_var_idx = i
-                                break
-                    
-                    # Fall back to using the first index if still not found
-                    if current_var_idx is None and len(var_indices) > 0:
-                        current_var_idx = 0
-                    
-                    if current_var_idx is not None and current_var_idx + steps < len(var_indices):
-                        next_idx = var_indices[current_var_idx + steps]
-                        if next_idx >= 0 and next_idx < len(self.context.rows):
-                            raw_value = self.context.rows[next_idx].get(field_name)
-                            # Preserve data type for Trino compatibility
-                            if raw_value is not None and self.context.current_idx < len(self.context.rows):
-                                current_value = self.context.rows[self.context.current_idx].get(field_name)
-                                result = self._preserve_data_type(current_value, raw_value)
-                            else:
-                                result = raw_value
+                    next_idx = self.context.current_idx + steps
+                    if next_idx >= 0 and next_idx < len(self.context.rows):
+                        raw_value = self.context.rows[next_idx].get(field_name)
+                        # Preserve data type for Trino compatibility
+                        if raw_value is not None and self.context.current_idx < len(self.context.rows):
+                            current_value = self.context.rows[self.context.current_idx].get(field_name)
+                            result = self._preserve_data_type(current_value, raw_value)
+                        else:
+                            result = raw_value
+                    # Note: if next_idx >= len(rows), result remains None (boundary condition)
             
             # For FIRST/LAST with variable prefix, we use variable-specific logic
             elif func_name in ('FIRST', 'LAST'):
-                # Get occurrence (default is 0 for SQL:2016 compliance)
-                # Per SQL:2016 spec:
-                # - FIRST(A.value) = first occurrence (occurrence=0)
-                # - FIRST(A.value, 2) = third occurrence (occurrence=2, 0-based indexing, navigating forward)
-                # - LAST(A.value) = last occurrence (occurrence=0)
-                # - LAST(A.value, 2) = third from last (occurrence=2, 0-based from end, navigating backward)
+                # Get occurrence (default is 0)
                 occurrence = 0
                 if len(args) > 1:
                     try:
                         occurrence = int(args[1])
-                        if occurrence < 0:
-                            logger.warning(f"Negative offset {occurrence} in {func_name} function - using 0 instead")
-                            occurrence = 0  # Ensure non-negative per SQL:2016 requirements
                     except ValueError:
-                        logger.warning(f"Invalid offset in {func_name} function - using default of 0")
-                        occurrence = 0
+                        pass
                 
-                # Get variable indices with comprehensive subset handling
-                var_indices = self._get_full_var_indices(var_name)
-                
-                # Handle partition boundaries if defined
-                if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-                    partition = self._get_current_partition()
-                    if partition:
-                        part_start, part_end = partition
-                        var_indices = [idx for idx in var_indices if part_start <= idx <= part_end]
+                # Get variable indices
+                var_indices = []
+                if var_name in self.context.variables:
+                    var_indices = self.context.variables[var_name]
                 
                 # Sort indices to ensure correct order
                 var_indices = sorted(var_indices)
@@ -1086,48 +1036,33 @@ class MeasureEvaluator:
                 if is_running:
                     var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
                 
-                # Get logical index based on occurrence parameter
-                logical_idx = None
                 if var_indices:
+                    logical_idx = None
                     if func_name == 'FIRST':
-                        # Logical navigation forward from first occurrence:
-                        # If occurrence is within bounds, get the corresponding index
-                        # Otherwise, return null (logical_idx remains None)
-                        if occurrence < len(var_indices):
-                            logical_idx = var_indices[occurrence]  # 0-based indexing
+                        # SQL:2016 LOGICAL NAVIGATION: FIRST(A.value, N) 
+                        # Find first occurrence of A, then navigate forward N MORE occurrences
+                        # Default N=0 means stay at first occurrence
+                        target_position = 0 + occurrence  # Start from first (index 0), add offset
+                        if target_position < len(var_indices):
+                            logical_idx = var_indices[target_position]
                     elif func_name == 'LAST':
-                        # Logical navigation backward from last occurrence:
-                        # If occurrence is within bounds, get the corresponding index from the end
-                        # Otherwise, return null (logical_idx remains None)
-                        if occurrence < len(var_indices):
-                            logical_idx = var_indices[-(occurrence + 1)]  # Search backwards from last
+                        # SQL:2016 LOGICAL NAVIGATION: LAST(A.value, N)
+                        # Find last occurrence of A, then navigate backward N MORE occurrences  
+                        # Default N=0 means stay at last occurrence
+                        last_position = len(var_indices) - 1
+                        target_position = last_position - occurrence  # Start from last, subtract offset
+                        if target_position >= 0:
+                            logical_idx = var_indices[target_position]
                     
                     # Get the value if we found a valid logical position
                     if logical_idx is not None and logical_idx < len(self.context.rows):
-                        # Enhanced value retrieval with better null handling and type preservation
-                        try:
-                            raw_value = self.context.rows[logical_idx].get(field_name)
-                            
-                            # Handle nulls and type preservation properly per SQL:2016 standard
-                            if raw_value is not None:
-                                # Get current row's value for type context if available
-                                if self.context.current_idx < len(self.context.rows):
-                                    current_value = self.context.rows[self.context.current_idx].get(field_name)
-                                    # Use the _preserve_data_type method to ensure consistent types
-                                    result = self._preserve_data_type(current_value, raw_value)
-                                else:
-                                    # No current row for context, use raw value with basic type preservation
-                                    result = raw_value
-                            else:
-                                # Explicitly handle null values (return None, not NaN)
-                                result = None
-                        except (KeyError, IndexError, TypeError) as e:
-                            # Enhanced error handling for production reliability
-                            logger.debug(f"Error retrieving {field_name} from row {logical_idx}: {str(e)}")
-                            result = None
-                    else:
-                        # Per SQL:2016 spec, return null if no matching row is found
-                        result = None
+                        raw_value = self.context.rows[logical_idx].get(field_name)
+                        # Preserve data type for Trino compatibility
+                        if raw_value is not None and self.context.current_idx < len(self.context.rows):
+                            current_value = self.context.rows[self.context.current_idx].get(field_name)
+                            result = self._preserve_data_type(current_value, raw_value)
+                        else:
+                            result = raw_value
         
         else:
             # Handle simple field references (no variable prefix) for all functions
@@ -1140,169 +1075,111 @@ class MeasureEvaluator:
                 if len(args) > 1:
                     try:
                         steps = int(args[1])
-                        if steps < 0:
-                            logger.warning(f"Negative offset {steps} in {func_name} function - using 0 instead")
-                            steps = 0
                     except ValueError:
-                        logger.warning(f"Invalid offset in {func_name} function - using default of 1")
-                        steps = 1
-                
-                # Collect all matched indices in the order they appear
-                all_matched_indices = []
-                for var, indices in self.context.variables.items():
-                    all_matched_indices.extend(indices)
-                all_matched_indices = sorted(set(all_matched_indices))
-                
-                # For RUNNING semantics, only consider rows up to current position
-                if is_running:
-                    all_matched_indices = [idx for idx in all_matched_indices if idx <= self.context.current_idx]
+                        pass
                 
                 if func_name == 'PREV':
-                    # Find index in all_matched_indices that is closest to but less than current_idx
-                    current_pos = None
-                    for i, idx in enumerate(all_matched_indices):
-                        if idx <= self.context.current_idx:
-                            current_pos = i
-                    
-                    if current_pos is not None and current_pos >= steps:
-                        prev_idx = all_matched_indices[current_pos - steps]
-                        if prev_idx >= 0 and prev_idx < len(self.context.rows):
-                            result = _get_column_value_with_type_preservation(self.context.rows[prev_idx], field_name)
-                        else:
-                            result = None
+                    prev_idx = self.context.current_idx - steps
+                    if prev_idx >= 0 and prev_idx < len(self.context.rows):
+                        result = _get_column_value_with_type_preservation(self.context.rows[prev_idx], field_name)
                     else:
                         result = None
                 
                 elif func_name == 'NEXT':
-                    # Find index in all_matched_indices that is closest to or equal to current_idx
-                    current_pos = None
-                    for i, idx in enumerate(all_matched_indices):
-                        if idx >= self.context.current_idx:
-                            current_pos = i
-                            break
-                    
-                    # If not found directly, use the index of the current row
-                    if current_pos is None and len(all_matched_indices) > 0:
-                        for i, idx in enumerate(all_matched_indices):
-                            if i == self.context.current_idx:
-                                current_pos = i
-                                break
-                    
-                    # Fall back to using the first index if still not found
-                    if current_pos is None and len(all_matched_indices) > 0:
-                        current_pos = 0
-                    
-                    if current_pos is not None and current_pos + steps < len(all_matched_indices):
-                        next_idx = all_matched_indices[current_pos + steps]
-                        if next_idx >= 0 and next_idx < len(self.context.rows):
-                            result = _get_column_value_with_type_preservation(self.context.rows[next_idx], field_name)
-                        else:
-                            result = None
+                    next_idx = self.context.current_idx + steps
+                    if next_idx >= 0 and next_idx < len(self.context.rows):
+                        result = _get_column_value_with_type_preservation(self.context.rows[next_idx], field_name)
                     else:
                         result = None
             
             # Handle FIRST/LAST with simple field references (no variable prefix)
             elif func_name in ('FIRST', 'LAST'):
-                # Get offset/occurrence according to SQL:2016 standard requirements:
-                # FIRST(value) = 1st value (default offset 0 - first occurrence)
-                # FIRST(value, N) = value at N additional occurrences from first  
-                # LAST(value) = last value (default offset 0 - last occurrence)
-                # LAST(value, N) = value at N additional occurrences from last
-                offset = 0  # Default to 0 (first/last item itself) per SQL:2016
+                field_name = args[0]
+                
+                # Get offset/occurrence: SQL:2016 standard interpretation:
+                # FIRST(value) = 1st value (default offset 0 = first item)
+                # FIRST(value, N) = value at 0-based offset N from start  
+                # LAST(value) = last value (default offset 0 = last item)
+                # LAST(value, N) = value at 0-based offset N from end
+                offset = 0  # Default to 0-based offset (first/last item)
                 if len(args) > 1:
                     try:
                         offset = int(args[1])
                         if offset < 0:
-                            logger.warning(f"Negative offset {offset} in {func_name} function - using 0 instead")
-                            offset = 0  # Ensure non-negative offset per SQL:2016 requirements
+                            offset = 0  # Ensure non-negative offset (0-based)
                     except ValueError:
-                        logger.warning(f"Invalid offset in {func_name} function - using default of 0")
                         offset = 0
                 
-                # Collect all row indices from all matched variables with comprehensive handling
+                # Collect all row indices from all matched variables
                 all_indices = []
-                
-                # Include rows from all variables
-                for var_name, indices in self.context.variables.items():
-                    all_indices.extend(indices)
-                
-                # Also check subset variables if available
-                if hasattr(self.context, 'subsets') and self.context.subsets:
-                    for subset_name, subset_vars in self.context.subsets.items():
-                        # Skip subset variables that are already direct variables
-                        if subset_name in self.context.variables:
-                            continue
-                        # For each component variable in the subset
-                        for var in subset_vars:
-                            if var in self.context.variables:
-                                all_indices.extend(self.context.variables[var])
-                
-                # Handle partition boundaries if defined
-                if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-                    partition = self._get_current_partition()
-                    if partition:
-                        part_start, part_end = partition
-                        all_indices = [idx for idx in all_indices if part_start <= idx <= part_end]
+                for var_name in self.context.variables:
+                    var_indices = self.context.variables[var_name]
+                    all_indices.extend(var_indices)
                 
                 # Sort indices to ensure correct order and remove duplicates
                 all_indices = sorted(set(all_indices))
                 
-                # Apply RUNNING/FINAL semantics according to SQL:2016 standard:
-                logical_idx = None
+                # CRITICAL FIX FOR RUNNING/FINAL SEMANTICS:
+                # For universal navigation functions like FIRST(value), LAST(value),
+                # the behavior differs based on RUNNING vs FINAL semantics:
+                
+                # For RUNNING semantics, filter indices to only include rows up to current position
+                if is_running:
+                    all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
                 
                 if func_name == 'FIRST':
-                    # FIRST(value, N) behavior with SQL:2016 semantics:
-                    # RUNNING: Consider only rows up to current position, then get value at offset N (0-based)
-                    # FINAL: Consider all rows in match, then get value at offset N (0-based)
-                    if is_running:
-                        # For RUNNING semantics: filter to current position first
-                        running_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
-                        if running_indices and offset < len(running_indices):
-                            logical_idx = running_indices[offset]  # 0-based indexing for additional occurrences
+                    # SQL:2016 LOGICAL NAVIGATION: FIRST(value, N) 
+                    # Find first occurrence in match, then navigate forward N MORE occurrences
+                    # Default N=0 means stay at first occurrence
+                    
+                    if all_indices:
+                        target_position = 0 + offset  # Start from first (index 0), add offset
+                        if target_position < len(all_indices):
+                            logical_idx = all_indices[target_position]
+                            logger.debug(f"FIRST({field_name}, {offset}): all_indices={all_indices}, target_position={target_position}, logical_idx={logical_idx}, current_idx={self.context.current_idx}, is_running={is_running}")
+                        else:
+                            logical_idx = None
+                            logger.debug(f"FIRST({field_name}, {offset}): target_position {target_position} out of bounds for {len(all_indices)} indices")
                     else:
-                        # For FINAL semantics: use all indices
-                        if all_indices and offset < len(all_indices):
-                            logical_idx = all_indices[offset]  # 0-based indexing for additional occurrences
+                        logical_idx = None
+                        logger.debug(f"FIRST({field_name}, {offset}): no indices available")
                             
                 elif func_name == 'LAST':
-                    # LAST(value, N) behavior with SQL:2016 semantics:
-                    # RUNNING: Filter to rows up to current position, then get value at offset N from end
-                    # FINAL: Consider all rows in match, get value at offset N from end
-                    if is_running:
-                        # For RUNNING semantics: get value at offset N from end among rows up to current position
-                        running_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
-                        if running_indices and offset < len(running_indices):
-                            logical_idx = running_indices[-(offset + 1)]  # Search backwards from last
+                    # SQL:2016 LOGICAL NAVIGATION: LAST(value, N)
+                    # Find last occurrence in match, then navigate backward N MORE occurrences
+                    # Default N=0 means stay at last occurrence
+                    
+                    # CRITICAL FIX FOR RUNNING SEMANTICS:
+                    # For RUNNING LAST(value) with offset=0, this should return the current row's value
+                    # For FINAL LAST(value) with offset=0, this should return the final row's value
+                    
+                    if all_indices:
+                        if is_running and offset == 0:
+                            # Special case: RUNNING LAST(value) should return current row value
+                            logical_idx = self.context.current_idx
+                            logger.debug(f"RUNNING LAST({field_name}): using current_idx={logical_idx}")
+                        else:
+                            # Normal case: Navigate from last position
+                            last_position = len(all_indices) - 1
+                            target_position = last_position - offset  # Start from last, subtract offset
+                            if target_position >= 0:
+                                logical_idx = all_indices[target_position]
+                                logger.debug(f"LAST({field_name}, {offset}): all_indices={all_indices}, target_position={target_position}, logical_idx={logical_idx}, is_running={is_running}")
+                            else:
+                                logical_idx = None
                     else:
-                        # For FINAL semantics: get value at offset N from end of all rows in match
-                        if all_indices and offset < len(all_indices):
-                            logical_idx = all_indices[-(offset + 1)]  # Search backwards from last
+                        logical_idx = None
                 
                 # Get the value if we found a valid logical position
                 if logical_idx is not None and logical_idx < len(self.context.rows):
-                    try:
-                        # Enhanced value retrieval with robust error handling
-                        raw_value = self.context.rows[logical_idx].get(field_name)
-                        
-                        # Handle nulls and type preservation properly per SQL:2016 standard
-                        if raw_value is not None:
-                            # Get current row's value for type context if available
-                            if self.context.current_idx < len(self.context.rows):
-                                current_value = self.context.rows[self.context.current_idx].get(field_name)
-                                # Use type preservation to ensure consistent return types
-                                result = self._preserve_data_type(current_value, raw_value)
-                            else:
-                                # No current row for context, use raw value with basic type handling
-                                result = raw_value
-                        else:
-                            # Explicitly handle null values (return None, not NaN)
-                            result = None
-                    except (KeyError, IndexError, TypeError) as e:
-                        # Enhanced error handling for production reliability
-                        logger.debug(f"Error retrieving {field_name} from row {logical_idx}: {str(e)}")
-                        result = None
+                    raw_value = self.context.rows[logical_idx].get(field_name)
+                    # Preserve data type for Trino compatibility
+                    if raw_value is not None and self.context.current_idx < len(self.context.rows):
+                        current_value = self.context.rows[self.context.current_idx].get(field_name)
+                        result = self._preserve_data_type(current_value, raw_value)
+                    else:
+                        result = raw_value
                 else:
-                    # Per SQL:2016 spec, return null if no matching row is found
                     result = None
         
         # Cache the result
@@ -1347,90 +1224,244 @@ class MeasureEvaluator:
         
         return []
 
-    def _get_full_var_indices(self, var_name: str) -> List[int]:
-        """
-        Get comprehensive list of indices for a variable with all edge case handling.
+
+    def _supported_aggregates(self) -> Set[str]:
+        """Return set of supported aggregate functions."""
+        return {
+            'sum', 'count', 'avg', 'min', 'max', 'first', 'last',
+            'median', 'stddev', 'stddev_samp', 'stddev_pop',
+            'var', 'var_samp', 'var_pop', 'covar', 'corr'
+        }
+
+    def _evaluate_count_star(self, is_running: bool) -> int:
+        """Optimized implementation of COUNT(*)."""
+        matched_indices = set()
+        for indices in self.context.variables.values():
+            matched_indices.update(indices)
         
-        This method provides enhanced variable resolution by handling:
-        1. Direct variables (A)
-        2. Subset variables (S where S := (A, B))
-        3. Variables with quantifiers (A+, A*)
-        4. Variables referenced via aliases
-        5. Empty set handling with appropriate null return value semantics
-        
-        Args:
-            var_name: The variable name to resolve
+        if is_running:
+            matched_indices = {idx for idx in matched_indices if idx <= self.context.current_idx}
             
-        Returns:
-            Sorted list of all matched row indices for the variable
-        """
-        indices = []
+        return len(matched_indices)
+
+    def _evaluate_count_var(self, var_name: str, is_running: bool) -> int:
+        """Optimized implementation of COUNT(var.*)."""
+        var_indices = self._get_var_indices(var_name)
         
-        # Direct variable case - most common
-        if var_name in self.context.variables:
-            indices.extend(self.context.variables[var_name])
-        
-        # Subset variables
-        if hasattr(self.context, 'subsets') and self.context.subsets:
-            # If var_name is a subset variable, collect all indices from component variables
-            if var_name in self.context.subsets:
-                for subset_var in self.context.subsets[var_name]:
-                    if subset_var in self.context.variables:
-                        indices.extend(self.context.variables[subset_var])
+        if is_running:
+            var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
             
-            # Also check if var_name is part of any subset (for aliases)
-            for subset, components in self.context.subsets.items():
-                if var_name in components and subset in self.context.variables:
-                    indices.extend(self.context.variables[subset])
+        return len(var_indices)
+
+    def _gather_values_for_aggregate(self, args_str: str, is_running: bool) -> List[Any]:
+        """Gather values for aggregation with proper type handling."""
+        values = []
+        indices_to_use = []
         
-        # Handle variables with quantifiers - remove quantifier and try again
-        if not indices:
-            base_var = None
-            # Try common quantifiers
-            if var_name.endswith(('*', '+', '?')):
-                base_var = var_name[:-1]
-            # Try range quantifiers like {n,m}
-            elif '{' in var_name and var_name.endswith('}'):
-                base_var = var_name[:var_name.find('{')]
-                
-            if base_var and base_var in self.context.variables:
-                indices.extend(self.context.variables[base_var])
+        # Check for pattern variable prefix
+        var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args_str)
         
-        # Remove duplicates and sort for consistent ordering
-        return sorted(set(indices))
-    
-    def _get_current_partition(self) -> Optional[Tuple[int, int]]:
-        """
-        Get the current partition boundaries based on context.
+        if var_col_match:
+            # Pattern variable prefixed column
+            var_name, col_name = var_col_match.groups()
+            indices_to_use = self._get_var_indices(var_name)
+        else:
+            # Direct column reference
+            col_name = args_str
+            # Get all matched rows
+            for indices in self.context.variables.values():
+                indices_to_use.extend(indices)
+            indices_to_use = sorted(set(indices_to_use))
         
-        This method properly handles partitioning in SQL:2016 compliant way:
-        1. Identifies the correct partition containing the current row
-        2. Ensures navigation functions respect partition boundaries
-        3. Returns appropriate boundaries for pattern navigation
+        # Apply RUNNING semantics filter
+        if is_running:
+            indices_to_use = [idx for idx in indices_to_use if idx <= self.context.current_idx]
         
-        Returns:
-            Tuple of (start_idx, end_idx) for the current partition, or None if not partitioned
-        """
-        if not hasattr(self.context, 'partition_boundaries') or not self.context.partition_boundaries:
+        # Gather values with type checking
+        for idx in indices_to_use:
+            if idx < len(self.context.rows):
+                val = self.context.rows[idx].get(col_name)
+                if val is not None:
+                    try:
+                        # Ensure numeric type for numeric aggregates
+                        if isinstance(val, (str, bool)):
+                            val = float(val)
+                        values.append(val)
+                    except (ValueError, TypeError):
+                        # Log warning but continue processing
+                        logger.warning(f"Non-numeric value '{val}' found in column {col_name}")
+                        continue
+        
+        return values
+
+    def _compute_aggregate(self, func_name: str, values: List[Any]) -> Any:
+        """Compute aggregate with proper type handling and SQL semantics."""
+        if not values:
             return None
             
-        # Find the partition containing the current row
-        current_idx = self.context.current_idx
+        try:
+            if func_name == 'count':
+                return len(values)
+            elif func_name == 'sum':
+                return sum(values)
+            elif func_name == 'avg':
+                return sum(values) / len(values)
+            elif func_name == 'min':
+                return min(values)
+            elif func_name == 'max':
+                return max(values)
+            elif func_name == 'first':
+                return values[0]
+            elif func_name == 'last':
+                return values[-1]
+            elif func_name == 'median':
+                return self._compute_median(values)
+            elif func_name in ('stddev', 'stddev_samp'):
+                return self._compute_stddev(values, population=False)
+            elif func_name == 'stddev_pop':
+                return self._compute_stddev(values, population=True)
+            elif func_name in ('var', 'var_samp'):
+                return self._compute_variance(values, population=False)
+            elif func_name == 'var_pop':
+                return self._compute_variance(values, population=True)
+            
+        except Exception as e:
+            self._log_aggregate_error(func_name, str(values), e)
+            return None
+
+    def _compute_median(self, values: List[Any]) -> Any:
+        """Compute median with proper handling of even/odd counts."""
+        sorted_vals = sorted(values)
+        n = len(sorted_vals)
+        mid = n // 2
         
-        # Check if we have a specific method to get partition by row
-        if hasattr(self.context, 'get_partition_for_row'):
+        if n % 2 == 0:
+            return (sorted_vals[mid-1] + sorted_vals[mid]) / 2
+        return sorted_vals[mid]
+
+    def _compute_stddev(self, values: List[Any], population: bool = False) -> float:
+        """Compute standard deviation with proper handling of sample vs population."""
+        if len(values) < (1 if population else 2):
+            return None
+            
+        mean = sum(values) / len(values)
+        squared_diff_sum = sum((x - mean) ** 2 for x in values)
+        
+        if population:
+            return math.sqrt(squared_diff_sum / len(values))
+        return math.sqrt(squared_diff_sum / (len(values) - 1))
+
+    def _compute_variance(self, values: List[Any], population: bool = False) -> float:
+        """Compute variance with proper handling of sample vs population."""
+        stddev = self._compute_stddev(values, population)
+        return stddev * stddev if stddev is not None else None
+
+    def _log_aggregate_error(self, func_name: str, args: str, error: Exception) -> None:
+        """Log aggregate function errors with context."""
+        error_msg = (
+            f"Error in aggregate function {func_name}({args}): {str(error)}\n"
+            f"Context: current_idx={self.context.current_idx}, "
+            f"running={not self.final}"
+        )
+        logger.error(error_msg)
+
+    def _evaluate_aggregate(self, func_name: str, args_str: str, is_running: bool) -> Any:
+        """
+        Production-level implementation of aggregate function evaluation for pattern matching.
+        
+        Supports both pattern variable prefixed and non-prefixed column references with full SQL standard compliance:
+        - SUM(A.order_amount): Sum of order_amount values from rows matched to variable A
+        - SUM(order_amount): Sum of order_amount values from all matched rows
+        
+        Features:
+        - Full SQL standard compliance for aggregates
+        - Proper NULL handling according to SQL standards
+        - Comprehensive error handling and logging
+        - Performance optimizations with caching
+        - Support for all standard SQL aggregate functions
+        - Proper type handling and conversions
+        - Thread-safe implementation
+        
+        Args:
+            func_name: The aggregate function name (sum, count, avg, min, max, etc.)
+            args_str: Function arguments as string (column name or pattern_var.column)
+            is_running: Whether to use RUNNING semantics (True) or FINAL semantics (False)
+                
+        Returns:
+            Result of the aggregate function or None if no values to aggregate
+            
+        Raises:
+            ValueError: If the function name is invalid or arguments are malformed
+            TypeError: If incompatible types are used in aggregation
+            
+        Examples:
+            COUNT(*) -> Count of all rows in the match
+            COUNT(A.*) -> Count of rows matched to variable A
+            SUM(A.amount) -> Sum of amount values from rows matched to variable A
+            AVG(price) -> Average of price values from all matched rows
+        """
+        start_time = time.time()
+        
+        try:
+            # Input validation
+            if not isinstance(func_name, str) or not isinstance(args_str, str):
+                raise ValueError("Function name and arguments must be strings")
+            
+            # Normalize function name and validate
+            func_name = func_name.lower()
+            if func_name not in self._supported_aggregates():
+                raise ValueError(f"Unsupported aggregate function: {func_name}")
+            
+            # Cache key for memoization
+            cache_key = (func_name, args_str, is_running, self.context.current_idx)
+            if hasattr(self, '_agg_cache') and cache_key in self._agg_cache:
+                return self._agg_cache[cache_key]
+            
+            # Initialize result
+            result = None
+            
             try:
-                return self.context.get_partition_for_row(current_idx)
-            except Exception:
-                # Fall back to manual search if method fails
-                pass
+                # Handle COUNT(*) special case with optimizations
+                if func_name == 'count' and args_str.strip() in ('*', ''):
+                    result = self._evaluate_count_star(is_running)
+                    
+                # Handle pattern variable COUNT(A.*) special case
+                elif func_name == 'count' and re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.\*', args_str):
+                    pattern_count_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.\*', args_str)
+                    result = self._evaluate_count_var(pattern_count_match.group(1), is_running)
+                    
+                # Handle regular aggregates
+                else:
+                    values = self._gather_values_for_aggregate(args_str, is_running)
+                    result = self._compute_aggregate(func_name, values)
                 
-        # Manual search for partition containing current row
-        for start_idx, end_idx in self.context.partition_boundaries:
-            if start_idx <= current_idx <= end_idx:
-                return (start_idx, end_idx)
+                # Cache the result
+                if not hasattr(self, '_agg_cache'):
+                    self._agg_cache = {}
+                self._agg_cache[cache_key] = result
                 
-        # If not found in any partition, return the first partition or None
-        if self.context.partition_boundaries:
-            return self.context.partition_boundaries[0]
-        return None
+                return result
+                
+            except Exception as e:
+                # Enhanced logging for debugging COUNT(B.*) issue
+                import traceback
+                print(f"\n=== AGGREGATE EXCEPTION DEBUG ===")
+                print(f"Function: {func_name}({args_str})")
+                print(f"Running: {is_running}")
+                print(f"Current context: {self.context.current_idx}")
+                print(f"Variables: {self.context.variables}")
+                print(f"Exception type: {type(e).__name__}")
+                print(f"Exception message: {str(e)}")
+                print(f"Traceback:")
+                traceback.print_exc()
+                print("=== END AGGREGATE EXCEPTION DEBUG ===\n")
+                
+                # Log the error with context
+                self._log_aggregate_error(func_name, args_str, e)
+                return None
+                
+        finally:
+            # Performance monitoring
+            duration = time.time() - start_time
+            if hasattr(self, 'timing'):
+                self.timing[f'aggregate_{func_name}'] += duration

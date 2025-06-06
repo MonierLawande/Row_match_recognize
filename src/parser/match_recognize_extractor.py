@@ -357,7 +357,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         measures = []
         for md in ctx.measureDefinition():
             raw_text = self.get_text(md)  # Use get_text to preserve spaces
-            semantics = "RUNNING"  # Default semantics
+            semantics = "RUNNING"  # Default semantics per SQL:2016 specification
             raw_expr = raw_text.strip()
             
             # Use regex to match RUNNING or FINAL with flexible whitespace

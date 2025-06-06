@@ -1470,7 +1470,7 @@ def evaluate_navigation_expr(expr, row_context, current_row_idx, current_var):
     ref_var = match.group(2)
     field = match.group(3)
     offset_str = match.group(4)
-    offset = int(offset_str) if offset_str else 0  # SQL:2016 default is 0
+    offset = int(offset_str) if offset_str else 1
     
     # Check if referenced variable exists in context
     if ref_var not in row_context.variables:
@@ -1484,22 +1484,12 @@ def evaluate_navigation_expr(expr, row_context, current_row_idx, current_var):
     target_idx = None
     
     if func_type == 'FIRST':
-        # SQL:2016 REQUIREMENT: FIRST(A.totalprice, 2) navigates to first row matched to variable A,
-        # then searches forward for 2 more occurrences within the match
-        if offset < 0:
-            raise ValueError(f"FIRST offset must be non-negative, got {offset}")
-        if offset >= len(var_indices):
-            raise ValueError(f"FIRST({ref_var}, {offset}) references beyond available rows")
-        target_idx = var_indices[offset]  # 0-based indexing for additional occurrences
+        # First occurrence of the variable
+        target_idx = var_indices[0]
         
     elif func_type == 'LAST':
-        # SQL:2016 REQUIREMENT: LAST(A.totalprice, 2) navigates to last row matched to variable A,
-        # then searches backwards for 2 more occurrences within the match
-        if offset < 0:
-            raise ValueError(f"LAST offset must be non-negative, got {offset}")
-        if offset >= len(var_indices):
-            raise ValueError(f"LAST({ref_var}, {offset}) references beyond available rows")
-        target_idx = var_indices[-(offset + 1)]  # Search backwards from last
+        # Last occurrence of the variable
+        target_idx = var_indices[-1]
         
     elif func_type == 'NEXT':
         if ref_var == current_var:
@@ -1514,9 +1504,9 @@ def evaluate_navigation_expr(expr, row_context, current_row_idx, current_var):
         else:
             # Find rows of ref_var that appear after current row
             future_indices = [i for i in var_indices if i > current_row_idx]
-            if not future_indices or offset >= len(future_indices):
+            if not future_indices or offset > len(future_indices):
                 raise ValueError(f"NEXT({ref_var}, {offset}) references beyond available rows")
-            target_idx = future_indices[offset]  # 0-based indexing for additional occurrences
+            target_idx = future_indices[offset - 1]
             
     elif func_type == 'PREV':
         if ref_var == current_var:
@@ -1531,9 +1521,9 @@ def evaluate_navigation_expr(expr, row_context, current_row_idx, current_var):
         else:
             # Find rows of ref_var that appear before current row
             past_indices = [i for i in var_indices if i < current_row_idx]
-            if not past_indices or offset >= len(past_indices):
+            if not past_indices or offset > len(past_indices):
                 raise ValueError(f"PREV({ref_var}, {offset}) references before available rows")
-            target_idx = past_indices[-(offset + 1)]  # Search backwards from the most recent
+            target_idx = past_indices[-offset]
     
     # Get the value from the target row
     if target_idx < 0 or target_idx >= len(row_context.rows):
@@ -1631,7 +1621,7 @@ def _parse_simple_navigation(expr: str) -> NavigationFunctionInfo:
         func_type = simple_match.group(1).upper()
         variable = simple_match.group(2)
         column = simple_match.group(3)
-        offset = int(simple_match.group(4)) if simple_match.group(4) else 0  # SQL:2016 default is 0
+        offset = int(simple_match.group(4)) if simple_match.group(4) else 1
         
         return NavigationFunctionInfo(
             function_type=func_type,
@@ -1910,11 +1900,11 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
                         
                         if var_indices:
                             if inner_func_type == 'FIRST':
-                                if inner_offset < len(var_indices):
-                                    inner_target_idx = var_indices[inner_offset]  # 0-based indexing for additional occurrences
+                                if inner_offset <= len(var_indices):
+                                    inner_target_idx = var_indices[inner_offset - 1]  # Convert 1-based to 0-based
                             elif inner_func_type == 'LAST':
-                                if inner_offset < len(var_indices):
-                                    inner_target_idx = var_indices[-(inner_offset + 1)]  # Search backwards from last
+                                if inner_offset <= len(var_indices):
+                                    inner_target_idx = var_indices[-inner_offset]  # Count from end
                 else:
                     # Universal reference like FIRST(value) - look across all variables
                     all_indices = set()
@@ -1930,11 +1920,11 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
                         
                         if all_indices:
                             if inner_func_type == 'FIRST':
-                                if inner_offset < len(all_indices):
-                                    inner_target_idx = all_indices[inner_offset]  # 0-based indexing for additional occurrences
+                                if inner_offset <= len(all_indices):
+                                    inner_target_idx = all_indices[inner_offset - 1]  # Convert 1-based to 0-based
                             elif inner_func_type == 'LAST':
-                                if inner_offset < len(all_indices):
-                                    inner_target_idx = all_indices[-(inner_offset + 1)]  # Search backwards from last
+                                if inner_offset <= len(all_indices):
+                                    inner_target_idx = all_indices[-inner_offset]  # Count from end
                 
                 # Now apply the outer function from the inner target position
                 result = None
@@ -1988,10 +1978,10 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
         func_type = match.group(1).upper()
         var_name = match.group(2) if match.group(2) else None  # Optional variable
         field = match.group(3)
-        offset = int(match.group(4)) if match.group(4) else 0  # SQL:2016 default is 0
+        offset = int(match.group(4)) if match.group(4) else 1
         
-        # SQL:2016 REQUIREMENT: Validate offset is non-negative integer
-        if offset < 0:
+        # CRITICAL FIX 1: Validate offset is positive and handle FIRST/LAST offset correctly
+        if offset <= 0:
             row_context.navigation_cache[cache_key] = None
             return None
         
@@ -2020,30 +2010,32 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
             target_idx = None
             
             if func_type == 'FIRST':
-                # SQL:2016 REQUIREMENT: FIRST(A.totalprice, 2) should navigate to first row matched 
-                # to variable A, then search forward for 2 more occurrences within the match
-                # Default offset=0 means first occurrence
-                if offset < len(all_indices):
-                    target_idx = all_indices[offset]  # 0-based indexing for additional occurrences
+                # CRITICAL FIX: FIRST(value, offset) = first occurrence + offset steps forward
+                # FIRST(value, 2) means: start from first occurrence, go 2 positions forward
+                first_idx = 0  # First occurrence in sorted all_indices
+                target_position = first_idx + offset
+                if target_position < len(all_indices):
+                    target_idx = all_indices[target_position]
                 
             elif func_type == 'LAST':
-                # SQL:2016 REQUIREMENT: LAST(A.totalprice, 2) should navigate to last row matched
-                # to variable A, then search backwards for 2 more occurrences within the match  
-                # Default offset=0 means last occurrence
-                if offset < len(all_indices):
-                    target_idx = all_indices[-(offset + 1)]  # Search backwards from last
+                # CRITICAL FIX: LAST(value, offset) = last occurrence - offset steps backward
+                # LAST(value, 2) means: start from last occurrence, go 2 positions backward
+                last_idx = len(all_indices) - 1  # Last occurrence in sorted all_indices
+                target_position = last_idx - offset
+                if target_position >= 0:
+                    target_idx = all_indices[target_position]
                     
             elif func_type == 'NEXT':
                 # For universal NEXT, find next occurrence after current position
                 future_indices = [idx for idx in all_indices if idx > current_row_idx]
-                if offset < len(future_indices):
-                    target_idx = future_indices[offset]  # 0-based indexing for additional occurrences
+                if offset <= len(future_indices):
+                    target_idx = future_indices[offset - 1]
                     
             elif func_type == 'PREV':
                 # For universal PREV, find previous occurrence before current position
                 past_indices = [idx for idx in all_indices if idx < current_row_idx]
-                if offset < len(past_indices):
-                    target_idx = past_indices[-(offset + 1)]  # Search backwards from the most recent
+                if offset <= len(past_indices):
+                    target_idx = past_indices[-offset]  # Count backwards
             
             # Get value if target found
             if target_idx is not None and 0 <= target_idx < len(row_context.rows):
@@ -2077,18 +2069,18 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
         
         try:
             if func_type == 'FIRST':
-                # SQL:2016 REQUIREMENT: FIRST(A.value, 2) should navigate to first occurrence
-                # of variable A, then search forward for 2 more occurrences within the match
-                # offset=0 means first occurrence, offset=1 means second occurrence, etc.
-                if offset < len(var_indices):
-                    target_idx = var_indices[offset]  # 0-based indexing for additional occurrences
+                # CRITICAL FIX: FIRST(A.value, offset) = first occurrence + offset steps forward
+                # FIRST(A.value, 2) means: start from first occurrence in var_indices, go 2 positions forward
+                if len(var_indices) > offset:
+                    target_idx = var_indices[offset]  # 0-based: offset positions from first
                     
             elif func_type == 'LAST':
-                # SQL:2016 REQUIREMENT: LAST(A.value, 2) should navigate to last occurrence
-                # of variable A, then search backwards for 2 more occurrences within the match
-                # offset=0 means last occurrence, offset=1 means second-to-last, etc.
-                if offset < len(var_indices):
-                    target_idx = var_indices[-(offset + 1)]  # Search backwards from last
+                # CRITICAL FIX: LAST(A.value, offset) = last occurrence - offset steps backward
+                # LAST(A.value, 2) means: start from last occurrence in var_indices, go 2 positions backward
+                last_position = len(var_indices) - 1
+                target_position = last_position - offset
+                if target_position >= 0:
+                    target_idx = var_indices[target_position]
                     
             elif func_type == 'NEXT':
                 # Enhanced NEXT with partition boundary checking
@@ -2105,8 +2097,8 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
                 else:
                     # Cross-variable navigation
                     future_indices = [i for i in var_indices if i > current_row_idx]
-                    if offset < len(future_indices):
-                        target_idx = future_indices[offset]  # 0-based indexing for additional occurrences
+                    if offset <= len(future_indices):
+                        target_idx = future_indices[offset - 1]
                     
             elif func_type == 'PREV':
                 # Enhanced PREV with partition boundary checking
@@ -2123,8 +2115,8 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
                 else:
                     # Cross-variable navigation
                     past_indices = [i for i in var_indices if i < current_row_idx]
-                    if offset < len(past_indices):
-                        target_idx = past_indices[-(offset + 1)]  # Search backwards from the most recent
+                    if offset <= len(past_indices):
+                        target_idx = past_indices[-offset]
                     
         except (ValueError, IndexError) as e:
             # Enhanced error handling with logging
