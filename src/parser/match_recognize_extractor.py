@@ -738,22 +738,36 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         logger.debug(f"PATTERN clause validated successfully: {pattern_text}")
 
     def validate_function_usage(self, ctx):
-        allowed_functions = {
-            "COUNT": r"(?:FINAL|RUNNING)?\s*COUNT\(\s*.*?\s*\)",
-            "COUNT_IF": r"(?:FINAL|RUNNING)?\s*COUNT_IF\(\s*.*?,\s*.*?\s*\)",
-            "SUM_IF": r"(?:FINAL|RUNNING)?\s*SUM_IF\(\s*.*?,\s*.*?\s*\)",
-            "AVG_IF": r"(?:FINAL|RUNNING)?\s*AVG_IF\(\s*.*?,\s*.*?\s*\)",
-            "FIRST": r"(?:FINAL|RUNNING)?\s*FIRST\(\s*.+?(?:\s*,\s*\d+)?\s*\)",
-            "LAST":  r"(?:FINAL|RUNNING)?\s*LAST\(\s*.+?(?:\s*,\s*\d+)?\s*\)",
-            "PREV":  r"(?:FINAL|RUNNING)?\s*PREV\(\s*.+?(?:,\s*\d+)?\s*\)",
-            "NEXT":  r"(?:FINAL|RUNNING)?\s*NEXT\(\s*.+?(?:,\s*\d+)?\s*\)",
-        }
+        # Order matters! Check specific functions (COUNT_IF, SUM_IF, AVG_IF) before generic ones (COUNT)
+        allowed_functions = [
+            ("COUNT_IF", r"(?:FINAL|RUNNING)?\s*COUNT_IF\(\s*.*?,\s*.*?\s*\)"),
+            ("SUM_IF", r"(?:FINAL|RUNNING)?\s*SUM_IF\(\s*.*?,\s*.*?\s*\)"),
+            ("AVG_IF", r"(?:FINAL|RUNNING)?\s*AVG_IF\(\s*.*?,\s*.*?\s*\)"),
+            ("COUNT", r"(?:FINAL|RUNNING)?\s*COUNT\(\s*.*?\s*\)"),
+            ("FIRST", r"(?:FINAL|RUNNING)?\s*FIRST\(\s*.+?(?:\s*,\s*\d+)?\s*\)"),
+            ("LAST", r"(?:FINAL|RUNNING)?\s*LAST\(\s*.+?(?:\s*,\s*\d+)?\s*\)"),
+            ("PREV", r"(?:FINAL|RUNNING)?\s*PREV\(\s*.+?(?:,\s*\d+)?\s*\)"),
+            ("NEXT", r"(?:FINAL|RUNNING)?\s*NEXT\(\s*.+?(?:,\s*\d+)?\s*\)"),
+        ]
+        
         for measure in self.ast.measures.measures if self.ast.measures else []:
-            for func, pattern in allowed_functions.items():
-                if re.search(func, measure.expression, flags=re.IGNORECASE):
-                    if not re.search(pattern, measure.expression, flags=re.IGNORECASE):
-                        raise ParserError(f"Invalid usage of {func} in measure: {measure.expression}", line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
-            logger.debug(f"Validated function usage for measure: {measure.expression}")
+            expression = measure.expression
+            validated = False
+            
+            # Check each function pattern in order
+            for func, pattern in allowed_functions:
+                if re.search(func, expression, flags=re.IGNORECASE):
+                    if re.search(pattern, expression, flags=re.IGNORECASE):
+                        validated = True
+                        logger.debug(f"Validated {func} usage in measure: {expression}")
+                        break
+                    else:
+                        raise ParserError(f"Invalid usage of {func} in measure: {expression}", 
+                                        line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText())
+            
+            if not validated:
+                # No specific function pattern matched, which is fine for other expressions
+                logger.debug(f"No specific function validation needed for measure: {expression}")
 
     def validate_identifiers(self, ctx):
         """Validate that all defined variables are found in the pattern or as subset components."""
