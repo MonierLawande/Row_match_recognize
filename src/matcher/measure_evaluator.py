@@ -1012,9 +1012,7 @@ class MeasureEvaluator:
                             result = self._preserve_data_type(current_value, raw_value)
                         else:
                             result = raw_value
-                    # Note: if next_idx >= len(rows), result remains None (boundary condition)
-            
-            # For FIRST/LAST with variable prefix, we use variable-specific logic
+                    # Note: if next_idx >= len(rows), result remains None (boundary condition)                # For FIRST/LAST with variable prefix, we use variable-specific logic
             elif func_name in ('FIRST', 'LAST'):
                 # Get occurrence (default is 0)
                 occurrence = 0
@@ -1024,45 +1022,37 @@ class MeasureEvaluator:
                     except ValueError:
                         pass
                 
-                # Get variable indices
-                var_indices = []
-                if var_name in self.context.variables:
-                    var_indices = self.context.variables[var_name]
-                
-                # Sort indices to ensure correct order
-                var_indices = sorted(var_indices)
-                
-                # For RUNNING semantics, only consider rows up to current position
-                if is_running:
-                    var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
-                
-                if var_indices:
-                    logical_idx = None
-                    if func_name == 'FIRST':
-                        # SQL:2016 LOGICAL NAVIGATION: FIRST(A.value, N) 
-                        # Find first occurrence of A, then navigate forward N MORE occurrences
-                        # Default N=0 means stay at first occurrence
-                        target_position = 0 + occurrence  # Start from first (index 0), add offset
-                        if target_position < len(var_indices):
-                            logical_idx = var_indices[target_position]
-                    elif func_name == 'LAST':
-                        # SQL:2016 LOGICAL NAVIGATION: LAST(A.value, N)
-                        # Find last occurrence of A, then navigate backward N MORE occurrences  
-                        # Default N=0 means stay at last occurrence
-                        last_position = len(var_indices) - 1
-                        target_position = last_position - occurrence  # Start from last, subtract offset
-                        if target_position >= 0:
-                            logical_idx = var_indices[target_position]
-                    
-                    # Get the value if we found a valid logical position
-                    if logical_idx is not None and logical_idx < len(self.context.rows):
-                        raw_value = self.context.rows[logical_idx].get(field_name)
-                        # Preserve data type for Trino compatibility
-                        if raw_value is not None and self.context.current_idx < len(self.context.rows):
-                            current_value = self.context.rows[self.context.current_idx].get(field_name)
-                            result = self._preserve_data_type(current_value, raw_value)
-                        else:
-                            result = raw_value
+                # Leverage the enhanced RowContext methods with semantics support
+                if func_name == 'FIRST':
+                    semantics = 'RUNNING' if is_running else 'FINAL'
+                    row = self.context.first(var_name, occurrence, semantics)
+                    if row and field_name in row:
+                        result = row.get(field_name)
+                    else:
+                        result = None
+                        
+                elif func_name == 'LAST':
+                    semantics = 'RUNNING' if is_running else 'FINAL'
+                    row = self.context.last(var_name, occurrence, semantics)
+                    if row and field_name in row:
+                        result = row.get(field_name)
+                    else:
+                        result = None
+                if func_name == 'FIRST':
+                    semantics = 'RUNNING' if is_running else 'FINAL'
+                    row = self.context.first(var_name, occurrence, semantics)
+                    if row and field_name in row:
+                        result = row.get(field_name)
+                    else:
+                        result = None
+                        
+                elif func_name == 'LAST':
+                    semantics = 'RUNNING' if is_running else 'FINAL'
+                    row = self.context.last(var_name, occurrence, semantics)
+                    if row and field_name in row:
+                        result = row.get(field_name)
+                    else:
+                        result = None
         
         else:
             # Handle simple field references (no variable prefix) for all functions
@@ -1172,6 +1162,7 @@ class MeasureEvaluator:
                 
                 # Get the value if we found a valid logical position
                 if logical_idx is not None and logical_idx < len(self.context.rows):
+                    # Use the row context's enhanced direct access with optimized caching
                     raw_value = self.context.rows[logical_idx].get(field_name)
                     # Preserve data type for Trino compatibility
                     if raw_value is not None and self.context.current_idx < len(self.context.rows):
