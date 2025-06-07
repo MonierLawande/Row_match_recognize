@@ -14,6 +14,7 @@ from src.matcher.row_context import RowContext
 from src.matcher.condition_evaluator import compile_condition, validate_navigation_conditions
 from src.matcher.measure_evaluator import MeasureEvaluator
 from src.utils.logging_config import get_logger, PerformanceTimer
+from src.utils.pattern_cache import get_cache_key, get_cached_pattern, cache_pattern, CACHE_STATS
 
 # Module logger
 logger = get_logger(__name__)
@@ -82,14 +83,7 @@ def _create_dataframe_with_preserved_types(results: List[Dict[str, Any]]) -> pd.
     
     return pd.DataFrame(df_data)
 
-# Simple pattern cache - production-ready caching without external dependencies
-_PATTERN_CACHE = {}
-_CACHE_STATS = {
-    'hits': 0, 
-    'misses': 0, 
-    'compilation_time_saved': 0.0,
-    'memory_used_mb': 0.0
-}
+# Removed local pattern cache in favor of centralized cache utility
 
 
 
@@ -540,17 +534,16 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         automata_start = time.time()
         
-        # Simple cache key generation
-        import hashlib
-        cache_key = hashlib.md5(f"{pattern_text}{str(define)}{str(subset_dict)}".encode()).hexdigest()
+        # Generate cache key using centralized utility
+        cache_key = get_cache_key(pattern_text, define, subset_dict)
         
         try:
             # Try to get compiled pattern from cache first
-            if cache_key in _PATTERN_CACHE:
+            cached_pattern = get_cached_pattern(cache_key)
+            if cached_pattern:
                 # Cache hit - use cached DFA and NFA
-                dfa, nfa, cached_time = _PATTERN_CACHE[cache_key]
-                _CACHE_STATS['hits'] += 1
-                _CACHE_STATS['compilation_time_saved'] += cached_time
+                dfa, nfa, cached_time = cached_pattern
+                CACHE_STATS['compilation_time_saved'] += cached_time
                 logger.info(f"Pattern compilation cache HIT for pattern: {pattern_text}")
                 
                 # Create matcher with cached automata
@@ -565,7 +558,6 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 )
             else:
                 # Cache miss - compile pattern and cache the result
-                _CACHE_STATS['misses'] += 1
                 logger.info(f"Pattern compilation cache MISS for pattern: {pattern_text}")
                 compilation_start = time.time()
                 
@@ -578,13 +570,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 compilation_time = time.time() - compilation_start
                 
-                # Cache the compiled pattern for future use (simple cache - keep last 100 patterns)
-                if len(_PATTERN_CACHE) > 100:
-                    # Remove oldest entry (simple FIFO eviction)
-                    oldest_key = next(iter(_PATTERN_CACHE))
-                    del _PATTERN_CACHE[oldest_key]
-                
-                _PATTERN_CACHE[cache_key] = (dfa, nfa, compilation_time)
+                # Cache the compiled pattern using centralized utility
+                cache_pattern(cache_key, dfa, nfa, compilation_time)
                 
                 # Create matcher with newly compiled automata
                 matcher = EnhancedMatcher(
@@ -1006,22 +993,22 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         logger.info(f"Query execution metrics: {metrics}")
         
         # Display cache statistics
-        total_requests = _CACHE_STATS['hits'] + _CACHE_STATS['misses']
+        total_requests = CACHE_STATS['hits'] + CACHE_STATS['misses']
         cache_stats = {
-            'total_hits': _CACHE_STATS['hits'],
-            'total_misses': _CACHE_STATS['misses'], 
-            'total_compilation_time_saved': _CACHE_STATS['compilation_time_saved'],
-            'memory_used_mb': len(_PATTERN_CACHE) * 0.1  # Rough estimate
+            'total_hits': CACHE_STATS['hits'],
+            'total_misses': CACHE_STATS['misses'], 
+            'total_compilation_time_saved': CACHE_STATS['compilation_time_saved'],
+            'memory_used_mb': CACHE_STATS['memory_used_mb']
         }
         logger.info(f"Pattern cache statistics: {cache_stats}")
         
         # Calculate cache effectiveness
         if total_requests > 0:
-            hit_rate = (_CACHE_STATS['hits'] / total_requests) * 100
-            logger.info(f"Cache hit rate: {hit_rate:.1f}% ({_CACHE_STATS['hits']}/{total_requests})")
+            hit_rate = (CACHE_STATS['hits'] / total_requests) * 100
+            logger.info(f"Cache hit rate: {hit_rate:.1f}% ({CACHE_STATS['hits']}/{total_requests})")
             
-            if _CACHE_STATS['compilation_time_saved'] > 0:
-                logger.info(f"Compilation time saved: {_CACHE_STATS['compilation_time_saved']:.3f}s")
+            if CACHE_STATS['compilation_time_saved'] > 0:
+                logger.info(f"Compilation time saved: {CACHE_STATS['compilation_time_saved']:.3f}s")
         
         # Display memory usage
         if cache_stats['memory_used_mb'] > 0:

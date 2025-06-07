@@ -29,25 +29,22 @@ class RowsPerMatch(Enum):
 @dataclass
 class MatchConfig:
     """Configuration for pattern matching behavior."""
-    def __init__(self, rows_per_match, skip_mode, skip_var=None, show_empty=True, include_unmatched=False):
-        self.rows_per_match = rows_per_match
-        self.skip_mode = skip_mode
-        self.skip_var = skip_var
-        self.show_empty = show_empty
-        self.include_unmatched = include_unmatched
-        
-        # Map to dictionary for compatibility
-        self._config_dict = {
-            "all_rows": rows_per_match != RowsPerMatch.ONE_ROW,
-            "show_empty": show_empty,
-            "with_unmatched": include_unmatched,
-            "skip_mode": skip_mode,
-            "skip_var": skip_var
-        }
+    rows_per_match: RowsPerMatch
+    skip_mode: SkipMode
+    skip_var: Optional[str] = None
+    show_empty: bool = True
+    include_unmatched: bool = False
     
     def get(self, key, default=None):
         """Dictionary-like get method for compatibility."""
-        return self._config_dict.get(key, default)
+        config_dict = {
+            "all_rows": self.rows_per_match != RowsPerMatch.ONE_ROW,
+            "show_empty": self.show_empty,
+            "with_unmatched": self.include_unmatched,
+            "skip_mode": self.skip_mode,
+            "skip_var": self.skip_var
+        }
+        return config_dict.get(key, default)
 
 class PatternExclusionHandler:
     """
@@ -214,7 +211,11 @@ class EnhancedMatcher:
         else:
             # Fallback to legacy behavior
             self.metadata = {}
-            self.excluded_vars = self._analyze_exclusions()
+            # Use exclusion handler to get excluded variables
+            if self.exclusion_handler:
+                self.excluded_vars = self.exclusion_handler.excluded_vars
+            else:
+                self.excluded_vars = set()
             self._anchor_metadata = {
                 "has_start_anchor": False,
                 "has_end_anchor": False,
@@ -537,7 +538,7 @@ class EnhancedMatcher:
 
     def find_matches(self, rows, config=None, measures=None):
         """Find all matches with optimized processing."""
-        logger.info(f"FIND_MATCHES DEBUG: Starting find_matches with {len(rows)} rows")
+        logger.info(f"Starting find_matches with {len(rows)} rows")
         start_time = time.time()
         results = []
         match_number = 1
@@ -551,7 +552,6 @@ class EnhancedMatcher:
         show_empty = config.show_empty if config else True
         include_unmatched = config.include_unmatched if config else False
 
-        logger.info(f"FIND_MATCHES DEBUG: all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
         logger.info(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
 
         # Safety counter to prevent infinite loops
@@ -560,25 +560,21 @@ class EnhancedMatcher:
 
         while start_idx < len(rows) and iteration_count < max_iterations:
             iteration_count += 1
-            logger.debug(f"ITERATOR DEBUG: iteration {iteration_count}, start_idx={start_idx}, processed_indices={sorted(processed_indices)}")
+            logger.debug(f"Iteration {iteration_count}, start_idx={start_idx}")
 
             # Skip already processed indices
             if start_idx in processed_indices:
-                logger.debug(f"ITERATOR DEBUG: Skipping already processed index {start_idx}")
+                logger.debug(f"Skipping already processed index {start_idx}")
                 start_idx += 1
                 continue
 
-            logger.debug(f"ITERATOR DEBUG: Looking for match starting at index {start_idx}")
             # Find next match using optimized transitions
             match = self._find_single_match(rows, start_idx, RowContext(rows=rows))
             if not match:
                 # Mark this index as processed and move on
-                logger.debug(f"ITERATOR DEBUG: No match found at index {start_idx}, marking as processed")
                 processed_indices.add(start_idx)
                 start_idx += 1
                 continue
-
-            logger.debug(f"ITERATOR DEBUG: Found match at index {start_idx}: {match}")
             # Store the match for post-processing
             match["match_number"] = match_number
             self._matches.append(match)
@@ -625,7 +621,7 @@ class EnhancedMatcher:
                 # For empty matches, always move to the next position
                 processed_indices.add(start_idx)
                 start_idx += 1
-                logger.debug(f"ITERATOR DEBUG: Empty match, advancing from {old_start_idx} to {start_idx}")
+                logger.debug(f"Empty match, advancing from {old_start_idx} to {start_idx}")
             else:
                 # For non-empty matches, use the skip mode
                 if config and config.skip_mode:
@@ -633,7 +629,7 @@ class EnhancedMatcher:
                 else:
                     start_idx = match["end"] + 1
 
-                logger.debug(f"ITERATOR DEBUG: Non-empty match, advancing from {old_start_idx} to {start_idx}")
+                logger.debug(f"Non-empty match, advancing from {old_start_idx} to {start_idx}")
                 # Mark all indices in the match as processed
                 for idx in range(old_start_idx, match["end"] + 1):
                     processed_indices.add(idx)
@@ -641,16 +637,14 @@ class EnhancedMatcher:
                 # Also mark excluded rows as processed
                 if match.get("excluded_rows"):
                     processed_indices.update(match["excluded_rows"])
-                    logger.debug(f"ITERATOR DEBUG: Also marked excluded rows as processed: {match['excluded_rows']}")
+                    logger.debug(f"Marked excluded rows as processed: {match['excluded_rows']}")
 
             match_number += 1
-            logger.debug(f"ITERATOR DEBUG: End of iteration {iteration_count}, start_idx={start_idx}, match_number={match_number}")
-            logger.debug(f"ITERATOR DEBUG: processed_indices now: {sorted(processed_indices)}")
-            logger.info("="*50)
+            logger.debug(f"End of iteration {iteration_count}, match_number={match_number}")
 
         # Check if we hit the iteration limit
         if iteration_count >= max_iterations:
-            logger.warning(f"WARNING: Reached maximum iteration count ({max_iterations}). Possible infinite loop detected.")
+            logger.warning(f"Reached maximum iteration count ({max_iterations}). Possible infinite loop detected.")
 
         # Add unmatched rows if requested
         if include_unmatched or (config and config.rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED):
@@ -667,18 +661,6 @@ class EnhancedMatcher:
 
 
 
-    def _analyze_exclusions(self):
-        """Pre-analyze pattern for excluded variables."""
-        excluded_vars = set()
-        if self.original_pattern and "{-" in self.original_pattern and "-}" in self.original_pattern:
-            parts = self.original_pattern.split("{-")
-            for part in parts[1:]:
-                if "-}" in part:
-                    excluded = part.split("-}")[0].strip()
-                    for var_name in self.dfa.states[0].variables:
-                        if var_name in excluded:
-                            excluded_vars.add(var_name)
-        return excluded_vars
     def _get_skip_position(self, skip_mode: SkipMode, skip_var: Optional[str], match: Dict[str, Any]) -> int:
         """
         Determine the next position to start matching based on skip mode.
