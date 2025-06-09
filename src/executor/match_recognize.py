@@ -526,7 +526,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         measure_semantics[alias] = "RUNNING" if rows_per_match != RowsPerMatch.ONE_ROW else "FINAL"
         
         # Create match configuration
-        config = MatchConfig(
+        match_config = MatchConfig(
             rows_per_match=rows_per_match,
             skip_mode=skip_mode,
             skip_var=skip_var,
@@ -540,8 +540,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         # Try to load configuration
         try:
-            config = MatchRecognizeConfig.from_env()
-            caching_enabled = config.performance.enable_caching
+            app_config = MatchRecognizeConfig.from_env()
+            caching_enabled = app_config.performance.enable_caching
         except Exception:
             caching_enabled = is_caching_enabled()
         
@@ -651,7 +651,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 # Find matches
                 partition_results = matcher.find_matches(
                     rows=rows,
-                    config=config,
+                    config=match_config,
                     measures=measures
                 )
                 
@@ -875,7 +875,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         
                         # Handle empty match case
                         if match.get("is_empty", False) or (match["start"] > match["end"]):
-                            if config.show_empty and match["start"] < len(all_rows):
+                            if match_config.show_empty and match["start"] < len(all_rows):
                                 empty_row = _process_empty_match(match["start"], all_rows, measures, match_num, partition_by)
                                 if empty_row:
                                     results.append(empty_row)
@@ -916,7 +916,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             results.append(result)
                 
                 # Handle unmatched rows for ALL ROWS PER MATCH WITH UNMATCHED ROWS
-                if config.include_unmatched:
+                if match_config.include_unmatched:
                     unmatched_indices = set(range(len(all_rows))) - all_matched_indices
                     for idx in sorted(unmatched_indices):
                         if idx < len(all_rows):
