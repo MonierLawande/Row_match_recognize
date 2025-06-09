@@ -21,6 +21,10 @@ class PerformanceConfig:
     max_memory_mb: int = 1024
     enable_caching: bool = True
     cache_size_limit: int = 10_000
+    cache_memory_limit_mb: int = 500
+    cache_ttl_seconds: int = 3600
+    cache_clear_threshold_mb: int = 400
+    cache_monitoring_interval_seconds: int = 300
     parallel_processing: bool = False
     max_workers: int = 4
 
@@ -88,6 +92,19 @@ class MatchRecognizeConfig:
             os.getenv('MR_EXECUTION_TIMEOUT', config.performance.execution_timeout_seconds)
         )
         config.performance.enable_caching = os.getenv('MR_ENABLE_CACHING', 'true').lower() == 'true'
+        config.performance.cache_size_limit = int(
+            os.getenv('MR_CACHE_SIZE_LIMIT', config.performance.cache_size_limit)
+        )
+        config.performance.cache_memory_limit_mb = int(
+            os.getenv('MR_CACHE_MEMORY_LIMIT_MB', config.performance.cache_memory_limit_mb)
+        )
+        config.performance.cache_ttl_seconds = int(
+            os.getenv('MR_CACHE_TTL_SECONDS', config.performance.cache_ttl_seconds)
+        )
+        config.performance.parallel_processing = os.getenv('MR_PARALLEL_PROCESSING', 'false').lower() == 'true'
+        config.performance.max_workers = int(
+            os.getenv('MR_MAX_WORKERS', config.performance.max_workers)
+        )
         
         # Logging settings
         config.logging.level = os.getenv('MR_LOG_LEVEL', config.logging.level)

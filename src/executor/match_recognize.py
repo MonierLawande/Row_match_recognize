@@ -14,7 +14,11 @@ from src.matcher.row_context import RowContext
 from src.matcher.condition_evaluator import compile_condition, validate_navigation_conditions
 from src.matcher.measure_evaluator import MeasureEvaluator
 from src.utils.logging_config import get_logger, PerformanceTimer
-from src.utils.pattern_cache import get_cache_key, get_cached_pattern, cache_pattern, CACHE_STATS
+from src.utils.pattern_cache import (
+    get_cache_key, get_cached_pattern, cache_pattern, CACHE_STATS,
+    get_cache_stats, is_caching_enabled
+)
+from src.config.production_config import MatchRecognizeConfig
 
 # Module logger
 logger = get_logger(__name__)
@@ -534,17 +538,29 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         automata_start = time.time()
         
+        # Try to load configuration
+        try:
+            config = MatchRecognizeConfig.from_env()
+            caching_enabled = config.performance.enable_caching
+        except Exception:
+            caching_enabled = is_caching_enabled()
+        
         # Generate cache key using centralized utility
         cache_key = get_cache_key(pattern_text, define, subset_dict)
         
         try:
             # Try to get compiled pattern from cache first
-            cached_pattern = get_cached_pattern(cache_key)
+            cached_pattern = get_cached_pattern(cache_key) if caching_enabled else None
             if cached_pattern:
                 # Cache hit - use cached DFA and NFA
                 dfa, nfa, cached_time = cached_pattern
-                CACHE_STATS['compilation_time_saved'] += cached_time
                 logger.info(f"Pattern compilation cache HIT for pattern: {pattern_text}")
+                
+                # Log cache statistics for monitoring
+                cache_stats = get_cache_stats()
+                logger.debug(f"Cache efficiency: {cache_stats.get('cache_efficiency', 0):.2f}%, "
+                           f"Memory used: {cache_stats.get('memory_used_mb', 0):.2f} MB, "
+                           f"Cache size: {cache_stats.get('size', 0)}/{cache_stats.get('max_size', 0)}")
                 
                 # Create matcher with cached automata
                 matcher = EnhancedMatcher(
@@ -570,8 +586,13 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 compilation_time = time.time() - compilation_start
                 
-                # Cache the compiled pattern using centralized utility
-                cache_pattern(cache_key, dfa, nfa, compilation_time)
+                # Cache the compiled pattern using centralized utility if caching is enabled
+                if caching_enabled:
+                    cache_pattern(cache_key, dfa, nfa, compilation_time)
+                    
+                    # Log cache statistics for monitoring
+                    cache_stats = get_cache_stats()
+                    logger.debug(f"Cache size after adding new pattern: {cache_stats.get('size', 0)}")
                 
                 # Create matcher with newly compiled automata
                 matcher = EnhancedMatcher(
