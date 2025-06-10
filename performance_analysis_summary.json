@@ -1,0 +1,6 @@
+{
+  "lru_vs_none_improvement": 53.879882344888216,
+  "lru_vs_fifo_improvement": 23.245735709605878,
+  "lru_avg_hit_rate": 75.30127063579747,
+  "summary": "LRU caching recommended for production deployment"
+}

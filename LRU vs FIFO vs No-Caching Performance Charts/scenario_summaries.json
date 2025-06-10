@@ -1,0 +1,47 @@
+[
+  {
+    "scenario_id": 0,
+    "scenario_description": "Basic patterns, small dataset",
+    "lru_vs_none_improvement": -1.9758045194121898,
+    "lru_vs_fifo_improvement": 1.66405063717802,
+    "best_mode": "none",
+    "best_time": 1.416025495529175,
+    "best_cache_mode": "lru",
+    "best_hit_rate": 90.9090909090909,
+    "lru_time": 1.4440033912658692,
+    "fifo_time": 1.4684389591217042,
+    "none_time": 1.416025495529175,
+    "lru_hit_rate": 90.9090909090909,
+    "fifo_hit_rate": 90.9090909090909
+  },
+  {
+    "scenario_id": 0,
+    "scenario_description": "Complex patterns",
+    "lru_vs_none_improvement": -2.961440769223929,
+    "lru_vs_fifo_improvement": -6.158477472615227,
+    "best_mode": "fifo",
+    "best_time": 3.019209051132202,
+    "best_cache_mode": "lru",
+    "best_hit_rate": 90.9090909090909,
+    "lru_time": 3.2051463603973387,
+    "fifo_time": 3.019209051132202,
+    "none_time": 3.1129579544067383,
+    "lru_hit_rate": 90.9090909090909,
+    "fifo_hit_rate": 90.9090909090909
+  },
+  {
+    "scenario_id": 0,
+    "scenario_description": "Complex patterns, large dataset",
+    "lru_vs_none_improvement": 16.99698333746155,
+    "lru_vs_fifo_improvement": 25.075427731589862,
+    "best_mode": "lru",
+    "best_time": 5.649227619171143,
+    "best_cache_mode": "lru",
+    "best_hit_rate": 90.9090909090909,
+    "lru_time": 5.649227619171143,
+    "fifo_time": 7.539886379241944,
+    "none_time": 6.806050968170166,
+    "lru_hit_rate": 90.9090909090909,
+    "fifo_hit_rate": 90.9090909090909
+  }
+]
