@@ -1,0 +1,26 @@
+[
+  {
+    "target": "matcher.match",
+    "impact": "High",
+    "finding": "Pattern matching consumes 50.0% of execution time",
+    "recommendation": "Review the core matching algorithm for optimization opportunities. Consider specialized algorithms for common pattern types."
+  },
+  {
+    "target": "pattern_tokenizer.tokenize_pattern",
+    "impact": "High",
+    "finding": "Pattern tokenization consumes 25.0% of execution time",
+    "recommendation": "Consider implementing a more efficient tokenization algorithm or caching tokenized patterns."
+  },
+  {
+    "target": "automata.NFABuilder.build_nfa",
+    "impact": "High",
+    "finding": "NFA construction consumes 15.0% of execution time",
+    "recommendation": "Optimize NFA construction algorithm or cache NFAs for similar patterns."
+  },
+  {
+    "target": "matcher",
+    "impact": "High",
+    "finding": "Module consumes 50.0% of execution time",
+    "recommendation": "Focus optimization efforts on the matcher module."
+  }
+]
