@@ -50,8 +50,8 @@ class AggregateTestSuite:
         print("=" * 60)
         
         try:
-            result = match_recognize(query, self.test_data)
-            
+            result = match_recognize( query,self.test_data)
+
             print(f"✅ Success: {name}")
             print(f"Query: {query}")
             print(f"Result shape: {result.shape}")

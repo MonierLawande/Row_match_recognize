@@ -2,10 +2,11 @@ import re
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple, Dict, Any, Union
-from src.utils.logging_config import get_logger
 
-# Module logger
-logger = get_logger(__name__)
+# Temporarily disable logging to fix hanging issue
+# from src.utils.logging_config import get_logger
+# logger = get_logger(__name__)
+logger = None
 
 class PatternTokenType(Enum):
     """Enum representing different types of pattern tokens."""

@@ -336,6 +336,11 @@ class RowContext:
                             if comp in self.variables and self.current_idx in self.variables[comp]:
                                 return comp
                     return variable
+                
+                # Check if this is an empty match (no variables defined)
+                # For empty patterns in alternations like (() | A), CLASSIFIER should return None
+                if not self.variables:
+                    return None
                 return ""
             
             # No variable specified - return the matching variable for current row
@@ -349,6 +354,11 @@ class RowContext:
             for var, indices in self.variables.items():
                 if self.current_idx in indices:
                     return var
+            
+            # Check if this is an empty match (no variables defined)
+            # For empty patterns in alternations like (() | A), CLASSIFIER should return None
+            if not self.variables:
+                return None
             return ""
         finally:
             classifier_time = time.time() - start_time

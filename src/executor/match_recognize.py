@@ -397,18 +397,18 @@ def extract_original_variable_order(pattern_clause):
 def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     """
     Execute a MATCH_RECOGNIZE query against a Pandas DataFrame.
-    
+
     This production-ready implementation follows SQL:2016 standard for pattern matching
     with full support for all features including nested PERMUTE patterns, navigation functions,
     and different output modes.
-    
+
     Args:
         query: SQL query string containing a MATCH_RECOGNIZE clause
         df: Input DataFrame to perform pattern matching on
-        
+
     Returns:
         DataFrame containing the query results
-        
+
     Raises:
         ValueError: If the query is invalid or cannot be executed
         RuntimeError: If an unexpected error occurs during execution

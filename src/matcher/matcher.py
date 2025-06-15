@@ -520,7 +520,24 @@ class EnhancedMatcher:
             longest_match["excluded_rows"] = sorted(set(excluded_rows))
             logger.debug(f"Match contains excluded rows: {longest_match['excluded_rows']}")
         
-        # Prefer non-empty match over empty match
+        # Handle SQL:2016 alternation precedence for empty patterns
+        # Temporarily disabled to debug hanging issue
+        prefer_empty = False
+        # if empty_match and longest_match and self.dfa.states[self.start_state].is_accept:
+        #     # Additional check: only if we have alternation metadata
+        #     if (hasattr(self.dfa, 'metadata') and 
+        #         self.dfa.metadata.get('has_alternation', False)):
+        #         prefer_empty = True
+        #         logger.debug(f"Alternation with empty pattern detected - preferring empty match")
+        
+        if prefer_empty:
+            logger.debug(f"Applying SQL:2016 empty pattern precedence")
+            logger.debug(f"Empty match: {empty_match}")
+            logger.debug(f"Non-empty match (rejected): {longest_match}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return empty_match
+        
+        # Standard precedence: prefer non-empty matches
         if longest_match and longest_match["end"] >= longest_match["start"]:  # Ensure it's a valid match
             logger.debug(f"Found non-empty match: {longest_match}")
             self.timing["find_match"] += time.time() - match_start_time

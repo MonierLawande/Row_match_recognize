@@ -10,6 +10,9 @@ from typing import List, Dict, Any, Optional, Set, Tuple, Union
 # Add the parent directory to the path so we can import from src
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Import the match_recognize function
+from src.executor.match_recognize import match_recognize
+
 # Import our modules
 from src.matcher.pattern_tokenizer import tokenize_pattern, PatternTokenType
 from src.matcher.automata import NFABuilder, NFA, NFAState, Transition
@@ -73,8 +76,14 @@ if __name__ == "__main__":
     success = test_permute_pattern()
     print(f"\nPermute pattern test {'succeeded' if success else 'failed'}")
 
-# Define a MATCH_RECOGNIZE query with PERMUTE pattern
-query = """
+    # Define sample data for testing
+    df = pd.DataFrame({
+        'id': range(1, 10),
+        'category': ['A', 'B', 'C', 'A', 'B', 'C', 'A', 'B', 'C']
+    })
+
+    # Define a MATCH_RECOGNIZE query with PERMUTE pattern
+    query = """
 SELECT *
 FROM df
 MATCH_RECOGNIZE (
@@ -92,12 +101,12 @@ MATCH_RECOGNIZE (
 """
 
 # Execute the query
-result = match_recognize(query, df)
-print("PERMUTE Pattern Result:")
-print(result)
+    result = match_recognize(query, df)
+    print("PERMUTE Pattern Result:")
+    print(result)
 
 # Test with a nested PERMUTE pattern
-nested_query = """
+    nested_query = """
 SELECT *
 FROM df
 MATCH_RECOGNIZE (
@@ -115,9 +124,9 @@ MATCH_RECOGNIZE (
 """
 
 # Execute the nested query
-try:
-    nested_result = match_recognize(nested_query, df)
-    print("\nNested PERMUTE Pattern Result:")
-    print(nested_result)
-except Exception as e:
-    print(f"\nNested PERMUTE Pattern Error: {e}")
+    try:
+        nested_result = match_recognize(nested_query, df)
+        print("\nNested PERMUTE Pattern Result:")
+        print(nested_result)
+    except Exception as e:
+        print(f"\nNested PERMUTE Pattern Error: {e}")

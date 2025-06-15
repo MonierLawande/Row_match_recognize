@@ -62,6 +62,7 @@ class NFAState:
         self.is_accept: bool = False
         self.subset_parent: Optional[str] = None
         self.priority: int = 0
+        self.epsilon_priorities: Dict[int, int] = {}  # Track epsilon transition priorities
     
     def add_transition(self, condition: ConditionFn, target: int, variable: Optional[str] = None, 
                       priority: int = 0, metadata: Dict[str, Any] = None):
@@ -173,47 +174,44 @@ class NFA:
     def epsilon_closure(self, state_indices: List[int]) -> List[int]:
         """
         Compute epsilon closure for given states with robust cycle detection.
-        
-        This method computes the set of states reachable from the given states
-        via epsilon transitions, including the original states themselves.
-        It efficiently handles cycles in the epsilon transition graph.
+        Uses a depth limit to prevent infinite loops.
         
         Args:
             state_indices: List of state indices to compute closure for
             
         Returns:
-            List of state indices in the epsilon closure (sorted)
+            List of state indices in the epsilon closure
         """
-        closure = set(state_indices)  # Result set
-        stack = list(state_indices)   # DFS stack
-        visited_pairs = set()         # Track (state, target) pairs to detect cycles
+        closure = set(state_indices)
+        queue = list(state_indices)
+        max_iterations = len(self.states) * 2  # Reasonable upper bound
+        iterations = 0
         
-        while stack:
-            s = stack.pop()
+        while queue and iterations < max_iterations:
+            iterations += 1
+            s = queue.pop(0)
             
-            # Get epsilon transitions for this state
             for t in self.states[s].epsilon:
-                # Skip if we've already processed this epsilon transition
-                if (s, t) in visited_pairs:
-                    continue
-                
-                # Mark transition as visited
-                visited_pairs.add((s, t))
-                
-                # Add target to closure if not already present
                 if t not in closure:
                     closure.add(t)
-                    stack.append(t)
-                    
-                    # SQL:2016 requires proper handling of epsilon loops
-                    # Special handling for epsilon transitions from accept state
-                    if t == self.accept and s != self.accept:
-                        # If we reached accept via epsilon, mark source state
-                        self.states[s].can_accept = True
+                    queue.append(t)
         
-        # Return sorted closure for deterministic behavior
-        # This is important for predictable NFA-to-DFA conversion
-        return sorted(closure)
+        # Return closure sorted by priority, then state index for deterministic behavior
+        # States with lower priority numbers are processed first (higher precedence)
+        def get_state_priority(state_idx):
+            # For states that were targets of epsilon transitions with priorities, 
+            # find the minimum priority assigned to any epsilon transition targeting this state
+            min_priority = 999
+            for src_idx, src_state in enumerate(self.states):
+                if (hasattr(src_state, 'epsilon_priorities') and 
+                    src_state.epsilon_priorities and 
+                    state_idx in src_state.epsilon_priorities):
+                    min_priority = min(min_priority, src_state.epsilon_priorities[state_idx])
+            return min_priority, state_idx
+        
+        closure_list = list(closure)
+        closure_list.sort(key=get_state_priority)
+        return closure_list
         
     def validate(self) -> bool:
         """
@@ -451,6 +449,63 @@ class NFABuilder:
         """Add an epsilon transition between states."""
         if to_state not in self.states[from_state].epsilon:
             self.states[from_state].epsilon.append(to_state)
+    
+    def add_epsilon_with_priority(self, from_state: int, to_state: int, priority: int):
+        """Add an epsilon transition with priority for alternation precedence."""
+        # For now, we'll use the standard epsilon transition but mark the priority
+        # The actual priority handling will be done during matching
+        if to_state not in self.states[from_state].epsilon:
+            self.states[from_state].epsilon.append(to_state)
+            # Store priority information in state metadata for use during matching
+            if not hasattr(self.states[from_state], 'epsilon_priorities'):
+                self.states[from_state].epsilon_priorities = {}
+            self.states[from_state].epsilon_priorities[to_state] = priority
+    
+    def _is_empty_pattern_branch(self, start: int, end: int) -> bool:
+        """
+        Check if a branch represents an empty pattern.
+        
+        An empty pattern branch has:
+        1. Only epsilon transitions from start to end (no variable transitions)
+        2. No intermediate states with variable assignments
+        
+        Args:
+            start: Start state of the branch
+            end: End state of the branch
+            
+        Returns:
+            bool: True if the branch represents an empty pattern
+        """
+        # If start and end are the same state, it's empty
+        if start == end:
+            return True
+            
+        # Check if there's a direct epsilon path from start to end with no variables
+        visited = set()
+        queue = [start]
+        
+        while queue:
+            current = queue.pop(0)
+            if current in visited:
+                continue
+            visited.add(current)
+            
+            # If we reached the end state, check the path
+            if current == end:
+                # Check if any state in the path has variable transitions
+                for state_idx in visited:
+                    state = self.states[state_idx]
+                    if state.variable or state.transitions:
+                        return False
+                return True
+            
+            # Follow epsilon transitions only
+            for eps_target in self.states[current].epsilon:
+                if eps_target not in visited:
+                    queue.append(eps_target)
+        
+        # If we can't reach end via epsilon transitions, it's not empty
+        return False
  
     def build(self, tokens: List[PatternToken], define: Dict[str, str], 
              subset_vars: Dict[str, List[str]] = None) -> NFA:
@@ -506,15 +561,26 @@ class NFABuilder:
                     allows_empty = True
                     self.metadata["allows_empty"] = True
                     break
-                    
-                # Also check for empty alternatives like (A|) which allow empty matches
-                if token.type == PatternTokenType.ALTERNATION:
-                    # If alternation is followed by GROUP_END, it might allow empty match
-                    idx_alt = tokens.index(token)
-                    if idx_alt + 1 < len(tokens) and tokens[idx_alt + 1].type == PatternTokenType.GROUP_END:
+            
+            # Check for empty groups in alternations like (() | A)
+            if not allows_empty:
+                for i, token in enumerate(tokens):
+                    if (token.type == PatternTokenType.GROUP_START and 
+                        i + 1 < len(tokens) and 
+                        tokens[i + 1].type == PatternTokenType.GROUP_END):
+                        # Found empty group ()
                         allows_empty = True
                         self.metadata["allows_empty"] = True
+                        self.metadata["has_empty_group"] = True
                         break
+                    
+                    # Also check for empty alternatives like (A|) which allow empty matches
+                    if token.type == PatternTokenType.ALTERNATION:
+                        # If alternation is followed by GROUP_END, it might allow empty match
+                        if i + 1 < len(tokens) and tokens[i + 1].type == PatternTokenType.GROUP_END:
+                            allows_empty = True
+                            self.metadata["allows_empty"] = True
+                            break
             
             # For patterns like Z? that allow empty matches, add direct path
             if allows_empty:
@@ -709,9 +775,25 @@ class NFABuilder:
                 alt_start = self.new_state()
                 alt_end = self.new_state()
                 
-                # Connect alternation fragment
-                self.add_epsilon(alt_start, start)  # To left branch
-                self.add_epsilon(alt_start, right_start)  # To right branch
+                # SQL:2016 alternation precedence: empty patterns have higher priority
+                # Check if left branch (start to current) is an empty pattern
+                left_is_empty = self._is_empty_pattern_branch(start, current)
+                # Check if right branch is an empty pattern
+                right_is_empty = self._is_empty_pattern_branch(right_start, right_end)
+                
+                if left_is_empty and not right_is_empty:
+                    # Left branch (empty) has priority - connect it with higher priority (priority 0)
+                    self.add_epsilon_with_priority(alt_start, start, 0)  # Higher priority for empty
+                    self.add_epsilon_with_priority(alt_start, right_start, 1)  # Lower priority for non-empty
+                elif right_is_empty and not left_is_empty:
+                    # Right branch (empty) has priority - connect it with higher priority
+                    self.add_epsilon_with_priority(alt_start, right_start, 0)  # Higher priority for empty
+                    self.add_epsilon_with_priority(alt_start, start, 1)  # Lower priority for non-empty
+                else:
+                    # Both empty or both non-empty - use standard equal priority
+                    self.add_epsilon(alt_start, start)  # To left branch
+                    self.add_epsilon(alt_start, right_start)  # To right branch
+                
                 self.add_epsilon(left_end, alt_end)  # From left branch
                 self.add_epsilon(right_end, alt_end)  # From right branch
                 
