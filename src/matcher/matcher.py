@@ -742,11 +742,17 @@ class EnhancedMatcher:
 
         # Add unmatched rows if requested
         if include_unmatched or (config and config.rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED):
+            logger.debug(f"Processing unmatched rows: unmatched_indices={unmatched_indices}, processed_indices={processed_indices}")
             for idx in sorted(unmatched_indices):
                 if idx not in processed_indices:  # Avoid duplicates
+                    logger.debug(f"Adding unmatched row at index {idx}")
                     unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
                     results.append(unmatched_row)
                     processed_indices.add(idx)
+                else:
+                    logger.debug(f"Skipping unmatched row at index {idx} - already processed")
+        else:
+            logger.debug(f"Not processing unmatched rows: include_unmatched={include_unmatched}, config.rows_per_match={config.rows_per_match if config else None}")
 
         self.timing["total"] = time.time() - start_time
         logger.info(f"Find matches completed in {self.timing['total']:.6f} seconds")

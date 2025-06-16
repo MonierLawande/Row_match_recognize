@@ -1094,168 +1094,38 @@ class ConditionEvaluator(ast.NodeVisitor):
         return node.value
 
     def visit_BoolOp(self, node: ast.BoolOp):
+        """Handle boolean operations (AND, OR)"""
         if isinstance(node.op, ast.And):
-            # Short-circuit evaluation for AND
+            # For AND, all values must be True
             for value in node.values:
                 result = self.visit(value)
                 if not result:
                     return False
             return True
         elif isinstance(node.op, ast.Or):
-            # Short-circuit evaluation for OR
+            # For OR, at least one value must be True
             for value in node.values:
                 result = self.visit(value)
                 if result:
                     return True
             return False
-        raise ValueError("Unsupported boolean operator")
-
-    def visit_BinOp(self, node: ast.BinOp):
-        """Handle binary operations like addition, subtraction, etc."""
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        
-        OPERATORS = {
-            ast.Add: operator.add,
-            ast.Sub: operator.sub,
-            ast.Mult: operator.mul,
-            ast.Div: operator.truediv,
-            ast.FloorDiv: operator.floordiv,
-            ast.Mod: operator.mod,
-            ast.Pow: operator.pow,
-        }
-        
-        func = OPERATORS.get(type(node.op))
-        if func is None:
-            raise ValueError(f"Binary operator {type(node.op)} not supported")
-        
-        # Handle NULL values in operations
-        if left is None or right is None:
-            return None
-            
-        try:
-            return func(left, right)
-        except Exception as e:
-            # Better error handling
-            raise ValueError(f"Error in binary operation {left} {type(node.op).__name__} {right}: {e}")
-    
-    def visit_UnaryOp(self, node: ast.UnaryOp):
-        """Handle unary operations like negation"""
-        operand = self.visit(node.operand)
-        
-        OPERATORS = {
-            ast.UAdd: operator.pos,
-            ast.USub: operator.neg,
-            ast.Not: operator.not_,
-        }
-        
-        func = OPERATORS.get(type(node.op))
-        if func is None:
-            raise ValueError(f"Unary operator {type(node.op)} not supported")
-            
-        # Handle NULL values
-        if operand is None and type(node.op) != ast.Not:
-            return None
-            
-        return func(operand)
-    
-    def visit_IfExp(self, node: ast.IfExp):
-        """Handle ternary expressions: x if cond else y"""
-        test = self.visit(node.test)
-        if test:
-            return self.visit(node.body)
         else:
-            return self.visit(node.orelse)
-    
-    def visit_List(self, node: ast.List):
-        """Handle list literals"""
-        return [self.visit(elt) for elt in node.elts]
-    
-    def visit_Dict(self, node: ast.Dict):
-        """Handle dict literals"""
-        keys = [self.visit(key) if key is not None else None for key in node.keys]
-        values = [self.visit(value) for value in node.values]
-        return {k: v for k, v in zip(keys, values)}
-    
-    def visit_JoinedStr(self, node: ast.JoinedStr):
-        """Handle f-strings"""
-        parts = []
-        for value in node.values:
-            if isinstance(value, ast.Str):
-                parts.append(value.s)
-            else:
-                parts.append(str(self.visit(value)))
-        return ''.join(parts)
-    
-    def visit_FormattedValue(self, node: ast.FormattedValue):
-        """Handle formatted values in f-strings"""
-        return self.visit(node.value)
-    
-    def visit_Subscript(self, node: ast.Subscript):
-        """Handle subscript expressions like a[b] and price[n] for array access"""
-        # Special handling for row['keyword'] pattern
-        if isinstance(node.value, ast.Name) and node.value.id == 'row':
-            # Get the index (column name)
-            col_name = self._extract_subscript_value(node)
-                    
-            # Return the column value from the current row
-            if col_name is not None and self.current_row is not None:
-                return self.current_row.get(col_name)
-        
-        # Handle array-like access for column values: price[1] -> PREV(price, 1)
-        if isinstance(node.value, ast.Name):
-            col_name = node.value.id
-            idx = self._extract_subscript_value(node)
-            
-            if isinstance(idx, int) and idx > 0:
-                # Translate to PREV function for backward compatibility
-                return self._get_navigation_value('PREV', col_name, 'PREV', idx)
-            elif isinstance(idx, int) and idx < 0:
-                # Negative indices could translate to NEXT
-                return self._get_navigation_value('NEXT', col_name, 'NEXT', abs(idx))
-        
-        # Original functionality for normal subscripts
-        value = self.visit(node.value)
-        idx = self._extract_subscript_value(node)
-        
-        if value is None:
-            return None
-            
-        try:
-            return value[idx]
-        except (TypeError, KeyError, IndexError):
-            return None
-    
-    def _extract_subscript_value(self, node):
-        """Helper to extract value from subscript, compatible with different Python versions"""
-        if hasattr(node, 'slice'):
-            if isinstance(node.slice, ast.Index):  # Python < 3.9
-                return self.visit(node.slice.value)
-            elif hasattr(node.slice, 'value'):  # For some versions
-                return self.visit(node.slice.value)
-            else:  # Python >= 3.9
-                return self.visit(node.slice)
-        return None
-    
-    def visit_Tuple(self, node: ast.Tuple):
-        """Handle tuple literals"""
-        return tuple(self.visit(elt) for elt in node.elts)
-    
-    def visit_Set(self, node: ast.Set):
-        """Handle set literals"""
-        return {self.visit(elt) for elt in node.elts}
-    
-    def visit_ListComp(self, node: ast.ListComp):
-        """Handle list comprehensions - limited support"""
-        raise ValueError("List comprehensions are not supported in pattern conditions")
-    
-    def generic_visit(self, node):
-        """Handle unsupported nodes"""
-        raise ValueError(f"Unsupported expression type: {type(node).__name__}")
+            raise ValueError(f"Unsupported boolean operator: {type(node.op)}")
 
+    def visit_Num(self, node: ast.Num):
+        """Handle numeric constants (Python < 3.8 compatibility)"""
+        return node.n
+
+    def visit_Str(self, node: ast.Str):
+        """Handle string constants (Python < 3.8 compatibility)"""
+        return node.s
+
+    def visit_NameConstant(self, node: ast.NameConstant):
+        """Handle boolean and None constants (Python < 3.8 compatibility)"""
+        return node.value
+
+    # ...existing code...
     
-
-
     def _compare_values(self, left, right, operator):
         """Compare values with proper NULL handling for Trino compatibility."""
         # If either value is None/NULL, the comparison should fail (except for IS NULL/IS NOT NULL)
@@ -1318,94 +1188,68 @@ def _preprocess_sql_condition(condition_expr):
     condition_expr = re.sub(r'\b(\w+)\s*=\s*([\'"][^\'\"]*[\'"])', r'\1 == \2', condition_expr)
     
     # Handle patterns like "column = unquoted_value" -> "column == unquoted_value"
-    condition_expr = re.sub(r'\b(\w+)\s*=\s*([^=\s]+(?:\s*[^=\s]+)*)', r'\1 == \2', condition_expr)
+    # Use global flag to replace ALL occurrences, not just the first one
+    condition_expr = re.sub(r'\b(\w+)\s*=\s*([^=\s]+)', r'\1 == \2', condition_expr)
     
     return condition_expr
 
-def compile_condition(condition_expr, row_context=None, current_row_idx=None, current_var=None, evaluation_mode='DEFINE'):
-    # Preprocess SQL-style condition to Python-compatible format
-    processed_condition = _preprocess_sql_condition(condition_expr)
+def compile_condition(condition_str, evaluation_mode='DEFINE'):
+    """
+    Compile a condition string into a callable function.
     
-    # Handle compilation mode - return function for later evaluation
-    if row_context is None and current_row_idx is None:
-        # Create closure that will evaluate condition at runtime
-        def condition_fn(row, context):
-            # Store the current row and evaluation context
-            context.current_row = row
-            context.current_idx = context.rows.index(row) if row in context.rows else -1
-            # CRITICAL FIX: Don't overwrite current_var if it's already set by the matcher
-            # Only set it if it's not already set (None) and we have a value from compilation
-            if not hasattr(context, 'current_var') or context.current_var is None:
-                context.current_var = current_var
+    Args:
+        condition_str: SQL condition string
+        evaluation_mode: 'DEFINE' for pattern definitions, 'MEASURES' for measures
+        
+    Returns:
+        A callable function that takes a row and context and returns a boolean
+    """
+    if not condition_str or condition_str.strip().upper() == 'TRUE':
+        # Optimization for true condition
+        return lambda row, ctx: True
+        
+    if condition_str.strip().upper() == 'FALSE':
+        # Optimization for false condition
+        return lambda row, ctx: False
+    
+    try:
+        # Preprocess SQL-style condition to Python-compatible format
+        processed_condition = _preprocess_sql_condition(condition_str)
+        
+        # Parse the condition
+        tree = ast.parse(processed_condition, mode='eval')
+        
+        # Create a function that evaluates the condition with the given row and context
+        def evaluate_condition(row, ctx):
+            # Create evaluator with the given context
+            evaluator = ConditionEvaluator(ctx, evaluation_mode)
             
-            # Use AST-based evaluator instead of direct eval for navigation functions
-            evaluator = ConditionEvaluator(context, evaluation_mode)
+            # Set the current row
+            evaluator.current_row = row
+            
+            # Set the current row index in the context
             try:
-                # Clear any previous context invalid flag
-                if hasattr(context, '_evaluation_context_invalid'):
-                    delattr(context, '_evaluation_context_invalid')
-                
-                # Parse condition using AST and evaluate with our visitor
-                tree = ast.parse(processed_condition, mode='eval')
+                ctx.current_idx = ctx.rows.index(row) if row in ctx.rows else -1
+            except (ValueError, AttributeError):
+                ctx.current_idx = -1
+            
+            # Evaluate the condition
+            try:
                 result = evaluator.visit(tree.body)
                 return bool(result)
-            except ValueError as ve:
-                # Handle navigation context unavailable error
-                if "Navigation context unavailable" in str(ve):
-                    # This indicates the condition cannot be evaluated at this row
-                    # due to missing navigation context (e.g., PREV() on row 0)
-                    # Return False but signal this should be handled differently
-                    context._navigation_context_error = True
-                    return False
-                raise ve
             except Exception as e:
-                # Fall back to basic condition check
-                basic_condition = extract_base_condition(condition_expr)
-                if basic_condition:
-                    if "event_type" in basic_condition:
-                        event_type = re.search(r"'(\w+)'", basic_condition)
-                        if event_type and row.get('event_type') == event_type.group(1):
-                            return True
+                logger.error(f"Error evaluating condition '{condition_str}': {e}")
                 return False
-        return condition_fn
-    
-    # Runtime evaluation with proper context
-    if row_context and current_row_idx is not None:
-        if current_row_idx < 0 or current_row_idx >= len(row_context.rows):
-            return False
-        
-        # Use proper AST-based evaluation with context
-        row = row_context.rows[current_row_idx]
-        row_context.current_row = row
-        row_context.current_idx = current_row_idx
-        row_context.current_var = current_var
-        
-        evaluator = ConditionEvaluator(row_context, evaluation_mode)
-        try:
-            # Clear any previous context invalid flag
-            if hasattr(row_context, '_evaluation_context_invalid'):
-                delattr(row_context, '_evaluation_context_invalid')
-            
-            tree = ast.parse(processed_condition, mode='eval')
-            result = evaluator.visit(tree.body)
-            return bool(result)
-        except ValueError as ve:
-            # Handle navigation context unavailable error
-            if "Navigation context unavailable" in str(ve):
-                # This indicates the condition cannot be evaluated at this row
-                # Signal this for the matcher to handle appropriately
-                row_context._navigation_context_error = True
-                return False
-            raise ve
-        except Exception as e:
-            # If navigational evaluation fails, check basic conditions
-            if 'event_type' in condition_expr and 'event_type' in row:
-                event_match = f"event_type = '{row['event_type']}'"
-                return event_match in condition_expr
-            return False
-    
-    # Default for validation
-    return True
+                
+        return evaluate_condition
+    except SyntaxError as e:
+        # Log the error and return a function that always returns False
+        logger.error(f"Syntax error in condition '{condition_str}': {e}")
+        return lambda row, ctx: False
+    except Exception as e:
+        # Log the error and return a function that always returns False
+        logger.error(f"Error compiling condition '{condition_str}': {e}")
+        return lambda row, ctx: False
 
 def extract_base_condition(condition):
     """Extract the basic part of a condition without navigation functions."""
@@ -1564,7 +1408,7 @@ def _parse_navigation_expression(expr: str) -> NavigationFunctionInfo:
             if inner_expr.count('(') > inner_expr.count(')'):
                 inner_expr += ")"
                 
-            inner_info = _parse_navigation_expression(inner_expr)
+            inner_info = _parse_navigation_expression(inner_expr);
             
             return NavigationFunctionInfo(
                 function_type=outer_func,
