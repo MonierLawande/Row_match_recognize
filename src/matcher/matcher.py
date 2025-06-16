@@ -659,8 +659,7 @@ class EnhancedMatcher:
             # Find next match using optimized transitions
             match = self._find_single_match(rows, start_idx, RowContext(rows=rows), config)
             if not match:
-                # Mark this index as processed and move on
-                processed_indices.add(start_idx)
+                # Move to next position without marking as processed (unmatched rows will be handled later)
                 start_idx += 1
                 continue
             # Store the match for post-processing
@@ -740,19 +739,13 @@ class EnhancedMatcher:
         if iteration_count >= max_iterations:
             logger.warning(f"Reached maximum iteration count ({max_iterations}). Possible infinite loop detected.")
 
-        # Add unmatched rows if requested
-        if include_unmatched or (config and config.rows_per_match == RowsPerMatch.ALL_ROWS_WITH_UNMATCHED):
-            logger.debug(f"Processing unmatched rows: unmatched_indices={unmatched_indices}, processed_indices={processed_indices}")
+        # Add unmatched rows only when explicitly requested via WITH UNMATCHED ROWS
+        if include_unmatched:
             for idx in sorted(unmatched_indices):
                 if idx not in processed_indices:  # Avoid duplicates
-                    logger.debug(f"Adding unmatched row at index {idx}")
                     unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
                     results.append(unmatched_row)
                     processed_indices.add(idx)
-                else:
-                    logger.debug(f"Skipping unmatched row at index {idx} - already processed")
-        else:
-            logger.debug(f"Not processing unmatched rows: include_unmatched={include_unmatched}, config.rows_per_match={config.rows_per_match if config else None}")
 
         self.timing["total"] = time.time() - start_time
         logger.info(f"Find matches completed in {self.timing['total']:.6f} seconds")

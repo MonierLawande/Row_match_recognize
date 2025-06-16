@@ -1112,16 +1112,8 @@ class ConditionEvaluator(ast.NodeVisitor):
         else:
             raise ValueError(f"Unsupported boolean operator: {type(node.op)}")
 
-    def visit_Num(self, node: ast.Num):
-        """Handle numeric constants (Python < 3.8 compatibility)"""
-        return node.n
-
-    def visit_Str(self, node: ast.Str):
-        """Handle string constants (Python < 3.8 compatibility)"""
-        return node.s
-
-    def visit_NameConstant(self, node: ast.NameConstant):
-        """Handle boolean and None constants (Python < 3.8 compatibility)"""
+    def visit_Constant(self, node: ast.Constant):
+        """Handle all constant values (numbers, strings, booleans, None)"""
         return node.value
 
     # ...existing code...
