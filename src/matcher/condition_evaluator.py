@@ -1784,11 +1784,12 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
         
         # ENHANCED PATTERN MATCHING - Fixed regex patterns for robust parsing
         # Pattern for nested navigation with enhanced parenthesis matching
-        nested_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*((FIRST|LAST|NEXT|PREV)\s*\([^)]+\))\s*(?:,\s*(\d+))?\s*\)'
+        nested_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*((?:(?:RUNNING|FINAL)\s+)?(?:FIRST|LAST|NEXT|PREV)[^)]+\))\s*(?:,\s*(\d+))?\s*\)'
         
         # Pattern for simple navigation with improved argument parsing
         # Handles: FIRST(A.value), FIRST(A.value, 2), FIRST(value), FIRST(value, 2)
-        simple_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)\s*(?:,\s*(\d+))?\s*\)'
+        # Updated to support semantic modifiers: RUNNING LAST(value), FINAL FIRST(A.value)
+        simple_pattern = r'(?:(RUNNING|FINAL)\s+)?(FIRST|LAST|NEXT|PREV)\s*\(\s*(?:([A-Za-z0-9_]+)\.)?([A-Za-z0-9_]+)\s*(?:,\s*(\d+))?\s*\)'
         
         # Pattern for CLASSIFIER function: FUNC(CLASSIFIER())
         classifier_pattern = r'(PREV|NEXT|FIRST|LAST)\s*\(\s*CLASSIFIER\s*\(\s*\)\s*\)'
@@ -1856,7 +1857,7 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
         if nested_match:
             outer_func = nested_match.group(1).upper()
             inner_expr = nested_match.group(2)
-            outer_offset = int(nested_match.group(4)) if nested_match.group(4) else 1
+            outer_offset = int(nested_match.group(3)) if nested_match.group(3) else 1
             
             # Enhanced validation for nested navigation - incorporate from k.py
             if outer_offset <= 0:
@@ -1881,10 +1882,16 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
             inner_simple_match = re.match(simple_pattern, inner_expr, re.IGNORECASE)
             
             if inner_simple_match:
-                inner_func_type = inner_simple_match.group(1).upper()
-                inner_var = inner_simple_match.group(2) if inner_simple_match.group(2) else None
-                inner_field = inner_simple_match.group(3)
-                inner_offset = int(inner_simple_match.group(4)) if inner_simple_match.group(4) else 1
+                inner_semantic = inner_simple_match.group(1)  # RUNNING or FINAL (can be None)
+                inner_func_type = inner_simple_match.group(2).upper()
+                inner_var = inner_simple_match.group(3) if inner_simple_match.group(3) else None
+                inner_field = inner_simple_match.group(4)
+                inner_offset = int(inner_simple_match.group(5)) if inner_simple_match.group(5) else 1
+                
+                # Determine if inner function should use RUNNING semantics
+                inner_is_running = is_running
+                if inner_semantic:
+                    inner_is_running = inner_semantic.upper() == 'RUNNING'
                 
                 # Find the target index from the inner function first
                 inner_target_idx = None
@@ -1895,7 +1902,7 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
                         var_indices = sorted(row_context.variables[inner_var])
                         
                         # Apply RUNNING semantics if needed
-                        if is_running:
+                        if inner_is_running:
                             var_indices = [idx for idx in var_indices if idx <= current_row_idx]
                         
                         if var_indices:
@@ -1915,7 +1922,7 @@ def evaluate_nested_navigation(expr, row_context, current_row_idx, current_var):
                         all_indices = sorted(all_indices)
                         
                         # Apply RUNNING semantics if needed
-                        if is_running:
+                        if inner_is_running:
                             all_indices = [idx for idx in all_indices if idx <= current_row_idx]
                         
                         if all_indices:

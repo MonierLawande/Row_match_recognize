@@ -283,7 +283,7 @@ class EnhancedMatcher:
         })
         
         return index        
-    def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> Optional[Dict[str, Any]]:
+    def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext, config=None) -> Optional[Dict[str, Any]]:
         """Find a single match using optimized transitions with proper variable handling."""
         match_start_time = time.time()
         state = self.start_state
@@ -594,9 +594,16 @@ class EnhancedMatcher:
             self.timing["find_match"] += time.time() - match_start_time
             return longest_match
         elif empty_match:
-            logger.debug(f"Using empty match as fallback: {empty_match}")
-            self.timing["find_match"] += time.time() - match_start_time
-            return empty_match
+            # For SKIP TO NEXT ROW, TO_FIRST, TO_LAST modes, don't return empty matches when there's no valid non-empty match
+            # This prevents the generation of spurious empty matches at every position
+            if config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST):
+                logger.debug(f"{config.skip_mode} mode: not returning empty match, will advance to next position")
+                self.timing["find_match"] += time.time() - match_start_time
+                return None
+            else:
+                logger.debug(f"Using empty match as fallback: {empty_match}")
+                self.timing["find_match"] += time.time() - match_start_time
+                return empty_match
         else:
             logger.debug(f"No match found starting at index {start_idx}")
             self.timing["find_match"] += time.time() - match_start_time
@@ -623,21 +630,34 @@ class EnhancedMatcher:
         logger.info(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
 
         # Safety counter to prevent infinite loops
-        max_iterations = len(rows) * 2  # Allow at most 2 iterations per row
+        max_iterations = len(rows) * 3 if (config and config.skip_mode == SkipMode.TO_NEXT_ROW) else len(rows) * 2
         iteration_count = 0
+        recent_starts = []  # Track recent start positions for TO_NEXT_ROW safety
 
         while start_idx < len(rows) and iteration_count < max_iterations:
             iteration_count += 1
             logger.debug(f"Iteration {iteration_count}, start_idx={start_idx}")
 
-            # Skip already processed indices
-            if start_idx in processed_indices:
+            # Additional safety for TO_NEXT_ROW to prevent infinite loops
+            if config and config.skip_mode == SkipMode.TO_NEXT_ROW:
+                recent_starts.append(start_idx)
+                # If we've seen this start position too many times recently, break
+                if recent_starts.count(start_idx) > 3:
+                    logger.warning(f"Breaking TO_NEXT_ROW infinite loop at position {start_idx}")
+                    break
+                # Keep recent_starts manageable
+                if len(recent_starts) > 20:
+                    recent_starts = recent_starts[-10:]
+
+            # Skip already processed indices (except for TO_NEXT_ROW, TO_FIRST, TO_LAST which allow overlaps)
+            allow_overlap = config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST)
+            if start_idx in processed_indices and not allow_overlap:
                 logger.debug(f"Skipping already processed index {start_idx}")
                 start_idx += 1
                 continue
 
             # Find next match using optimized transitions
-            match = self._find_single_match(rows, start_idx, RowContext(rows=rows))
+            match = self._find_single_match(rows, start_idx, RowContext(rows=rows), config)
             if not match:
                 # Mark this index as processed and move on
                 processed_indices.add(start_idx)
@@ -698,14 +718,20 @@ class EnhancedMatcher:
                     start_idx = match["end"] + 1
 
                 logger.debug(f"Non-empty match, advancing from {old_start_idx} to {start_idx}")
-                # Mark all indices in the match as processed
-                for idx in range(old_start_idx, match["end"] + 1):
-                    processed_indices.add(idx)
+                # Mark all indices in the match as processed (except for TO_NEXT_ROW which allows overlaps)
+                if not (config and config.skip_mode == SkipMode.TO_NEXT_ROW):
+                    for idx in range(old_start_idx, match["end"] + 1):
+                        processed_indices.add(idx)
                     
                 # Also mark excluded rows as processed
                 if match.get("excluded_rows"):
                     processed_indices.update(match["excluded_rows"])
                     logger.debug(f"Marked excluded rows as processed: {match['excluded_rows']}")
+                
+                # SKIP PAST LAST ROW should continue searching for non-overlapping matches
+                # The skip position is already set correctly above to start after the last row of the match
+                if config and config.skip_mode == SkipMode.PAST_LAST_ROW:
+                    logger.debug(f"SKIP PAST LAST ROW: continuing search from position {start_idx}")
 
             match_number += 1
             logger.debug(f"End of iteration {iteration_count}, match_number={match_number}")

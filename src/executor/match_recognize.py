@@ -913,18 +913,52 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             result["MATCH_NUMBER"] = match_num
                             result["IS_EMPTY_MATCH"] = False
                             
-                            results.append(result)
-                
-                # Handle unmatched rows for ALL ROWS PER MATCH WITH UNMATCHED ROWS
-                if match_config.include_unmatched:
-                    unmatched_indices = set(range(len(all_rows))) - all_matched_indices
-                    for idx in sorted(unmatched_indices):
-                        if idx < len(all_rows):
-                            unmatched_row = _handle_unmatched_row(all_rows[idx], measures, partition_by)
-                            results.append(unmatched_row)
+                            results.append(result)                    # Handle unmatched rows for ALL ROWS PER MATCH WITH UNMATCHED ROWS
+                    if match_config.include_unmatched:
+                        unmatched_indices = set(range(len(all_rows))) - all_matched_indices
+                        for idx in sorted(unmatched_indices):
+                            if idx < len(all_rows):
+                                unmatched_row = _handle_unmatched_row(all_rows[idx], measures, partition_by)
+                                # Add the original row index for proper sorting
+                                unmatched_row['_original_row_idx'] = idx
+                                results.append(unmatched_row)
+                    
+                    # Add original row index to matched rows as well for consistent sorting
+                    for result in results:
+                        if '_original_row_idx' not in result:
+                            # Try to find the original row index from the data
+                            if 'id' in result and result['id'] is not None:
+                                # Find the index based on the id column (assuming it matches row position + 1)
+                                result['_original_row_idx'] = result['id'] - 1 if isinstance(result['id'], int) else 0
+                            else:
+                                result['_original_row_idx'] = 0
                 
                 # Create result DataFrame with preserved data types
-                result_df = _create_dataframe_with_preserved_types(results)
+                # Sort results by match number first, then by row order within each match
+                # Add original index for stable sorting
+                for i, result in enumerate(results):
+                    result['_original_order'] = i
+                
+                # Safe sorting that handles None values properly
+                def safe_sort_key(r):
+                    match_num = r.get('match', r.get('MATCH_NUMBER', 0))
+                    if match_num is None:
+                        match_num = 0
+                    original_order = r.get('_original_order', 0)
+                    if original_order is None:
+                        original_order = 0
+                    return (match_num, original_order)
+                
+                sorted_results = sorted(results, key=safe_sort_key)
+                
+                # Remove the temporary ordering field
+                for result in sorted_results:
+                    result.pop('_original_order', None)
+                
+                result_df = _create_dataframe_with_preserved_types(sorted_results)
+                
+                # Reset the DataFrame index to be sequential
+                result_df.reset_index(drop=True, inplace=True)
                 
                 # Debug the measure columns
                 logger.debug("Checking measure columns in final DataFrame:")
@@ -985,15 +1019,34 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 # Only keep columns that exist in the result
                 ordered_cols = [col for col in ordered_cols if col in result_df.columns]
                 
-                # Sort the results by partition and order columns
+                # Sort the results by match number first to maintain match grouping, then by partition and order columns
                 sort_columns = []
-                if partition_by:
-                    sort_columns.extend(partition_by)
-                if order_by:
-                    sort_columns.extend([col for col in order_by if col not in sort_columns])
+                
+                # Special handling for WITH UNMATCHED ROWS - sort by original row position
+                if match_config.include_unmatched and '_original_row_idx' in result_df.columns:
+                    sort_columns.append('_original_row_idx')
+                else:
+                    # First sort by match number to keep matches grouped together
+                    if 'match' in result_df.columns:
+                        sort_columns.append('match')
+                    elif 'MATCH_NUMBER' in result_df.columns:
+                        sort_columns.append('MATCH_NUMBER')
+                    
+                    # Then add partition columns
+                    if partition_by:
+                        sort_columns.extend([col for col in partition_by if col not in sort_columns])
+                    
+                    # Then add order columns, but only if they don't break match grouping
+                    # For SKIP TO NEXT ROW, we want to maintain match order, not reorder by id within matches
+                    if order_by and not any('SKIP TO NEXT ROW' in query.upper() for _ in [1]):
+                        sort_columns.extend([col for col in order_by if col not in sort_columns])
                 
                 if sort_columns:
                     result_df = result_df.sort_values(by=sort_columns)
+                
+                # Remove temporary sorting columns
+                if '_original_row_idx' in result_df.columns:
+                    result_df = result_df.drop('_original_row_idx', axis=1)
                 
                 metrics["result_processing_time"] = time.time() - processing_start
                 metrics["total_time"] = time.time() - start_time

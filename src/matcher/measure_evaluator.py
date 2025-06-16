@@ -946,8 +946,8 @@ class MeasureEvaluator:
             The result of the navigation function
         """
         # Check for nested navigation pattern first
-        # Updated pattern to recognize CLASSIFIER() as a valid inner function
-        nested_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*((?:FIRST|LAST|NEXT|PREV|CLASSIFIER)[^)]*\))\s*(?:,\s*(\d+))?\s*\)'
+        # Updated pattern to recognize RUNNING/FINAL semantic modifiers with navigation functions
+        nested_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*((?:(?:RUNNING|FINAL)\s+)?(?:FIRST|LAST|NEXT|PREV|CLASSIFIER)[^)]*\))\s*(?:,\s*(\d+))?\s*\)'
         nested_match = re.match(nested_pattern, expr, re.IGNORECASE)
         
         if nested_match:
