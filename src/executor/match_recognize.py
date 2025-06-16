@@ -913,7 +913,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             result["MATCH_NUMBER"] = match_num
                             result["IS_EMPTY_MATCH"] = False
                             
-                            results.append(result)                    # Handle unmatched rows for ALL ROWS PER MATCH WITH UNMATCHED ROWS
+                            results.append(result)
+                    
+                    # Handle unmatched rows for ALL ROWS PER MATCH WITH UNMATCHED ROWS
                     if match_config.include_unmatched:
                         unmatched_indices = set(range(len(all_rows))) - all_matched_indices
                         for idx in sorted(unmatched_indices):
@@ -922,16 +924,6 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                 # Add the original row index for proper sorting
                                 unmatched_row['_original_row_idx'] = idx
                                 results.append(unmatched_row)
-                    
-                    # Add original row index to matched rows as well for consistent sorting
-                    for result in results:
-                        if '_original_row_idx' not in result:
-                            # Try to find the original row index from the data
-                            if 'id' in result and result['id'] is not None:
-                                # Find the index based on the id column (assuming it matches row position + 1)
-                                result['_original_row_idx'] = result['id'] - 1 if isinstance(result['id'], int) else 0
-                            else:
-                                result['_original_row_idx'] = 0
                 
                 # Create result DataFrame with preserved data types
                 # Sort results by match number first, then by row order within each match
@@ -941,6 +933,11 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 # Safe sorting that handles None values properly
                 def safe_sort_key(r):
+                    # For WITH UNMATCHED ROWS, use original row index to maintain input order
+                    if match_config.include_unmatched and '_original_row_idx' in r:
+                        return (r.get('_original_row_idx', 0), 0)
+                    
+                    # Otherwise, sort by match number then original order
                     match_num = r.get('match', r.get('MATCH_NUMBER', 0))
                     if match_num is None:
                         match_num = 0
@@ -1025,6 +1022,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 # Special handling for WITH UNMATCHED ROWS - sort by original row position
                 if match_config.include_unmatched and '_original_row_idx' in result_df.columns:
                     sort_columns.append('_original_row_idx')
+                    # For WITH UNMATCHED ROWS, we only sort by original row index to maintain input order
+                    # Don't add additional sort columns that would break this ordering
                 else:
                     # First sort by match number to keep matches grouped together
                     if 'match' in result_df.columns:
@@ -1042,7 +1041,11 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         sort_columns.extend([col for col in order_by if col not in sort_columns])
                 
                 if sort_columns:
+                    # Reset DataFrame index before final sort to ensure proper ordering
+                    result_df.reset_index(drop=True, inplace=True)
                     result_df = result_df.sort_values(by=sort_columns)
+                    # Reset index again after sort
+                    result_df.reset_index(drop=True, inplace=True)
                 
                 # Remove temporary sorting columns
                 if '_original_row_idx' in result_df.columns:

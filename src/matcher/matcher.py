@@ -223,6 +223,17 @@ class EnhancedMatcher:
             self.excluded_vars = self.exclusion_handler.excluded_vars
             logger.debug(f"Initialized matcher with excluded variables: {self.excluded_vars}")
 
+        # Store pattern tokens for empty match validation
+        self._pattern_tokens = []
+        if original_pattern:
+            # Simple tokenization to extract pattern structure
+            import re
+            # Split pattern into tokens, preserving quantifiers
+            token_pattern = r'([A-Za-z_][A-Za-z0-9_]*[+*?]?|\{[^}]*\}|[()|\s])'
+            tokens = re.findall(r'([A-Za-z_][A-Za-z0-9_]*[+*?]?(?:\{[^}]*\})?)', original_pattern)
+            self._pattern_tokens = [token.strip() for token in tokens if token.strip()]
+            logger.debug(f"Pattern tokens for empty match validation: {self._pattern_tokens}")
+        
     def _extract_dfa_metadata(self):
         """Extract and process metadata from the DFA for optimization."""
         # Copy metadata from DFA if available
@@ -313,21 +324,28 @@ class EnhancedMatcher:
         if self.dfa.states[state].is_accept:
             # For empty matches, also verify end anchor if present
             if self._check_anchors(state, start_idx, len(rows), "end"):
-                logger.debug(f"Found potential empty match at index {start_idx} - start state is accepting")
+                # Check if this is a valid empty match by examining the pattern structure
+                # Empty matches should only be allowed for patterns where all required quantifiers are satisfied
+                is_valid_empty_match = self._is_valid_empty_match_state(state)
                 
-                # Track which rows are part of empty pattern matches
-                empty_pattern_rows = [start_idx]
-                
-                empty_match = {
-                    "start": start_idx,
-                    "end": start_idx - 1,
-                    "variables": {},
-                    "state": state,
-                    "is_empty": True,
-                    "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
-                    "excluded_rows": [],
-                    "empty_pattern_rows": empty_pattern_rows  # Add tracking for empty pattern rows
-                }
+                if is_valid_empty_match:
+                    logger.debug(f"Found potential empty match at index {start_idx} - start state is accepting")
+                    
+                    # Track which rows are part of empty pattern matches
+                    empty_pattern_rows = [start_idx]
+                    
+                    empty_match = {
+                        "start": start_idx,
+                        "end": start_idx - 1,
+                        "variables": {},
+                        "state": state,
+                        "is_empty": True,
+                        "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                        "excluded_rows": [],
+                        "empty_pattern_rows": empty_pattern_rows  # Add tracking for empty pattern rows
+                    }
+                else:
+                    logger.debug(f"Rejecting empty match at index {start_idx} - pattern has unsatisfied required quantifiers")
                 # Don't return immediately - try to find a non-empty match first
         
         longest_match = None
@@ -744,6 +762,8 @@ class EnhancedMatcher:
             for idx in sorted(unmatched_indices):
                 if idx not in processed_indices:  # Avoid duplicates
                     unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
+                    # Add original row index for proper sorting in executor
+                    unmatched_row['_original_row_idx'] = idx
                     results.append(unmatched_row)
                     processed_indices.add(idx)
 
@@ -917,6 +937,9 @@ class EnhancedMatcher:
         result["MATCH_NUMBER"] = match_number
         result["IS_EMPTY_MATCH"] = True
         
+        # Add original row index for proper sorting in executor
+        result["_original_row_idx"] = start_idx
+        
         return result
 
     def _handle_unmatched_row(self, row: Dict[str, Any], measures: Dict[str, str]) -> Dict[str, Any]:
@@ -1002,6 +1025,9 @@ class EnhancedMatcher:
         # Ensure we always return a meaningful result for valid matches
         # Add match metadata that indicates a match was found
         result["MATCH_NUMBER"] = match_number
+        
+        # Add original row index for proper sorting in executor (use the start row for ONE ROW PER MATCH)
+        result["_original_row_idx"] = match["start"]
         
         # If no measures were specified, add a basic match indicator
         if not measures:
@@ -1188,6 +1214,9 @@ class EnhancedMatcher:
                     empty_row["MATCH_NUMBER"] = match_number
                     empty_row["IS_EMPTY_MATCH"] = True
                     
+                    # Add original row index for proper sorting in executor
+                    empty_row["_original_row_idx"] = match["start"]
+                    
                     # Track that this is an empty pattern match
                     if "empty_pattern_rows" not in match:
                         match["empty_pattern_rows"] = [match["start"]]
@@ -1321,13 +1350,15 @@ class EnhancedMatcher:
             result["MATCH_NUMBER"] = match_number
             result["IS_EMPTY_MATCH"] = False
             
+            # Add original row index for proper sorting in executor
+            result["_original_row_idx"] = idx
+            
             results.append(result)
             logger.debug(f"Added row {idx} to results")
         
         return results
 
 
-    
     
     def _select_preferred_match(self, matches, variables):
         """
@@ -1354,3 +1385,110 @@ class EnhancedMatcher:
         
         # Return the most preferred match
         return sorted(matches, key=match_priority)[0]
+    
+    def _is_valid_empty_match_state(self, state: int) -> bool:
+        """
+        Check if an empty match is valid from the given state.
+        
+        An empty match is valid only if:
+        1. All required quantifiers in the pattern have been satisfied, OR
+        2. The pattern only contains optional quantifiers (*, ?, {0,n})
+        
+        For patterns like 'A B+ C+', an empty match from the start state is NOT valid
+        because B+ and C+ are required quantifiers that haven't been satisfied.
+        
+        For patterns like 'B*', empty matches ARE valid because B* means zero or more.
+        
+        Args:
+            state: The DFA state to check
+            
+        Returns:
+            True if empty match is valid, False otherwise
+        """
+        import re
+        
+        # For start state (state 0), check if pattern has required quantifiers
+        if state == 0:
+            # Analyze the pattern structure to see if we have unsatisfied required quantifiers
+            pattern_tokens = getattr(self, '_pattern_tokens', [])
+            
+            # If we don't have pattern token info, be conservative
+            if not pattern_tokens:
+                # Default to allowing empty matches for backward compatibility
+                return True
+            
+            # Special case: if pattern has only one token with optional quantifier (like "B*"), allow empty match
+            if len(pattern_tokens) == 1:
+                token_str = str(pattern_tokens[0])
+                if '*' in token_str or '?' in token_str:
+                    # Single optional token - empty match is valid
+                    return True
+                elif '{' in token_str:
+                    # Check if it's {0,n} - optional
+                    quant_match = re.search(r'\{(\d+),?(\d*)\}', token_str)
+                    if quant_match:
+                        min_count = int(quant_match.group(1))
+                        if min_count == 0:
+                            return True
+            
+            # Check if ALL tokens are optional (pattern like "A* B* C*")
+            all_optional = True
+            for token in pattern_tokens:
+                token_str = str(token)
+                
+                # Check if this token is required
+                if '+' in token_str:
+                    # B+ means one or more B - this is required
+                    all_optional = False
+                    break
+                elif '{' in token_str:
+                    # Check for quantifiers like {1,}, {2,5}, etc.
+                    quant_match = re.search(r'\{(\d+),?(\d*)\}', token_str)
+                    if quant_match:
+                        min_count = int(quant_match.group(1))
+                        if min_count > 0:
+                            # Minimum count > 0 means required
+                            all_optional = False
+                            break
+                elif re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', token_str):
+                    # Variable without quantifier - required by default
+                    all_optional = False
+                    break
+                # If we get here, it's optional (*, ?, {0,n})
+            
+            return all_optional
+        
+        # For non-start states, the DFA construction should handle acceptance correctly
+        return True
+
+    def _get_pattern_required_vars(self) -> Set[str]:
+        """Get the set of variables that are required (not optional) in the pattern."""
+        required_vars = set()
+        pattern_tokens = getattr(self, '_pattern_tokens', [])
+        
+        for token in pattern_tokens:
+            token_str = str(token)
+            
+            # Extract base variable name
+            import re
+            var_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)', token_str)
+            if var_match:
+                var_name = var_match.group(1)
+                
+                # Check if it's optional
+                if '*' in token_str or '?' in token_str:
+                    # Optional quantifier
+                    continue
+                elif '{' in token_str:
+                    # Check quantifier
+                    quant_match = re.search(r'\{(\d+),?(\d*)\}', token_str)
+                    if quant_match:
+                        min_count = int(quant_match.group(1))
+                        if min_count == 0:
+                            # {0,n} is optional
+                            continue
+                
+                # If we get here, it's required
+                required_vars.add(var_name)
+        
+        return required_vars
