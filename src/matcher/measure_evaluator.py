@@ -1124,11 +1124,12 @@ class MeasureEvaluator:
                 all_indices = sorted(set(all_indices))
                 
                 # CRITICAL FIX FOR RUNNING/FINAL SEMANTICS:
-                # For universal navigation functions like FIRST(value), LAST(value),
+                # For navigation functions like FIRST(value), LAST(value),
                 # the behavior differs based on RUNNING vs FINAL semantics:
                 
-                # For RUNNING semantics, filter indices to only include rows up to current position
-                if is_running:
+                # For RUNNING semantics with no explicit offset, filter indices to only include rows up to current position
+                # For navigation functions with explicit offsets (like FIRST(value, 2)), use complete match indices
+                if is_running and offset == 0:
                     all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
                 
                 if func_name == 'FIRST':
@@ -1155,20 +1156,32 @@ class MeasureEvaluator:
                     
                     # CRITICAL FIX FOR RUNNING SEMANTICS:
                     # For RUNNING LAST(value) with offset=0, this should return the current row's value
+                    # For RUNNING LAST(value, N) with offset>0, this should return the value N positions back from current
                     # For FINAL LAST(value) with offset=0, this should return the final row's value
+                    # For FINAL LAST(value, N) with offset>0, this should return the value N positions back from final
                     
                     if all_indices:
-                        if is_running and offset == 0:
-                            # Special case: RUNNING LAST(value) should return current row value
-                            logical_idx = self.context.current_idx
-                            logger.debug(f"RUNNING LAST({field_name}): using current_idx={logical_idx}")
+                        if is_running:
+                            if offset == 0:
+                                # Special case: RUNNING LAST(value) should return current row value
+                                logical_idx = self.context.current_idx
+                                logger.debug(f"RUNNING LAST({field_name}): using current_idx={logical_idx}")
+                            else:
+                                # RUNNING LAST(value, N): Go backward N positions from current position
+                                target_idx = self.context.current_idx - offset
+                                if target_idx >= 0 and target_idx in all_indices:
+                                    logical_idx = target_idx
+                                    logger.debug(f"RUNNING LAST({field_name}, {offset}): current_idx={self.context.current_idx}, target_idx={target_idx}, logical_idx={logical_idx}")
+                                else:
+                                    logical_idx = None
+                                    logger.debug(f"RUNNING LAST({field_name}, {offset}): target_idx {target_idx} out of bounds or not in match")
                         else:
-                            # Normal case: Navigate from last position
+                            # FINAL semantics: Navigate from final position
                             last_position = len(all_indices) - 1
                             target_position = last_position - offset  # Start from last, subtract offset
                             if target_position >= 0:
                                 logical_idx = all_indices[target_position]
-                                logger.debug(f"LAST({field_name}, {offset}): all_indices={all_indices}, target_position={target_position}, logical_idx={logical_idx}, is_running={is_running}")
+                                logger.debug(f"FINAL LAST({field_name}, {offset}): all_indices={all_indices}, target_position={target_position}, logical_idx={logical_idx}, is_running={is_running}")
                             else:
                                 logical_idx = None
                     else:
