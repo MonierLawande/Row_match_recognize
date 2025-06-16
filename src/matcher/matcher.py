@@ -167,6 +167,38 @@ class EnhancedMatcher:
         # Add performance tracking
         self.timing = defaultdict(float)
         
+        # Check if pattern contains empty alternation or reluctant quantifiers - important for CLASSIFIER() function behavior
+        self.has_empty_alternation = False
+        self.has_reluctant_star = False  # *? quantifier (prefers zero matches)
+        self.has_reluctant_plus = False  # +? quantifier (prefers minimal non-empty matches)
+        if original_pattern:
+            import re
+            # Check for empty alternation patterns like "() |" or "| ()"
+            if '()' in original_pattern and '|' in original_pattern:
+                empty_alternation_patterns = [
+                    r'\(\)\s*\|',  # () |
+                    r'\|\s*\(\)',  # | ()
+                ]
+                for pattern in empty_alternation_patterns:
+                    if re.search(pattern, original_pattern):
+                        self.has_empty_alternation = True
+                        logger.debug(f"Pattern contains empty alternation: {original_pattern}")
+                        break
+            
+            # Check for reluctant star quantifier (*?) that prefers empty matches
+            if re.search(r'\*\?', original_pattern):
+                self.has_reluctant_star = True
+                self.has_empty_alternation = True  # Treat *? like empty alternation for precedence
+                logger.debug(f"Pattern contains reluctant star quantifier that prefers empty matches: {original_pattern}")
+            
+            # Check for reluctant plus quantifier (+?) that prefers minimal matches
+            if re.search(r'\+\?', original_pattern):
+                self.has_reluctant_plus = True
+                logger.debug(f"Pattern contains reluctant plus quantifier that prefers minimal matches: {original_pattern}")
+            
+            # Other reluctant quantifiers (??) don't prefer empty matches over non-empty ones
+            # They just prefer shorter matches among valid matches
+        
         # Initialize anchor metadata before building transition index
         self._anchor_metadata = {
             "has_start_anchor": False,
@@ -282,6 +314,10 @@ class EnhancedMatcher:
             # For empty matches, also verify end anchor if present
             if self._check_anchors(state, start_idx, len(rows), "end"):
                 logger.debug(f"Found potential empty match at index {start_idx} - start state is accepting")
+                
+                # Track which rows are part of empty pattern matches
+                empty_pattern_rows = [start_idx]
+                
                 empty_match = {
                     "start": start_idx,
                     "end": start_idx - 1,
@@ -289,7 +325,8 @@ class EnhancedMatcher:
                     "state": state,
                     "is_empty": True,
                     "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
-                    "excluded_rows": []
+                    "excluded_rows": [],
+                    "empty_pattern_rows": empty_pattern_rows  # Add tracking for empty pattern rows
                 }
                 # Don't return immediately - try to find a non-empty match first
         
@@ -481,6 +518,21 @@ class EnhancedMatcher:
                         logger.debug(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
                         continue
                 
+                # For reluctant plus quantifiers, stop at the first valid match (early termination)
+                if self.has_reluctant_plus:
+                    logger.debug(f"Reluctant plus pattern detected - using early termination at first valid match")
+                    longest_match = {
+                        "start": start_idx,
+                        "end": current_idx - 1,
+                        "variables": {k: v[:] for k, v in var_assignments.items()},
+                        "state": state,
+                        "is_empty": False,
+                        "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                        "excluded_rows": excluded_rows.copy()
+                    }
+                    logger.debug(f"  Reluctant plus match (early termination): {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                    break  # Early termination for reluctant plus
+                
                 # For greedy quantifiers, we should continue trying to match as long as possible
                 # Only update longest_match but don't break - continue to find longer matches
                 longest_match = {
@@ -521,19 +573,18 @@ class EnhancedMatcher:
             logger.debug(f"Match contains excluded rows: {longest_match['excluded_rows']}")
         
         # Handle SQL:2016 alternation precedence for empty patterns
-        # Temporarily disabled to debug hanging issue
+        # For patterns with empty alternation like () | A, prefer empty pattern
         prefer_empty = False
-        # if empty_match and longest_match and self.dfa.states[self.start_state].is_accept:
-        #     # Additional check: only if we have alternation metadata
-        #     if (hasattr(self.dfa, 'metadata') and 
-        #         self.dfa.metadata.get('has_alternation', False)):
-        #         prefer_empty = True
-        #         logger.debug(f"Alternation with empty pattern detected - preferring empty match")
+        if empty_match and self.has_empty_alternation:
+            # For empty alternation patterns, always prefer empty match regardless of non-empty matches
+            prefer_empty = True
+            logger.debug(f"Empty alternation pattern detected - preferring empty match over any non-empty match")
         
         if prefer_empty:
             logger.debug(f"Applying SQL:2016 empty pattern precedence")
             logger.debug(f"Empty match: {empty_match}")
-            logger.debug(f"Non-empty match (rejected): {longest_match}")
+            if longest_match:
+                logger.debug(f"Non-empty match (rejected): {longest_match}")
             self.timing["find_match"] += time.time() - match_start_time
             return empty_match
         
@@ -690,6 +741,11 @@ class EnhancedMatcher:
         
         logger.debug(f"Calculating skip position: mode={skip_mode}, skip_var={skip_var}, match_range=[{start_idx}:{end_idx}]")
         
+        # Empty match handling - always move to next row
+        if match.get("is_empty", False):
+            logger.debug(f"Empty match: skipping to position {start_idx + 1}")
+            return start_idx + 1
+            
         if skip_mode == SkipMode.PAST_LAST_ROW:
             # Default behavior: skip past the last row of the match
             next_pos = end_idx + 1
@@ -1107,6 +1163,10 @@ class EnhancedMatcher:
                     empty_row["MATCH_NUMBER"] = match_number
                     empty_row["IS_EMPTY_MATCH"] = True
                     
+                    # Track that this is an empty pattern match
+                    if "empty_pattern_rows" not in match:
+                        match["empty_pattern_rows"] = [match["start"]]
+                    
                     results.append(empty_row)
                     logger.debug(f"Added empty match row for index {match['start']}")
             return results
@@ -1130,6 +1190,10 @@ class EnhancedMatcher:
         context.match_number = match_number
         context.subsets = self.subsets.copy() if self.subsets else {}
         context.excluded_rows = excluded_rows
+        
+        # Add empty pattern tracking for proper CLASSIFIER() handling
+        if match.get("is_empty", False) and match.get("empty_pattern_rows"):
+            context._empty_pattern_rows = set(match["empty_pattern_rows"])
         
         # Create a single evaluator for better caching
         measure_evaluator = MeasureEvaluator(context)
@@ -1184,14 +1248,30 @@ class EnhancedMatcher:
                     
                     # Special handling for CLASSIFIER
                     if expr.upper() == "CLASSIFIER()":
-                        # Determine pattern variable for this row
-                        pattern_var = None
-                        for var, indices in match["variables"].items():
-                            if idx in indices:
-                                pattern_var = var
-                                break
-                        result[alias] = pattern_var
-                        logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {pattern_var}")
+                        # Check if this is an empty pattern match
+                        if match.get("is_empty", False):
+                            # Empty pattern should return NULL/None for CLASSIFIER()
+                            result[alias] = None
+                            logger.debug(f"Empty pattern match: CLASSIFIER() returning None for row {idx}")
+                        # Check if this row is explicitly marked as part of an empty pattern
+                        elif match.get("empty_pattern_rows") and idx in match.get("empty_pattern_rows", []):
+                            # This row was matched by an empty pattern - return None
+                            result[alias] = None
+                            logger.debug(f"Row {idx} is in empty_pattern_rows, CLASSIFIER() returning None")
+                        # Check if the pattern has an empty alternation
+                        elif match.get("has_empty_alternation", False):
+                            # For patterns with () | A alternation, treat as empty
+                            result[alias] = None
+                            logger.debug(f"Pattern has empty alternation, CLASSIFIER() returning None for row {idx}")
+                        else:
+                            # Determine pattern variable for this row
+                            pattern_var = None
+                            for var, indices in match["variables"].items():
+                                if idx in indices:
+                                    pattern_var = var
+                                    break
+                            result[alias] = pattern_var
+                            logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {pattern_var}")
                     
                     # Special handling for running sum
                     elif expr.upper().startswith("SUM(") and semantics == "RUNNING":
