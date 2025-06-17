@@ -342,7 +342,8 @@ class EnhancedMatcher:
                         "is_empty": True,
                         "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
                         "excluded_rows": [],
-                        "empty_pattern_rows": empty_pattern_rows  # Add tracking for empty pattern rows
+                        "empty_pattern_rows": empty_pattern_rows,  # Add tracking for empty pattern rows
+                        "has_empty_alternation": self.has_empty_alternation
                     }
                 else:
                     logger.debug(f"Rejecting empty match at index {start_idx} - pattern has unsatisfied required quantifiers")
@@ -479,7 +480,8 @@ class EnhancedMatcher:
                                 "state": state,
                                 "is_empty": False,
                                 "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
-                                "excluded_rows": excluded_rows.copy()
+                                "excluded_rows": excluded_rows.copy(),
+                                "has_empty_alternation": self.has_empty_alternation
                             }
                         else:
                             logger.debug(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
@@ -492,7 +494,8 @@ class EnhancedMatcher:
                             "state": state,
                             "is_empty": False,
                             "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
-                            "excluded_rows": excluded_rows.copy()
+                            "excluded_rows": excluded_rows.copy(),
+                            "has_empty_alternation": self.has_empty_alternation
                         }
                     break
                 
@@ -546,7 +549,8 @@ class EnhancedMatcher:
                         "state": state,
                         "is_empty": False,
                         "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
-                        "excluded_rows": excluded_rows.copy()
+                        "excluded_rows": excluded_rows.copy(),
+                        "has_empty_alternation": self.has_empty_alternation
                     }
                     logger.debug(f"  Reluctant plus match (early termination): {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                     break  # Early termination for reluctant plus
@@ -560,7 +564,8 @@ class EnhancedMatcher:
                     "state": state,
                     "is_empty": False,
                     "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
-                    "excluded_rows": excluded_rows.copy()
+                    "excluded_rows": excluded_rows.copy(),
+                    "has_empty_alternation": self.has_empty_alternation
                 }
                 logger.debug(f"  Updated longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                 
