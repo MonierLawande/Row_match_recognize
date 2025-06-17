@@ -714,19 +714,45 @@ class MeasureEvaluator:
                 
             self.stats["cache_misses"] += 1
             
-            # Handle subset variables specially to fix subset_functionality test
+            # Handle subset variables with context-aware semantics
             if var_name is not None and hasattr(self.context, 'subsets') and var_name in self.context.subsets:
                 subset_components = self.context.subsets[var_name]
                 
-                # For ALL ROWS PER MATCH mode, check if the current row is matched to any component
-                # of the subset variable
-                for component in subset_components:
-                    if component in self.context.variables and current_idx in self.context.variables[component]:
-                        result = component
-                        self._classifier_cache[cache_key] = result
-                        return result
+                # First, get the actual classifier for the current row
+                actual_classifier = self._evaluate_classifier_impl(None, running)
                 
-                # If not matched to any component, return None
+                # If the actual classifier is in the subset, return it (standard SQL:2016)
+                if actual_classifier in subset_components:
+                    result = actual_classifier
+                    self._classifier_cache[cache_key] = result
+                    return result
+                
+                # Compatibility behavior: Only use fallback for alternation patterns where
+                # the subset contains variables from the current alternation group
+                # Check if this appears to be an alternation pattern by looking at variable context
+                is_alternation_context = False
+                if hasattr(self.context, 'variables'):
+                    # Count how many variables in the subset are active in the current match
+                    active_subset_vars = sum(1 for comp in subset_components 
+                                           if comp in self.context.variables and self.context.variables[comp])
+                    
+                    # If only one subset component is active and there are other non-subset variables,
+                    # this might be an alternation pattern like (L|H) A
+                    total_active_vars = sum(1 for var_rows in self.context.variables.values() if var_rows)
+                    if active_subset_vars == 1 and total_active_vars > active_subset_vars:
+                        is_alternation_context = True
+                
+                # Use fallback behavior only for alternation contexts
+                if is_alternation_context:
+                    for component in subset_components:
+                        if component in self.context.variables:
+                            component_rows = self.context.variables[component]
+                            if component_rows:  # If this component has any matched rows in the match
+                                result = component
+                                self._classifier_cache[cache_key] = result
+                                return result
+                
+                # Standard behavior: If not in subset and not alternation context, return None
                 self._classifier_cache[cache_key] = None
                 return None
             
