@@ -555,6 +555,23 @@ class EnhancedMatcher:
                     logger.debug(f"  Reluctant plus match (early termination): {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                     break  # Early termination for reluctant plus
                 
+                # For SKIP TO NEXT ROW mode, use minimal matching to avoid overlaps (SQL:2016 compliance)
+                # This ensures each quantified pattern matches minimally to create non-overlapping matches
+                if config and config.skip_mode == SkipMode.TO_NEXT_ROW:
+                    logger.debug(f"SKIP TO NEXT ROW mode detected - using minimal matching at first valid match")
+                    longest_match = {
+                        "start": start_idx,
+                        "end": current_idx - 1,
+                        "variables": {k: v[:] for k, v in var_assignments.items()},
+                        "state": state,
+                        "is_empty": False,
+                        "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                        "excluded_rows": excluded_rows.copy(),
+                        "has_empty_alternation": self.has_empty_alternation
+                    }
+                    logger.debug(f"  Minimal match for SKIP TO NEXT ROW: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                    break  # Early termination for SKIP TO NEXT ROW
+                
                 # For greedy quantifiers, we should continue trying to match as long as possible
                 # Only update longest_match but don't break - continue to find longer matches
                 longest_match = {
