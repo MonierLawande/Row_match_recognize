@@ -247,6 +247,60 @@ def validate_pattern_structure(pattern: str) -> None:
     Raises:
         PatternSyntaxError: If pattern structure is invalid
     """
+    # Check for complex nested exclusions with quantifiers (not currently supported)
+    # Pattern like: A {- {- B+ -} C+ -} is problematic
+    
+    def find_matching_exclusion_end(text: str, start_pos: int) -> int:
+        """Find the matching -} for a {- at start_pos."""
+        depth = 0
+        i = start_pos
+        while i < len(text) - 1:
+            if text[i:i+2] == "{-":
+                depth += 1
+                i += 2
+            elif text[i:i+2] == "-}":
+                depth -= 1
+                if depth == 0:
+                    return i
+                i += 2
+            else:
+                i += 1
+        return -1
+    
+    start = 0
+    while True:
+        start_marker = pattern.find("{-", start)
+        if start_marker == -1:
+            break
+        
+        end_marker = find_matching_exclusion_end(pattern, start_marker)
+        if end_marker == -1:
+            break
+        
+        # Extract exclusion content
+        excluded_content = pattern[start_marker + 2:end_marker]
+        
+        # Check for nested exclusions within this content
+        if "{-" in excluded_content:
+            # This is a nested exclusion - check for the specific problematic pattern
+            # Look for patterns like: {- B+ -} C+
+            nested_start = excluded_content.find("{-")
+            nested_end = find_matching_exclusion_end(excluded_content, nested_start)
+            
+            if nested_end != -1:
+                # Check what comes after the nested exclusion
+                after_nested = excluded_content[nested_end + 2:].strip()
+                
+                # Check for quantified variables after the nested exclusion
+                if re.search(r'[A-Za-z_][A-Za-z0-9_]*[+*?]', after_nested):
+                    raise PatternSyntaxError(
+                        "Complex nested exclusion patterns with quantifiers are not currently supported. "
+                        f"Found complex pattern: {pattern[start_marker:end_marker+2]}",
+                        start_marker, pattern
+                    )
+        
+        start = end_marker + 2
+    
     # Check for balanced parentheses
     paren_stack = []
     brace_stack = []

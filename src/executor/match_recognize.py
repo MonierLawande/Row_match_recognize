@@ -731,6 +731,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 )
             
             metrics["match_count"] = len(all_matches)
+        except ValueError as e:
+            # Re-raise ValueError as-is for proper SQL error handling
+            raise e
         except Exception as e:
             raise RuntimeError(f"Error during pattern matching: {str(e)}")
         metrics["matching_time"] = time.time() - matching_start

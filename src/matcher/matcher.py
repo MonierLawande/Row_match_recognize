@@ -868,8 +868,8 @@ class EnhancedMatcher:
         if target_idx == start_idx:
             logger.error(f"AFTER MATCH SKIP {skip_type} {skip_var} would create infinite loop: "
                         f"target position {target_idx} equals match start {start_idx}")
-            # Standard mandates this should fail - skip to next row to avoid infinite loop
-            return start_idx + 1
+            # According to SQL:2016 standard, this should raise an error
+            raise ValueError(f"AFTER MATCH SKIP failed: cannot skip to first row of match (variable '{skip_var}' at position {target_idx})")
             
         # For TO FIRST/TO LAST: resume AT the variable position (SQL:2016 standard)
         # For TO FIRST: skip to the first occurrence of the variable
