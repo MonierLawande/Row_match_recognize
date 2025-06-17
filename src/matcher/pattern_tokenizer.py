@@ -477,8 +477,24 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
             continue
             
         if i + 1 < len(pattern) and pattern[i:i+2] == "-}":
-            tokens.append(PatternToken(PatternTokenType.EXCLUSION_END, "-}"))
-            i += 2
+            # Handle exclusion end with potential quantifier
+            exclusion_end_pos = i + 2
+            
+            # Check for quantifiers after the exclusion pattern
+            quantifier = None
+            is_greedy = True
+            
+            if exclusion_end_pos < len(pattern) and pattern[exclusion_end_pos] in "*+?{":
+                quantifier, is_greedy, exclusion_end_pos = parse_quantifier_at(pattern, exclusion_end_pos)
+            
+            # Create exclusion end token with quantifier information
+            tokens.append(PatternToken(
+                PatternTokenType.EXCLUSION_END, 
+                "-}", 
+                quantifier=quantifier, 
+                greedy=is_greedy
+            ))
+            i = exclusion_end_pos
             continue
             
         # Enhanced PERMUTE handling with recursive nesting and quantifiers
