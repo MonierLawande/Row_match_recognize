@@ -553,6 +553,25 @@ class PatternExclusionHandler:
             ]
         }
     
+    def _collect_excluded_variables(self, node: 'ExclusionNode', excluded_vars: set) -> None:
+        """
+        Recursively collect variable names that should be excluded based on exclusion tree.
+        
+        Args:
+            node: The exclusion tree node to traverse
+            excluded_vars: Set to collect excluded variable names
+        """
+        if not node:
+            return
+            
+        if node.node_type == ExclusionNodeType.VARIABLE:
+            # This is a variable node - add its name to excluded set
+            excluded_vars.add(node.value)
+        elif node.children:
+            # Recursively process children
+            for child in node.children:
+                self._collect_excluded_variables(child, excluded_vars)
+
     def filter_excluded_rows(self, match: Dict[str, Any]) -> Dict[str, Any]:
         """
         Filter out excluded rows from a match.
@@ -1079,6 +1098,59 @@ class EnhancedMatcher:
         # Standard precedence: prefer non-empty matches
         if longest_match and longest_match["end"] >= longest_match["start"]:  # Ensure it's a valid match
             logger.debug(f"Found non-empty match: {longest_match}")
+            
+            # Evaluate complex exclusions to determine which rows should be excluded from output
+            if self.exclusion_handler and self.exclusion_handler.has_complex_exclusions():
+                logger.debug(f"Evaluating complex exclusions for match")
+                
+                # Build sequence of (variable, row_index) for exclusion evaluation
+                sequence = []
+                for var, indices in longest_match["variables"].items():
+                    for idx in indices:
+                        sequence.append((var, idx))
+                
+                # Sort by row index to maintain order
+                sequence.sort(key=lambda x: x[1])
+                
+                # For each exclusion pattern, determine which variables match it
+                complex_excluded_rows = []
+                for exclusion in self.exclusion_handler.complex_exclusions:
+                    tree = exclusion['tree']
+                    pattern_str = exclusion.get('pattern', str(tree))
+                    logger.debug(f"Evaluating exclusion pattern: {pattern_str}")
+                    
+                    # Check which variable assignments should be excluded
+                    # For exclusion pattern like "B+", we need to find all B variable assignments
+                    excluded_vars_for_pattern = set()
+                    self.exclusion_handler._collect_excluded_variables(tree, excluded_vars_for_pattern)
+                    
+                    logger.debug(f"Variables to exclude for pattern '{pattern_str}': {excluded_vars_for_pattern}")
+                    
+                    # Mark rows that correspond to excluded variables
+                    for var, indices in longest_match["variables"].items():
+                        # Strip quantifiers for comparison
+                        base_var = var
+                        if var.endswith(('+', '*', '?')):
+                            base_var = var[:-1]
+                        elif '{' in var and var.endswith('}'):
+                            base_var = var[:var.find('{')]
+                        
+                        if base_var in excluded_vars_for_pattern:
+                            logger.debug(f"Variable {var} (base: {base_var}) matches exclusion pattern")
+                            for row_idx in indices:
+                                if row_idx not in complex_excluded_rows:
+                                    complex_excluded_rows.append(row_idx)
+                                    logger.debug(f"Complex exclusion: marking row {row_idx} (var: {var}) for exclusion")
+                
+                # Update excluded_rows in the match
+                if complex_excluded_rows:
+                    existing_excluded = longest_match.get("excluded_rows", [])
+                    all_excluded = sorted(set(existing_excluded + complex_excluded_rows))
+                    longest_match["excluded_rows"] = all_excluded
+                    logger.debug(f"Updated excluded_rows: {all_excluded}")
+                else:
+                    logger.debug(f"No rows marked for exclusion by complex patterns")
+            
             self.timing["find_match"] += time.time() - match_start_time
             return longest_match
         elif empty_match:
