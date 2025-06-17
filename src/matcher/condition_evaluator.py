@@ -92,19 +92,84 @@ class ConditionEvaluator(ast.NodeVisitor):
         return op(left, right)
 
     def visit_Compare(self, node: ast.Compare):
-        if len(node.ops) != 1 or len(node.comparators) != 1:
-            raise ValueError("Only simple comparisons are supported")
+        # Handle multiple operators for complex comparisons like IN
+        if len(node.ops) > 1:
+            # For now, handle only single comparisons
+            raise ValueError("Multiple comparison operators not supported")
+            
         left = self.visit(node.left)
-        right = self.visit(node.comparators[0])
+        op = node.ops[0]
         
         # Debug logging for DEFINE mode comparisons
         logger = get_logger(__name__)
         if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), op={op.__class__.__name__}")
+        
+        # Handle IN operator specially
+        if isinstance(op, ast.In):
+            # For IN operator, we need to check if left is in any of the comparators
+            # IN expects a list/tuple on the right side
+            if len(node.comparators) != 1:
+                raise ValueError("IN operator requires exactly one comparator (list/tuple)")
+            
+            right = self.visit(node.comparators[0])
+            
+            # Handle different types of right-hand side for IN
+            if isinstance(right, (list, tuple)):
+                # Direct list/tuple comparison
+                result = left in right
+            elif hasattr(right, '__iter__') and not isinstance(right, str):
+                # Iterable but not string
+                try:
+                    result = left in right
+                except TypeError:
+                    # If comparison fails, return False
+                    result = False
+            else:
+                # Single value - treat as membership test
+                result = left == right
+                
+            if self.evaluation_mode == 'DEFINE':
+                logger.debug(f"[DEBUG] IN RESULT: {left} IN {right} = {result}")
+            
+            return result
+            
+        elif isinstance(op, ast.NotIn):
+            # Handle NOT IN operator
+            if len(node.comparators) != 1:
+                raise ValueError("NOT IN operator requires exactly one comparator (list/tuple)")
+            
+            right = self.visit(node.comparators[0])
+            
+            # Handle different types of right-hand side for NOT IN
+            if isinstance(right, (list, tuple)):
+                # Direct list/tuple comparison
+                result = left not in right
+            elif hasattr(right, '__iter__') and not isinstance(right, str):
+                # Iterable but not string
+                try:
+                    result = left not in right
+                except TypeError:
+                    # If comparison fails, return True (not in)
+                    result = True
+            else:
+                # Single value - treat as membership test
+                result = left != right
+                
+            if self.evaluation_mode == 'DEFINE':
+                logger.debug(f"[DEBUG] NOT IN RESULT: {left} NOT IN {right} = {result}")
+            
+            return result
+        
+        # Handle standard comparison operators
+        if len(node.comparators) != 1:
+            raise ValueError("Standard comparison operators require exactly one comparator")
+            
+        right = self.visit(node.comparators[0])
+        
+        if self.evaluation_mode == 'DEFINE':
             logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
             logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
-        
-        # Use safe comparison with NULL handling
-        op = node.ops[0]
         
         OPERATORS = {
             ast.Gt: operator.gt,
@@ -117,7 +182,7 @@ class ConditionEvaluator(ast.NodeVisitor):
         
         func = OPERATORS.get(type(op))
         if func is None:
-            raise ValueError(f"Operator {op} not supported")
+            raise ValueError(f"Operator {op.__class__.__name__} not supported")
             
         result = self._safe_compare(left, right, func)
         
@@ -1115,6 +1180,22 @@ class ConditionEvaluator(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant):
         """Handle all constant values (numbers, strings, booleans, None)"""
         return node.value
+
+    def visit_Num(self, node: ast.Num):
+        """Handle numeric constants (Python < 3.8 compatibility)"""
+        return node.n
+
+    def visit_Str(self, node: ast.Str):
+        """Handle string constants (Python < 3.8 compatibility)"""
+        return node.s
+
+    def visit_List(self, node: ast.List):
+        """Handle list literals for IN expressions"""
+        return [self.visit(item) for item in node.elts]
+
+    def visit_Tuple(self, node: ast.Tuple):
+        """Handle tuple literals for IN expressions"""
+        return tuple(self.visit(item) for item in node.elts)
 
     # ...existing code...
     

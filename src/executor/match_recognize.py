@@ -856,10 +856,23 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     is_select_star = any(item.expression == '*' for item in ast.select_clause.items)
                     
                     if is_select_star:
-                        # For SELECT *, include all available columns (original + measures)
-                        ordered_cols = [col for col in result_df.columns 
-                                      if col not in ['MATCH_NUMBER', 'IS_EMPTY_MATCH', '_original_row_idx']]
-                        logger.debug(f"SELECT * - including all columns: {ordered_cols}")
+                        # For SELECT * in ONE ROW PER MATCH, SQL:2016 column ordering:
+                        # 1. PARTITION BY columns
+                        # 2. MEASURES only
+                        # (NO ORDER BY columns or remaining input columns for ONE ROW PER MATCH)
+                        
+                        # Start with PARTITION BY columns
+                        if partition_by:
+                            for col in partition_by:
+                                if col in result_df.columns:
+                                    ordered_cols.append(col)
+                        
+                        # Add MEASURES only (not ORDER BY or other input columns)
+                        for alias in measures.keys():
+                            if alias in result_df.columns and alias not in ordered_cols:
+                                ordered_cols.append(alias)
+                        
+                        logger.debug(f"SELECT * ONE ROW PER MATCH - SQL:2016 column ordering: {ordered_cols}")
                     else:
                         # Create a mapping from expression to alias for proper column aliasing
                         column_alias_map = {}
@@ -1101,10 +1114,35 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     column_alias_map = {}  # Initialize for both cases
                     
                     if has_select_star:
-                        # For SELECT *, include all available columns (original + measures)
-                        ordered_cols = [col for col in result_df.columns 
-                                      if col not in ['MATCH_NUMBER', 'IS_EMPTY_MATCH', '_original_row_idx']]
-                        logger.debug(f"SELECT * - including all columns: {ordered_cols}")
+                        # For SELECT *, implement SQL:2016 column ordering:
+                        # 1. PARTITION BY columns
+                        # 2. ORDER BY columns  
+                        # 3. MEASURES
+                        # 4. Remaining input columns
+                        
+                        # Start with PARTITION BY columns
+                        if partition_by:
+                            for col in partition_by:
+                                if col in result_df.columns:
+                                    ordered_cols.append(col)
+                        
+                        # Add ORDER BY columns (if not already included)
+                        for col in order_by:
+                            if col in result_df.columns and col not in ordered_cols:
+                                ordered_cols.append(col)
+                        
+                        # Add MEASURES (if not already included)
+                        for alias in measures.keys():
+                            if alias in result_df.columns and alias not in ordered_cols:
+                                ordered_cols.append(alias)
+                        
+                        # Add remaining input columns (if not already included)
+                        for col in result_df.columns:
+                            if (col not in ordered_cols and 
+                                col not in ['MATCH_NUMBER', 'IS_EMPTY_MATCH', '_original_row_idx']):
+                                ordered_cols.append(col)
+                        
+                        logger.debug(f"SELECT * - SQL:2016 column ordering: {ordered_cols}")
                     else:
                         # Create a mapping from expression to alias for proper column aliasing
                         select_columns = []

@@ -294,6 +294,41 @@ class MeasureEvaluator:
                         for idx in self.context.variables[comp]:
                             self._row_to_vars[idx].add(subset_name)
 
+    def _preprocess_expression_for_ast(self, expr: str) -> str:
+        """
+        Preprocess an expression to replace special SQL functions with their values
+        so that the expression can be parsed by Python's AST parser.
+        
+        This method handles:
+        - MATCH_NUMBER() -> actual match number value
+        - CLASSIFIER() -> classifier value (if needed)
+        - SQL IN operator -> Python in operator (case conversion)
+        
+        Args:
+            expr: The original expression
+            
+        Returns:
+            The preprocessed expression that can be parsed by AST
+        """
+        preprocessed = expr
+        
+        # Replace MATCH_NUMBER() with the actual match number
+        # Use word boundaries to avoid replacing partial matches
+        if 'MATCH_NUMBER()' in preprocessed:
+            match_number = str(self.context.match_number)
+            preprocessed = re.sub(r'\bMATCH_NUMBER\(\)', match_number, preprocessed, flags=re.IGNORECASE)
+        
+        # Convert SQL IN to Python in (case-sensitive conversion)
+        # Use word boundaries to avoid replacing parts of words
+        preprocessed = re.sub(r'\bIN\b', 'in', preprocessed)
+        preprocessed = re.sub(r'\bNOT IN\b', 'not in', preprocessed)
+        
+        # Note: We could add other special function replacements here if needed
+        # For example, CLASSIFIER() could be replaced with the classifier value
+        
+        logger.debug(f"Preprocessed expression: '{expr}' -> '{preprocessed}'")
+        return preprocessed
+
 
     def evaluate(self, expr: str, semantics: str = None) -> Any:
         """
@@ -607,13 +642,17 @@ class MeasureEvaluator:
             # Set up context for AST evaluation
             self.context.current_row = self.context.rows[self.context.current_idx] if self.context.current_idx < len(self.context.rows) else None
             
+            # Preprocess the expression to replace special functions with their values
+            # This allows complex expressions like "MATCH_NUMBER() IN (0, MATCH_NUMBER())" to be parsed by AST
+            preprocessed_expr = self._preprocess_expression_for_ast(expr)
+            
             # Create a specialized condition evaluator for measure expressions
             # Use MEASURES mode for correct PREV/NEXT semantics in measure expressions
             evaluator = ConditionEvaluator(self.context, evaluation_mode='MEASURES')
             
             # Parse and evaluate the expression using AST
             try:
-                tree = ast.parse(expr, mode='eval')
+                tree = ast.parse(preprocessed_expr, mode='eval')
                 result = evaluator.visit(tree.body)
                 return result
             except (SyntaxError, ValueError) as ast_error:
