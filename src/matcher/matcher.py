@@ -11,6 +11,10 @@ from src.matcher.pattern_tokenizer import PatternTokenType
 from src.utils.logging_config import get_logger, PerformanceTimer
 import re
 
+# Complex exclusion support integrated directly
+from enum import Enum
+from dataclasses import dataclass
+
 # Module logger
 logger = get_logger(__name__)
 
@@ -46,53 +50,258 @@ class MatchConfig:
         }
         return config_dict.get(key, default)
 
+class ExclusionNodeType(Enum):
+    """Types of nodes in the exclusion pattern tree."""
+    VARIABLE = "VARIABLE"
+    QUANTIFIER = "QUANTIFIER"
+    SEQUENCE = "SEQUENCE"
+    NEGATION = "NEGATION"
+    ALTERNATION = "ALTERNATION"
+
+@dataclass
+class ExclusionNode:
+    """Node in the exclusion pattern tree."""
+    node_type: ExclusionNodeType
+    value: str
+    quantifier: Optional[str] = None
+    children: List['ExclusionNode'] = None
+    is_negated: bool = False
+    
+    def __post_init__(self):
+        if self.children is None:
+            self.children = []
+
 class PatternExclusionHandler:
     """
-    Handler for pattern exclusions with proper semantics.
+    Production-ready handler for pattern exclusions with full support for complex nested patterns.
+    
+    Supports patterns like:
+    - {- A -} (simple exclusion)
+    - {- {- B+ -} C+ -} (complex nested exclusion with quantifiers)
+    - {- A | B -} (exclusion with alternation)
     """
     
     def __init__(self, original_pattern: str):
         self.original_pattern = original_pattern
         self.exclusion_ranges = []
         self.excluded_vars = set()
-        self._parse_exclusions()
+        self.exclusion_trees: List[ExclusionNode] = []
+        self.complex_exclusions: List[Dict[str, Any]] = []
+        
+        # Parse all exclusions (both simple and complex)
+        self._parse_all_exclusions()
     
-    def _parse_exclusions(self):
-        """
-        Parse exclusion patterns from the original pattern.
-        """
+    def _parse_all_exclusions(self) -> None:
+        """Parse all exclusion patterns in the input pattern."""
         if not self.original_pattern:
             return
-        
-        # Find all exclusion sections
-        pattern = self.original_pattern
+            
         start = 0
         while True:
-            start_marker = pattern.find("{-", start)
+            start_marker = self.original_pattern.find("{-", start)
             if start_marker == -1:
                 break
-            end_marker = pattern.find("-}", start_marker)
+            
+            end_marker = self._find_matching_exclusion_end(start_marker)
             if end_marker == -1:
-                logger.warning(f"Unbalanced exclusion markers in pattern: {pattern}")
+                logger.warning(f"Unbalanced exclusion markers in pattern: {self.original_pattern}")
                 break
             
-            # Extract excluded content
-            excluded_content = pattern[start_marker + 2:end_marker].strip()
+            exclusion_content = self.original_pattern[start_marker + 2:end_marker]
             self.exclusion_ranges.append((start_marker, end_marker))
-            logger.debug(f"Exclusion handler found content: '{excluded_content}'")
+            logger.debug(f"Exclusion handler found content: '{exclusion_content}'")
             
-            # Extract excluded variables - handle base variables without quantifiers
-            var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)(?:[+*?]|\{[0-9,]*\})?'
-            for match in re.finditer(var_pattern, excluded_content):
-                var_name = match.group(1)
-                self.excluded_vars.add(var_name)
-                logger.debug(f"Exclusion handler added variable: '{var_name}'")
+            try:
+                exclusion_tree = self._parse_exclusion_content(exclusion_content)
+                
+                if self._is_complex_exclusion(exclusion_tree):
+                    self.complex_exclusions.append({
+                        'tree': exclusion_tree,
+                        'start': start_marker,
+                        'end': end_marker,
+                        'content': exclusion_content
+                    })
+                    logger.info("Using complex exclusion handler for advanced patterns")
+                else:
+                    # Simple exclusion - extract variables the old way
+                    self._extract_simple_variables(exclusion_content)
+            except Exception as e:
+                logger.warning(f"Failed to parse exclusion '{exclusion_content}', treating as simple: {e}")
+                self._extract_simple_variables(exclusion_content)
             
             start = end_marker + 2
     
+    def _find_matching_exclusion_end(self, start_pos: int) -> int:
+        """Find the matching -} for a {- at start_pos."""
+        depth = 0
+        i = start_pos
+        while i < len(self.original_pattern) - 1:
+            if self.original_pattern[i:i+2] == "{-":
+                depth += 1
+                i += 2
+            elif self.original_pattern[i:i+2] == "-}":
+                depth -= 1
+                if depth == 0:
+                    return i
+                i += 2
+            else:
+                i += 1
+        return -1
+    
+    def _parse_exclusion_content(self, content: str) -> ExclusionNode:
+        """Parse exclusion content into a tree structure."""
+        content = content.strip()
+        
+        # Check for nested exclusions
+        if "{-" in content and "-}" in content:
+            return self._parse_nested_exclusion(content)
+        
+        # Check for alternation
+        if "|" in content:
+            return self._parse_alternation(content)
+        
+        # Check for sequence with quantifiers
+        if any(q in content for q in ['+', '*', '?']) or '{' in content:
+            return self._parse_quantified_sequence(content)
+        
+        # Simple variable
+        return ExclusionNode(
+            node_type=ExclusionNodeType.VARIABLE,
+            value=content.strip()
+        )
+    
+    def _parse_nested_exclusion(self, content: str) -> ExclusionNode:
+        """Parse nested exclusion patterns."""
+        # Find the nested exclusion
+        nested_start = content.find("{-")
+        nested_end = self._find_matching_exclusion_end_in_content(content, nested_start)
+        
+        if nested_end == -1:
+            raise ValueError(f"Unmatched nested exclusion in: {content}")
+        
+        # Parse the nested part
+        nested_content = content[nested_start + 2:nested_end]
+        nested_node = self._parse_exclusion_content(nested_content)
+        nested_node.is_negated = True
+        
+        # Parse what comes after the nested exclusion
+        after_nested = content[nested_end + 2:].strip()
+        
+        if after_nested:
+            after_node = self._parse_exclusion_content(after_nested)
+            
+            # Create a sequence node
+            sequence_node = ExclusionNode(
+                node_type=ExclusionNodeType.SEQUENCE,
+                value="nested_sequence",
+                children=[nested_node, after_node]
+            )
+            
+            # The whole thing is negated (outer exclusion)
+            negation_node = ExclusionNode(
+                node_type=ExclusionNodeType.NEGATION,
+                value="negation",
+                children=[sequence_node],
+                is_negated=True
+            )
+            
+            return negation_node
+        else:
+            return nested_node
+    
+    def _find_matching_exclusion_end_in_content(self, content: str, start_pos: int) -> int:
+        """Find matching -} within content string."""
+        depth = 0
+        i = start_pos
+        while i < len(content) - 1:
+            if content[i:i+2] == "{-":
+                depth += 1
+                i += 2
+            elif content[i:i+2] == "-}":
+                depth -= 1
+                if depth == 0:
+                    return i
+                i += 2
+            else:
+                i += 1
+        return -1
+    
+    def _parse_alternation(self, content: str) -> ExclusionNode:
+        """Parse alternation patterns (A | B)."""
+        alternatives = [alt.strip() for alt in content.split("|")]
+        
+        alt_node = ExclusionNode(
+            node_type=ExclusionNodeType.ALTERNATION,
+            value="alternation"
+        )
+        
+        for alt in alternatives:
+            child_node = self._parse_exclusion_content(alt)
+            alt_node.children.append(child_node)
+        
+        return alt_node
+    
+    def _parse_quantified_sequence(self, content: str) -> ExclusionNode:
+        """Parse sequences with quantifiers (A+ B* C{2,3})."""
+        # Extract variables with their quantifiers
+        var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)([+*?]|\{[0-9,]*\})?'
+        matches = re.findall(var_pattern, content)
+        
+        if len(matches) == 1:
+            var_name, quantifier = matches[0]
+            return ExclusionNode(
+                node_type=ExclusionNodeType.VARIABLE,
+                value=var_name,
+                quantifier=quantifier if quantifier else None
+            )
+        else:
+            # Multiple variables - create sequence
+            seq_node = ExclusionNode(
+                node_type=ExclusionNodeType.SEQUENCE,
+                value="sequence"
+            )
+            
+            for var_name, quantifier in matches:
+                var_node = ExclusionNode(
+                    node_type=ExclusionNodeType.VARIABLE,
+                    value=var_name,
+                    quantifier=quantifier if quantifier else None
+                )
+                seq_node.children.append(var_node)
+            
+            return seq_node
+    
+    def _is_complex_exclusion(self, node: ExclusionNode) -> bool:
+        """Determine if an exclusion tree represents a complex pattern."""
+        if node.node_type == ExclusionNodeType.NEGATION:
+            return True
+        
+        if node.node_type == ExclusionNodeType.ALTERNATION:
+            return True  # Alternation is always complex
+        
+        if node.node_type == ExclusionNodeType.SEQUENCE and len(node.children) > 1:
+            return True
+        
+        if node.quantifier and node.quantifier in ['+', '*'] or '{' in (node.quantifier or ''):
+            return True
+        
+        for child in node.children:
+            if self._is_complex_exclusion(child):
+                return True
+        
+        return False
+    
+    def _extract_simple_variables(self, content: str) -> None:
+        """Extract variables from simple exclusion patterns."""
+        var_pattern = r'([A-Za-z_][A-Za-z0-9_]*)'
+        for match in re.finditer(var_pattern, content):
+            var_name = match.group(1)
+            self.excluded_vars.add(var_name)
+            logger.debug(f"Exclusion handler added variable: '{var_name}'")
+    
     def is_excluded(self, var_name: str) -> bool:
         """
-        Check if a variable is excluded.
+        Check if a variable is excluded by simple exclusions.
         
         Args:
             var_name: The variable name to check
@@ -100,7 +309,7 @@ class PatternExclusionHandler:
         Returns:
             True if the variable is excluded, False otherwise
         """
-        # Strip any quantifiers from the variable name
+        # Strip any quantifiers from the variable name for simple exclusions
         base_var = var_name
         if var_name.endswith('+') or var_name.endswith('*') or var_name.endswith('?'):
             base_var = var_name[:-1]
@@ -108,6 +317,241 @@ class PatternExclusionHandler:
             base_var = var_name[:var_name.find('{')]
             
         return base_var in self.excluded_vars
+    
+    def has_complex_exclusions(self) -> bool:
+        """Check if there are complex exclusions that need special handling."""
+        return len(self.complex_exclusions) > 0
+    
+    def evaluate_complex_exclusions(self, sequence: List[Tuple[str, int]], 
+                                   start_idx: int, end_idx: int) -> bool:
+        """
+        Evaluate whether a sequence should be excluded by complex exclusions.
+        
+        Args:
+            sequence: List of (variable_name, row_index) tuples
+            start_idx: Start index in the sequence
+            end_idx: End index in the sequence
+            
+        Returns:
+            True if the sequence should be excluded
+        """
+        if not self.complex_exclusions:
+            return False
+        
+        for exclusion in self.complex_exclusions:
+            tree = exclusion['tree']
+            if self._evaluate_exclusion_tree(tree, sequence, start_idx, end_idx):
+                return True
+        
+        return False
+    
+    def _evaluate_exclusion_tree(self, node: ExclusionNode, 
+                                sequence: List[Tuple[str, int]], 
+                                start_idx: int, end_idx: int) -> bool:
+        """Evaluate an exclusion tree against a sequence."""
+        if node.node_type == ExclusionNodeType.NEGATION:
+            # Negation - invert the result of children
+            if node.children:
+                child_result = self._evaluate_exclusion_tree(
+                    node.children[0], sequence, start_idx, end_idx
+                )
+                return not child_result
+            return True
+        
+        elif node.node_type == ExclusionNodeType.SEQUENCE:
+            # All children must match in sequence
+            return self._evaluate_sequence_match(node, sequence, start_idx, end_idx)
+        
+        elif node.node_type == ExclusionNodeType.VARIABLE:
+            # Single variable with optional quantifier
+            return self._evaluate_variable_match(node, sequence, start_idx, end_idx)
+        
+        elif node.node_type == ExclusionNodeType.ALTERNATION:
+            # Any child can match
+            for child in node.children:
+                if self._evaluate_exclusion_tree(child, sequence, start_idx, end_idx):
+                    return True
+            return False
+        
+        return False
+    
+    def _evaluate_sequence_match(self, node: ExclusionNode, 
+                               sequence: List[Tuple[str, int]], 
+                               start_idx: int, end_idx: int) -> bool:
+        """Evaluate if a sequence matches the pattern with production-ready sequence matching."""
+        if not node.children:
+            return True
+        
+        seq_vars = [var_name for var_name, _ in sequence[start_idx:end_idx+1]]
+        
+        # Use advanced sequence matching with backtracking for complex patterns
+        return self._match_sequence_with_backtracking(node.children, seq_vars, 0, 0)
+    
+    def _match_sequence_with_backtracking(self, pattern_nodes: List[ExclusionNode], 
+                                        seq_vars: List[str], 
+                                        pattern_idx: int, seq_idx: int) -> bool:
+        """Production-ready sequence matching with backtracking and quantifier support."""
+        # Base case: matched all pattern nodes
+        if pattern_idx >= len(pattern_nodes):
+            return True
+        
+        # Base case: no more sequence but pattern remains
+        if seq_idx >= len(seq_vars):
+            # Check if remaining pattern nodes can match empty
+            for i in range(pattern_idx, len(pattern_nodes)):
+                node = pattern_nodes[i]
+                if node.quantifier not in ['*', '?']:
+                    return False
+            return True
+        
+        current_node = pattern_nodes[pattern_idx]
+        
+        # Handle negated nodes
+        if current_node.is_negated:
+            # Should NOT match - check if it doesn't match and continue
+            if not self._node_matches_position(current_node, seq_vars, seq_idx):
+                return self._match_sequence_with_backtracking(
+                    pattern_nodes, seq_vars, pattern_idx + 1, seq_idx
+                )
+            return False
+        
+        # Handle quantifiers
+        if current_node.quantifier == '*':
+            # Zero or more: try matching 0, 1, 2, ... instances
+            for match_count in range(len(seq_vars) - seq_idx + 1):
+                if self._try_match_count(current_node, seq_vars, seq_idx, match_count):
+                    if self._match_sequence_with_backtracking(
+                        pattern_nodes, seq_vars, pattern_idx + 1, seq_idx + match_count
+                    ):
+                        return True
+            return False
+        
+        elif current_node.quantifier == '+':
+            # One or more: try matching 1, 2, 3, ... instances
+            for match_count in range(1, len(seq_vars) - seq_idx + 1):
+                if self._try_match_count(current_node, seq_vars, seq_idx, match_count):
+                    if self._match_sequence_with_backtracking(
+                        pattern_nodes, seq_vars, pattern_idx + 1, seq_idx + match_count
+                    ):
+                        return True
+            return False
+        
+        elif current_node.quantifier == '?':
+            # Zero or one: try 0 then 1
+            # Try zero matches first
+            if self._match_sequence_with_backtracking(
+                pattern_nodes, seq_vars, pattern_idx + 1, seq_idx
+            ):
+                return True
+            # Try one match
+            if (seq_idx < len(seq_vars) and 
+                self._node_matches_position(current_node, seq_vars, seq_idx)):
+                return self._match_sequence_with_backtracking(
+                    pattern_nodes, seq_vars, pattern_idx + 1, seq_idx + 1
+                )
+            return False
+        
+        elif current_node.quantifier and current_node.quantifier.startswith('{'):
+            # Range quantifier {min,max}
+            range_match = re.match(r'\{(\d+)(?:,(\d+))?\}', current_node.quantifier)
+            if range_match:
+                min_count = int(range_match.group(1))
+                max_count = int(range_match.group(2)) if range_match.group(2) else min_count
+                
+                for match_count in range(min_count, min(max_count + 1, len(seq_vars) - seq_idx + 1)):
+                    if self._try_match_count(current_node, seq_vars, seq_idx, match_count):
+                        if self._match_sequence_with_backtracking(
+                            pattern_nodes, seq_vars, pattern_idx + 1, seq_idx + match_count
+                        ):
+                            return True
+            return False
+        
+        else:
+            # No quantifier: match exactly once
+            if (seq_idx < len(seq_vars) and 
+                self._node_matches_position(current_node, seq_vars, seq_idx)):
+                return self._match_sequence_with_backtracking(
+                    pattern_nodes, seq_vars, pattern_idx + 1, seq_idx + 1
+                )
+            return False
+    
+    def _try_match_count(self, node: ExclusionNode, seq_vars: List[str], 
+                        start_idx: int, count: int) -> bool:
+        """Try to match a node exactly 'count' times starting at start_idx."""
+        if count == 0:
+            return True
+        
+        if start_idx + count > len(seq_vars):
+            return False
+        
+        # Check if all positions match the node
+        for i in range(count):
+            if not self._node_matches_position(node, seq_vars, start_idx + i):
+                return False
+        
+        return True
+    
+    def _node_matches_position(self, node: ExclusionNode, seq_vars: List[str], pos: int) -> bool:
+        """Check if a node matches at a specific position."""
+        if pos >= len(seq_vars):
+            return False
+        
+        if node.node_type == ExclusionNodeType.VARIABLE:
+            return seq_vars[pos] == node.value
+        elif node.node_type == ExclusionNodeType.ALTERNATION:
+            return any(self._node_matches_position(child, seq_vars, pos) for child in node.children)
+        elif node.node_type == ExclusionNodeType.SEQUENCE:
+            # For sequence in a position, try to match starting here
+            return self._match_sequence_with_backtracking(node.children, seq_vars, 0, pos)
+        
+        return False
+    
+    def _evaluate_variable_match(self, node: ExclusionNode, 
+                               sequence: List[Tuple[str, int]], 
+                               start_idx: int, end_idx: int) -> bool:
+        """Evaluate if a variable matches with its quantifier."""
+        seq_vars = [var_name for var_name, _ in sequence[start_idx:end_idx+1]]
+        return self._variable_present_with_quantifier(node, seq_vars)
+    
+    def _variable_present_with_quantifier(self, node: ExclusionNode, 
+                                        seq_vars: List[str]) -> bool:
+        """Check if variable is present according to its quantifier."""
+        var_name = node.value
+        count = seq_vars.count(var_name)
+        
+        if node.quantifier == '+':
+            return count >= 1
+        elif node.quantifier == '*':
+            return True  # Zero or more always matches
+        elif node.quantifier == '?':
+            return count <= 1
+        elif node.quantifier and node.quantifier.startswith('{'):
+            # Parse {min,max} quantifier
+            range_match = re.match(r'\{(\d+)(?:,(\d+))?\}', node.quantifier)
+            if range_match:
+                min_count = int(range_match.group(1))
+                max_count = int(range_match.group(2)) if range_match.group(2) else min_count
+                return min_count <= count <= max_count
+        
+        # No quantifier - exact match
+        return count == 1
+    
+    def get_debug_info(self) -> Dict[str, Any]:
+        """Get debug information about the exclusion handler."""
+        return {
+            'pattern': self.original_pattern,
+            'simple_excluded_vars': list(self.excluded_vars),
+            'complex_exclusions_count': len(self.complex_exclusions),
+            'has_complex': self.has_complex_exclusions(),
+            'complex_exclusions': [
+                {
+                    'content': exc['content'],
+                    'tree_type': exc['tree'].node_type.value,
+                    'is_negated': exc['tree'].is_negated
+                }
+                for exc in self.complex_exclusions
+            ]
+        }
     
     def filter_excluded_rows(self, match: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -392,8 +836,12 @@ class EnhancedMatcher:
             for var, target, condition in trans_index:
                 logger.debug(f"  Evaluating condition for var: {var}")
                 try:
-                    # Check if this is an excluded variable
-                    is_excluded = var in self.excluded_vars
+                    # Check if this is an excluded variable using our integrated logic
+                    is_excluded = False
+                    if self.exclusion_handler:
+                        is_excluded = self.exclusion_handler.is_excluded(var)
+                    else:
+                        is_excluded = var in self.excluded_vars
                     
                     # Set the current variable being evaluated for self-references
                     context.current_var = var
