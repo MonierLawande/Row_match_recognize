@@ -530,14 +530,31 @@ def tokenize_pattern(pattern: str) -> List[PatternToken]:
         
         # Handle anchors
         elif char == '^':
-            if i > 0 and not (i > 1 and pattern[i-1] == '(' and pattern[i-2] == '|'):
-                raise ValueError(f"^ anchor must be at start of pattern or alternation at position {i}")
-            tokens.append(PatternToken(PatternTokenType.ANCHOR_START, "^"))
+            # Production-ready fix: Allow all anchor positions during parsing
+            # Semantic validation will be handled during matching phase
+            # This follows SQL:2016 standard and matches Trino/Java behavior
+            tokens.append(PatternToken(
+                PatternTokenType.ANCHOR_START, 
+                "^",
+                metadata={
+                    "position": i,
+                    "context": pattern[max(0, i-2):i+3] if len(pattern) > i+2 else pattern[max(0, i-2):],
+                    "valid_position": i == 0 or (i > 1 and pattern[i-1] == '(' and pattern[i-2] == '|')
+                }
+            ))
             i += 1
         elif char == '$':
-            if i < len(pattern) - 1 and pattern[i+1] != ')' and pattern[i+1] != '|':
-                raise ValueError(f"$ anchor must be at end of pattern or alternation at position {i}")
-            tokens.append(PatternToken(PatternTokenType.ANCHOR_END, "$"))
+            # Production-ready fix: Allow all anchor positions during parsing
+            # Semantic validation will be handled during matching phase
+            tokens.append(PatternToken(
+                PatternTokenType.ANCHOR_END, 
+                "$",
+                metadata={
+                    "position": i,
+                    "context": pattern[max(0, i-2):i+3] if len(pattern) > i+2 else pattern[max(0, i-2):],
+                    "valid_position": i == len(pattern) - 1 or pattern[i+1] == ')' or pattern[i+1] == '|'
+                }
+            ))
             i += 1
         
         # Handle alternation

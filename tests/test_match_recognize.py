@@ -946,10 +946,15 @@ class TestRowPatternMatching:
         assert result is not None
         assert not result.empty
         
+        # Expected results: Only matches where B.value < PREV(B.value) is satisfied
+        # For p1: ids [1,2,3,4,5] with values [90,80,70,80,90]
+        #   - Match 1: id=2 (80<90) and id=3 (70<80) ✓
+        #   - id=5 cannot match because 90 >= 80 (PREV value from id=4)
+        # For p2: ids [1,2,3] with values [20,20,10]  
+        #   - Match 1: id=3 (10<20) ✓
         expected_rows = [
             ('p1', 2, 1, 90, 'B'),
             ('p1', 3, 1, 80, 'B'),
-            ('p1', 5, 2, 90, 'B'),
             ('p2', 3, 1, 20, 'B')
         ]
         

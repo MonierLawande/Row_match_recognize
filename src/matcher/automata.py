@@ -541,6 +541,14 @@ class NFABuilder:
             self.add_epsilon(start, accept)
             return NFA(start, accept, self.states, [], {"empty_pattern": True})
         
+        # Validate anchor semantics first - critical for SQL:2016 compliance
+        if not self._validate_anchor_semantics(tokens):
+            # Pattern has invalid anchor semantics (like A^), create a non-matching NFA
+            # Connect start directly to a dead-end state (not accept)
+            dead_state = self.new_state()
+            self.add_epsilon(start, dead_state)
+            return NFA(start, accept, self.states, [], self.metadata)
+        
         # Process pattern with full SQL:2016 compliance
         idx = [0]  # Use mutable list for position tracking
         
@@ -1170,6 +1178,100 @@ class NFABuilder:
                 perm_start, perm_end, min_rep, max_rep, greedy)
         
         return perm_start, perm_end
+
+# enhanced/automata.py - Part 5: NFABuilder Semantic Validation
+
+    def _validate_anchor_semantics(self, tokens: List[PatternToken]) -> bool:
+        """
+        Validate anchor semantics to ensure patterns like A^ are marked as impossible.
+        
+        According to SQL:2016 standard:
+        - Start anchors (^) can only appear at the beginning or after alternation
+        - End anchors ($) can only appear at the end or before alternation
+        - Patterns like A^ are semantically invalid (literal followed by start anchor)
+        - Patterns like ^A$ are valid (start anchor, literal, end anchor)
+        
+        Args:
+            tokens: List of pattern tokens to validate
+            
+        Returns:
+            bool: True if pattern has valid semantics, False if impossible to match
+        """
+        for i, token in enumerate(tokens):
+            if token.type == PatternTokenType.ANCHOR_START:
+                # ^ must be at start, after (, or after |
+                if i > 0:
+                    prev_token = tokens[i-1]
+                    if prev_token.type not in (PatternTokenType.GROUP_START, PatternTokenType.ALTERNATION):
+                        # Found ^ after a literal (like A^) - this is semantically invalid
+                        self.metadata["impossible_pattern"] = True
+                        self.metadata["invalid_anchor_reason"] = f"Start anchor after {prev_token.type.name} at position {i}"
+                        return False
+                        
+            elif token.type == PatternTokenType.ANCHOR_END:
+                # $ must be at end, before ), or before |
+                if i < len(tokens) - 1:
+                    next_token = tokens[i+1]
+                    if next_token.type not in (PatternTokenType.GROUP_END, PatternTokenType.ALTERNATION):
+                        # Found $ before a literal (like $A) - this is semantically invalid
+                        self.metadata["impossible_pattern"] = True
+                        self.metadata["invalid_anchor_reason"] = f"End anchor before {next_token.type.name} at position {i}"
+                        return False
+        
+        return True
+
+# enhanced/automata.py - Part 6: NFABuilder DEFINE Processing
+
+    def _process_define(self, define: Dict[str, str]):
+        """
+        Process DEFINE variables and integrate them into the NFA builder.
+        
+        This method processes the DEFINE variables to:
+        - Create states for each variable
+        - Add transitions based on variable conditions
+        - Handle variable quantifiers and nesting
+        
+        Args:
+            define: Dictionary of DEFINE variables and their conditions
+        """
+        for var_name, condition in define.items():
+            # Create a new state for the variable
+            var_start = self.new_state()
+            var_end = self.new_state()
+            
+            # Compile the condition for this variable
+            condition_fn = compile_condition(condition, evaluation_mode='DEFINE')
+            
+            # Add a transition from var_start to var_end with the variable condition
+            self.states[var_start].add_transition(condition_fn, var_end, var_name)
+            
+            # Store variable name on both states
+            self.states[var_start].variable = var_name
+            self.states[var_end].variable = var_name
+            
+            # Handle quantifiers if present in the variable name
+            if '{' in var_name and '}' in var_name:
+                # Extract min and max from {min,max} pattern
+                open_brace = var_name.index('{')
+                close_brace = var_name.index('}')
+                quantifier = var_name[open_brace+1:close_brace]
+                
+                # Parse quantifier values
+                if ',' in quantifier:
+                    min_rep, max_rep = quantifier.split(',')
+                    min_rep = int(min_rep) if min_rep else 0
+                    max_rep = int(max_rep) if max_rep else None
+                else:
+                    min_rep = int(quantifier)
+                    max_rep = min_rep
+                
+                # Apply quantifier to the variable transition
+                self._apply_quantifier(var_start, var_end, min_rep, max_rep, greedy=True)
+            
+            # Update the start state of the NFA to include the variable
+            self.add_epsilon(0, var_start)
+            self.add_epsilon(var_end, 1)
+
 # enhanced/automata.py - Part 7: NFABuilder Quantifier Handling
 
     def _apply_quantifier(self, 
@@ -1418,6 +1520,7 @@ class NFABuilder:
                     state_map[eps_target] = new_eps_target
                     queue.append((eps_target, new_eps_target))
                     new_state_obj.add_epsilon(new_eps_target)
+
 # enhanced/automata.py - Part 9: NFABuilder Utility Methods
 
     def optimize_nfa(self, nfa: NFA) -> NFA:

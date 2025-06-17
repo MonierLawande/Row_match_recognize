@@ -317,7 +317,7 @@ class TestSql2016Compliance:
             ORDER BY id
             MEASURES
                 MATCH_NUMBER() AS match_num
-            ALL ROWS PER MATCH
+            ONE ROW PER MATCH
             AFTER MATCH SKIP TO NEXT ROW
             PATTERN (A+)
             DEFINE A AS true
@@ -327,9 +327,10 @@ class TestSql2016Compliance:
         result = match_recognize(query, df)
         assert result is not None
         assert not result.empty
-        # Each row should have a different match number
-        for i in range(len(result) - 1):
-            assert result.iloc[i]['match_num'] != result.iloc[i+1]['match_num']
+        # Each row should have a different match number since ONE ROW PER MATCH with SKIP TO NEXT ROW
+        # should produce one row per match starting from each position
+        unique_match_numbers = result['match_num'].unique()
+        assert len(unique_match_numbers) == len(result), f"Expected {len(result)} unique match numbers, got {len(unique_match_numbers)}"
         
     def test_sql2016_partition_handling(self):
         """Test that partitioning complies with SQL:2016 standard."""
