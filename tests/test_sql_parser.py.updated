@@ -1,0 +1,272 @@
+"""
+Tests for the SQL parser component of the match_recognize implementation.
+"""
+
+import pytest
+import pandas as pd
+from typing import List, Dict, Any, Tuple
+
+# Add the src directory to path
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# Import the SQL parser
+from src.parser.match_recognize_extractor import parse_full_query
+
+class TestSqlParser:
+    """Test suite for the SQL parser component."""
+    
+    def test_basic_query_parsing(self):
+        """Test parsing of basic MATCH_RECOGNIZE queries."""
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            PATTERN (A B+)
+            DEFINE
+                A AS A.value > 100,
+                B AS B.value < A.value
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize is not None
+        assert result.match_recognize.pattern is not None
+        assert result.match_recognize.define is not None
+        assert result.match_recognize.order_by is not None
+        
+    def test_complete_query_parsing(self):
+        """Test parsing of complete MATCH_RECOGNIZE queries with all clauses."""
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            PARTITION BY symbol
+            ORDER BY timestamp
+            MEASURES
+                MATCH_NUMBER() AS match_num,
+                CLASSIFIER() AS label,
+                RUNNING LAST(price) AS price
+            ONE ROW PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (A B+ C+)
+            SUBSET
+                U = (A, B),
+                V = (B, C)
+            DEFINE
+                A AS price > 100,
+                B AS B.price < PREV(B.price),
+                C AS C.price > PREV(C.price)
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize is not None
+        assert result.match_recognize.pattern is not None
+        assert result.match_recognize.partition_by is not None
+        assert result.match_recognize.order_by is not None
+        assert result.match_recognize.measures is not None
+        assert result.match_recognize.rows_per_match is not None
+        assert result.match_recognize.after_match_skip is not None
+        assert result.match_recognize.subset is not None
+        assert result.match_recognize.define is not None
+        
+    def test_minimal_query_parsing(self):
+        """Test parsing of minimal MATCH_RECOGNIZE queries."""
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            PATTERN (A)
+            DEFINE A AS true
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.pattern is not None
+        assert result.match_recognize.define is not None
+        
+    def test_pattern_parsing(self):
+        """Test parsing of different pattern syntaxes."""
+        # Simple concatenation
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            PATTERN (A B C)
+            DEFINE A AS true, B AS true, C AS true
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.pattern is not None
+        assert result.match_recognize.pattern.pattern is not None
+        assert "A B C" in result.match_recognize.pattern.pattern or "ABC" in result.match_recognize.pattern.pattern
+        
+        # Alternation
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            PATTERN (A | B | C)
+            DEFINE A AS true, B AS true, C AS true
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.pattern is not None
+        assert "|" in result.match_recognize.pattern.pattern
+        
+        # Quantifiers
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            PATTERN (A* B+ C?)
+            DEFINE A AS true, B AS true, C AS true
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.pattern is not None
+        assert "*" in result.match_recognize.pattern.pattern
+        assert "+" in result.match_recognize.pattern.pattern
+        assert "?" in result.match_recognize.pattern.pattern
+        
+        # PERMUTE
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            PATTERN (PERMUTE(A, B, C))
+            DEFINE A AS true, B AS true, C AS true
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.pattern is not None
+        assert "PERMUTE" in result.match_recognize.pattern.pattern
+        
+    def test_measures_parsing(self):
+        """Test parsing of MEASURES clause."""
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            MEASURES
+                MATCH_NUMBER() AS match_num,
+                CLASSIFIER() AS label,
+                RUNNING LAST(price) AS price,
+                FINAL LAST(price) AS final_price,
+                RUNNING FIRST(price) AS start_price,
+                PREV(price) AS prev_price,
+                NEXT(price) AS next_price
+            PATTERN (A)
+            DEFINE A AS true
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.measures is not None
+        # Check that there are measures defined
+        assert len(result.match_recognize.measures.measures) > 0
+        
+    def test_rows_per_match_parsing(self):
+        """Test parsing of ROWS PER MATCH clause."""
+        # ONE ROW PER MATCH
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ONE ROW PER MATCH
+            PATTERN (A)
+            DEFINE A AS true
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.rows_per_match is not None
+        assert "ONE ROW" in result.match_recognize.rows_per_match.raw_mode
+        
+        # ALL ROWS PER MATCH
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ALL ROWS PER MATCH
+            PATTERN (A)
+            DEFINE A AS true
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.rows_per_match is not None
+        assert "ALL ROWS" in result.match_recognize.rows_per_match.raw_mode
+        
+    def test_after_match_skip_parsing(self):
+        """Test parsing of AFTER MATCH SKIP clause."""
+        # SKIP PAST LAST ROW
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (A)
+            DEFINE A AS true
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.after_match_skip is not None
+        assert "PAST LAST ROW" in result.match_recognize.after_match_skip.mode
+        
+        # SKIP TO NEXT ROW
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            AFTER MATCH SKIP TO NEXT ROW
+            PATTERN (A)
+            DEFINE A AS true
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.after_match_skip is not None
+        assert "TO NEXT ROW" in result.match_recognize.after_match_skip.mode
+        
+    def test_define_parsing(self):
+        """Test parsing of DEFINE clause."""
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            PATTERN (A B C)
+            DEFINE
+                A AS price > 100,
+                B AS B.price < A.price,
+                C AS C.price > PREV(C.price)
+        ) AS m
+        """
+        
+        result = parse_full_query(query)
+        assert result is not None
+        assert hasattr(result, 'match_recognize')
+        assert result.match_recognize.define is not None
+        assert len(result.match_recognize.define.definitions) == 3
