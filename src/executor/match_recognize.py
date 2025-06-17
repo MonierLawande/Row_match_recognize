@@ -770,10 +770,37 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     # Create a new result row
                     result_row = {}
                     
-                    # Add partition columns
+                    # Determine which columns we need based on SELECT clause
+                    needed_data_columns = set()
+                    is_select_star = False
+                    
+                    if ast.select_clause and ast.select_clause.items:
+                        # Check if this is a SELECT * query
+                        is_select_star = any(item.expression == '*' for item in ast.select_clause.items)
+                        
+                        if is_select_star:
+                            # For SELECT *, include all original data columns
+                            if match["start"] < len(all_rows):
+                                needed_data_columns.update(all_rows[match["start"]].keys())
+                        else:
+                            # Get all measure expressions (not just aliases)
+                            measure_expressions = set(measures.values()) if measures else set()
+                            
+                            for item in ast.select_clause.items:
+                                expression = item.expression.split('.')[-1] if '.' in item.expression else item.expression
+                                # Only include data columns that are not measures or special functions
+                                if (expression not in measures and 
+                                    expression not in measure_expressions and 
+                                    expression not in ['MATCH_NUMBER()', 'CLASSIFIER()']):
+                                    needed_data_columns.add(expression)
+                    else:
+                        # Fallback: include partition columns if no SELECT clause
+                        needed_data_columns.update(partition_by)
+                    
+                    # Add only the needed data columns from original rows
                     if match["start"] < len(all_rows):
                         start_row = all_rows[match["start"]]
-                        for col in partition_by:
+                        for col in needed_data_columns:
                             if col in start_row:
                                 result_row[col] = start_row[col]
                     
@@ -820,19 +847,56 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     metrics["total_time"] = time.time() - start_time
                     return pd.DataFrame(columns=columns)
                 
-                # Ensure columns are in the correct order
+                # Ensure columns are in the correct order - only SELECT clause columns
                 ordered_cols = []
-                ordered_cols.extend(partition_by)  # Partition columns first
-                if mr_clause.measures:
-                    ordered_cols.extend([m.alias for m in mr_clause.measures.measures if m.alias])
                 
-                # Include columns specified in the SELECT clause
+                # Handle SELECT clause columns and aliases - Production-ready column aliasing fix
                 if ast.select_clause and ast.select_clause.items:
-                    select_items = [item.expression.split('.')[-1] if '.' in item.expression else item.expression 
-                                   for item in ast.select_clause.items]
-                    for col in select_items:
-                        if col not in ordered_cols and col in result_df.columns:
-                            ordered_cols.append(col)
+                    # Check if this is a SELECT * query
+                    is_select_star = any(item.expression == '*' for item in ast.select_clause.items)
+                    
+                    if is_select_star:
+                        # For SELECT *, include all available columns (original + measures)
+                        ordered_cols = [col for col in result_df.columns 
+                                      if col not in ['MATCH_NUMBER', 'IS_EMPTY_MATCH', '_original_row_idx']]
+                        logger.debug(f"SELECT * - including all columns: {ordered_cols}")
+                    else:
+                        # Create a mapping from expression to alias for proper column aliasing
+                        column_alias_map = {}
+                        select_columns = []
+                        
+                        for item in ast.select_clause.items:
+                            expression = item.expression.split('.')[-1] if '.' in item.expression else item.expression
+                            alias = item.alias if item.alias else expression
+                            
+                            # Track the mapping for renaming
+                            if item.alias and expression != alias:
+                                column_alias_map[expression] = alias
+                            
+                            # Add to select columns (use alias when available)
+                            select_columns.append(alias)
+                        
+                        # Apply column aliasing to the result DataFrame
+                        if column_alias_map:
+                            # Create rename mapping for columns that exist in the DataFrame
+                            rename_map = {}
+                            for orig_col, new_col in column_alias_map.items():
+                                if orig_col in result_df.columns:
+                                    rename_map[orig_col] = new_col
+                            
+                            if rename_map:
+                                result_df = result_df.rename(columns=rename_map)
+                                logger.debug(f"Applied column aliases: {rename_map}")
+                        
+                        # Only include SELECT columns that exist after aliasing
+                        for col in select_columns:
+                            if col in result_df.columns:
+                                ordered_cols.append(col)
+                else:
+                    # Fallback: if no SELECT clause, include partition and measure columns
+                    ordered_cols.extend(partition_by)  # Partition columns first
+                    if mr_clause.measures:
+                        ordered_cols.extend([m.alias for m in mr_clause.measures.measures if m.alias])
                 
                 # Only keep columns that exist in the result
                 ordered_cols = [col for col in ordered_cols if col in result_df.columns]
@@ -957,6 +1021,44 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 # Reset the DataFrame index to be sequential
                 result_df.reset_index(drop=True, inplace=True)
                 
+                # Production-ready fix: Filter out unwanted columns early to prevent aliasing conflicts
+                if ast.select_clause and ast.select_clause.items:
+                    # Check if this is a SELECT * query
+                    has_select_star = any(item.expression == '*' for item in ast.select_clause.items)
+                    
+                    if not has_select_star:
+                        # For specific column selection, be selective about which columns to keep
+                        needed_original_columns = set()
+                        measure_expressions = set(measures.values()) if measures else set()
+                        
+                        for item in ast.select_clause.items:
+                            expression = item.expression.split('.')[-1] if '.' in item.expression else item.expression
+                            # Only include original data columns that are not covered by measures
+                            if (expression not in measures and 
+                                expression not in measure_expressions and 
+                                expression not in ['MATCH_NUMBER()', 'CLASSIFIER()'] and
+                                expression in result_df.columns):
+                                needed_original_columns.add(expression)
+                        
+                        # Remove unwanted original data columns that would conflict with measures
+                        columns_to_drop = []
+                        for col in result_df.columns:
+                            # Keep measure columns, metadata columns, and needed original columns
+                            if (col in measures or 
+                                col in ['MATCH_NUMBER', 'IS_EMPTY_MATCH', '_original_row_idx'] or
+                                col in needed_original_columns):
+                                continue
+                            # Drop original data columns that aren't needed or would conflict
+                            if col not in needed_original_columns:
+                                columns_to_drop.append(col)
+                        
+                        if columns_to_drop:
+                            result_df = result_df.drop(columns=columns_to_drop)
+                            logger.debug(f"Dropped conflicting columns: {columns_to_drop}")
+                    else:
+                        # For SELECT *, keep all columns (both original and measures)
+                        logger.debug("SELECT * detected - keeping all columns")
+                
                 # Debug the measure columns
                 logger.debug("Checking measure columns in final DataFrame:")
                 for alias in measures.keys():
@@ -989,29 +1091,65 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     metrics["total_time"] = time.time() - start_time
                     return pd.DataFrame(columns=columns)
                 
-                # Define ordered columns - match Trino's output format
+                # Define ordered columns - only SELECT clause columns for production-ready behavior
                 ordered_cols = []
                 
-                # First add partition columns
-                if partition_by:
-                    ordered_cols.extend(partition_by)
-                
-                # Then add ordering columns if they're not already included
-                for col in order_by:
-                    if col not in ordered_cols:
-                        ordered_cols.append(col)
-                
-                # Then add measure columns
-                if mr_clause.measures:
-                    ordered_cols.extend([m.alias for m in mr_clause.measures.measures if m.alias])
-                
-                # Only include columns specified in the SELECT clause
+                # Handle SELECT clause columns and aliases - Production-ready column aliasing fix
                 if ast.select_clause and ast.select_clause.items:
-                    select_items = [item.expression.split('.')[-1] if '.' in item.expression else item.expression 
-                                   for item in ast.select_clause.items]
-                    for col in select_items:
-                        if col not in ordered_cols and col in result_df.columns:
+                    # Check if this is a SELECT * query
+                    has_select_star = any(item.expression == '*' for item in ast.select_clause.items)
+                    column_alias_map = {}  # Initialize for both cases
+                    
+                    if has_select_star:
+                        # For SELECT *, include all available columns (original + measures)
+                        ordered_cols = [col for col in result_df.columns 
+                                      if col not in ['MATCH_NUMBER', 'IS_EMPTY_MATCH', '_original_row_idx']]
+                        logger.debug(f"SELECT * - including all columns: {ordered_cols}")
+                    else:
+                        # Create a mapping from expression to alias for proper column aliasing
+                        select_columns = []
+                        
+                        for item in ast.select_clause.items:
+                            expression = item.expression.split('.')[-1] if '.' in item.expression else item.expression
+                            alias = item.alias if item.alias else expression
+                            
+                            # Track the mapping for renaming
+                            if item.alias and expression != alias:
+                                column_alias_map[expression] = alias
+                            
+                            # Add to select columns (use alias when available)
+                            select_columns.append(alias)
+                        
+                        # Apply column aliasing to the result DataFrame
+                        if column_alias_map:
+                            # Create rename mapping for columns that exist in the DataFrame
+                            rename_map = {}
+                            for orig_col, new_col in column_alias_map.items():
+                                if orig_col in result_df.columns:
+                                    rename_map[orig_col] = new_col
+                            
+                            if rename_map:
+                                result_df = result_df.rename(columns=rename_map)
+                                logger.debug(f"Applied column aliases: {rename_map}")
+                        
+                        # Only include SELECT columns that exist after aliasing
+                        for col in select_columns:
+                            if col in result_df.columns:
+                                ordered_cols.append(col)
+                else:
+                    # Fallback: if no SELECT clause, include partition, order, and measure columns
+                    # First add partition columns
+                    if partition_by:
+                        ordered_cols.extend(partition_by)
+                    
+                    # Then add ordering columns if they're not already included
+                    for col in order_by:
+                        if col not in ordered_cols:
                             ordered_cols.append(col)
+                    
+                    # Then add measure columns
+                    if mr_clause.measures:
+                        ordered_cols.extend([m.alias for m in mr_clause.measures.measures if m.alias])
                 
                 # Only keep columns that exist in the result
                 ordered_cols = [col for col in ordered_cols if col in result_df.columns]
@@ -1031,21 +1169,44 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     elif 'MATCH_NUMBER' in result_df.columns:
                         sort_columns.append('MATCH_NUMBER')
                     
-                    # Then add partition columns
+                    # Production-ready fix: Use renamed columns for sorting if they exist
+                    # Apply column alias mapping to sort columns
+                    partition_sort_cols = []
                     if partition_by:
-                        sort_columns.extend([col for col in partition_by if col not in sort_columns])
+                        for col in partition_by:
+                            # Check if this column was renamed
+                            if column_alias_map and col in column_alias_map:
+                                aliased_col = column_alias_map[col]
+                                if aliased_col in result_df.columns and aliased_col not in sort_columns:
+                                    partition_sort_cols.append(aliased_col)
+                            elif col in result_df.columns and col not in sort_columns:
+                                partition_sort_cols.append(col)
+                        sort_columns.extend(partition_sort_cols)
                     
-                    # Then add order columns, but only if they don't break match grouping
-                    # For SKIP TO NEXT ROW, we want to maintain match order, not reorder by id within matches
+                    # Apply the same logic to order_by columns
+                    order_sort_cols = []
                     if order_by and not any('SKIP TO NEXT ROW' in query.upper() for _ in [1]):
-                        sort_columns.extend([col for col in order_by if col not in sort_columns])
+                        for col in order_by:
+                            # Check if this column was renamed
+                            if column_alias_map and col in column_alias_map:
+                                aliased_col = column_alias_map[col]
+                                if aliased_col in result_df.columns and aliased_col not in sort_columns:
+                                    order_sort_cols.append(aliased_col)
+                            elif col in result_df.columns and col not in sort_columns:
+                                order_sort_cols.append(col)
+                        sort_columns.extend(order_sort_cols)
                 
+                # Only sort if we have valid columns
                 if sort_columns:
-                    # Reset DataFrame index before final sort to ensure proper ordering
-                    result_df.reset_index(drop=True, inplace=True)
-                    result_df = result_df.sort_values(by=sort_columns)
-                    # Reset index again after sort
-                    result_df.reset_index(drop=True, inplace=True)
+                    # Filter out any columns that don't exist in the DataFrame
+                    valid_sort_columns = [col for col in sort_columns if col in result_df.columns]
+                    
+                    if valid_sort_columns:
+                        # Reset DataFrame index before final sort to ensure proper ordering
+                        result_df.reset_index(drop=True, inplace=True)
+                        result_df = result_df.sort_values(by=valid_sort_columns)
+                        # Reset index again after sort
+                        result_df.reset_index(drop=True, inplace=True)
                 
                 # Remove temporary sorting columns
                 if '_original_row_idx' in result_df.columns:
