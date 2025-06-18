@@ -757,12 +757,19 @@ class MeasureEvaluator:
             if var_name is not None and hasattr(self.context, 'subsets') and var_name in self.context.subsets:
                 subset_components = self.context.subsets[var_name]
                 
-                # First, get the actual classifier for the current row
-                actual_classifier = self._evaluate_classifier_impl(None, running)
+                # Find the raw classifier for the current row (without case correction)
+                current_idx = self.context.current_idx
+                actual_classifier_raw = None
                 
-                # If the actual classifier is in the subset, return it (standard SQL:2016)
-                if actual_classifier in subset_components:
-                    result = actual_classifier
+                # Check which variable this row is assigned to (raw lookup)
+                for var, indices in self.context.variables.items():
+                    if current_idx in indices:
+                        actual_classifier_raw = var
+                        break
+                
+                # If the actual classifier is in the subset, return it with case correction (standard SQL:2016)
+                if actual_classifier_raw and actual_classifier_raw in subset_components:
+                    result = self.context._apply_case_sensitivity_rule(actual_classifier_raw)
                     self._classifier_cache[cache_key] = result
                     return result
                 
@@ -787,7 +794,7 @@ class MeasureEvaluator:
                         if component in self.context.variables:
                             component_rows = self.context.variables[component]
                             if component_rows:  # If this component has any matched rows in the match
-                                result = component
+                                result = self.context._apply_case_sensitivity_rule(component)
                                 self._classifier_cache[cache_key] = result
                                 return result
                 
@@ -799,7 +806,7 @@ class MeasureEvaluator:
             if var_name is not None and not running:
                 # For ONE ROW PER MATCH, return var if it exists in the pattern
                 if var_name in self.context.variables:
-                    result = var_name
+                    result = self.context._apply_case_sensitivity_rule(var_name)
                     self._classifier_cache[cache_key] = result
                     return result
                     
@@ -898,20 +905,23 @@ class MeasureEvaluator:
                 if vars_for_row:
                     # If multiple variables match this row, use timeline for correct order
                     if len(vars_for_row) == 1:
-                        return next(iter(vars_for_row))
+                        var = next(iter(vars_for_row))
+                        return self.context._apply_case_sensitivity_rule(var)
                     else:
                         # Use timeline to determine correct variable in pattern order
                         timeline = self.context.get_timeline()
                         timeline_vars = [var for idx, var in timeline if idx == current_idx]
                         if timeline_vars:
-                            return timeline_vars[0]
+                            var = timeline_vars[0]
+                            return self.context._apply_case_sensitivity_rule(var)
                         # Fallback to alphabetical ordering
-                        return min(vars_for_row)
+                        var = min(vars_for_row)
+                        return self.context._apply_case_sensitivity_rule(var)
             
             # Fallback: Check which variable this row was assigned to
             for var, indices in self.context.variables.items():
                 if current_idx in indices:
-                    return var
+                    return self.context._apply_case_sensitivity_rule(var)
         
         # Case 1: CLASSIFIER() without arguments - find the matching variable for current row
         if var_name is None:
@@ -932,7 +942,8 @@ class MeasureEvaluator:
                 if vars_for_row:
                     # If multiple variables match this row, use the timeline to determine the correct one
                     if len(vars_for_row) == 1:
-                        return next(iter(vars_for_row))
+                        var = next(iter(vars_for_row))
+                        return self.context._apply_case_sensitivity_rule(var)
                     else:
                         # Multiple variables for this row - check timeline for order
                         timeline = self.context.get_timeline() if hasattr(self.context, 'get_timeline') else []
@@ -940,21 +951,23 @@ class MeasureEvaluator:
                         timeline_vars = [var for idx, var in timeline if idx == current_idx]
                         # Return the first one in timeline order (pattern matching order)
                         if timeline_vars:
-                            return timeline_vars[0]
+                            var = timeline_vars[0]
+                            return self.context._apply_case_sensitivity_rule(var)
                         # Fallback to alphabetical for deterministic behavior
-                        return min(vars_for_row)
+                        var = min(vars_for_row)
+                        return self.context._apply_case_sensitivity_rule(var)
             
             # Fallback to direct variable assignments (preserving original logic)
             for var, indices in self.context.variables.items():
                 if current_idx in indices:
-                    return var
+                    return self.context._apply_case_sensitivity_rule(var)
                     
             # Then check subset variables
             if hasattr(self.context, 'subsets') and self.context.subsets:
                 for subset_name, components in self.context.subsets.items():
                     for comp in components:
                         if comp in self.context.variables and current_idx in self.context.variables[comp]:
-                            return comp
+                            return self.context._apply_case_sensitivity_rule(comp)
             
             # For rows not matching any variable, return None
             # This is a change from previous behavior which returned an empty string
@@ -965,13 +978,13 @@ class MeasureEvaluator:
         else:
             # Direct variable check
             if var_name in self.context.variables and current_idx in self.context.variables[var_name]:
-                return var_name
+                return self.context._apply_case_sensitivity_rule(var_name)
                 
             # Subset variable check
             if hasattr(self.context, 'subsets') and var_name in self.context.subsets:
                 for comp in self.context.subsets[var_name]:
                     if comp in self.context.variables and current_idx in self.context.variables[comp]:
-                        return comp
+                        return self.context._apply_case_sensitivity_rule(comp)
             
             # No match found
             return None

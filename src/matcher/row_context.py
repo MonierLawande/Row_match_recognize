@@ -26,6 +26,7 @@ class RowContext:
         navigation_cache: Cache for navigation function results
         partition_boundaries: List of (start, end) indices for partitions
         partition_key: Current partition key (for multi-partition data)
+        defined_variables: Set of variables explicitly defined in DEFINE clause
     """
     rows: List[Dict[str, Any]] = field(default_factory=list)
     variables: Dict[str, List[int]] = field(default_factory=dict)
@@ -36,6 +37,7 @@ class RowContext:
     navigation_cache: Dict[Any, Any] = field(default_factory=dict)
     partition_boundaries: List[Tuple[int, int]] = field(default_factory=list)
     partition_key: Optional[Any] = None
+    defined_variables: Set[str] = field(default_factory=set)
     _timeline: List[Tuple[int, str]] = field(default_factory=list, repr=False)
     _row_var_index: Dict[int, Set[str]] = field(default_factory=lambda: defaultdict(set), repr=False)
     _subset_index: Dict[str, Set[str]] = field(default_factory=dict, repr=False)
@@ -301,6 +303,8 @@ class RowContext:
         Return pattern variable for current row or specified set.
         
         This function implements the CLASSIFIER functionality of SQL:2016 standard.
+        According to SQL:2016 and Trino behavior, pattern variables that are not
+        explicitly defined in DEFINE clause should be displayed as uppercase.
         
         Args:
             variable: Optional variable name to check against
@@ -334,8 +338,10 @@ class RowContext:
                     if variable in self.subsets:
                         for comp in self.subsets[variable]:
                             if comp in self.variables and self.current_idx in self.variables[comp]:
-                                return comp
-                    return variable
+                                # Apply case sensitivity rule
+                                return self._apply_case_sensitivity_rule(comp)
+                    # Apply case sensitivity rule
+                    return self._apply_case_sensitivity_rule(variable)
                 
                 # Check if this is an empty match (no variables defined)
                 # For empty patterns in alternations like (() | A), CLASSIFIER should return None
@@ -348,12 +354,13 @@ class RowContext:
             if hasattr(self, '_row_var_index') and self.current_idx in self._row_var_index:
                 vars_for_row = self._row_var_index[self.current_idx]
                 if vars_for_row:
-                    return next(iter(vars_for_row))  # Return first variable in set
+                    var = next(iter(vars_for_row))  # Return first variable in set
+                    return self._apply_case_sensitivity_rule(var)
                     
             # Fallback to standard lookup
             for var, indices in self.variables.items():
                 if self.current_idx in indices:
-                    return var
+                    return self._apply_case_sensitivity_rule(var)
             
             # Check if this is an empty match (no variables defined)
             # For empty patterns in alternations like (() | A), CLASSIFIER should return None
@@ -1238,3 +1245,52 @@ class RowContext:
             if hasattr(self, 'timing'):
                 reset_time = time.time() - start_time
                 self.timing['cache_reset'] = self.timing.get('cache_reset', 0) + reset_time
+    
+    def _apply_case_sensitivity_rule(self, variable: str) -> str:
+        """
+        Apply SQL:2016 case sensitivity rule for CLASSIFIER output.
+        
+        According to SQL:2016 standard and Trino behavior:
+        - Variables defined in DEFINE clause preserve their original case
+        - Variables NOT defined in DEFINE clause are displayed as uppercase
+        - Quoted identifiers have quotes removed in output
+        
+        Args:
+            variable: The pattern variable name
+            
+        Returns:
+            The variable name with proper case according to SQL:2016 rules
+        """
+        # Handle quoted identifiers: remove quotes for output
+        if variable.startswith('"') and variable.endswith('"') and len(variable) > 2:
+            # For quoted identifiers, remove quotes and preserve the inner case
+            inner_var = variable[1:-1]  # Remove surrounding quotes
+            # Check if the quoted variable was defined in DEFINE clause
+            if hasattr(self, 'defined_variables') and self.defined_variables:
+                if variable in self.defined_variables:
+                    # Quoted variable was explicitly defined - preserve inner case
+                    return inner_var
+                else:
+                    # Quoted variable was not defined - use uppercase
+                    return inner_var.upper()
+            else:
+                # Fallback: preserve inner case for quoted identifiers
+                return inner_var
+        
+        # Check if variable was defined in DEFINE clause
+        if hasattr(self, 'defined_variables') and self.defined_variables:
+            if variable in self.defined_variables:
+                # Variable was explicitly defined - preserve original case
+                return variable
+            else:
+                # Variable was not defined - use uppercase (default pattern behavior)
+                return variable.upper()
+        
+        # Fallback: if we don't have DEFINE information, check variable name patterns
+        # This is a heuristic approach for backwards compatibility
+        if variable.islower() and len(variable) == 1:
+            # Single lowercase letter that might be an undefined variable
+            return variable.upper()
+        else:
+            # Preserve case for explicitly defined or multi-character variables
+            return variable

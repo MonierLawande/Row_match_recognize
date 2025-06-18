@@ -570,7 +570,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     exclusion_ranges=nfa.exclusion_ranges,
                     after_match_skip=skip_mode,
                     subsets=subset_dict,
-                    original_pattern=pattern_text
+                    original_pattern=pattern_text,
+                    defined_variables=list(define.keys())
                 )
             else:
                 # Cache miss - compile pattern and cache the result
@@ -602,7 +603,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     exclusion_ranges=nfa.exclusion_ranges,
                     after_match_skip=skip_mode,
                     subsets=subset_dict,
-                    original_pattern=pattern_text
+                    original_pattern=pattern_text,
+                    defined_variables=list(define.keys())
                 )
                 
         except Exception as e:

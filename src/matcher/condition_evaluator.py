@@ -257,6 +257,12 @@ class ConditionEvaluator(ast.NodeVisitor):
                 col_name = arg.attr
                 # For navigation functions like FIRST(A.value), we need both parts
                 args.extend([var_name, col_name])
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Constant):
+                # Handle quoted variable references like "b".value -> split to var and column
+                var_name = f'"{arg.value.value}"'  # Preserve quotes for consistency
+                col_name = arg.attr
+                # For navigation functions like FIRST("b".value), we need both parts
+                args.extend([var_name, col_name])
             elif isinstance(arg, ast.Constant):
                 # Constant values (numbers, strings)
                 args.append(arg.value)
@@ -323,17 +329,34 @@ class ConditionEvaluator(ast.NodeVisitor):
                     # Get the first argument which should be either ast.Name or ast.Attribute
                     first_arg = node.args[0]
                     
+                    # Get optional steps argument first (for all patterns)
+                    steps = 1
+                    if len(node.args) > 1:
+                        steps_arg = node.args[1]
+                        if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                            steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                    
                     if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
                         # Pattern: NEXT(A.value) - variable.column format
                         var_name = first_arg.value.id
                         column = first_arg.attr
                         
-                        # Get optional steps argument
-                        steps = 1
-                        if len(node.args) > 1:
-                            steps_arg = node.args[1]
-                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
-                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Constant):
+                        # Pattern: NEXT("b".value) - quoted variable.column format
+                        var_name = f'"{first_arg.value.value}"'  # Preserve quotes for consistency
+                        column = first_arg.attr
                         
                         if func_name in ("PREV", "NEXT"):
                             # Context-aware navigation: physical for DEFINE, logical for MEASURES
@@ -350,13 +373,6 @@ class ConditionEvaluator(ast.NodeVisitor):
                     elif isinstance(first_arg, ast.Name):
                         # Pattern: NEXT(column) - simple column format
                         column = first_arg.id
-                        
-                        # Get optional steps argument
-                        steps = 1
-                        if len(node.args) > 1:
-                            steps_arg = node.args[1]
-                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
-                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
                         
                         if func_name in ("PREV", "NEXT"):
                             # Context-aware navigation: physical for DEFINE, logical for MEASURES
@@ -383,7 +399,7 @@ class ConditionEvaluator(ast.NodeVisitor):
         raise ValueError(f"Function {func} not callable")
 
     def visit_Attribute(self, node: ast.Attribute):
-        """Handle pattern variable references (A.price) with table prefix validation"""
+        """Handle pattern variable references (A.price or "b".price) with table prefix validation"""
         if isinstance(node.value, ast.Name):
             var = node.value.id
             col = node.attr
@@ -394,6 +410,15 @@ class ConditionEvaluator(ast.NodeVisitor):
                                f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
             
             # Handle pattern variable references
+            result = self._get_variable_column_value(var, col, self.context)
+            
+            return result
+        elif isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            # Handle quoted identifiers like "b".value
+            var = f'"{node.value.value}"'  # Preserve quotes for consistency with context storage
+            col = node.attr
+            
+            # Handle pattern variable references for quoted identifiers
             result = self._get_variable_column_value(var, col, self.context)
             
             return result

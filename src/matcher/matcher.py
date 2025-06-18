@@ -614,7 +614,7 @@ class PatternExclusionHandler:
 class EnhancedMatcher:
 
     def __init__(self, dfa, measures=None, measure_semantics=None, exclusion_ranges=None, 
-                after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None):
+                after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None, defined_variables=None):
         """Initialize the enhanced matcher with support for new DFA features."""
         self.dfa = dfa
         self.start_state = dfa.start
@@ -625,6 +625,7 @@ class EnhancedMatcher:
         self.after_match_skip = after_match_skip
         self.subsets = subsets or {}
         self.original_pattern = original_pattern
+        self.defined_variables = set(defined_variables) if defined_variables else set()
         self._matches = []  # Store matches for post-processing
 
         # Add performance tracking
@@ -1217,7 +1218,8 @@ class EnhancedMatcher:
                 continue
 
             # Find next match using optimized transitions
-            match = self._find_single_match(rows, start_idx, RowContext(rows=rows), config)
+            context = RowContext(rows=rows, defined_variables=self.defined_variables)
+            match = self._find_single_match(rows, start_idx, context, config)
             if not match:
                 # Move to next position without marking as processed (unmatched rows will be handled later)
                 start_idx += 1
@@ -1460,7 +1462,7 @@ class EnhancedMatcher:
         result = rows[start_idx].copy()
         
         # Create context for empty match
-        context = RowContext()
+        context = RowContext(defined_variables=self.defined_variables)
         context.rows = rows
         context.variables = {}
         context.match_number = match_number
@@ -1534,7 +1536,7 @@ class EnhancedMatcher:
         var_assignments = match.get("variables", {})
         
         # Create context for measure evaluation
-        context = RowContext()
+        context = RowContext(defined_variables=self.defined_variables)
         context.rows = rows
         context.variables = var_assignments
         context.match_number = match_number
@@ -1780,7 +1782,7 @@ class EnhancedMatcher:
             logger.debug(f"Excluded rows: {sorted(excluded_rows)}")
         
         # Create context once for all rows with optimized structures
-        context = RowContext()
+        context = RowContext(defined_variables=self.defined_variables)
         context.rows = rows
         context.variables = match["variables"]
         context.match_number = match_number
@@ -1866,6 +1868,9 @@ class EnhancedMatcher:
                                 if idx in indices:
                                     pattern_var = var
                                     break
+                            # Apply case sensitivity rule to pattern variable
+                            if pattern_var is not None:
+                                pattern_var = context._apply_case_sensitivity_rule(pattern_var)
                             result[alias] = pattern_var
                             logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {pattern_var}")
                     
