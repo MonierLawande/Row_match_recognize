@@ -614,7 +614,7 @@ class PatternExclusionHandler:
 class EnhancedMatcher:
 
     def __init__(self, dfa, measures=None, measure_semantics=None, exclusion_ranges=None, 
-                after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None, defined_variables=None):
+                after_match_skip="PAST LAST ROW", subsets=None, original_pattern=None, defined_variables=None, define_conditions=None):
         """Initialize the enhanced matcher with support for new DFA features."""
         self.dfa = dfa
         self.start_state = dfa.start
@@ -626,6 +626,7 @@ class EnhancedMatcher:
         self.subsets = subsets or {}
         self.original_pattern = original_pattern
         self.defined_variables = set(defined_variables) if defined_variables else set()
+        self.define_conditions = define_conditions or {}  # Store actual DEFINE conditions
         self._matches = []  # Store matches for post-processing
 
         # Add performance tracking
@@ -783,35 +784,10 @@ class EnhancedMatcher:
             self.timing["find_match"] += time.time() - match_start_time
             return None
         
-        # Check for empty match - but only use it if we can't find a non-empty match
+        # PRODUCTION FIX: Don't check for empty matches immediately
+        # For patterns with back references, we need to try to build a real match first
+        # Empty matches should only be considered as a last resort
         empty_match = None
-        if self.dfa.states[state].is_accept:
-            # For empty matches, also verify end anchor if present
-            if self._check_anchors(state, start_idx, len(rows), "end"):
-                # Check if this is a valid empty match by examining the pattern structure
-                # Empty matches should only be allowed for patterns where all required quantifiers are satisfied
-                is_valid_empty_match = self._is_valid_empty_match_state(state)
-                
-                if is_valid_empty_match:
-                    logger.debug(f"Found potential empty match at index {start_idx} - start state is accepting")
-                    
-                    # Track which rows are part of empty pattern matches
-                    empty_pattern_rows = [start_idx]
-                    
-                    empty_match = {
-                        "start": start_idx,
-                        "end": start_idx - 1,
-                        "variables": {},
-                        "state": state,
-                        "is_empty": True,
-                        "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
-                        "excluded_rows": [],
-                        "empty_pattern_rows": empty_pattern_rows,  # Add tracking for empty pattern rows
-                        "has_empty_alternation": self.has_empty_alternation
-                    }
-                else:
-                    logger.debug(f"Rejecting empty match at index {start_idx} - pattern has unsatisfied required quantifiers")
-                # Don't return immediately - try to find a non-empty match first
         
         longest_match = None
         trans_index = self.transition_index[state]
@@ -852,7 +828,10 @@ class EnhancedMatcher:
             matched_var = None
             is_excluded_match = False
             
-            # Try all transitions and use the first one that matches the condition
+            # Collect all valid transitions that match the current row
+            valid_transitions = []
+            
+            # Try all transitions and collect those that match the condition
             for var, target, condition in trans_index:
                 logger.debug(f"  Evaluating condition for var: {var}")
                 try:
@@ -891,15 +870,9 @@ class EnhancedMatcher:
                     logger.debug(f"    DEBUG: condition result={result}, type={type(result)}")
                     
                     if result:
-                        # If this is an excluded variable, mark for exclusion but continue matching
-                        if is_excluded:
-                            logger.debug(f"    Variable {var} is excluded - marking row for exclusion")
-                            excluded_rows.append(current_idx)
-                            is_excluded_match = True
+                        # Store this as a valid transition
+                        valid_transitions.append((var, target, is_excluded))
                         
-                        next_state = target
-                        matched_var = var
-                        break
                 except Exception as e:
                     logger.error(f"  Error evaluating condition for {var}: {str(e)}")
                     logger.debug("Exception details:", exc_info=True)
@@ -908,6 +881,58 @@ class EnhancedMatcher:
                     # Clear the current variable after evaluation
                     logger.debug(f"  [DEBUG] Clearing context.current_var (was {getattr(context, 'current_var', 'None')})")
                     context.current_var = None
+            
+            # Choose the best transition from valid ones with enhanced back reference support
+            if valid_transitions:
+                # PRODUCTION FIX: Implement proper transition selection for back references
+                # For patterns with back references, we need to select transitions that enable
+                # future back reference satisfaction
+                
+                best_transition = None
+                
+                # Enhanced transition prioritization for back reference patterns
+                categorized_transitions = {
+                    'accepting': [],           # Transitions to accepting states
+                    'prerequisite': [],        # Variables referenced in other DEFINE conditions
+                    'simple': [],             # Variables with simple conditions
+                    'dependent': []           # Variables with back reference conditions
+                }
+                
+                # Categorize transitions by their back reference requirements
+                for var, target, is_excluded in valid_transitions:
+                    is_accepting = self.dfa.states[target].is_accept
+                    has_back_reference = self._variable_has_back_reference(var)
+                    is_prerequisite = self._variable_is_back_reference_prerequisite(var)
+                    
+                    if is_accepting:
+                        categorized_transitions['accepting'].append((var, target, is_excluded))
+                    elif is_prerequisite:
+                        categorized_transitions['prerequisite'].append((var, target, is_excluded))
+                    elif not has_back_reference:
+                        categorized_transitions['simple'].append((var, target, is_excluded))
+                    else:
+                        categorized_transitions['dependent'].append((var, target, is_excluded))
+                
+                # Try transitions in order of priority for back reference satisfaction:
+                # PRODUCTION FIX: Prioritize variables that lead to accepting states
+                # 1. Accepting states (complete the match)
+                # 2. Prerequisites (variables referenced by others)
+                # 3. Dependent variables with satisfied back references
+                # 4. Simple variables (no back references)
+                
+                for category in ['accepting', 'prerequisite', 'dependent', 'simple']:
+                    if categorized_transitions[category]:
+                        # Within each category, prefer transitions that advance the state
+                        sorted_transitions = sorted(
+                            categorized_transitions[category],
+                            key=lambda x: (x[1] == state, x[0])  # Prefer state changes, then alphabetical
+                        )
+                        best_transition = sorted_transitions[0]
+                        logger.debug(f"Selected {category} transition: {best_transition[0]} -> state {best_transition[1]}")
+                        break
+                
+                if best_transition:
+                    matched_var, next_state, is_excluded_match = best_transition
             
             # Handle exclusion matches properly - they should still advance the state
             if is_excluded_match:
@@ -1151,24 +1176,57 @@ class EnhancedMatcher:
                     logger.debug(f"Updated excluded_rows: {all_excluded}")
                 else:
                     logger.debug(f"No rows marked for exclusion by complex patterns")
-            
             self.timing["find_match"] += time.time() - match_start_time
             return longest_match
-        elif empty_match:
-            # For SKIP TO NEXT ROW, TO_FIRST, TO_LAST modes, don't return empty matches when there's no valid non-empty match
-            # This prevents the generation of spurious empty matches at every position
-            if config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST):
-                logger.debug(f"{config.skip_mode} mode: not returning empty match, will advance to next position")
+        else:
+            # PRODUCTION FIX: Only check for empty matches after we've tried to find a real match
+            # For patterns with back references, we should only create empty matches if:
+            # 1. The start state is accepting
+            # 2. No real pattern match was found
+            # 3. The pattern structure allows for valid empty matches
+            
+            if not longest_match and self.dfa.states[self.start_state].is_accept:
+                # For empty matches, also verify end anchor if present
+                if self._check_anchors(self.start_state, start_idx, len(rows), "end"):
+                    # Check if this is a valid empty match by examining the pattern structure
+                    # Empty matches should only be allowed for patterns where all required quantifiers are satisfied
+                    is_valid_empty_match = self._is_valid_empty_match_state(self.start_state)
+                    
+                    if is_valid_empty_match:
+                        logger.debug(f"Creating empty match at index {start_idx} after no real match found")
+                        
+                        # Track which rows are part of empty pattern matches
+                        empty_pattern_rows = [start_idx]
+                        
+                        empty_match = {
+                            "start": start_idx,
+                            "end": start_idx - 1,
+                            "variables": {},
+                            "state": self.start_state,
+                            "is_empty": True,
+                            "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                            "excluded_rows": [],
+                            "empty_pattern_rows": empty_pattern_rows,  # Add tracking for empty pattern rows
+                            "has_empty_alternation": self.has_empty_alternation
+                        }
+                    else:
+                        logger.debug(f"Rejecting empty match at index {start_idx} - pattern has unsatisfied required quantifiers")
+            
+            if empty_match:
+                # For SKIP TO NEXT ROW, TO_FIRST, TO_LAST modes, don't return empty matches when there's no valid non-empty match
+                # This prevents the generation of spurious empty matches at every position
+                if config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST):
+                    logger.debug(f"{config.skip_mode} mode: not returning empty match, will advance to next position")
+                    self.timing["find_match"] += time.time() - match_start_time
+                    return None
+                else:
+                    logger.debug(f"Using empty match as fallback: {empty_match}")
+                    self.timing["find_match"] += time.time() - match_start_time
+                    return empty_match
+            else:
+                logger.debug(f"No match found starting at index {start_idx}")
                 self.timing["find_match"] += time.time() - match_start_time
                 return None
-            else:
-                logger.debug(f"Using empty match as fallback: {empty_match}")
-                self.timing["find_match"] += time.time() - match_start_time
-                return empty_match
-        else:
-            logger.debug(f"No match found starting at index {start_idx}")
-            self.timing["find_match"] += time.time() - match_start_time
-            return None
 
 
 
@@ -1440,7 +1498,44 @@ class EnhancedMatcher:
         else:
             raise ValueError(f"Unknown AFTER MATCH SKIP mode: {skip_mode}")
 
-    # ...existing code...
+    def _calculate_transition_priority(self, current_state: int, target_state: int, variable: str) -> int:
+        """
+        Calculate priority for a transition to help choose the best one when multiple are valid.
+        Lower numbers = higher priority.
+        
+        Priority order:
+        1. Transitions to accepting states (complete the match)
+        2. Variables that are referenced in DEFINE conditions (needed for back refs)
+        3. Transitions that make progress (move to different, non-looping state)  
+        4. Transitions that loop back to same or previous states
+        
+        Args:
+            current_state: Current DFA state
+            target_state: Target DFA state for this transition
+            variable: Pattern variable for this transition
+            
+        Returns:
+            Priority value (lower = higher priority)
+        """
+        # Priority 1: Transitions to accepting states (highest priority)
+        if self.dfa.states[target_state].is_accept:
+            return 1
+        
+        # Priority 2: Variables that are referenced in other DEFINE conditions
+        # This helps ensure back references can be satisfied
+        if hasattr(self, 'define_conditions') and self.define_conditions:
+            for defined_var, condition in self.define_conditions.items():
+                if defined_var != variable and variable in condition:
+                    # This variable is referenced by another DEFINE condition
+                    return 2
+            
+        # Priority 3: Forward progress (different state, not looping)
+        if target_state != current_state:
+            return 3
+            
+        # Priority 4: Looping transitions (lowest priority)
+        return 4
+    
     def _process_empty_match(self, start_idx: int, rows: List[Dict[str, Any]], measures: Dict[str, str], match_number: int) -> Dict[str, Any]:
         """
         Process an empty match according to SQL standard, preserving original row data.
@@ -1767,6 +1862,7 @@ class EnhancedMatcher:
                     
                     results.append(empty_row)
                     logger.debug(f"Added empty match row for index {match['start']}")
+           
             return results
         
         # Get all matched indices, excluding excluded rows
@@ -1905,137 +2001,95 @@ class EnhancedMatcher:
         
         return results
 
+    def _variable_has_back_reference(self, variable: str) -> bool:
+        """
+        Check if a variable's DEFINE condition contains back references to other variables.
+        
+        Args:
+            variable: Pattern variable to check
+            
+        Returns:
+            True if the variable's condition contains back references
+        """
+        if not hasattr(self, 'define_conditions') or variable not in self.define_conditions:
+            return False
+        
+        condition_text = self.define_conditions[variable]
+        
+        # Simple pattern matching to detect back references (e.g., A.column, B.column)
+        import re
+        # Look for pattern variable references like A.column, B.column, etc.
+        back_ref_pattern = r'\b([A-Z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)'
+        matches = re.findall(back_ref_pattern, condition_text)
+        
+        # Check if any referenced variables are pattern variables
+        for referenced_var, column in matches:
+            if referenced_var != variable and hasattr(self, 'define_conditions'):
+                # If the referenced variable is either defined or in our pattern variables
+                all_pattern_vars = set(self.define_conditions.keys())
+                if hasattr(self, 'defined_variables'):
+                    all_pattern_vars.update(self.defined_variables)
+                if referenced_var in all_pattern_vars:
+                    return True
+        
+        return False
+    
+    def _variable_is_back_reference_prerequisite(self, variable: str) -> bool:
+        """
+        Check if a variable is referenced in other variables' DEFINE conditions.
+        Such variables should be matched first to enable back reference satisfaction.
+        
+        Args:
+            variable: Pattern variable to check
+            
+        Returns:
+            True if this variable is referenced by other DEFINE conditions
+        """
+        if not hasattr(self, 'define_conditions'):
+            return False
+        
+        # Check if any other variable's condition references this variable
+        import re
+        back_ref_pattern = r'\b([A-Z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)'
+        
+        for other_var, condition_text in self.define_conditions.items():
+            if other_var == variable:
+                continue
+                
+            matches = re.findall(back_ref_pattern, condition_text)
+            for referenced_var, column in matches:
+                if referenced_var == variable:
+                    return True
+        
+        return False
 
-    
-    def _select_preferred_match(self, matches, variables):
-        """
-        When multiple permutation matches are found, select the one with
-        highest lexicographical preference according to Trino rules.
-        """
-        if not matches:
-            return None
-        
-        # Create priority map based on original variable order
-        var_priority = {var: idx for idx, var in enumerate(variables)}
-        
-        # Sort matches by permutation preference
-        def match_priority(match):
-            # For each position in the pattern, get the actual variable that matched
-            # Lower score is higher priority (more preferred)
-            score = []
-            for i in range(len(variables)):
-                for var, indices in match.get('variables', {}).items():
-                    if i in indices:
-                        score.append(var_priority.get(var, len(variables)))
-                        break
-            return score
-        
-        # Return the most preferred match
-        return sorted(matches, key=match_priority)[0]
-    
     def _is_valid_empty_match_state(self, state: int) -> bool:
         """
         Check if an empty match is valid from the given state.
         
-        An empty match is valid only if:
-        1. All required quantifiers in the pattern have been satisfied, OR
-        2. The pattern only contains optional quantifiers (*, ?, {0,n})
-        
-        For patterns like 'A B+ C+', an empty match from the start state is NOT valid
-        because B+ and C+ are required quantifiers that haven't been satisfied.
-        
-        For patterns like 'B*', empty matches ARE valid because B* means zero or more.
+        An empty match is valid if:
+        1. The state is accepting
+        2. The pattern doesn't require mandatory quantifiers to be satisfied
+        3. No unsatisfied required variables exist
         
         Args:
-            state: The DFA state to check
+            state: DFA state to check
             
         Returns:
-            True if empty match is valid, False otherwise
+            True if empty match is valid from this state
         """
-        import re
+        # Must be an accepting state
+        if not self.dfa.states[state].is_accept:
+            return False
         
-        # For start state (state 0), check if pattern has required quantifiers
-        if state == 0:
-            # Analyze the pattern structure to see if we have unsatisfied required quantifiers
-            pattern_tokens = getattr(self, '_pattern_tokens', [])
-            
-            # If we don't have pattern token info, be conservative
-            if not pattern_tokens:
-                # Default to allowing empty matches for backward compatibility
-                return True
-            
-            # Special case: if pattern has only one token with optional quantifier (like "B*"), allow empty match
-            if len(pattern_tokens) == 1:
-                token_str = str(pattern_tokens[0])
-                if '*' in token_str or '?' in token_str:
-                    # Single optional token - empty match is valid
-                    return True
-                elif '{' in token_str:
-                    # Check if it's {0,n} - optional
-                    quant_match = re.search(r'\{(\d+),?(\d*)\}', token_str)
-                    if quant_match:
-                        min_count = int(quant_match.group(1))
-                        if min_count == 0:
-                            return True
-            
-            # Check if ALL tokens are optional (pattern like "A* B* C*")
-            all_optional = True
-            for token in pattern_tokens:
-                token_str = str(token)
-                
-                # Check if this token is required
-                if '+' in token_str:
-                    # B+ means one or more B - this is required
-                    all_optional = False
-                    break
-                elif '{' in token_str:
-                    # Check for quantifiers like {1,}, {2,5}, etc.
-                    quant_match = re.search(r'\{(\d+),?(\d*)\}', token_str)
-                    if quant_match:
-                        min_count = int(quant_match.group(1))
-                        if min_count > 0:
-                            # Minimum count > 0 means required
-                            all_optional = False
-                            break
-                elif re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', token_str):
-                    # Variable without quantifier - required by default
-                    all_optional = False
-                    break
-                # If we get here, it's optional (*, ?, {0,n})
-            
-            return all_optional
+        # Check if pattern has unsatisfied required quantifiers
+        # This is determined by analyzing the pattern structure
+        if hasattr(self, '_pattern_tokens') and self._pattern_tokens:
+            # If pattern has variables that must be matched (like X in (A | B)* X)
+            # then we can't have an empty match
+            pattern_str = getattr(self, '_original_pattern', '')
+            if pattern_str and not pattern_str.endswith('*') and not pattern_str.endswith('?'):
+                # Pattern has required components
+                return False
         
-        # For non-start states, the DFA construction should handle acceptance correctly
         return True
-
-    def _get_pattern_required_vars(self) -> Set[str]:
-        """Get the set of variables that are required (not optional) in the pattern."""
-        required_vars = set()
-        pattern_tokens = getattr(self, '_pattern_tokens', [])
-        
-        for token in pattern_tokens:
-            token_str = str(token)
-            
-            # Extract base variable name
-            import re
-            var_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)', token_str)
-            if var_match:
-                var_name = var_match.group(1)
-                
-                # Check if it's optional
-                if '*' in token_str or '?' in token_str:
-                    # Optional quantifier
-                    continue
-                elif '{' in token_str:
-                    # Check quantifier
-                    quant_match = re.search(r'\{(\d+),?(\d*)\}', token_str)
-                    if quant_match:
-                        min_count = int(quant_match.group(1))
-                        if min_count == 0:
-                            # {0,n} is optional
-                            continue
-                
-                # If we get here, it's required
-                required_vars.add(var_name)
-        
-        return required_vars

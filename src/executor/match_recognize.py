@@ -571,7 +571,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     after_match_skip=skip_mode,
                     subsets=subset_dict,
                     original_pattern=pattern_text,
-                    defined_variables=list(define.keys())
+                    defined_variables=list(define.keys()),
+                    define_conditions=define
                 )
             else:
                 # Cache miss - compile pattern and cache the result
@@ -604,7 +605,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     after_match_skip=skip_mode,
                     subsets=subset_dict,
                     original_pattern=pattern_text,
-                    defined_variables=list(define.keys())
+                    defined_variables=list(define.keys()),
+                    define_conditions=define
                 )
                 
         except Exception as e:
