@@ -380,17 +380,39 @@ def extract_exclusion_variables(pattern: str) -> Set[str]:
 
 def _parse_variable_with_quantifier(var_text: str) -> Union[str, PatternToken]:
     """
-    Parse a variable string that may contain a quantifier.
+    Parse a variable string that may contain a quantifier or alternation.
     
     Args:
-        var_text: Variable text like "A", "A+", "B*", etc.
+        var_text: Variable text like "A", "A+", "B*", "A | B", etc.
         
     Returns:
         Either a plain string (for variables without quantifiers) or 
-        a PatternToken (for variables with quantifiers)
+        a PatternToken (for variables with quantifiers or alternations)
     """
     if not var_text:
         return var_text
+    
+    # Check if this is an alternation pattern
+    if '|' in var_text:
+        # This is an alternation like "A | B"
+        # We need to create an alternation token
+        parts = [part.strip() for part in var_text.split('|')]
+        
+        # Parse each part for potential quantifiers
+        parsed_parts = []
+        for part in parts:
+            parsed_part = _parse_variable_with_quantifier(part)
+            parsed_parts.append(parsed_part)
+        
+        # Create alternation token
+        return PatternToken(
+            PatternTokenType.ALTERNATION,
+            var_text,
+            metadata={
+                "alternatives": parsed_parts,
+                "original": var_text
+            }
+        )
     
     # Check if the variable has a quantifier at the end
     quantifier_chars = "*+?{"

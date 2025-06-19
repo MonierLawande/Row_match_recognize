@@ -792,6 +792,18 @@ class EnhancedMatcher:
     def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext, config=None) -> Optional[Dict[str, Any]]:
         """Find a single match using optimized transitions with proper variable handling."""
         match_start_time = time.time()
+        
+        # PRODUCTION FIX: Special handling for PERMUTE patterns with alternations
+        # These patterns require testing all combinations in lexicographical order
+        if (hasattr(self.dfa, 'metadata') and 
+            self.dfa.metadata.get('has_permute', False) and 
+            self._has_alternations_in_permute()):
+            logger.debug(f"PERMUTE pattern with alternations detected - using specialized handler")
+            match = self._handle_permute_with_alternations(rows, start_idx, context, config)
+            if match:
+                self.timing["find_match"] += time.time() - match_start_time
+                return match
+        
         state = self.start_state
         current_idx = start_idx
         var_assignments = {}
@@ -1097,7 +1109,7 @@ class EnhancedMatcher:
                     logger.debug(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
                     # Continue to next row, but don't update longest_match
                     continue
-                    
+                
                 logger.debug(f"Reached accepting state {state} at row {current_idx-1}")
                 
                 # For patterns with both start and end anchors, we need to check if we've consumed the entire partition
@@ -2040,8 +2052,18 @@ class EnhancedMatcher:
         measure_evaluator = MeasureEvaluator(context)
         
         # For Trino compatibility, we need to include all rows from start to end,
-        # skipping only the excluded rows
-        all_indices = list(range(match["start"], match["end"] + 1))
+        # skipping only the excluded rows. However, for PERMUTE patterns, we only
+        # include rows that actually participated in variable matches
+        if (hasattr(self.dfa, 'metadata') and 
+            self.dfa.metadata.get('has_permute', False) and 
+            self.dfa.metadata.get('has_alternations', False)):
+            # For PERMUTE with alternations, only include matched variable rows
+            all_indices = matched_indices.copy()
+            logger.debug(f"PERMUTE pattern: using only matched indices {all_indices}")
+        else:
+            # Regular pattern: include all rows from start to end
+            all_indices = list(range(match["start"], match["end"] + 1))
+            logger.debug(f"Regular pattern: using range {all_indices}")
         
         # Pre-calculate running sums for efficiency
         running_sums = {}
@@ -2379,46 +2401,151 @@ class EnhancedMatcher:
             # These don't make the variable required
         
         return required_vars
-        while i < len(pattern):
-            char = pattern[i]
-            
-            if char == '(':
-                paren_depth += 1
-                current.append(char)
-            elif char == ')':
-                paren_depth -= 1
-                current.append(char)
-            elif char == '|' and paren_depth == 0:
-                # Top-level alternation
-                branches.append(''.join(current).strip())
-                current = []
-            else:
-                current.append(char)
-            
-            i += 1
+
+    def _has_alternations_in_permute(self) -> bool:
+        """Check if the DFA metadata indicates PERMUTE patterns with alternations."""
+        if not hasattr(self.dfa, 'metadata'):
+            logger.debug("No DFA metadata found")
+            return False
         
-        if current:
-            branches.append(''.join(current).strip())
+        metadata = self.dfa.metadata
+        logger.debug(f"DFA metadata keys: {list(metadata.keys())}")
+        logger.debug(f"Has permute flag: {metadata.get('has_permute', False)}")
+        logger.debug(f"Has alternations flag: {metadata.get('has_alternations', False)}")
         
-        return branches if len(branches) > 1 else [pattern]
+        if not metadata.get('has_permute', False):
+            logger.debug("Not a PERMUTE pattern")
+            return False
+            
+        # Check for alternation metadata in PERMUTE patterns
+        has_alternations = metadata.get('has_alternations', False)
+        logger.debug(f"Final has_alternations result: {has_alternations}")
+        return has_alternations
     
-    def _extract_required_from_sequence(self, sequence: str) -> Set[str]:
-        """Extract required variables from a sequence (no top-level alternation)."""
-        import re
-        required_vars = set()
+    def _handle_permute_with_alternations(self, rows: List[Dict[str, Any]], start_idx: int, 
+                                        context: RowContext, config) -> Optional[Dict[str, Any]]:
+        """
+        Handle PERMUTE patterns with alternations using lexicographical ordering.
+        """
+        logger.debug(f"Handling PERMUTE with alternations at start_idx={start_idx}")
         
-        # Remove any remaining parentheses and analyze tokens
-        # This handles nested groups by flattening them
-        cleaned = re.sub(r'[()]', '', sequence)
+        # Extract alternation combinations from DFA metadata
+        if not hasattr(self.dfa, 'metadata') or 'alternation_combinations' not in self.dfa.metadata:
+            logger.debug("No alternation_combinations in DFA metadata, falling back to regular matching")
+            return None
         
-        # Find all variable patterns in this sequence
-        # Matches: "A", "B*", "C+", "D?", "E*?", "F+?", etc.
-        tokens = re.findall(r'([A-Z])([*+?]{0,2})', cleaned)
+        combinations = self.dfa.metadata['alternation_combinations']
+        logger.debug(f"Found {len(combinations)} alternation combinations: {combinations}")
         
-        for var, quantifier in tokens:
-            # Required variables are those without quantifiers or with + quantifier
-            if not quantifier or quantifier in ['+', '+?']:
-                required_vars.add(var)
-            # Optional variables: *, *?, ?, ?? - these don't make the variable required
+        # Try each combination in lexicographical order
+        for combo_idx, combination in enumerate(combinations):
+            logger.debug(f"Trying combination {combo_idx}: {combination}")
+            
+            # Try to match this specific combination
+            match = self._try_alternation_combination(rows, start_idx, context, combination, config)
+            if match:
+                logger.debug(f"Successfully matched combination {combo_idx}: {combination}")
+                return match
+                
+        logger.debug("No combination matched")
+        return None
+    
+    def _try_alternation_combination(self, rows: List[Dict[str, Any]], start_idx: int,
+                                   context: RowContext, combination: List[str], 
+                                   config) -> Optional[Dict[str, Any]]:
+        """Try to match a specific alternation combination."""
+        logger.debug(f"Trying alternation combination: {combination}")
         
-        return required_vars
+        # Generate all permutations of this combination
+        import itertools
+        for perm in itertools.permutations(combination):
+            logger.debug(f"  Trying permutation: {perm}")
+            
+            # Try to match this specific permutation
+            match = self._try_specific_permutation(rows, start_idx, context, list(perm), config)
+            if match:
+                return match
+                
+        return None
+    
+    def _try_specific_permutation(self, rows: List[Dict[str, Any]], start_idx: int,
+                                context: RowContext, permutation: List[str], 
+                                config) -> Optional[Dict[str, Any]]:
+        """Try to match a specific permutation of variables."""
+        logger.debug(f"Trying specific permutation: {permutation}")
+        
+        current_idx = start_idx
+        var_assignments = {}
+        
+        # Try to match each variable in the permutation order
+        for var_pos, variable in enumerate(permutation):
+            logger.debug(f"  Looking for variable '{variable}' at position {var_pos}, starting from idx {current_idx}")
+            
+            # Try to find this variable starting from current position
+            found_idx = self._find_variable_match(rows, current_idx, variable, context)
+            if found_idx is None:
+                logger.debug(f"    Variable '{variable}' not found from idx {current_idx}")
+                return None
+                
+            logger.debug(f"    Variable '{variable}' found at idx {found_idx}")
+            var_assignments[variable] = [found_idx]
+            current_idx = found_idx + 1
+        
+        # If we successfully matched all variables, create the match result
+        all_indices = []
+        for var in permutation:
+            all_indices.extend(var_assignments[var])
+        all_indices.sort()
+        
+        match_result = {
+            'variables': var_assignments,
+            'start': min(all_indices),
+            'end': max(all_indices),
+            'pattern_variables': permutation
+        }
+        
+        logger.debug(f"Created match result - variables: {var_assignments}")
+        logger.debug(f"Created match result - all_indices: {all_indices}")
+        logger.debug(f"Created match result - start: {min(all_indices)}, end: {max(all_indices)}")
+        logger.debug(f"Successfully matched permutation {permutation}: {match_result}")
+        return match_result
+    
+    def _find_variable_match(self, rows: List[Dict[str, Any]], start_idx: int, 
+                           variable: str, context: RowContext) -> Optional[int]:
+        """Find the next occurrence of a variable match starting from start_idx."""
+        # Get the condition for this variable from the original DFA
+        if not hasattr(self, 'define_conditions'):
+            logger.debug(f"No define_conditions found for variable matching")
+            return None
+            
+        if variable not in self.define_conditions:
+            logger.debug(f"Variable '{variable}' not found in define_conditions")
+            return None
+            
+        condition_str = self.define_conditions[variable]
+        logger.debug(f"Checking condition for '{variable}': {condition_str}")
+        
+        # Compile the condition if it's still a string
+        if isinstance(condition_str, str):
+            from src.matcher.condition_evaluator import compile_condition
+            condition = compile_condition(condition_str, evaluation_mode='DEFINE')
+        else:
+            condition = condition_str
+        
+        # Search for the first row that matches this variable's condition
+        for idx in range(start_idx, len(rows)):
+            try:
+                # Update context for evaluation
+                context.current_idx = idx
+                context.current_var = variable
+                
+                # Evaluate the condition
+                if condition(rows[idx], context):
+                    logger.debug(f"Variable '{variable}' condition satisfied at idx {idx}")
+                    return idx
+            except Exception as e:
+                logger.debug(f"Error evaluating condition for '{variable}' at idx {idx}: {e}")
+                continue
+                
+        logger.debug(f"Variable '{variable}' condition not satisfied from idx {start_idx}")
+        return None

@@ -1060,7 +1060,22 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             continue
                         
                         # Process each matched row
-                        for idx in range(match["start"], match["end"] + 1):
+                        # For PERMUTE patterns with alternations, only process matched variable indices
+                        if (hasattr(matcher, 'dfa') and hasattr(matcher.dfa, 'metadata') and 
+                            matcher.dfa.metadata.get('has_permute', False) and 
+                            matcher.dfa.metadata.get('has_alternations', False)):
+                            # Get only the matched indices for PERMUTE with alternations
+                            matched_indices = []
+                            for var, indices in match.get("variables", {}).items():
+                                matched_indices.extend(indices)
+                            indices_to_process = sorted(set(matched_indices))
+                            logger.debug(f"PERMUTE with alternations: processing only matched indices {indices_to_process}")
+                        else:
+                            # Regular pattern: process all rows from start to end
+                            indices_to_process = list(range(match["start"], match["end"] + 1))
+                            logger.debug(f"Regular pattern: processing range {indices_to_process}")
+                        
+                        for idx in indices_to_process:
                             if idx >= len(all_rows):
                                 continue
                                 

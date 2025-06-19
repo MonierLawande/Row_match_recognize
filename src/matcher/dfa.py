@@ -35,11 +35,11 @@ class DFAState:
     permute_data: Optional[Dict[str, Any]] = None
     subset_vars: Set[str] = field(default_factory=set)
 
-    def add_transition(self, condition: Any, target: int, variable: Optional[str] = None):
-        """Add a transition with enhanced validation."""
+    def add_transition(self, condition: Any, target: int, variable: Optional[str] = None, priority: int = 0):
+        """Add a transition with enhanced validation and priority support."""
         # Allow transitions for excluded variables - they should be available for matching
         # but will be filtered from output during result processing
-        self.transitions.append(Transition(condition, target, variable))
+        self.transitions.append(Transition(condition, target, variable, priority))
 
     def allows_empty_match(self) -> bool:
         """Check if this state allows empty matches."""
@@ -273,9 +273,10 @@ class DFABuilder:
                 target_set = self._compute_target_set(transitions)
                 target_idx = self._get_target_state(target_set, state_map, dfa_states, queue)
                 
-                # Create optimized transition
+                # Create optimized transition with priority from the first (highest priority) transition
                 condition = self._create_combined_condition(transitions)
-                dfa_states[current_idx].add_transition(condition, target_idx, var)
+                priority = transitions[0].priority if transitions else 0
+                dfa_states[current_idx].add_transition(condition, target_idx, var, priority)
 
         # Build final DFA
         dfa = DFA(0, dfa_states, self.nfa.exclusion_ranges, self.metadata)
@@ -318,7 +319,7 @@ class DFABuilder:
         return state
 
     def _group_transitions(self, nfa_states: FrozenSet[int]) -> Dict[str, List[Transition]]:
-        """Group NFA transitions by variable for optimization."""
+        """Group NFA transitions by variable for optimization, preserving priorities."""
         transitions: Dict[str, List[Transition]] = {}
         
         for state_idx in nfa_states:
@@ -326,6 +327,10 @@ class DFABuilder:
                 if trans.variable not in transitions:
                     transitions[trans.variable] = []
                 transitions[trans.variable].append(trans)
+        
+        # Sort transitions within each variable group by priority (lower = higher priority)
+        for var, trans_list in transitions.items():
+            trans_list.sort(key=lambda t: t.priority)
                 
         return transitions
 
