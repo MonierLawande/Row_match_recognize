@@ -369,13 +369,15 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             final_match = re.match(r'(?i)FINAL\s+', raw_expr)
             
             if running_match:
+                semantics = "RUNNING"
                 raw_expr = raw_expr[running_match.end():].strip()
             elif final_match:
                 semantics = "FINAL"
                 raw_expr = raw_expr[final_match.end():].strip()
             
-            # Alternative: If the expression is already concatenated (e.g., "FINALLAST")
+            # Alternative: If the expression is already concatenated (e.g., "RUNNINGLAST")
             elif raw_expr.upper().startswith("RUNNING"):
+                semantics = "RUNNING"
                 # Extract function name after "RUNNING"
                 function_match = re.match(r'(?i)RUNNING([A-Z]+)', raw_expr)
                 if function_match:
