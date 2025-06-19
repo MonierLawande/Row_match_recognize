@@ -351,7 +351,10 @@ class ConditionEvaluator(ast.NodeVisitor):
                                 return self.evaluate_navigation_function(func_name, column, steps)
                         else:
                             # Use variable-aware navigation for FIRST/LAST
-                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            logger.debug(f"[DEBUG] Calling _get_navigation_value for {func_name}({var_name}.{column}) in visit_Call")
+                            result = self._get_navigation_value(var_name, column, func_name, steps)
+                            logger.debug(f"[DEBUG] _get_navigation_value returned: {result} for {func_name}({var_name}.{column})")
+                            return result
                             
                     elif isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Constant):
                         # Pattern: NEXT("b".value) - quoted variable.column format
@@ -368,7 +371,10 @@ class ConditionEvaluator(ast.NodeVisitor):
                                 return self.evaluate_navigation_function(func_name, column, steps)
                         else:
                             # Use variable-aware navigation for FIRST/LAST
-                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            logger.debug(f"[DEBUG] Calling _get_navigation_value for {func_name}({var_name}.{column}) in visit_Call (quoted)")
+                            result = self._get_navigation_value(var_name, column, func_name, steps)
+                            logger.debug(f"[DEBUG] _get_navigation_value returned: {result} for {func_name}({var_name}.{column}) (quoted)")
+                            return result
                             
                     elif isinstance(first_arg, ast.Name):
                         # Pattern: NEXT(column) - simple column format
@@ -655,6 +661,11 @@ class ConditionEvaluator(ast.NodeVisitor):
         """
         start_time = time.time()
         
+        logger.debug(f"[NAV_DEBUG] _get_navigation_value: var_name={var_name}, column={column}, nav_type={nav_type}, steps={steps}")
+        logger.debug(f"[NAV_DEBUG] Current context.variables: {self.context.variables}")
+        logger.debug(f"[NAV_DEBUG] Current context.current_idx: {self.context.current_idx}")
+        logger.debug(f"[NAV_DEBUG] Current evaluation_mode: {self.evaluation_mode}")
+        
         try:
             # Enhanced input validation with comprehensive error messages
             if steps < 0:
@@ -693,11 +704,13 @@ class ConditionEvaluator(ast.NodeVisitor):
             
             # Fast path: Quickly return None for obvious edge cases to avoid unnecessary computation
             if curr_idx < 0 or curr_idx >= len(self.context.rows) or not self.context.rows:
+                logger.debug(f"[NAV_DEBUG] Fast path exit: curr_idx={curr_idx}, rows_len={len(self.context.rows) if self.context.rows else 0}")
                 self.context.navigation_cache[cache_key] = None
                 return None
             
             # Enhanced subset variable handling for logical navigation (FIRST/LAST)
             if nav_type in ('FIRST', 'LAST') and var_name in self.context.subsets:
+                logger.debug(f"[NAV_DEBUG] Subset variable path for {var_name}")
                 # For subset variables, find rows matched to any component variable
                 component_vars = self.context.subsets[var_name]
                 all_indices = []
@@ -734,11 +747,15 @@ class ConditionEvaluator(ast.NodeVisitor):
                 self.context.navigation_cache[cache_key] = None
                 return None
             
+            logger.debug(f"[NAV_DEBUG] Past subset check, checking if var_name is subset: var_name={var_name}, subsets={getattr(self.context, 'subsets', {})}")
+            
             # Optimized timeline building with caching
             # Build a timeline of all pattern variables in this match
             if hasattr(self.context, '_timeline') and not getattr(self.context, '_timeline_dirty', True):
                 timeline = self.context._timeline
+                logger.debug(f"[NAV_DEBUG] Using cached timeline: {timeline}")
             else:
+                logger.debug(f"[NAV_DEBUG] Building new timeline from variables: {self.context.variables}")
                 # Rebuild timeline with optimized algorithm
                 timeline = []
                 
@@ -770,15 +787,11 @@ class ConditionEvaluator(ast.NodeVisitor):
                 self.context._timeline = timeline
                 self.context._timeline_dirty = False
             
-            # Empty timeline indicates incomplete match state
-            if not timeline:
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
             result = None
             
             # Enhanced logical positioning functions (FIRST/LAST)
             if nav_type in ('FIRST', 'LAST'):
+                logger.debug(f"[NAV_DEBUG] Processing {nav_type} navigation for var_name={var_name}")
                 if var_name is None:
                     # FIRST(column) or LAST(column) - look across all variables in the match
                     all_indices = []
@@ -786,26 +799,32 @@ class ConditionEvaluator(ast.NodeVisitor):
                         all_indices.extend(indices)
                     
                     if not all_indices:
+                        logger.debug(f"[NAV_DEBUG] No indices found for var_name=None case")
                         self.context.navigation_cache[cache_key] = None
                         return None
                     
                     # Sort indices and select first or last
                     all_indices = sorted(set(all_indices))
                     idx = all_indices[0] if nav_type == 'FIRST' else all_indices[-1]
+                    logger.debug(f"[NAV_DEBUG] var_name=None: all_indices={all_indices}, selected idx={idx}")
                     
                 elif var_name not in self.context.variables or not self.context.variables[var_name]:
+                    logger.debug(f"[NAV_DEBUG] Variable {var_name} not found in context.variables or empty")
                     self.context.navigation_cache[cache_key] = None
                     return None
                 else:
                     # Get sorted indices with duplication handling
                     var_indices = sorted(set(self.context.variables[var_name]))
+                    logger.debug(f"[NAV_DEBUG] Variable {var_name} indices: {var_indices}")
                     
                     if not var_indices:
+                        logger.debug(f"[NAV_DEBUG] No indices for variable {var_name}")
                         self.context.navigation_cache[cache_key] = None
                         return None
                     
                     # Select appropriate index based on navigation type
                     idx = var_indices[0] if nav_type == 'FIRST' else var_indices[-1]
+                    logger.debug(f"[NAV_DEBUG] Selected idx={idx} for {nav_type}({var_name})")
                 
                 # Check partition boundaries if defined
                 if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
@@ -814,17 +833,33 @@ class ConditionEvaluator(ast.NodeVisitor):
                     
                     # Enforce partition boundaries
                     if curr_partition != target_partition or curr_partition is None or target_partition is None:
+                        logger.debug(f"[NAV_DEBUG] Partition boundary violation: curr={curr_partition}, target={target_partition}")
                         self.context.navigation_cache[cache_key] = None
                         return None
                 
                 # Bounds checking with advanced error handling
+                logger.debug(f"[NAV_DEBUG] Bounds check: idx={idx}, len(self.context.rows)={len(self.context.rows)}")
                 if 0 <= idx < len(self.context.rows):
                     result = self.context.rows[idx].get(column)
+                    logger.debug(f"[NAV_DEBUG] Got result: {result} from row {idx}, column {column}")
+                    logger.debug(f"[NAV_DEBUG] Row data at idx {idx}: {self.context.rows[idx]}")
                 else:
                     result = None
+                    logger.debug(f"[NAV_DEBUG] Index {idx} out of bounds (rows length: {len(self.context.rows)})")
+                
+                # Cache and return the result for FIRST/LAST
+                logger.debug(f"[NAV_DEBUG] Caching and returning FIRST/LAST result: {result}")
+                self.context.navigation_cache[cache_key] = result
+                return result
+            
             
             # Enhanced physical navigation (PREV/NEXT) with optimized algorithms
             elif nav_type in ('PREV', 'NEXT'):
+                # Empty timeline indicates incomplete match state for PREV/NEXT navigation
+                if not timeline:
+                    self.context.navigation_cache[cache_key] = None
+                    return None
+                
                 # Fast path for simple operations using the context's methods
                 if (var_name is None or var_name == current_var) and steps <= 10:
                     # Use optimized methods from context
@@ -1458,346 +1493,6 @@ class ConditionEvaluator(ast.NodeVisitor):
 
 
 
-    def _get_navigation_value(self, var_name, column, nav_type, steps=1):
-        """
-        Production-grade enhanced navigation function for physical (PREV/NEXT) and logical (FIRST/LAST) operations.
-        
-        This implementation provides:
-        - Comprehensive performance optimization with smart caching
-        - Robust error handling with detailed error messages
-        - Advanced bounds checking with early exit
-        - Full support for subset variables and PERMUTE patterns
-        - Consistent behavior across pattern boundaries
-        - Production-level partition boundary enforcement
-        - Performance metrics and logging
-        - Thread-safety for concurrent pattern matching
-        
-        Args:
-            var_name: Variable name or function name
-            column: Column name to retrieve
-            nav_type: Navigation type ('PREV', 'NEXT', 'FIRST', 'LAST')
-            steps: Number of steps to navigate (for PREV/NEXT)
-            
-        Returns:
-            The value at the navigated position or None if navigation is invalid
-            
-        Raises:
-            ValueError: For invalid navigation parameters
-            TypeError: For type mismatches
-        """
-        start_time = time.time()
-        
-        try:
-            # Enhanced input validation with comprehensive error messages
-            if steps < 0:
-                raise ValueError(f"Navigation steps must be non-negative: {steps}")
-            
-            if not isinstance(column, str):
-                raise TypeError(f"Column name must be a string, got {type(column)}: {column}")
-            
-            # Initialize or update performance metrics
-            if hasattr(self.context, 'stats'):
-                self.context.stats["navigation_calls"] = self.context.stats.get("navigation_calls", 0) + 1
-            
-            # Initialize cache if not exists with thread-safety consideration
-            if not hasattr(self.context, 'navigation_cache'):
-                self.context.navigation_cache = {}
-            
-            # Create a comprehensive cache key that includes all relevant context
-            # This ensures cache hits even in complex pattern scenarios
-            partition_key = getattr(self.context, 'partition_key', None)
-            pattern_id = id(getattr(self.context, 'pattern_metadata', None))
-            cache_key = (var_name, column, nav_type, steps, self.context.current_idx, partition_key, pattern_id)
-            
-            # Optimized cache lookup with metrics tracking
-            if cache_key in self.context.navigation_cache:
-                if hasattr(self.context, 'stats'):
-                    self.context.stats["cache_hits"] = self.context.stats.get("cache_hits", 0) + 1
-                return self.context.navigation_cache[cache_key]
-            
-            if hasattr(self.context, 'stats'):
-                self.context.stats["cache_misses"] = self.context.stats.get("cache_misses", 0) + 1
-            
-            # Get context state with robust null handling
-            curr_idx = self.context.current_idx
-            current_var = getattr(self.context, 'current_var', None)
-            is_permute = hasattr(self.context, 'pattern_metadata') and getattr(self.context, 'pattern_metadata', {}).get('permute', False)
-            
-            # Fast path: Quickly return None for obvious edge cases to avoid unnecessary computation
-            if curr_idx < 0 or curr_idx >= len(self.context.rows) or not self.context.rows:
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
-            # Enhanced subset variable handling for logical navigation (FIRST/LAST)
-            if nav_type in ('FIRST', 'LAST') and var_name in self.context.subsets:
-                # For subset variables, find rows matched to any component variable
-                component_vars = self.context.subsets[var_name]
-                all_indices = []
-                
-                # Gather indices from all component variables
-                for comp_var in component_vars:
-                    if comp_var in self.context.variables:
-                        all_indices.extend(self.context.variables[comp_var])
-                
-                if all_indices:
-                    # Sort indices for consistent behavior and deduplication
-                    all_indices = sorted(set(all_indices))
-                    
-                    # Bounds checking and partition enforcement for subset variables
-                    idx = all_indices[0] if nav_type == 'FIRST' else all_indices[-1]
-                    
-                    # Check partition boundaries if defined
-                    if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-                        curr_partition = self.context.get_partition_for_row(curr_idx)
-                        target_partition = self.context.get_partition_for_row(idx)
-                        
-                        # Enforce partition boundaries
-                        if curr_partition != target_partition or curr_partition is None or target_partition is None:
-                            self.context.navigation_cache[cache_key] = None
-                            return None
-                    
-                    # Bounds checking
-                    if 0 <= idx < len(self.context.rows):
-                        result = self.context.rows[idx].get(column)
-                        self.context.navigation_cache[cache_key] = result
-                        return result
-                
-                # No valid indices found for subset
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
-            # Optimized timeline building with caching
-            # Build a timeline of all pattern variables in this match
-            if hasattr(self.context, '_timeline') and not getattr(self.context, '_timeline_dirty', True):
-                timeline = self.context._timeline
-            else:
-                # Rebuild timeline with optimized algorithm
-                timeline = []
-                
-                # Use direct index lookup for small variable sets
-                if len(self.context.variables) < 50:
-                    for var, indices in self.context.variables.items():
-                        for idx in indices:
-                            timeline.append((idx, var))
-                else:
-                    # For larger sets, use a more efficient approach
-                    # Pre-allocate to avoid resizing
-                    total_indices = sum(len(indices) for indices in self.context.variables.values())
-                    timeline = [(0, "")] * total_indices
-                    pos = 0
-                    
-                    for var, indices in self.context.variables.items():
-                        for idx in indices:
-                            timeline[pos] = (idx, var)
-                            pos += 1
-                    
-                    # Truncate if needed
-                    if pos < len(timeline):
-                        timeline = timeline[:pos]
-                
-                # Sort by row index for consistent ordering
-                timeline.sort()
-                
-                # Cache the timeline and mark as clean
-                self.context._timeline = timeline
-                self.context._timeline_dirty = False
-            
-            # Empty timeline indicates incomplete match state
-            if not timeline:
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
-            result = None
-            
-            # Enhanced logical positioning functions (FIRST/LAST)
-            if nav_type in ('FIRST', 'LAST'):
-                if var_name is None:
-                    # FIRST(column) or LAST(column) - look across all variables in the match
-                    all_indices = []
-                    for var, indices in self.context.variables.items():
-                        all_indices.extend(indices)
-                    
-                    if not all_indices:
-                        self.context.navigation_cache[cache_key] = None
-                        return None
-                    
-                    # Sort indices and select first or last
-                    all_indices = sorted(set(all_indices))
-                    idx = all_indices[0] if nav_type == 'FIRST' else all_indices[-1]
-                    
-                elif var_name not in self.context.variables or not self.context.variables[var_name]:
-                    self.context.navigation_cache[cache_key] = None
-                    return None
-                else:
-                    # Get sorted indices with duplication handling
-                    var_indices = sorted(set(self.context.variables[var_name]))
-                    
-                    if not var_indices:
-                        self.context.navigation_cache[cache_key] = None
-                        return None
-                    
-                    # Select appropriate index based on navigation type
-                    idx = var_indices[0] if nav_type == 'FIRST' else var_indices[-1]
-                
-                # Check partition boundaries if defined
-                if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-                    curr_partition = self.context.get_partition_for_row(curr_idx)
-                    target_partition = self.context.get_partition_for_row(idx)
-                    
-                    # Enforce partition boundaries
-                    if curr_partition != target_partition or curr_partition is None or target_partition is None:
-                        self.context.navigation_cache[cache_key] = None
-                        return None
-                
-                # Bounds checking with advanced error handling
-                if 0 <= idx < len(self.context.rows):
-                    result = self.context.rows[idx].get(column)
-                else:
-                    result = None
-            
-            # Enhanced physical navigation (PREV/NEXT) with optimized algorithms
-            elif nav_type in ('PREV', 'NEXT'):
-                # Fast path for simple operations using the context's methods
-                if (var_name is None or var_name == current_var) and steps <= 10:
-                    # Use optimized methods from context
-                    if nav_type == 'PREV':
-                        row = self.context.prev(steps)
-                    else:  # NEXT
-                        row = self.context.next(steps)
-                        
-                    if row is not None:
-                        result = row.get(column)
-                        self.context.navigation_cache[cache_key] = result
-                        return result
-                
-                # Advanced position finding using optimized algorithms
-                curr_pos = -1
-                
-                # Optimization: Binary search for current position if timeline is large
-                if len(timeline) > 100:
-                    # Use binary search to find position close to curr_idx
-                    low, high = 0, len(timeline) - 1
-                    while low <= high:
-                        mid = (low + high) // 2
-                        mid_idx, _ = timeline[mid]
-                        
-                        if mid_idx < curr_idx:
-                            low = mid + 1
-                        elif mid_idx > curr_idx:
-                            high = mid - 1
-                        else:
-                            # Found exact index, now check variable if needed
-                            if current_var is None or timeline[mid][1] == current_var:
-                                curr_pos = mid
-                                break
-                            
-                            # Enhanced linear search for the correct variable at this index
-                            # Use expanding window to handle clustered variables
-                            found = False
-                            for offset in range(1, min(10, len(timeline))):
-                                # Check before mid
-                                if mid - offset >= 0:
-                                    idx, var = timeline[mid - offset]
-                                    if idx == curr_idx and (current_var is None or var == current_var):
-                                        curr_pos = mid - offset
-                                        found = True
-                                        break
-                                        
-                                # Check after mid
-                                if mid + offset < len(timeline):
-                                    idx, var = timeline[mid + offset]
-                                    if idx == curr_idx and (current_var is None or var == current_var):
-                                        curr_pos = mid + offset
-                                        found = True
-                                        break
-                                        
-                            if found:
-                                break
-                                
-                            # Fall back to checking nearby indices if we found the right index but wrong variable
-                            for i in range(max(0, mid-10), min(len(timeline), mid+11)):
-                                if timeline[i][0] == curr_idx and (current_var is None or timeline[i][1] == current_var):
-                                    curr_pos = i
-                                    found = True
-                                    break
-                                    
-                            if found:
-                                break
-                            
-                            # If we got here, we found the index but not the right variable
-                            # Fall back to linear search from the beginning
-                            break
-                else:
-                    # Optimized linear search for smaller timelines
-                    for i, (idx, var) in enumerate(timeline):
-                        if idx == curr_idx and (current_var is None or var == current_var):
-                            curr_pos = i
-                            break
-                
-                # If current position not found in timeline
-                if curr_pos < 0:
-                    self.context.navigation_cache[cache_key] = None
-                    return None
-                
-                # Enhanced PREV navigation with comprehensive bounds checking and partition enforcement
-                if nav_type == 'PREV':
-                    if steps == 0:  # Special case: PREV(col, 0) returns current row's value
-                        result = self.context.rows[curr_idx].get(column)
-                    elif curr_pos >= steps:
-                        prev_idx, _ = timeline[curr_pos - steps]
-                        
-                        # Enhanced partition boundary checking with optimized lookup
-                        if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-                            # Use optimized method from context
-                            if not self.context.check_same_partition(curr_idx, prev_idx):
-                                self.context.navigation_cache[cache_key] = None
-                                return None
-                        
-                        # Get the value from the previous row with column existence check
-                        if 0 <= prev_idx < len(self.context.rows):
-                            prev_row = self.context.rows[prev_idx]
-                            result = prev_row.get(column)
-                        else:
-                            result = None
-                    else:
-                        # Not enough rows before current position - this is a boundary condition
-                        # For DEFINE clauses with variable-specific PREV, return NULL (not context invalid)
-                        # This allows proper SQL NULL comparison semantics: value > NULL = FALSE
-                        result = None
-                
-                # Enhanced NEXT navigation with comprehensive bounds checking and partition enforcement
-                elif nav_type == 'NEXT':
-                    if steps == 0:  # Special case: NEXT(col, 0) returns current row's value
-                        result = self.context.rows[curr_idx].get(column)
-                    elif curr_pos >= 0 and curr_pos + steps < len(timeline):
-                        next_idx, _ = timeline[curr_pos + steps]
-                        
-                        # Enhanced partition boundary checking with optimized lookup
-                        if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-                            # Use optimized method from context
-                            if not self.context.check_same_partition(curr_idx, next_idx):
-                                self.context.navigation_cache[cache_key] = None
-                                return None
-                        
-                        # Get the value from the next row with column existence check
-                        if 0 <= next_idx < len(self.context.rows):
-                            next_row = self.context.rows[next_idx]
-                            result = next_row.get(column)
-                        else:
-                            result = None
-                    else:
-                        # Not enough rows after current position
-                        result = None
-            
-            # Cache the result for future lookups
-            self.context.navigation_cache[cache_key] = result
-            return result
-            
-        finally:
-            # Track performance metrics
-            if hasattr(self.context, 'timing'):
-                navigation_time = time.time() - start_time
-                self.context.timing['navigation'] = self.context.timing.get('navigation', 0) + navigation_time
 
 def validate_navigation_conditions(conditions: Dict[str, str], pattern_variables: List[str]) -> Dict[str, str]:
     """
@@ -1913,25 +1608,55 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
             
             logger.debug(f"NESTED_NAV: Nested pattern: {outer_func}({inner_expr}, {outer_offset})")
             
-            # Evaluate the inner expression first to get the value
-            inner_result = evaluate_nested_navigation(inner_expr, context, current_idx, current_var)
-            if inner_result is None:
+            # CRITICAL FIX: For nested navigation, we need to find the ROW INDEX where the inner
+            # expression was evaluated, then apply the outer navigation from THAT index.
+            # This is the key difference from simple value evaluation.
+            
+            # Parse the inner expression to extract variable and column
+            inner_simple_match = re.match(simple_pattern, inner_expr, re.IGNORECASE)
+            if not inner_simple_match:
+                logger.error(f"NESTED_NAV: Cannot parse inner expression: {inner_expr}")
                 context.navigation_cache[cache_key] = None
                 return None
             
-            logger.debug(f"NESTED_NAV: Inner result: {inner_result}")
+            inner_func = inner_simple_match.group(1).upper()
+            inner_var = inner_simple_match.group(2)
+            inner_col = inner_simple_match.group(3)
             
-            # Now apply the outer navigation function to the current position, not the inner result
-            # The inner result gives us the value, outer function navigates from current position
+            logger.debug(f"NESTED_NAV: Inner function: {inner_func}({inner_var}.{inner_col})")
+            
+            # Find the ROW INDEX where the inner function evaluates
+            inner_row_idx = None
+            if inner_var in context.variables:
+                var_indices = context.variables[inner_var]
+                if var_indices:
+                    if inner_func == 'LAST':
+                        inner_row_idx = max(var_indices)
+                    elif inner_func == 'FIRST':
+                        inner_row_idx = min(var_indices)
+                    
+                    logger.debug(f"NESTED_NAV: {inner_func}({inner_var}) found at row index: {inner_row_idx}")
+            
+            if inner_row_idx is None:
+                logger.debug(f"NESTED_NAV: Could not find row index for {inner_func}({inner_var})")
+                context.navigation_cache[cache_key] = None
+                return None
+            
+            # Get the value at the inner row index for validation
+            inner_value = context.rows[inner_row_idx].get(inner_col) if 0 <= inner_row_idx < len(context.rows) else None
+            logger.debug(f"NESTED_NAV: Inner value at row {inner_row_idx}: {inner_value}")
+            
+            # Now apply the outer navigation function FROM the inner row index
             if outer_func == 'PREV':
-                target_idx = current_idx - outer_offset
+                target_idx = inner_row_idx - outer_offset
             else:  # NEXT
-                target_idx = current_idx + outer_offset
+                target_idx = inner_row_idx + outer_offset
             
             if 0 <= target_idx < len(context.rows):
-                # Get the value from the target row - assume 'value' column for now
-                result = context.rows[target_idx].get('value')
-                logger.debug(f"NESTED_NAV: {outer_func}({inner_result}, {outer_offset}) -> row[{target_idx}] = {result}")
+                # Get the value from the target row using the same column as inner expression
+                result = context.rows[target_idx].get(inner_col)
+                logger.debug(f"NESTED_NAV: {outer_func}({inner_func}({inner_var}.{inner_col}), {outer_offset}) -> row[{target_idx}] = {result}")
+                logger.debug(f"NESTED_NAV: Navigation path: {inner_func} found at row {inner_row_idx}, {outer_func} by {outer_offset} -> row {target_idx}")
             else:
                 result = None
                 logger.debug(f"NESTED_NAV: {outer_func} target index {target_idx} out of bounds")
@@ -1954,8 +1679,34 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
             evaluator.context.current_idx = current_idx
             evaluator.context.current_var = current_var
             
+            # Debug the context state
+            logger.debug(f"NESTED_NAV: Before navigation, context.variables = {context.variables}")
+            logger.debug(f"NESTED_NAV: After creating evaluator, evaluator.context.variables = {evaluator.context.variables}")
+            logger.debug(f"NESTED_NAV: Looking for variable '{var_name}' in navigation")
+            
             # Use the existing _get_navigation_value method
             result = evaluator._get_navigation_value(var_name, col_name, func_name, offset)
+            logger.debug(f"NESTED_NAV: Direct call result from _get_navigation_value: {result}")
+            
+            # PRODUCTION FIX: If the navigation function returns None, try a direct implementation
+            if result is None and var_name in context.variables:
+                var_indices = context.variables[var_name]
+                if var_indices:
+                    if func_name == 'LAST':
+                        # Get the last index for this variable
+                        last_idx = max(var_indices)
+                        if 0 <= last_idx < len(context.rows):
+                            result = context.rows[last_idx].get(col_name)
+                            logger.debug(f"NESTED_NAV: Direct LAST implementation returned: {result}")
+                    elif func_name == 'FIRST':
+                        # Get the first index for this variable
+                        first_idx = min(var_indices)
+                        if 0 <= first_idx < len(context.rows):
+                            result = context.rows[first_idx].get(col_name)
+                            logger.debug(f"NESTED_NAV: Direct FIRST implementation returned: {result}")
+            
+            if result is None:
+                logger.debug(f"NESTED_NAV: Navigation returned None - checking context again: {context.variables}")
             logger.debug(f"NESTED_NAV: {func_name}({var_name}.{col_name}, {offset}) = {result}")
             context.navigation_cache[cache_key] = result
             return result

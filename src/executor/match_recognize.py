@@ -133,7 +133,15 @@ def format_trino_output(df):
     return result
 def _process_empty_match(start_idx: int, rows: List[Dict[str, Any]], measures: Dict[str, str], match_number: int, partition_by: List[str]) -> Dict[str, Any]:
     """
-    Process an empty match according to SQL standard, preserving original row data.
+    Process an empty match according to SQL:2016 standard, preserving original row data.
+    
+    For empty matches, measures should return appropriate empty values:
+    - MATCH_NUMBER() → match number
+    - CLASSIFIER() → None (no variables matched)  
+    - COUNT(*) → 0 (empty set count)
+    - SUM(...) → None (empty set sum)
+    - FIRST(...), LAST(...) → None (no rows in match)
+    - Navigation functions → None (no match context)
     
     Args:
         start_idx: Starting row index for the empty match
@@ -145,6 +153,8 @@ def _process_empty_match(start_idx: int, rows: List[Dict[str, Any]], measures: D
     Returns:
         Result row for the empty match with original row data preserved
     """
+    import re
+    
     # Check if index is valid
     if start_idx >= len(rows):
         return None
@@ -152,21 +162,50 @@ def _process_empty_match(start_idx: int, rows: List[Dict[str, Any]], measures: D
     # Start with a copy of the original row to preserve all columns
     result = rows[start_idx].copy()
     
-    # Create context for empty match
+    # Create context for empty match (no variables assigned)
     context = RowContext()
     context.rows = rows
-    context.variables = {}
+    context.variables = {}  # Empty for empty match
     context.match_number = match_number
     context.current_idx = start_idx
     
-    # Set all measures to NULL values
+    # Create measure evaluator for empty match context
+    evaluator = MeasureEvaluator(context=context, final=True)
+    
+    # Process each measure appropriately for empty matches
     for alias, expr in measures.items():
-        # Special handling for MATCH_NUMBER()
-        if expr.upper() == "MATCH_NUMBER()":
+        expr_upper = expr.upper().strip()
+        
+        # Handle special functions
+        if expr_upper == "MATCH_NUMBER()":
             result[alias] = match_number
-        else:
-            # All other measures are NULL for empty matches
+        elif expr_upper == "CLASSIFIER()":
+            result[alias] = None  # No variables matched in empty match
+        elif re.match(r'^COUNT\s*\(\s*\*\s*\)$', expr_upper):
+            # COUNT(*) for empty match is 0
+            result[alias] = 0
+        elif re.match(r'^COUNT\s*\(.*\)$', expr_upper):
+            # COUNT(expression) for empty match is 0
+            result[alias] = 0
+        elif re.match(r'^(SUM|AVG|MIN|MAX|STDDEV|VARIANCE)\s*\(.*\)$', expr_upper):
+            # Aggregates for empty match are None (NULL in SQL)
             result[alias] = None
+        elif re.match(r'^(FIRST|LAST)\s*\(.*\)$', expr_upper):
+            # Navigation functions for empty match are None
+            result[alias] = None
+        elif re.match(r'^(PREV|NEXT)\s*\(.*\)$', expr_upper):
+            # Navigation functions for empty match are None
+            result[alias] = None
+        else:
+            # For other expressions, try to evaluate in empty context
+            # Most will return None, which is appropriate for empty matches
+            try:
+                # Try to evaluate the expression with no variables assigned
+                value = evaluator.evaluate_measure(expr, is_running=True)
+                result[alias] = value
+            except Exception:
+                # If evaluation fails, default to None for empty match
+                result[alias] = None
     
     # Add match metadata
     result["MATCH_NUMBER"] = match_number

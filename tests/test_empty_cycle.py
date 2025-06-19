@@ -282,8 +282,8 @@ class TestEmptyCycle:
             MEASURES
                 MATCH_NUMBER() AS match,
                 CLASSIFIER() AS label,
-                price,
-                volume
+                price AS price,
+                volume AS volume
             ALL ROWS PER MATCH
             AFTER MATCH SKIP PAST LAST ROW
             PATTERN (UP* DOWN* SPIKE)

@@ -676,29 +676,59 @@ class EnhancedMatcher:
         # Extract metadata from DFA for optimization
         self._extract_dfa_metadata()
         
-        # Add optimization structures
-        self.transition_index = self._build_transition_index()
+        # PRODUCTION FIX: Track alternation order to respect left-to-right precedence
+        # This fixes the bug where 'A' is chosen over 'B' in PATTERN (B | C | A)
+        self.alternation_order = self._parse_alternation_order(original_pattern) if original_pattern else {}
+        if self.alternation_order:
+            logger.debug(f"Alternation order map: {self.alternation_order}")
         
-        # Create pattern exclusion handler
+        # Initialize exclusion handler
         self.exclusion_handler = PatternExclusionHandler(original_pattern) if original_pattern else None
         
-        # Extract excluded variables
-        self.excluded_vars = set()
-        if self.exclusion_handler:
-            self.excluded_vars = self.exclusion_handler.excluded_vars
-            logger.debug(f"Initialized matcher with excluded variables: {self.excluded_vars}")
-
-        # Store pattern tokens for empty match validation
-        self._pattern_tokens = []
-        if original_pattern:
-            # Simple tokenization to extract pattern structure
-            import re
-            # Split pattern into tokens, preserving quantifiers
-            token_pattern = r'([A-Za-z_][A-Za-z0-9_]*[+*?]?|\{[^}]*\}|[()|\s])'
-            tokens = re.findall(r'([A-Za-z_][A-Za-z0-9_]*[+*?]?(?:\{[^}]*\})?)', original_pattern)
-            self._pattern_tokens = [token.strip() for token in tokens if token.strip()]
-            logger.debug(f"Pattern tokens for empty match validation: {self._pattern_tokens}")
+        # Build transition index for optimization
+        self.transition_index = self._build_transition_index()
+    
+    def _parse_alternation_order(self, pattern: str) -> Dict[str, int]:
+        """
+        Parse the pattern to determine the order of variables in alternations.
         
+        For PATTERN (B | C | A), this returns {'B': 0, 'C': 1, 'A': 2}
+        Lower numbers have higher priority (left-to-right order).
+        
+        Args:
+            pattern: The original pattern string
+            
+        Returns:
+            Dictionary mapping variable names to their priority order (lower = higher priority)
+        """
+        if not pattern:
+            return {}
+            
+        order_map = {}
+        order_counter = 0
+        
+        # Simple regex to find alternation groups like (A | B | C)
+        import re
+        
+        # Find all alternation patterns: sequences of variables separated by |
+        # This handles patterns like "B | C | A" or "(X | Y | Z)"
+        alternation_pattern = r'([A-Z_][A-Z0-9_]*(?:\s*\|\s*[A-Z_][A-Z0-9_]*)+)'
+        
+        for match in re.finditer(alternation_pattern, pattern):
+            alternation_group = match.group(1)
+            # Split by | and extract variable names
+            variables = [var.strip() for var in alternation_group.split('|')]
+            
+            # Assign order priority to each variable (lower number = higher priority)
+            for i, var in enumerate(variables):
+                if var and var not in order_map:
+                    order_map[var] = order_counter + i
+            
+            # Increment counter for the next alternation group
+            order_counter += len(variables)
+        
+        return order_map
+    
     def _extract_dfa_metadata(self):
         """Extract and process metadata from the DFA for optimization."""
         # Copy metadata from DFA if available
@@ -813,6 +843,25 @@ class EnhancedMatcher:
         # Track if we're in a pattern with exclusions
         has_exclusions = hasattr(self, 'excluded_vars') and self.excluded_vars
         
+        # PRODUCTION FIX: For reluctant star patterns, check if we start in an accepting state
+        # If so, prefer empty match immediately instead of trying to build longer matches
+        if self.has_reluctant_star and self.dfa.states[state].is_accept:
+            logger.debug(f"Reluctant star pattern starting in accepting state - preferring empty match at position {start_idx}")
+            # Return empty match immediately to satisfy B*? preference for zero matches
+            empty_match = {
+                "start": start_idx,
+                "end": -1,  # Empty match
+                "variables": {},
+                "state": state,
+                "is_empty": True,
+                "excluded_vars": set(),
+                "excluded_rows": [],
+                "empty_pattern_rows": [start_idx],
+                "has_empty_alternation": True
+            }
+            self.timing["find_match"] += time.time() - match_start_time
+            return empty_match
+        
         while current_idx < len(rows):
             row = rows[current_idx]
             context.current_idx = current_idx
@@ -822,6 +871,7 @@ class EnhancedMatcher:
             context.current_var_assignments = var_assignments
             
             logger.debug(f"Testing row {current_idx}, data: {row}")
+            logger.debug(f"  Current var_assignments: {var_assignments}")
             
             # Use indexed transitions for faster lookups
             next_state = None
@@ -904,6 +954,8 @@ class EnhancedMatcher:
                     has_back_reference = self._variable_has_back_reference(var)
                     is_prerequisite = self._variable_is_back_reference_prerequisite(var)
                     
+                    logger.debug(f"  Transition {var}: accepting={is_accepting}, has_back_ref={has_back_reference}, is_prerequisite={is_prerequisite}")
+                    
                     if is_accepting:
                         categorized_transitions['accepting'].append((var, target, is_excluded))
                     elif is_prerequisite:
@@ -922,13 +974,21 @@ class EnhancedMatcher:
                 
                 for category in ['accepting', 'prerequisite', 'dependent', 'simple']:
                     if categorized_transitions[category]:
-                        # Within each category, prefer transitions that advance the state
+                        # PRODUCTION FIX: Within each category, prefer transitions that advance the state,
+                        # then use alternation order (left-to-right) instead of alphabetical order
+                        def transition_sort_key(x):
+                            var_name = x[0]
+                            state_advance = x[1] == state  # False is preferred (state change)
+                            # Use alternation order if available, otherwise fall back to alphabetical
+                            alternation_priority = self.alternation_order.get(var_name, 999)
+                            return (state_advance, alternation_priority, var_name)
+                        
                         sorted_transitions = sorted(
                             categorized_transitions[category],
-                            key=lambda x: (x[1] == state, x[0])  # Prefer state changes, then alphabetical
+                            key=transition_sort_key
                         )
                         best_transition = sorted_transitions[0]
-                        logger.debug(f"Selected {category} transition: {best_transition[0]} -> state {best_transition[1]}")
+                        logger.debug(f"Selected {category} transition: {best_transition[0]} -> state {best_transition[1]} (alternation priority: {self.alternation_order.get(best_transition[0], 'N/A')})")
                         break
                 
                 if best_transition:
@@ -1047,6 +1107,33 @@ class EnhancedMatcher:
                     }
                     logger.debug(f"  Reluctant plus match (early termination): {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                     break  # Early termination for reluctant plus
+                
+                # PRODUCTION FIX: For reluctant star quantifiers, prefer empty matches when possible
+                if self.has_reluctant_star:
+                    # For B*?, we should prefer empty matches at each position rather than building longer matches
+                    # If we're at the starting position and in an accepting state, prefer empty match
+                    if current_idx - 1 == start_idx:
+                        # This is a single-row match, but for *? we prefer empty matches
+                        logger.debug(f"Reluctant star pattern detected - preferring empty match over single-row match at position {start_idx}")
+                        # Don't create a match here, let it fall through to create an empty match instead
+                        next_state = None  # Force exit from main loop to create empty match
+                        break
+                    else:
+                        # This is a multi-row match, but for *? we should have stopped earlier
+                        # Take the minimal match (early termination)
+                        logger.debug(f"Reluctant star pattern detected - using early termination at first valid match")
+                        longest_match = {
+                            "start": start_idx,
+                            "end": current_idx - 1,
+                            "variables": {k: v[:] for k, v in var_assignments.items()},
+                            "state": state,
+                            "is_empty": False,
+                            "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                            "excluded_rows": excluded_rows.copy(),
+                            "has_empty_alternation": self.has_empty_alternation
+                        }
+                        logger.debug(f"  Reluctant star match (early termination): {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                        break  # Early termination for reluctant star
                 
                 # For SKIP TO NEXT ROW mode, use minimal matching to avoid overlaps (SQL:2016 compliance)
                 # This ensures each quantified pattern matches minimally to create non-overlapping matches
@@ -1538,7 +1625,15 @@ class EnhancedMatcher:
     
     def _process_empty_match(self, start_idx: int, rows: List[Dict[str, Any]], measures: Dict[str, str], match_number: int) -> Dict[str, Any]:
         """
-        Process an empty match according to SQL standard, preserving original row data.
+        Process an empty match according to SQL:2016 standard, preserving original row data.
+        
+        For empty matches, measures should return appropriate empty values:
+        - MATCH_NUMBER() → match number
+        - CLASSIFIER() → None (no variables matched)  
+        - COUNT(*) → 0 (empty set count)
+        - SUM(...) → None (empty set sum)
+        - FIRST(...), LAST(...) → None (no rows in match)
+        - Navigation functions → None (no match context)
         
         Args:
             start_idx: Starting row index for the empty match
@@ -1549,6 +1644,8 @@ class EnhancedMatcher:
         Returns:
             Result row for the empty match with original row data preserved
         """
+        import re
+        
         # Check if index is valid
         if start_idx >= len(rows):
             return None
@@ -1556,21 +1653,50 @@ class EnhancedMatcher:
         # Start with a copy of the original row to preserve all columns
         result = rows[start_idx].copy()
         
-        # Create context for empty match
+        # Create context for empty match (no variables assigned)
         context = RowContext(defined_variables=self.defined_variables)
         context.rows = rows
-        context.variables = {}
+        context.variables = {}  # Empty for empty match
         context.match_number = match_number
         context.current_idx = start_idx
         
-        # Set all measures to NULL values
+        # Create measure evaluator for empty match context
+        evaluator = MeasureEvaluator(context=context, final=True)
+        
+        # Process each measure appropriately for empty matches
         for alias, expr in measures.items():
-            # Special handling for MATCH_NUMBER()
-            if expr.upper() == "MATCH_NUMBER()":
+            expr_upper = expr.upper().strip()
+            
+            # Handle special functions
+            if expr_upper == "MATCH_NUMBER()":
                 result[alias] = match_number
-            else:
-                # All other measures are NULL for empty matches
+            elif expr_upper == "CLASSIFIER()":
+                result[alias] = None  # No variables matched in empty match
+            elif re.match(r'^COUNT\s*\(\s*\*\s*\)$', expr_upper):
+                # COUNT(*) for empty match is 0
+                result[alias] = 0
+            elif re.match(r'^COUNT\s*\(.*\)$', expr_upper):
+                # COUNT(expression) for empty match is 0
+                result[alias] = 0
+            elif re.match(r'^(SUM|AVG|MIN|MAX|STDDEV|VARIANCE)\s*\(.*\)$', expr_upper):
+                # Aggregates for empty match are None (NULL in SQL)
                 result[alias] = None
+            elif re.match(r'^(FIRST|LAST)\s*\(.*\)$', expr_upper):
+                # Navigation functions for empty match are None
+                result[alias] = None
+            elif re.match(r'^(PREV|NEXT)\s*\(.*\)$', expr_upper):
+                # Navigation functions for empty match are None
+                result[alias] = None
+            else:
+                # For other expressions, try to evaluate in empty context
+                # Most will return None, which is appropriate for empty matches
+                try:
+                    # Try to evaluate the expression with no variables assigned
+                    value = evaluator.evaluate_measure(expr, is_running=True)
+                    result[alias] = value
+                except Exception:
+                    # If evaluation fails, default to None for empty match
+                    result[alias] = None
         
         # Add match metadata
         result["MATCH_NUMBER"] = match_number
@@ -1838,30 +1964,18 @@ class EnhancedMatcher:
         # Handle empty matches
         if match.get("is_empty", False) or (match["start"] > match["end"]):
             if config and config.show_empty:
-                # For empty matches, use the original row data at the start index
+                # For empty matches, use proper measure evaluation
                 if match["start"] < len(rows):
-                    empty_row = rows[match["start"]].copy()
+                    # Use the production-ready empty match processing method
+                    empty_row = self._process_empty_match(match["start"], rows, measures, match_number)
                     
-                    # Set all measures to NULL
-                    for alias in measures:
-                        if alias.upper() == "MATCH_NUM" or measures[alias].upper() == "MATCH_NUMBER()":
-                            empty_row[alias] = match_number
-                        else:
-                            empty_row[alias] = None
-                    
-                    # Add match metadata
-                    empty_row["MATCH_NUMBER"] = match_number
-                    empty_row["IS_EMPTY_MATCH"] = True
-                    
-                    # Add original row index for proper sorting in executor
-                    empty_row["_original_row_idx"] = match["start"]
-                    
-                    # Track that this is an empty pattern match
-                    if "empty_pattern_rows" not in match:
-                        match["empty_pattern_rows"] = [match["start"]]
-                    
-                    results.append(empty_row)
-                    logger.debug(f"Added empty match row for index {match['start']}")
+                    if empty_row is not None:
+                        # Track that this is an empty pattern match
+                        if "empty_pattern_rows" not in match:
+                            match["empty_pattern_rows"] = [match["start"]]
+                        
+                        results.append(empty_row)
+                        logger.debug(f"Added empty match row for index {match['start']}")
            
             return results
         
@@ -2065,12 +2179,12 @@ class EnhancedMatcher:
 
     def _is_valid_empty_match_state(self, state: int) -> bool:
         """
-        Check if an empty match is valid from the given state.
+        Production-ready check if an empty match is valid from the given state.
         
         An empty match is valid if:
         1. The state is accepting
-        2. The pattern doesn't require mandatory quantifiers to be satisfied
-        3. No unsatisfied required variables exist
+        2. The pattern only contains optional components (*, ?, or empty alternations)
+        3. No mandatory variables are required to be matched
         
         Args:
             state: DFA state to check
@@ -2082,14 +2196,193 @@ class EnhancedMatcher:
         if not self.dfa.states[state].is_accept:
             return False
         
-        # Check if pattern has unsatisfied required quantifiers
-        # This is determined by analyzing the pattern structure
-        if hasattr(self, '_pattern_tokens') and self._pattern_tokens:
-            # If pattern has variables that must be matched (like X in (A | B)* X)
-            # then we can't have an empty match
-            pattern_str = getattr(self, '_original_pattern', '')
-            if pattern_str and not pattern_str.endswith('*') and not pattern_str.endswith('?'):
-                # Pattern has required components
-                return False
+        # PRODUCTION FIX: Analyze pattern structure to determine if empty matches are valid
+        pattern_str = getattr(self, 'original_pattern', '')
+        if not pattern_str:
+            return True  # No pattern constraints
         
+        # Check if this is a pattern that only allows empty matches (like A* where A is always false)
+        if self.has_reluctant_star and not self._has_required_components(pattern_str):
+            return True
+        
+        # Parse the pattern to identify required vs optional components
+        # For patterns like "B* A* C", C is required so empty matches are invalid
+        # For patterns like "B* A*", all components are optional so empty matches are valid
+        required_vars = self._extract_required_variables(pattern_str)
+        
+        if required_vars:
+            # If pattern has required variables, empty match is only valid
+            # if we're in a state that represents those variables being satisfied
+            logger.debug(f"Pattern has required variables: {required_vars}, rejecting empty match")
+            return False
+        
+        # Pattern only has optional components (*, ?, empty alternations)
+        logger.debug(f"Pattern only has optional components, allowing empty match")
         return True
+    
+    def _has_required_components(self, pattern: str) -> bool:
+        """Check if pattern has any required (non-optional) components."""
+        import re
+        
+        # Remove all optional quantifiers and check what's left
+        # Replace X*, X?, X*?, X+?, etc. with empty string
+        cleaned = re.sub(r'[A-Z]\*\??', '', pattern)
+        cleaned = re.sub(r'[A-Z]\?\??', '', cleaned)
+        cleaned = re.sub(r'[A-Z]\+\??', 'REQ', cleaned)  # + quantifiers still require at least one match
+        
+        # Remove whitespace and grouping
+        cleaned = re.sub(r'[\s\(\)]+', '', cleaned)
+        
+        # If anything remains (other than empty alternations), there are required components
+        return len(cleaned) > 0 and 'REQ' in cleaned
+    
+    def _extract_required_variables(self, pattern: str) -> Set[str]:
+        """
+        Extract variables that are required (not optional) in the pattern.
+        
+        Args:
+            pattern: Pattern string like "B* A* C" or "A+ B*" or "(A | B)*"
+            
+        Returns:
+            Set of variable names that must be matched
+        """
+        import re
+        required_vars = set()
+        
+        # Handle grouped patterns properly - check for patterns like (A | B)* where the entire group is optional
+        # First check if the entire pattern is a single optional group
+        group_pattern = re.match(r'^\s*\(([^)]+)\)\s*([*?])\s*$', pattern.strip())
+        if group_pattern:
+            # Pattern like "(A | B)*" or "(A | B)?" - entire alternation is optional
+            group_content = group_pattern.group(1)
+            group_quantifier = group_pattern.group(2)
+            
+            if group_quantifier in ['*', '?']:
+                # Entire group is optional, so no variables are required
+                logger.debug(f"Pattern '{pattern}' is an optional group, no required variables")
+                return set()
+            elif group_quantifier == '+':
+                # Group requires at least one match - analyze content
+                # For alternation like (A | B)+, at least one branch must match
+                # but since both A and B could be false, this still allows empty in practice
+                # However, from a strict parsing perspective, this is required
+                return self._extract_required_variables(group_content)
+        
+        # Handle sequential patterns and mixed groups
+        # Normalize whitespace but preserve structure
+        normalized = re.sub(r'\s+', ' ', pattern.strip())
+        
+        # Split by alternation at the top level (not inside groups)
+        alternation_branches = self._split_top_level_alternation(normalized)
+        
+        # For a pattern to require variables, ALL alternation branches must have required variables
+        # If any branch has no required variables, then empty matches are possible
+        all_branches_required = True
+        
+        for branch in alternation_branches:
+            branch_required = self._extract_required_from_sequence(branch)
+            
+            if not branch_required:
+                # This branch has no required variables, so empty matches are possible
+                all_branches_required = False
+                break
+        
+        if all_branches_required:
+            # All branches have required variables
+            for branch in alternation_branches:
+                branch_required = self._extract_required_from_sequence(branch)
+                required_vars.update(branch_required)
+        
+        return required_vars
+    
+    def _split_top_level_alternation(self, pattern: str) -> List[str]:
+        """Split pattern by top-level alternation (not inside groups)."""
+        branches = []
+        current = []
+        paren_depth = 0
+        
+        i = 0
+        while i < len(pattern):
+            char = pattern[i]
+            
+            if char == '(':
+                paren_depth += 1
+                current.append(char)
+            elif char == ')':
+                paren_depth -= 1
+                current.append(char)
+            elif char == '|' and paren_depth == 0:
+                # Top-level alternation separator
+                branches.append(''.join(current).strip())
+                current = []
+            else:
+                current.append(char)
+            
+            i += 1
+        
+        # Add the last branch
+        if current:
+            branches.append(''.join(current).strip())
+        
+        return branches
+    
+    def _extract_required_from_sequence(self, sequence: str) -> Set[str]:
+        """Extract required variables from a sequential pattern (no top-level alternation)."""
+        import re
+        required_vars = set()
+        
+        # Find all variable patterns in this sequence
+        # Matches: "A", "B*", "C+", "D?", "E*?", "F+?", etc.
+        tokens = re.findall(r'([A-Z])([*+?]{0,2})', sequence)
+        
+        for var, quantifier in tokens:
+            # Required variables are those without *, ?, or those with + (which require at least one match)
+            if not quantifier or quantifier in ['+', '+?']:
+                required_vars.add(var)
+            # Optional variables: *, *?, ??, ?
+            # These don't make the variable required
+        
+        return required_vars
+        while i < len(pattern):
+            char = pattern[i]
+            
+            if char == '(':
+                paren_depth += 1
+                current.append(char)
+            elif char == ')':
+                paren_depth -= 1
+                current.append(char)
+            elif char == '|' and paren_depth == 0:
+                # Top-level alternation
+                branches.append(''.join(current).strip())
+                current = []
+            else:
+                current.append(char)
+            
+            i += 1
+        
+        if current:
+            branches.append(''.join(current).strip())
+        
+        return branches if len(branches) > 1 else [pattern]
+    
+    def _extract_required_from_sequence(self, sequence: str) -> Set[str]:
+        """Extract required variables from a sequence (no top-level alternation)."""
+        import re
+        required_vars = set()
+        
+        # Remove any remaining parentheses and analyze tokens
+        # This handles nested groups by flattening them
+        cleaned = re.sub(r'[()]', '', sequence)
+        
+        # Find all variable patterns in this sequence
+        # Matches: "A", "B*", "C+", "D?", "E*?", "F+?", etc.
+        tokens = re.findall(r'([A-Z])([*+?]{0,2})', cleaned)
+        
+        for var, quantifier in tokens:
+            # Required variables are those without quantifiers or with + quantifier
+            if not quantifier or quantifier in ['+', '+?']:
+                required_vars.add(var)
+            # Optional variables: *, *?, ?, ?? - these don't make the variable required
+        
+        return required_vars

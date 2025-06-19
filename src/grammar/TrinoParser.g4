@@ -360,7 +360,7 @@ patternRecognition
             MEASURES_ measureDefinition (COMMA_ measureDefinition)*
         )? rowsPerMatch? (AFTER_ MATCH_ skipTo)? (INITIAL_ | SEEK_)? PATTERN_ LPAREN_ rowPattern RPAREN_ (
             SUBSET_ subsetDefinition (COMMA_ subsetDefinition)*
-        )? DEFINE_ variableDefinition (COMMA_ variableDefinition)* RPAREN_ (
+        )? (DEFINE_ variableDefinition (COMMA_ variableDefinition)*)? RPAREN_ (
             AS_? identifier columnAliases?
         )?
     )?

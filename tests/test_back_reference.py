@@ -173,3 +173,70 @@ class TestBackReference:
                                ) or result.iloc[i]['defining_condition'] is None
             else:
                 assert result.iloc[i]['defining_condition'] == defining_condition
+
+    def test_nested_navigation_functions(self):
+        """Test navigation with various nested function combinations."""
+        df = pd.DataFrame({
+            'value': [1, 2, 3, 4, 5, 6, 7, 8]
+        })
+
+        test_cases = [
+            # PREV(LAST(A)) case
+            (
+                """
+                PATTERN (A+ X)
+                DEFINE X AS value = PREV(LAST(A.value), 1)
+                """,
+                [(1, 'A'), (2, 'A'), (3, 'A'), (4, 'X')],
+                3  # Expected X.value = PREV(LAST(A.value=3), 1) = 2
+            ),
+            # NEXT(FIRST(B)) case
+            (
+                """
+                PATTERN ((A | B)+ X)
+                DEFINE 
+                    A AS value % 2 = 1,
+                    B AS value % 2 = 0,
+                    X AS value = PREV(FIRST(B.value), 1)
+                """,
+                [(1, 'A'), (2, 'B'), (3, 'A'), (4, 'B'), (5, 'X')],
+                1  # Expected X.value = PREV(FIRST(B.value=2), 1) = 1
+            ),
+            # Complex chained case
+            (
+                """
+                PATTERN ((A | B)+ X)
+                DEFINE 
+                    A AS value % 3 = 0,
+                    B AS value % 3 = 1,
+                    X AS value = PREV(LAST(A.value), 2) + FIRST(B.value)
+                """,
+                [(3, 'A'), (4, 'B'), (6, 'A'), (7, 'B'), (8, 'X')],
+                7  # X.value = PREV(LAST(A.value=6), 2) = 3 + FIRST(B.value=4) = 7
+            ),
+        ]
+
+        for pattern_def, expected_classes, expected_x_value in test_cases:
+            query = f'''
+            SELECT value, classy
+            FROM data
+            MATCH_RECOGNIZE (
+                ORDER BY value
+                MEASURES
+                    CLASSIFIER() as classy
+                ALL ROWS PER MATCH
+                {pattern_def}
+            )
+            '''
+
+            result = match_recognize(query, df)
+            assert result is not None
+            assert not result.empty
+
+            # Verify classifications
+            actual_classes = list(zip(result['value'], result['classy']))
+            assert actual_classes[:len(expected_classes)] == expected_classes
+
+            # Verify X value matches expected
+            x_row = result[result['classy'] == 'X'].iloc[0]
+            assert x_row['value'] == expected_x_value
