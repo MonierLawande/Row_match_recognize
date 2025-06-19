@@ -58,11 +58,13 @@ class TestExponentialProtection:
         if result is not None and not result.empty:
             # Should find the pattern correctly
             assert 'classy' in result.columns
-            # Should have multiple A's and one B
+            # With default ONE ROW PER MATCH, should only return the last row (B)
             labels = result['classy'].tolist()
-            assert 'A' in labels
             assert 'B' in labels
-            assert labels[-1] == 'B'  # Last should be B
+            # For ONE ROW PER MATCH, we expect only the final row of each match
+            # The pattern ((A+)+ B) matches rows 0-5, but only row 5 (B) is returned
+            assert len(labels) == 1, f"Expected 1 row for ONE ROW PER MATCH, got {len(labels)}"
+            assert labels[0] == 'B', f"Expected 'B' as the only classifier, got {labels[0]}"
         else:
             # Empty result is also acceptable (no value=2 to match B)
             pass

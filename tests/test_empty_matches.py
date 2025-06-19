@@ -321,25 +321,26 @@ class TestEmptyMatches:
             MEASURES
                 MATCH_NUMBER() AS match,
                 CLASSIFIER() AS label,
-                value
+                value AS value
             ALL ROWS PER MATCH
             AFTER MATCH SKIP PAST LAST ROW
-            PATTERN (START MIDDLE* END)
+            PATTERN (START MIDDLE* FINISH)
             DEFINE 
                 START AS type = 'A',
                 MIDDLE AS false,  -- Never matches, creates empty MIDDLE*
-                END AS type = 'B'
+                FINISH AS type = 'B'
         ) AS m
         """
         
         result = match_recognize(query, df)
-        # Should match START (empty MIDDLE*) END pattern
+        # Should match START (empty MIDDLE*) FINISH pattern
+        # With AFTER MATCH SKIP PAST LAST ROW, both valid matches are found
         expected = pd.DataFrame({
-            'row_id': [1, 2],
-            'type': ['A', 'B'],
-            'match': [1, 1],
-            'label': ['START', 'END'],
-            'value': [10, 20]
+            'row_id': [1, 2, 4, 5],
+            'type': ['A', 'B', 'A', 'B'],
+            'match': [1, 1, 2, 2],
+            'label': ['START', 'FINISH', 'START', 'FINISH'],
+            'value': [10, 20, 40, 50]
         })
         pd.testing.assert_frame_equal(result.reset_index(drop=True), expected, check_dtype=False)
 
