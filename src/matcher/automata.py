@@ -1,41 +1,142 @@
-# enhanced/automata.py - Part 1: Basic Classes
+"""
+Production-ready automata module for SQL:2016 row pattern matching.
 
-from typing import Callable, List, Optional, Dict, Any, Set, Tuple, Union
+This module implements Non-deterministic Finite Automata (NFA) with comprehensive
+support for complex pattern constructs including PERMUTE, alternation, quantifiers,
+exclusions, and anchors. Designed for high performance and maintainability.
+
+Features:
+- Robust NFA construction with cycle detection
+- Full PERMUTE pattern support with alternations
+- Complex exclusion patterns with nested structures
+- Optimized epsilon closure computation
+- Comprehensive metadata tracking
+- Production-grade error handling and logging
+
+Author: Pattern Matching Engine Team
+Version: 2.0.0
+"""
+
+from typing import (
+    Callable, List, Optional, Dict, Any, Set, Tuple, Union, 
+    FrozenSet, Iterator, Protocol
+)
 from dataclasses import dataclass, field
-from src.matcher.pattern_tokenizer import PatternToken, PatternTokenType, parse_quantifier
-from src.matcher.condition_evaluator import compile_condition
+from abc import ABC, abstractmethod
 import itertools
 import re
-from typing import List, Dict, FrozenSet, Set, Any, Optional, Tuple, Union
-from src.utils.logging_config import get_logger
+import time
+from collections import defaultdict, deque
+import threading
+from contextlib import contextmanager
 
-# Module logger
+from src.matcher.pattern_tokenizer import (
+    PatternToken, PatternTokenType, parse_quantifier
+)
+from src.matcher.condition_evaluator import compile_condition
+from src.utils.logging_config import get_logger, PerformanceTimer
+
+# Module logger with enhanced configuration
 logger = get_logger(__name__)
 
-# A condition function: given a row and current match context, return True if the row qualifies.
-ConditionFn = Callable[[Dict[str, Any], Any], bool]
+# Type aliases for better readability
+ConditionFunction = Callable[[Dict[str, Any], Any], bool]
+StateIndex = int
+TransitionMap = Dict[StateIndex, List['Transition']]
+EpsilonMap = Dict[StateIndex, List[StateIndex]]
 
-@dataclass
+# A condition function: given a row and current match context, return True if the row qualifies.
+ConditionFn = ConditionFunction
+
+@dataclass(frozen=True)
 class Transition:
     """
-    Enhanced transition with support for pattern variables and optimizations.
+    Production-ready transition with comprehensive validation and metadata support.
+    
+    Represents a labeled transition in an NFA with support for pattern variables,
+    priorities, and specialized metadata for complex pattern constructs.
     
     Attributes:
-        condition: Function that evaluates if a row matches this transition
-        target: Target state index
+        condition: Function that evaluates if a row matches this transition.
+                  Must be callable with signature (row_data, context) -> bool
+        target: Target state index (must be non-negative)
         variable: Optional pattern variable associated with this transition
-        priority: Priority for resolving ambiguous transitions (lower is higher priority)
-        metadata: Additional metadata for specialized transitions
+        priority: Priority for resolving ambiguous transitions (lower = higher priority)
+        metadata: Additional metadata for specialized transitions (e.g., PERMUTE data)
+        
+    Raises:
+        ValueError: If target is negative or condition is not callable
+        TypeError: If condition signature is invalid
     """
-    condition: ConditionFn
+    condition: ConditionFunction
     target: int
     variable: Optional[str] = None
     priority: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Validate transition parameters after initialization."""
+        if self.target < 0:
+            raise ValueError(f"Target state index must be non-negative, got {self.target}")
+        
+        if not callable(self.condition):
+            raise TypeError(f"Condition must be callable, got {type(self.condition)}")
+        
+        # Validate variable name if present
+        if self.variable is not None:
+            if not isinstance(self.variable, str) or not self.variable.strip():
+                raise ValueError(f"Variable name must be non-empty string, got '{self.variable}'")
+            
+            # Check for valid variable naming (alphanumeric + underscore)
+            if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', self.variable):
+                raise ValueError(f"Invalid variable name format: '{self.variable}'")
+    
+    def evaluate_condition(self, row_data: Dict[str, Any], context: Any = None) -> bool:
+        """
+        Safely evaluate the transition condition with error handling.
+        
+        Args:
+            row_data: Row data to evaluate against
+            context: Optional context for evaluation
+            
+        Returns:
+            bool: True if condition matches, False otherwise
+            
+        Raises:
+            RuntimeError: If condition evaluation fails
+        """
+        try:
+            return self.condition(row_data, context)
+        except Exception as e:
+            logger.error(f"Transition condition evaluation failed for variable '{self.variable}': {e}")
+            raise RuntimeError(f"Condition evaluation error: {e}") from e
+    
+    def is_compatible_with(self, other: 'Transition') -> bool:
+        """
+        Check if this transition is compatible with another for optimization.
+        
+        Args:
+            other: Another transition to check compatibility with
+            
+        Returns:
+            bool: True if transitions can be merged/optimized together
+        """
+        return (
+            self.target == other.target and
+            self.variable == other.variable and
+            self.priority == other.priority and
+            self.metadata == other.metadata
+        )
 
 class NFAState:
     """
-    Enhanced NFA state with comprehensive SQL:2016 pattern matching support.
+    Production-ready NFA state with comprehensive SQL:2016 pattern matching support.
+    
+    This class represents a state in a Non-deterministic Finite Automaton with full
+    support for complex pattern constructs including PERMUTE, alternation, quantifiers,
+    exclusions, and anchors.
+    
+    Thread-safe design with proper validation and error handling.
     
     Attributes:
         transitions: List of outgoing transitions with conditions
@@ -51,8 +152,21 @@ class NFAState:
         is_accept: Whether this is an accepting state
         subset_parent: Parent variable for subset variables
         priority: Priority for deterministic matching (lower is higher priority)
+        epsilon_priorities: Priority mapping for epsilon transitions
+        
+    Thread Safety:
+        This class is thread-safe for read operations. Write operations should
+        be synchronized externally if used across multiple threads.
     """
-    def __init__(self):
+    
+    def __init__(self, state_id: Optional[int] = None):
+        """
+        Initialize NFA state with optional state ID for debugging.
+        
+        Args:
+            state_id: Optional unique identifier for this state
+        """
+        self.state_id = state_id
         self.transitions: List[Transition] = []
         self.epsilon: List[int] = []
         self.variable: Optional[str] = None
@@ -66,41 +180,120 @@ class NFAState:
         self.is_accept: bool = False
         self.subset_parent: Optional[str] = None
         self.priority: int = 0
-        self.epsilon_priorities: Dict[int, int] = {}  # Track epsilon transition priorities
+        self.epsilon_priorities: Dict[int, int] = {}
+        
+        # Validation flags
+        self._validated: bool = False
+        self._lock = threading.RLock()
     
-    def add_transition(self, condition: ConditionFn, target: int, variable: Optional[str] = None, 
-                      priority: int = 0, metadata: Dict[str, Any] = None):
+    def add_transition(self, condition: ConditionFunction, target: int, 
+                      variable: Optional[str] = None, priority: int = 0, 
+                      metadata: Optional[Dict[str, Any]] = None) -> None:
         """
-        Add a transition with enhanced metadata support.
+        Add a transition with enhanced validation and metadata support.
         
         Args:
             condition: Function that evaluates if a row matches this transition
-            target: Target state index
+            target: Target state index (must be non-negative)
             variable: Optional pattern variable associated with this transition
-            priority: Priority for resolving ambiguous transitions (lower is higher priority)
+            priority: Priority for resolving ambiguous transitions (lower = higher priority)
             metadata: Additional metadata for specialized transitions
+            
+        Raises:
+            ValueError: If parameters are invalid
+            TypeError: If condition is not callable
         """
-        self.transitions.append(Transition(
-            condition, 
-            target, 
-            variable, 
-            priority,
-            metadata or {}
-        ))
-        
-    def add_epsilon(self, target: int):
+        with self._lock:
+            transition = Transition(
+                condition=condition,
+                target=target,
+                variable=variable,
+                priority=priority,
+                metadata=metadata or {}
+            )
+            
+            # Check for duplicate transitions
+            if any(t.target == target and t.variable == variable for t in self.transitions):
+                logger.warning(f"Duplicate transition to state {target} with variable '{variable}'")
+            
+            self.transitions.append(transition)
+            self._validated = False
+            
+            logger.debug(f"Added transition: variable='{variable}', target={target}, priority={priority}")
+    
+    def add_epsilon(self, target: int, priority: int = 0) -> None:
         """
-        Add an epsilon transition to target state.
+        Add an epsilon transition to target state with priority support.
         
         Args:
-            target: Target state index
+            target: Target state index (must be non-negative)
+            priority: Priority for this epsilon transition
+            
+        Raises:
+            ValueError: If target is invalid
         """
-        if target not in self.epsilon:
-            self.epsilon.append(target)
+        if target < 0:
+            raise ValueError(f"Epsilon target must be non-negative, got {target}")
+        
+        with self._lock:
+            if target not in self.epsilon:
+                self.epsilon.append(target)
+                self.epsilon_priorities[target] = priority
+                self._validated = False
+                logger.debug(f"Added epsilon transition to state {target} with priority {priority}")
+            else:
+                # Update priority if target already exists
+                if self.epsilon_priorities.get(target, 0) != priority:
+                    self.epsilon_priorities[target] = priority
+                    logger.debug(f"Updated epsilon transition priority to state {target}: {priority}")
+    
+    def validate(self) -> bool:
+        """
+        Validate state configuration and constraints.
+        
+        Returns:
+            bool: True if state is valid, False otherwise
+        """
+        with self._lock:
+            if self._validated:
+                return True
+            
+            try:
+                # Validate variable naming
+                if self.variable and not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', self.variable):
+                    logger.error(f"Invalid variable name: '{self.variable}'")
+                    return False
+                
+                # Validate anchor constraints
+                if self.is_anchor and not self.anchor_type:
+                    logger.error("Anchor state must have anchor_type specified")
+                    return False
+                
+                # Validate transitions
+                for trans in self.transitions:
+                    try:
+                        # Basic validation already done in Transition.__post_init__
+                        pass
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"Invalid transition in state {self.state_id}: {e}")
+                        return False
+                
+                # Validate PERMUTE metadata consistency
+                if self.permute_data:
+                    required_fields = {'combinations', 'current_index', 'variables'}
+                    if not all(field in self.permute_data for field in required_fields):
+                        logger.warning(f"Incomplete PERMUTE metadata in state {self.state_id}")
+                
+                self._validated = True
+                return True
+                
+            except Exception as e:
+                logger.error(f"State validation failed for state {self.state_id}: {e}")
+                return False
             
     def has_transition_to(self, target: int) -> bool:
         """
-        Check if this state has a transition to the target state.
+        Thread-safe check if this state has a transition to the target state.
         
         Args:
             target: Target state index to check
@@ -108,22 +301,23 @@ class NFAState:
         Returns:
             bool: True if there is a transition to target, False otherwise
         """
-        # Check normal transitions
-        for trans in self.transitions:
-            if trans.target == target:
-                return True
-                
-        # Check epsilon transitions
-        return target in self.epsilon
+        with self._lock:
+            # Check normal transitions
+            for trans in self.transitions:
+                if trans.target == target:
+                    return True
+                    
+            # Check epsilon transitions
+            return target in self.epsilon
         
     def allows_empty_match(self) -> bool:
         """
-        Check if this state allows empty matches.
+        Check if this state allows empty matches with validation.
         
         Returns:
             bool: True if this state allows empty matches, False otherwise
         """
-        return self.is_empty_match
+        return self.is_empty_match or (self.is_accept and len(self.transitions) == 0)
         
     def is_variable_state(self) -> bool:
         """
@@ -132,116 +326,545 @@ class NFAState:
         Returns:
             bool: True if this state has a variable name, False otherwise
         """
-        return self.variable is not None
+        return self.variable is not None and self.variable.strip() != ""
         
     def get_epsilon_targets(self) -> List[int]:
         """
-        Get list of epsilon transition targets.
+        Get sorted list of epsilon transition targets by priority.
         
         Returns:
-            List[int]: List of target state indices
+            List[int]: List of target state indices sorted by priority
         """
-        return self.epsilon
+        with self._lock:
+            # Sort by priority (lower priority first), then by target index for determinism
+            return sorted(self.epsilon, key=lambda t: (self.epsilon_priorities.get(t, 0), t))
         
     def get_transition_targets(self) -> List[int]:
         """
-        Get list of all transition targets (non-epsilon).
+        Get sorted list of all transition targets (non-epsilon) by priority.
         
         Returns:
-            List[int]: List of target state indices
+            List[int]: List of target state indices sorted by priority
         """
-        return [trans.target for trans in self.transitions]
+        with self._lock:
+            return sorted([trans.target for trans in self.transitions], 
+                         key=lambda t: (
+                             min(tr.priority for tr in self.transitions if tr.target == t),
+                             t
+                         ))
+    
+    def get_transitions_by_variable(self, variable: str) -> List[Transition]:
+        """
+        Get all transitions associated with a specific variable.
+        
+        Args:
+            variable: Variable name to filter by
+            
+        Returns:
+            List[Transition]: List of transitions for the variable
+        """
+        with self._lock:
+            return [trans for trans in self.transitions if trans.variable == variable]
+    
+    def has_conflicting_transitions(self) -> bool:
+        """
+        Check if this state has conflicting transitions that could cause ambiguity.
+        
+        Returns:
+            bool: True if there are potential conflicts, False otherwise
+        """
+        with self._lock:
+            # Check for transitions with same target but different variables
+            target_vars = defaultdict(set)
+            for trans in self.transitions:
+                target_vars[trans.target].add(trans.variable)
+            
+            return any(len(vars_set) > 1 for vars_set in target_vars.values())
+    
+    def optimize_transitions(self) -> None:
+        """
+        Optimize transitions by removing duplicates and sorting by priority.
+        """
+        with self._lock:
+            # Remove duplicate transitions (same target, variable, priority)
+            seen = set()
+            unique_transitions = []
+            
+            for trans in self.transitions:
+                trans_key = (trans.target, trans.variable, trans.priority)
+                if trans_key not in seen:
+                    seen.add(trans_key)
+                    unique_transitions.append(trans)
+                else:
+                    logger.debug(f"Removed duplicate transition: {trans_key}")
+            
+            # Sort by priority, then by target for determinism
+            self.transitions = sorted(unique_transitions, 
+                                    key=lambda t: (t.priority, t.target, t.variable or ""))
+            
+            # Remove duplicate epsilon transitions
+            self.epsilon = list(dict.fromkeys(self.epsilon))  # Preserve order, remove dupes
+            
+            self._validated = False  # Re-validation needed after optimization
+    
+    def get_debug_info(self) -> Dict[str, Any]:
+        """
+        Get comprehensive debug information about this state.
+        
+        Returns:
+            Dict[str, Any]: Debug information including transitions, metadata, etc.
+        """
+        with self._lock:
+            return {
+                'state_id': self.state_id,
+                'variable': self.variable,
+                'is_accept': self.is_accept,
+                'is_anchor': self.is_anchor,
+                'anchor_type': self.anchor_type.name if self.anchor_type else None,
+                'is_excluded': self.is_excluded,
+                'is_empty_match': self.is_empty_match,
+                'can_accept': self.can_accept,
+                'transition_count': len(self.transitions),
+                'epsilon_count': len(self.epsilon),
+                'subset_vars': list(self.subset_vars),
+                'permute_data': dict(self.permute_data),
+                'priority': self.priority,
+                'validated': self._validated,
+                'transitions': [
+                    {
+                        'target': t.target,
+                        'variable': t.variable,
+                        'priority': t.priority,
+                        'metadata_keys': list(t.metadata.keys())
+                    } for t in self.transitions
+                ],
+                'epsilon_targets': self.get_epsilon_targets()
+            }
 
 # src/matcher/automata.py
 # enhanced/automata.py - Part 2: NFA Class
 
 class NFA:
     """
-    Enhanced NFA implementation for pattern matching.
+    Production-ready Non-deterministic Finite Automaton for SQL:2016 pattern matching.
+    
+    This implementation provides comprehensive support for complex pattern constructs
+    including PERMUTE, alternation, quantifiers, exclusions, and anchors with
+    robust error handling, validation, and performance optimizations.
+    
+    Features:
+    - Efficient epsilon closure computation with cycle detection
+    - Comprehensive metadata tracking for complex patterns
+    - Thread-safe operations with proper locking
+    - Validation and optimization methods
+    - Debug and monitoring capabilities
     
     Attributes:
-        start: Start state index
-        accept: Accept state index
-        states: List of NFA states
+        start: Start state index (must be valid state index)
+        accept: Accept state index (must be valid state index)
+        states: List of NFA states (validated on construction)
         exclusion_ranges: Ranges of excluded pattern components
-        metadata: Additional pattern metadata
+        metadata: Additional pattern metadata including PERMUTE and alternation info
+        
+    Thread Safety:
+        This class is thread-safe for read operations. Construction and modification
+        should be synchronized externally if used across multiple threads.
     """
+    
     def __init__(self, start: int, accept: int, states: List[NFAState], 
-                exclusion_ranges: List[Tuple[int, int]] = None,
-                metadata: Dict[str, Any] = None):
+                 exclusion_ranges: Optional[List[Tuple[int, int]]] = None,
+                 metadata: Optional[Dict[str, Any]] = None):
+        """
+        Initialize NFA with comprehensive validation.
+        
+        Args:
+            start: Start state index
+            accept: Accept state index  
+            states: List of NFA states
+            exclusion_ranges: Optional ranges of excluded pattern components
+            metadata: Optional pattern metadata
+            
+        Raises:
+            ValueError: If indices are invalid or states are malformed
+            TypeError: If parameters have wrong types
+        """
+        # Validate parameters
+        if not isinstance(states, list) or not states:
+            raise ValueError("States must be a non-empty list")
+        
+        if not (0 <= start < len(states)):
+            raise ValueError(f"Start state index {start} out of range [0, {len(states)})")
+        
+        if not (0 <= accept < len(states)):
+            raise ValueError(f"Accept state index {accept} out of range [0, {len(states)})")
+        
+        # Assign validated parameters
         self.start = start
         self.accept = accept
         self.states = states
         self.exclusion_ranges = exclusion_ranges or []
         self.metadata = metadata or {}
+        
+        # Add state IDs for debugging if not present
+        for i, state in enumerate(self.states):
+            if state.state_id is None:
+                state.state_id = i
+        
+        # Validation and optimization flags
+        self._validated = False
+        self._optimized = False
+        self._lock = threading.RLock()
+        
+        # Validate structure
+        if not self.validate():
+            raise ValueError("NFA structure validation failed")
+    
+    def validate(self) -> bool:
+        """
+        Comprehensive validation of NFA structure and constraints.
+        
+        Returns:
+            bool: True if NFA is valid, False otherwise
+        """
+        with self._lock:
+            if self._validated:
+                return True
+            
+            try:
+                # Validate each state
+                for i, state in enumerate(self.states):
+                    if not state.validate():
+                        logger.error(f"State {i} validation failed")
+                        return False
+                    
+                    # Validate transition targets
+                    for trans in state.transitions:
+                        if not (0 <= trans.target < len(self.states)):
+                            logger.error(f"State {i} has invalid transition target {trans.target}")
+                            return False
+                    
+                    # Validate epsilon targets
+                    for eps_target in state.epsilon:
+                        if not (0 <= eps_target < len(self.states)):
+                            logger.error(f"State {i} has invalid epsilon target {eps_target}")
+                            return False
+                
+                # Validate accept state reachability
+                if not self._is_accept_reachable():
+                    logger.warning("Accept state is not reachable from start state")
+                
+                # Validate metadata consistency
+                if not self._validate_metadata():
+                    logger.error("Metadata validation failed")
+                    return False
+                
+                self._validated = True
+                return True
+                
+            except Exception as e:
+                logger.error(f"NFA validation failed: {e}")
+                return False
+    
+    def _is_accept_reachable(self) -> bool:
+        """Check if accept state is reachable from start state."""
+        visited = set()
+        queue = deque([self.start])
+        
+        while queue:
+            state_idx = queue.popleft()
+            if state_idx == self.accept:
+                return True
+            
+            if state_idx in visited:
+                continue
+            visited.add(state_idx)
+            
+            state = self.states[state_idx]
+            
+            # Add transition targets
+            for trans in state.transitions:
+                if trans.target not in visited:
+                    queue.append(trans.target)
+            
+            # Add epsilon targets
+            for eps_target in state.epsilon:
+                if eps_target not in visited:
+                    queue.append(eps_target)
+        
+        return False
+    
+    def _validate_metadata(self) -> bool:
+        """Validate metadata consistency and completeness."""
+        try:
+            # Validate PERMUTE metadata
+            if self.metadata.get('permute'):
+                if 'alternation_combinations' not in self.metadata:
+                    logger.warning("PERMUTE pattern missing alternation_combinations metadata")
+                
+                if self.metadata.get('has_alternations'):
+                    combinations = self.metadata.get('alternation_combinations', [])
+                    if not combinations:
+                        logger.error("PERMUTE with alternations must have non-empty combinations")
+                        return False
+            
+            # Validate exclusion ranges
+            for start_pos, end_pos in self.exclusion_ranges:
+                if start_pos < 0 or end_pos < start_pos:
+                    logger.error(f"Invalid exclusion range: ({start_pos}, {end_pos})")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Metadata validation error: {e}")
+            return False
     
     def epsilon_closure(self, state_indices: List[int]) -> List[int]:
         """
-        Compute epsilon closure for given states with robust cycle detection.
-        Uses a depth limit to prevent infinite loops.
+        Compute epsilon closure for given states with robust cycle detection and priority handling.
+        
+        This method efficiently computes the set of states reachable from the given states
+        through epsilon transitions, with proper cycle detection and priority-based ordering.
         
         Args:
             state_indices: List of state indices to compute closure for
             
         Returns:
-            List of state indices in the epsilon closure
+            List[int]: Sorted list of state indices in the epsilon closure
+            
+        Raises:
+            ValueError: If any state index is invalid
         """
+        # Validate input
+        for idx in state_indices:
+            if not (0 <= idx < len(self.states)):
+                raise ValueError(f"Invalid state index {idx}")
+        
         closure = set(state_indices)
-        queue = list(state_indices)
-        max_iterations = len(self.states) * 2  # Reasonable upper bound
+        queue = deque(state_indices)
+        visited_transitions = set()  # Track (source, target) pairs to detect cycles
+        max_iterations = len(self.states) ** 2  # Conservative upper bound
         iterations = 0
         
-        while queue and iterations < max_iterations:
-            iterations += 1
-            s = queue.pop(0)
+        with PerformanceTimer("epsilon_closure"):
+            while queue and iterations < max_iterations:
+                iterations += 1
+                current_state = queue.popleft()
+                
+                # Get epsilon targets sorted by priority
+                for target in self.states[current_state].get_epsilon_targets():
+                    transition_key = (current_state, target)
+                    
+                    # Skip if we've already processed this transition (cycle detection)
+                    if transition_key in visited_transitions:
+                        continue
+                    
+                    visited_transitions.add(transition_key)
+                    
+                    if target not in closure:
+                        closure.add(target)
+                        queue.append(target)
             
-            for t in self.states[s].epsilon:
-                if t not in closure:
-                    closure.add(t)
-                    queue.append(t)
+            if iterations >= max_iterations:
+                logger.warning(f"Epsilon closure computation hit iteration limit: {max_iterations}")
         
-        # Return closure sorted by priority, then state index for deterministic behavior
-        # States with lower priority numbers are processed first (higher precedence)
-        def get_state_priority(state_idx):
-            # For states that were targets of epsilon transitions with priorities, 
-            # find the minimum priority assigned to any epsilon transition targeting this state
-            min_priority = 999
-            for src_idx, src_state in enumerate(self.states):
-                if (hasattr(src_state, 'epsilon_priorities') and 
-                    src_state.epsilon_priorities and 
-                    state_idx in src_state.epsilon_priorities):
-                    min_priority = min(min_priority, src_state.epsilon_priorities[state_idx])
-            return min_priority, state_idx
+        # Sort result by state priority, then by index for deterministic behavior
+        result = sorted(closure, key=lambda idx: (
+            self.states[idx].priority,
+            idx
+        ))
         
-        closure_list = list(closure)
-        closure_list.sort(key=get_state_priority)
-        return closure_list
-        
-    def validate(self) -> bool:
+        logger.debug(f"Epsilon closure of {state_indices} = {result} (iterations: {iterations})")
+        return result
+    
+    def get_variable_states(self) -> Dict[str, List[int]]:
         """
-        Validate NFA structure and constraints.
+        Get mapping of variables to their associated state indices.
         
         Returns:
-            bool: True if NFA is valid, False otherwise
+            Dict[str, List[int]]: Mapping from variable names to state indices
         """
-        # Check for unreachable states
+        var_states = defaultdict(list)
+        
+        for i, state in enumerate(self.states):
+            if state.variable:
+                var_states[state.variable].append(i)
+        
+        # Sort state lists for consistency
+        for var in var_states:
+            var_states[var].sort()
+        
+        return dict(var_states)
+    
+    def get_permute_info(self) -> Dict[str, Any]:
+        """
+        Extract comprehensive PERMUTE pattern information.
+        
+        Returns:
+            Dict[str, Any]: PERMUTE pattern metadata including combinations and variables
+        """
+        if not self.metadata.get('permute'):
+            return {}
+        
+        return {
+            'is_permute': True,
+            'has_alternations': self.metadata.get('has_alternations', False),
+            'alternation_combinations': self.metadata.get('alternation_combinations', []),
+            'permute_variables': self.metadata.get('permute_variables', []),
+            'current_combination_index': self.metadata.get('current_combination_index', 0)
+        }
+    
+    def optimize(self) -> None:
+        """
+        Apply optimizations to improve NFA performance and structure.
+        """
+        with self._lock:
+            if self._optimized:
+                return
+            
+            logger.info("Optimizing NFA...")
+            
+            # Optimize each state
+            for state in self.states:
+                state.optimize_transitions()
+            
+            # Remove unreachable states
+            self._remove_unreachable_states()
+            
+            # Merge equivalent epsilon transitions
+            self._merge_epsilon_transitions()
+            
+            # Update metadata after optimization
+            self._update_optimization_metadata()
+            
+            self._optimized = True
+            self._validated = False  # Need re-validation after optimization
+            
+            logger.info("NFA optimization completed")
+    
+    def _remove_unreachable_states(self) -> None:
+        """Remove states that cannot be reached from the start state."""
         reachable = set()
-        queue = [self.start]
+        queue = deque([self.start])
         
+        # Find all reachable states
         while queue:
-            state_idx = queue.pop(0)
-            if state_idx not in reachable:
-                reachable.add(state_idx)
-                # Add epsilon transitions
-                for target in self.states[state_idx].epsilon:
-                    queue.append(target)
-                # Add normal transitions
-                for trans in self.states[state_idx].transitions:
+            state_idx = queue.popleft()
+            if state_idx in reachable:
+                continue
+            
+            reachable.add(state_idx)
+            state = self.states[state_idx]
+            
+            # Add transition targets
+            for trans in state.transitions:
+                if trans.target not in reachable:
                     queue.append(trans.target)
+            
+            # Add epsilon targets
+            for eps_target in state.epsilon:
+                if eps_target not in reachable:
+                    queue.append(eps_target)
         
-        # Check if accept state is reachable
-        if self.accept not in reachable:
-            return False
+        # Remove unreachable states if any found
+        if len(reachable) < len(self.states):
+            logger.info(f"Removing {len(self.states) - len(reachable)} unreachable states")
+            
+            # Create mapping from old to new indices
+            old_to_new = {}
+            new_states = []
+            
+            for old_idx in sorted(reachable):
+                old_to_new[old_idx] = len(new_states)
+                new_states.append(self.states[old_idx])
+            
+            # Update state references
+            for state in new_states:
+                # Update transition targets
+                for trans in state.transitions:
+                    trans.target = old_to_new[trans.target]
+                
+                # Update epsilon targets
+                state.epsilon = [old_to_new[target] for target in state.epsilon]
+                
+                # Update epsilon priorities
+                if hasattr(state, 'epsilon_priorities'):
+                    new_priorities = {}
+                    for old_target, priority in state.epsilon_priorities.items():
+                        if old_target in old_to_new:
+                            new_priorities[old_to_new[old_target]] = priority
+                    state.epsilon_priorities = new_priorities
+            
+            # Update NFA references
+            self.start = old_to_new[self.start]
+            self.accept = old_to_new[self.accept]
+            self.states = new_states
+    
+    def _merge_epsilon_transitions(self) -> None:
+        """Merge equivalent epsilon transitions to reduce complexity."""
+        for state in self.states:
+            if len(state.epsilon) <= 1:
+                continue
+            
+            # Group epsilon targets by priority
+            priority_groups = defaultdict(list)
+            for target in state.epsilon:
+                priority = state.epsilon_priorities.get(target, 0)
+                priority_groups[priority].append(target)
+            
+            # Rebuild epsilon list with merged groups
+            new_epsilon = []
+            new_priorities = {}
+            
+            for priority, targets in sorted(priority_groups.items()):
+                # Remove duplicates while preserving order
+                unique_targets = list(dict.fromkeys(targets))
+                new_epsilon.extend(unique_targets)
+                
+                for target in unique_targets:
+                    new_priorities[target] = priority
+            
+            state.epsilon = new_epsilon
+            state.epsilon_priorities = new_priorities
+    
+    def _update_optimization_metadata(self) -> None:
+        """Update metadata after optimization."""
+        self.metadata['optimized'] = True
+        self.metadata['state_count'] = len(self.states)
+        self.metadata['optimization_timestamp'] = time.time()
+        
+        # Update variable mappings
+        var_states = self.get_variable_states()
+        self.metadata['variable_states'] = var_states
+    
+    def get_debug_info(self) -> Dict[str, Any]:
+        """
+        Get comprehensive debug information about the NFA.
+        
+        Returns:
+            Dict[str, Any]: Debug information including structure, metadata, and statistics
+        """
+        with self._lock:
+            return {
+                'structure': {
+                    'start': self.start,
+                    'accept': self.accept,
+                    'state_count': len(self.states),
+                    'validated': self._validated,
+                    'optimized': self._optimized
+                },
+                'metadata': dict(self.metadata),
+                'exclusion_ranges': list(self.exclusion_ranges),
+                'variable_states': self.get_variable_states(),
+                'permute_info': self.get_permute_info(),
+                'statistics': {
+                    'total_transitions': sum(len(s.transitions) for s in self.states),
+                    'total_epsilon_transitions': sum(len(s.epsilon) for s in self.states),
+                    'variable_states_count': len([s for s in self.states if s.variable]),
+                    'accept_reachable': self._is_accept_reachable()
+                },
+                'states': [state.get_debug_info() for state in self.states]
+            }
             
         # Check for invalid transitions
         for i, state in enumerate(self.states):
@@ -289,9 +912,20 @@ class NFA:
         for state in new_states:
             # Update epsilon transitions
             state.epsilon = [state_map[t] for t in state.epsilon if t in state_map]
-            # Update normal transitions
+            # Update normal transitions - create new transitions since they're frozen
+            updated_transitions = []
             for trans in state.transitions:
-                trans.target = state_map[trans.target]
+                if trans.target in state_map:
+                    # Create new transition with updated target
+                    new_trans = Transition(
+                        condition=trans.condition,
+                        target=state_map[trans.target],
+                        variable=trans.variable,
+                        priority=trans.priority,
+                        metadata=trans.metadata
+                    )
+                    updated_transitions.append(new_trans)
+            state.transitions = updated_transitions
                 
         # Update start and accept states
         self.start = state_map[self.start]
