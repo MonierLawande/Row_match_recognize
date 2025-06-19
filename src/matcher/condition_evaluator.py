@@ -1600,6 +1600,8 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
         nested_outer_pattern = r'(PREV|NEXT)\s*\(\s*((?:FIRST|LAST)\s*\([^)]+\))(?:\s*,\s*(\d+))?\s*\)'
         # NEW: Pattern for navigation functions with CLASSIFIER() - NEXT(CLASSIFIER()), PREV(CLASSIFIER()), LAST(CLASSIFIER()), FIRST(CLASSIFIER())  
         classifier_nav_pattern = r'(PREV|NEXT|LAST|FIRST)\s*\(\s*CLASSIFIER\s*\(\s*\)(?:\s*,\s*(\d+))?\s*\)'
+        # NEW: Pattern for navigation functions with RUNNING aggregates - PREV(RUNNING LAST(value)), NEXT(RUNNING SUM(value)), etc.
+        running_aggregate_pattern = r'(PREV|NEXT)\s*\(\s*RUNNING\s+(LAST|FIRST|SUM|COUNT|MAX|MIN|AVG)\s*\(\s*([A-Za-z0-9_]+)\s*\)(?:\s*,\s*(\d+))?\s*\)'
         
         # NEW: Try classifier navigation pattern first (like NEXT(CLASSIFIER()), PREV(CLASSIFIER()), LAST(CLASSIFIER()), FIRST(CLASSIFIER()))
         classifier_nav_match = re.match(classifier_nav_pattern, expr, re.IGNORECASE)
@@ -1686,6 +1688,124 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
             
             context.navigation_cache[cache_key] = target_classifier
             return target_classifier
+        
+        # NEW: Try RUNNING aggregate pattern (like PREV(RUNNING LAST(value)), NEXT(RUNNING SUM(amount)))
+        running_agg_match = re.match(running_aggregate_pattern, expr, re.IGNORECASE)
+        if running_agg_match:
+            nav_func = running_agg_match.group(1).upper()
+            agg_func = running_agg_match.group(2).upper()
+            column_name = running_agg_match.group(3)
+            offset = int(running_agg_match.group(4)) if running_agg_match.group(4) else 1
+            
+            logger.debug(f"NESTED_NAV: Running aggregate pattern: {nav_func}(RUNNING {agg_func}({column_name}), {offset})")
+            
+            # For LAST and FIRST, these are navigation functions, not aggregates
+            # RUNNING LAST(value) means "get the last value from the current running window"
+            # PREV(RUNNING LAST(value)) means "get the running last value from the previous row"
+            
+            if agg_func in ('LAST', 'FIRST'):
+                # Handle as navigation function in RUNNING context
+                if nav_func == 'PREV':
+                    target_idx = current_idx - offset
+                elif nav_func == 'NEXT':
+                    target_idx = current_idx + offset
+                else:
+                    logger.error(f"NESTED_NAV: Unsupported navigation function: {nav_func}")
+                    context.navigation_cache[cache_key] = None
+                    return None
+                
+                logger.debug(f"NESTED_NAV: Target index for {nav_func} by {offset}: {target_idx}")
+                
+                if 0 <= target_idx < len(context.rows):
+                    # Create a temporary context at the target position
+                    temp_context = RowContext(
+                        rows=context.rows,
+                        variables=context.variables,
+                        subsets=context.subsets,
+                        current_idx=target_idx,
+                        match_number=context.match_number,
+                        current_var=context.current_var,
+                        defined_variables=context.defined_variables
+                    )
+                    
+                    # Get all matched row indices up to the target position (RUNNING semantics)
+                    # For RUNNING LAST, we want the last row up to and including target_idx
+                    # This should consider ALL rows in the partition, not just matched ones
+                    all_rows_up_to_target = list(range(0, target_idx + 1))
+                    
+                    if all_rows_up_to_target:
+                        if agg_func == 'LAST':
+                            # Get the LAST (maximum) index from the running window
+                            last_idx = max(all_rows_up_to_target)
+                            result = temp_context.rows[last_idx].get(column_name)
+                        elif agg_func == 'FIRST':
+                            # Get the FIRST (minimum) index from the running window
+                            first_idx = min(all_rows_up_to_target)
+                            result = temp_context.rows[first_idx].get(column_name)
+                        
+                        logger.debug(f"NESTED_NAV: {nav_func}(RUNNING {agg_func}({column_name})) at row {target_idx} = {result}")
+                        context.navigation_cache[cache_key] = result
+                        return result
+                    else:
+                        logger.debug(f"NESTED_NAV: No rows found for running context at row {target_idx}")
+                        context.navigation_cache[cache_key] = None
+                        return None
+                else:
+                    logger.debug(f"NESTED_NAV: Target index {target_idx} out of bounds")
+                    context.navigation_cache[cache_key] = None
+                    return None
+            
+            else:
+                # Handle as traditional aggregate function (SUM, COUNT, MAX, MIN, AVG)
+                try:
+                    from src.matcher.production_aggregates import ProductionAggregateEvaluator
+                    
+                    # Step 1: Apply the navigation function to get the target row
+                    if nav_func == 'PREV':
+                        target_idx = current_idx - offset
+                    elif nav_func == 'NEXT':
+                        target_idx = current_idx + offset
+                    else:
+                        logger.error(f"NESTED_NAV: Unsupported navigation function for aggregates: {nav_func}")
+                        context.navigation_cache[cache_key] = None
+                        return None
+                    
+                    logger.debug(f"NESTED_NAV: Target index for {nav_func} by {offset}: {target_idx}")
+                    
+                    if 0 <= target_idx < len(context.rows):
+                        # Create a temporary context for the target row evaluation
+                        temp_context = RowContext(
+                            rows=context.rows,
+                            variables=context.variables,
+                            subsets=context.subsets,
+                            current_idx=target_idx,
+                            match_number=context.match_number,
+                            current_var=context.current_var,
+                            defined_variables=context.defined_variables
+                        )
+                        
+                        # Create evaluator for target context
+                        target_agg_evaluator = ProductionAggregateEvaluator(temp_context)
+                        
+                        # Build the aggregate expression for traditional aggregates
+                        agg_expr = f"{agg_func}({column_name})"
+                        logger.debug(f"NESTED_NAV: Evaluating aggregate: {agg_expr}")
+                        
+                        # Evaluate running aggregate at target position
+                        target_agg_value = target_agg_evaluator.evaluate_aggregate(agg_expr, "RUNNING")
+                        logger.debug(f"NESTED_NAV: Target running aggregate value at row {target_idx}: {target_agg_value}")
+                        
+                        context.navigation_cache[cache_key] = target_agg_value
+                        return target_agg_value
+                    else:
+                        logger.debug(f"NESTED_NAV: Target index {target_idx} out of bounds")
+                        context.navigation_cache[cache_key] = None
+                        return None
+                        
+                except Exception as e:
+                    logger.error(f"NESTED_NAV: Error evaluating running aggregate: {e}")
+                    context.navigation_cache[cache_key] = None
+                    return None
         
         # Try nested pattern (like PREV(LAST(A.value), 3))
         nested_match = re.match(nested_outer_pattern, expr, re.IGNORECASE)
