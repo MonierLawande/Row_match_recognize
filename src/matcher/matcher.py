@@ -2085,7 +2085,10 @@ class EnhancedMatcher:
             # Calculate measures
             for alias, expr in measures.items():
                 try:
-                    semantics = self.measure_semantics.get(alias, "RUNNING")
+                    # Get semantics for this measure with proper defaults
+                    # According to SQL:2016, aggregate functions default to FINAL semantics
+                    # Navigation functions may default to RUNNING in ALL ROWS PER MATCH context
+                    semantics = self.measure_semantics.get(alias, "FINAL")
                     
                     # Special handling for CLASSIFIER
                     if expr.upper() == "CLASSIFIER()":

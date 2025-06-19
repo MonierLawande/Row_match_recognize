@@ -357,7 +357,11 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
         measures = []
         for md in ctx.measureDefinition():
             raw_text = self.get_text(md)  # Use get_text to preserve spaces
-            semantics = "RUNNING"  # Default semantics per SQL:2016 specification
+            # Default semantics per SQL:2016 specification:
+            # - Aggregate functions (SUM, AVG, COUNT, etc.) default to FINAL
+            # - Navigation functions (FIRST, LAST, PREV, NEXT) may default to RUNNING in some contexts
+            # For consistency with Trino and the standard, use FINAL as default for all functions
+            semantics = "FINAL"
             raw_expr = raw_text.strip()
             
             # Use regex to match RUNNING or FINAL with flexible whitespace

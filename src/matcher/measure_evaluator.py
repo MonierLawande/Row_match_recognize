@@ -295,7 +295,7 @@ class MeasureEvaluator:
                         for idx in self.context.variables[comp]:
                             self._row_to_vars[idx].add(subset_name)
 
-    def _preprocess_expression_for_ast(self, expr: str) -> str:
+    def _preprocess_expression_for_ast(self, expr: str, is_running: bool = False) -> str:
         """
         Preprocess an expression to replace special SQL functions with their values
         so that the expression can be parsed by Python's AST parser.
@@ -303,6 +303,7 @@ class MeasureEvaluator:
         This method handles:
         - MATCH_NUMBER() -> actual match number value
         - CLASSIFIER() -> classifier value (if needed)
+        - Aggregate functions (SUM, AVG, COUNT, MIN, MAX, etc.) -> computed values
         - SQL IN operator -> Python in operator (case conversion)
         
         Args:
@@ -318,6 +319,36 @@ class MeasureEvaluator:
         if 'MATCH_NUMBER()' in preprocessed:
             match_number = str(self.context.match_number)
             preprocessed = re.sub(r'\bMATCH_NUMBER\(\)', match_number, preprocessed, flags=re.IGNORECASE)
+        
+        # Replace aggregate function calls with their computed values
+        # This is crucial for expressions like "AVG(value) * 0.9"
+        agg_pattern = r'(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\(([^)]+)\)'
+        agg_matches = re.finditer(agg_pattern, preprocessed, re.IGNORECASE)
+        
+        # Process matches in reverse order to avoid position shifts when replacing
+        for match in reversed(list(agg_matches)):
+            func_name = match.group(1).lower()
+            args_str = match.group(2).strip()
+            
+            # Evaluate the aggregate function
+            # Use the semantics passed to this method
+            agg_value = self._evaluate_aggregate(func_name, args_str, is_running)
+            
+            # Replace the aggregate function call with its computed value
+            if agg_value is not None:
+                # Convert to string, preserving numeric precision
+                if isinstance(agg_value, float):
+                    # Use sufficient precision to avoid rounding errors
+                    agg_str = f"{agg_value:.10g}"
+                else:
+                    agg_str = str(agg_value)
+                
+                old_expr = preprocessed[match.start():match.end()]
+                logger.debug(f"Preprocessing: replacing '{old_expr}' with '{agg_str}' in expression")
+                preprocessed = preprocessed[:match.start()] + agg_str + preprocessed[match.end():]
+                logger.debug(f"After replacement: '{preprocessed}'")
+            else:
+                logger.debug(f"Aggregate evaluation returned None for: {match.group()}")
         
         # Convert SQL IN to Python in (case-sensitive conversion)
         # Use word boundaries to avoid replacing parts of words
@@ -517,14 +548,16 @@ class MeasureEvaluator:
                         return total
         
         # Handle other aggregate functions using the comprehensive _evaluate_aggregate method
-        # Check if this is a standard aggregate function call
-        agg_match = re.match(r'(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\(([^)]+)\)', expr, re.IGNORECASE)
+        # Check if this is a standalone aggregate function call (not part of a larger expression)
+        # Only match if the entire expression is an aggregate function to avoid breaking complex expressions like "AVG(value) * 0.9"
+        agg_match = re.match(r'^(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\(([^)]+)\)$', expr, re.IGNORECASE)
         if agg_match:
             func_name = agg_match.group(1).lower()
             args_str = agg_match.group(2).strip()
             
             # Use the comprehensive aggregate evaluator
-            return self._evaluate_aggregate(func_name, args_str, is_running)
+            result = self._evaluate_aggregate(func_name, args_str, is_running)
+            return result
         
         # Determine if this is a PERMUTE pattern
         is_permute = False
@@ -566,8 +599,8 @@ class MeasureEvaluator:
             self.context.current_row = self.context.rows[self.context.current_idx] if self.context.current_idx < len(self.context.rows) else None
             
             # Preprocess the expression to replace special functions with their values
-            # This allows complex expressions like "MATCH_NUMBER() IN (0, MATCH_NUMBER())" to be parsed by AST
-            preprocessed_expr = self._preprocess_expression_for_ast(expr)
+            # This allows complex expressions like "MATCH_NUMBER() IN (0, MATCH_NUMBER())" and "AVG(value) * 0.9" to be parsed by AST
+            preprocessed_expr = self._preprocess_expression_for_ast(expr, is_running)
             
             # Create a specialized condition evaluator for measure expressions
             # Use MEASURES mode for correct PREV/NEXT semantics in measure expressions
@@ -587,7 +620,8 @@ class MeasureEvaluator:
                         return result
                     
                     # Fallback to simple column reference for compatibility
-                    return self.context.rows[self.context.current_idx].get(expr)
+                    fallback_result = self.context.rows[self.context.current_idx].get(expr)
+                    return fallback_result
                 except Exception:
                     logger.error(f"Error evaluating expression '{expr}' with AST: {ast_error}")
                     return None
