@@ -1598,10 +1598,10 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
         # Single navigation function - parse it properly
         simple_pattern = r'(PREV|NEXT|FIRST|LAST)\s*\(\s*([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)(?:\s*,\s*(\d+))?\s*\)'
         nested_outer_pattern = r'(PREV|NEXT)\s*\(\s*((?:FIRST|LAST)\s*\([^)]+\))(?:\s*,\s*(\d+))?\s*\)'
-        # NEW: Pattern for navigation functions with CLASSIFIER() - NEXT(CLASSIFIER()), PREV(CLASSIFIER())  
-        classifier_nav_pattern = r'(PREV|NEXT)\s*\(\s*CLASSIFIER\s*\(\s*\)(?:\s*,\s*(\d+))?\s*\)'
+        # NEW: Pattern for navigation functions with CLASSIFIER() - NEXT(CLASSIFIER()), PREV(CLASSIFIER()), LAST(CLASSIFIER()), FIRST(CLASSIFIER())  
+        classifier_nav_pattern = r'(PREV|NEXT|LAST|FIRST)\s*\(\s*CLASSIFIER\s*\(\s*\)(?:\s*,\s*(\d+))?\s*\)'
         
-        # NEW: Try classifier navigation pattern first (like NEXT(CLASSIFIER()) or PREV(CLASSIFIER()))
+        # NEW: Try classifier navigation pattern first (like NEXT(CLASSIFIER()), PREV(CLASSIFIER()), LAST(CLASSIFIER()), FIRST(CLASSIFIER()))
         classifier_nav_match = re.match(classifier_nav_pattern, expr, re.IGNORECASE)
         if classifier_nav_match:
             nav_func = classifier_nav_match.group(1).upper()
@@ -1610,34 +1610,82 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
             logger.debug(f"NESTED_NAV: Classifier navigation pattern: {nav_func}(CLASSIFIER(), {offset})")
             
             # Calculate target index based on navigation function
+            target_classifier = None
+            
             if nav_func == 'NEXT':
                 target_idx = current_idx + offset
-            else:  # PREV
+                logger.debug(f"NESTED_NAV: NEXT - Current idx: {current_idx}, target idx: {target_idx}")
+                
+                # Check if target index is valid
+                if 0 <= target_idx < len(context.rows):
+                    # Look through all variables to find which one contains the target row
+                    for var_name, var_indices in context.variables.items():
+                        if target_idx in var_indices:
+                            target_classifier = context._apply_case_sensitivity_rule(var_name)
+                            break
+                    logger.debug(f"NESTED_NAV: Target row {target_idx} classifier: {target_classifier}")
+                else:
+                    logger.debug(f"NESTED_NAV: Target index {target_idx} out of bounds (0 to {len(context.rows)-1})")
+                    
+            elif nav_func == 'PREV':
                 target_idx = current_idx - offset
-            
-            logger.debug(f"NESTED_NAV: Current idx: {current_idx}, target idx: {target_idx}")
-            
-            # Check if target index is valid
-            if 0 <= target_idx < len(context.rows):
-                # We need to determine what the CLASSIFIER would be for the target row
-                # This requires checking which variable the target row is assigned to
-                target_classifier = None
+                logger.debug(f"NESTED_NAV: PREV - Current idx: {current_idx}, target idx: {target_idx}")
                 
-                # Look through all variables to find which one contains the target row
-                for var_name, var_indices in context.variables.items():
-                    if target_idx in var_indices:
-                        # Apply case sensitivity rule
-                        target_classifier = context._apply_case_sensitivity_rule(var_name)
-                        break
+                # Check if target index is valid
+                if 0 <= target_idx < len(context.rows):
+                    # Look through all variables to find which one contains the target row
+                    for var_name, var_indices in context.variables.items():
+                        if target_idx in var_indices:
+                            target_classifier = context._apply_case_sensitivity_rule(var_name)
+                            break
+                    logger.debug(f"NESTED_NAV: Target row {target_idx} classifier: {target_classifier}")
+                else:
+                    logger.debug(f"NESTED_NAV: Target index {target_idx} out of bounds (0 to {len(context.rows)-1})")
+                    
+            elif nav_func == 'LAST':
+                logger.debug(f"NESTED_NAV: LAST(CLASSIFIER()) - finding last row in match")
                 
-                logger.debug(f"NESTED_NAV: Target row {target_idx} classifier: {target_classifier}")
-                context.navigation_cache[cache_key] = target_classifier
-                return target_classifier
-            else:
-                # Target index is out of bounds
-                logger.debug(f"NESTED_NAV: Target index {target_idx} out of bounds (0 to {len(context.rows)-1})")
-                context.navigation_cache[cache_key] = None
-                return None
+                # Find the last row index across all variables in the current match
+                all_match_indices = set()
+                for var_indices in context.variables.values():
+                    all_match_indices.update(var_indices)
+                
+                if all_match_indices:
+                    last_match_idx = max(all_match_indices)
+                    logger.debug(f"NESTED_NAV: Last match index: {last_match_idx}")
+                    
+                    # Find which variable this last row belongs to
+                    for var_name, var_indices in context.variables.items():
+                        if last_match_idx in var_indices:
+                            target_classifier = context._apply_case_sensitivity_rule(var_name)
+                            break
+                    logger.debug(f"NESTED_NAV: Last row {last_match_idx} classifier: {target_classifier}")
+                else:
+                    logger.debug(f"NESTED_NAV: No match indices found")
+                    
+            elif nav_func == 'FIRST':
+                logger.debug(f"NESTED_NAV: FIRST(CLASSIFIER()) - finding first row in match")
+                
+                # Find the first row index across all variables in the current match  
+                all_match_indices = set()
+                for var_indices in context.variables.values():
+                    all_match_indices.update(var_indices)
+                
+                if all_match_indices:
+                    first_match_idx = min(all_match_indices)
+                    logger.debug(f"NESTED_NAV: First match index: {first_match_idx}")
+                    
+                    # Find which variable this first row belongs to
+                    for var_name, var_indices in context.variables.items():
+                        if first_match_idx in var_indices:
+                            target_classifier = context._apply_case_sensitivity_rule(var_name)
+                            break
+                    logger.debug(f"NESTED_NAV: First row {first_match_idx} classifier: {target_classifier}")
+                else:
+                    logger.debug(f"NESTED_NAV: No match indices found")
+            
+            context.navigation_cache[cache_key] = target_classifier
+            return target_classifier
         
         # Try nested pattern (like PREV(LAST(A.value), 3))
         nested_match = re.match(nested_outer_pattern, expr, re.IGNORECASE)
