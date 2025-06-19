@@ -862,6 +862,25 @@ class EnhancedMatcher:
             self.timing["find_match"] += time.time() - match_start_time
             return empty_match
         
+        # PRODUCTION FIX: For patterns with empty alternation like (() | A), prefer empty branch
+        # If the start state is accepting and the pattern has empty alternation, prefer empty match
+        if self.has_empty_alternation and self.dfa.states[state].is_accept:
+            logger.debug(f"Empty alternation pattern starting in accepting state - preferring empty match at position {start_idx}")
+            # Return empty match immediately to satisfy (() | A) preference for empty branch
+            empty_match = {
+                "start": start_idx,
+                "end": -1,  # Empty match
+                "variables": {},
+                "state": state,
+                "is_empty": True,
+                "excluded_vars": set(),
+                "excluded_rows": [],
+                "empty_pattern_rows": [start_idx],
+                "has_empty_alternation": True
+            }
+            self.timing["find_match"] += time.time() - match_start_time
+            return empty_match
+        
         while current_idx < len(rows):
             row = rows[current_idx]
             context.current_idx = current_idx
