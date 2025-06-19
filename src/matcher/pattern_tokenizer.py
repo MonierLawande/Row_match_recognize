@@ -378,6 +378,62 @@ def extract_exclusion_variables(pattern: str) -> Set[str]:
     return excluded_vars
 
 
+def _parse_variable_with_quantifier(var_text: str) -> Union[str, PatternToken]:
+    """
+    Parse a variable string that may contain a quantifier.
+    
+    Args:
+        var_text: Variable text like "A", "A+", "B*", etc.
+        
+    Returns:
+        Either a plain string (for variables without quantifiers) or 
+        a PatternToken (for variables with quantifiers)
+    """
+    if not var_text:
+        return var_text
+    
+    # Check if the variable has a quantifier at the end
+    quantifier_chars = "*+?{"
+    
+    # Find the last quantifier character
+    i = len(var_text) - 1
+    while i >= 0 and var_text[i] in quantifier_chars:
+        i -= 1
+    
+    # If we found quantifier characters
+    if i < len(var_text) - 1:
+        var_name = var_text[:i+1]
+        quantifier_part = var_text[i+1:]
+        
+        # Validate the quantifier
+        try:
+            # Simple validation for basic quantifiers
+            if quantifier_part in ["*", "+", "?"]:
+                return PatternToken(
+                    PatternTokenType.LITERAL,
+                    var_name,
+                    quantifier=quantifier_part,
+                    greedy=True
+                )
+            elif quantifier_part.startswith("{") and quantifier_part.endswith("}"):
+                # Handle {n,m} style quantifiers
+                return PatternToken(
+                    PatternTokenType.LITERAL,
+                    var_name,
+                    quantifier=quantifier_part,
+                    greedy=True
+                )
+            else:
+                # Invalid quantifier, treat as part of variable name
+                return var_text
+        except:
+            # If quantifier parsing fails, treat as part of variable name
+            return var_text
+    
+    # No quantifier found
+    return var_text
+
+
 def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[str, PatternToken]], int]:
     """
     Process variables in a PERMUTE expression, handling nested PERMUTE patterns.
@@ -407,7 +463,9 @@ def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[
                     if var_text.endswith(','):
                         var_text = var_text[:-1].strip()
                     if var_text:
-                        variables.append(var_text)
+                        # Parse variable name and quantifier
+                        parsed_var = _parse_variable_with_quantifier(var_text)
+                        variables.append(parsed_var)
             
             # Process the nested PERMUTE
             nested_start = pos
@@ -457,20 +515,24 @@ def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[
             var_start = pos
             
         elif pattern[pos] == ',':
-            # Extract variable and skip comma
+            # Extract variable and parse any quantifier
             if pos > var_start:
                 var_text = pattern[var_start:pos].strip()
                 if var_text:
-                    variables.append(var_text)
+                    # Parse variable name and quantifier
+                    parsed_var = _parse_variable_with_quantifier(var_text)
+                    variables.append(parsed_var)
             pos += 1
             var_start = pos
             
         elif pattern[pos] == ')':
-            # Extract final variable before closing parenthesis
+            # Extract final variable before closing parenthesis and parse any quantifier
             if pos > var_start:
                 var_text = pattern[var_start:pos].strip()
                 if var_text:
-                    variables.append(var_text)
+                    # Parse variable name and quantifier
+                    parsed_var = _parse_variable_with_quantifier(var_text)
+                    variables.append(parsed_var)
             return variables, pos + 1  # Return position after closing parenthesis
             
         else:

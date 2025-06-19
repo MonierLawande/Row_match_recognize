@@ -2142,4 +2142,26 @@ def _sql_to_python_condition(condition: str) -> str:
     python_condition = re.sub(r'\bIN\b', 'in', python_condition, flags=re.IGNORECASE)
     python_condition = re.sub(r'\bNOT\s+IN\b', 'not in', python_condition, flags=re.IGNORECASE)
     
+    # Replace SQL BETWEEN operator (case-insensitive)
+    # Pattern: expr BETWEEN min_val AND max_val -> (min_val <= expr) and (expr <= max_val)
+    between_pattern = r'(\w+(?:\.\w+)?)\s+BETWEEN\s+([^A]+?)\s+AND\s+([^A]+?)(?=\s|$)'
+    def replace_between(match):
+        expr = match.group(1).strip()
+        min_val = match.group(2).strip()
+        max_val = match.group(3).strip()
+        return f"(({min_val} <= {expr}) and ({expr} <= {max_val}))"
+    
+    python_condition = re.sub(between_pattern, replace_between, python_condition, flags=re.IGNORECASE)
+    
+    # Replace SQL NOT BETWEEN operator (case-insensitive)  
+    # Pattern: expr NOT BETWEEN min_val AND max_val -> not ((min_val <= expr) and (expr <= max_val))
+    not_between_pattern = r'(\w+(?:\.\w+)?)\s+NOT\s+BETWEEN\s+([^A]+?)\s+AND\s+([^A]+?)(?=\s|$)'
+    def replace_not_between(match):
+        expr = match.group(1).strip()
+        min_val = match.group(2).strip()
+        max_val = match.group(3).strip()
+        return f"not (({min_val} <= {expr}) and ({expr} <= {max_val}))"
+    
+    python_condition = re.sub(not_between_pattern, replace_not_between, python_condition, flags=re.IGNORECASE)
+    
     return python_condition

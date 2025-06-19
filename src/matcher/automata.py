@@ -1134,42 +1134,113 @@ class NFABuilder:
                 
                 processed_vars.append((var_base, var_start, var_end))
         
-        # SQL:2016 PERMUTE implementation requires each variable to match exactly once
-        # Following Trino's approach, we generate all permutations explicitly
-        all_perms = list(itertools.permutations(range(len(processed_vars))))
+        # SQL:2016 PERMUTE implementation with enhanced quantifier support
+        # For PERMUTE patterns with quantifiers, we need to create automata
+        # that respects lexicographical ordering per Trino specification
         
-        # For each permutation, create a separate branch in the NFA
-        for perm in all_perms:
-            # Create a new start state for this permutation
-            branch_start = self.new_state()
-            current = branch_start
-            
-            # Create a chain of states for this permutation
-            for idx in perm:
-                var_info = processed_vars[idx]
-                
-                if isinstance(var_info[0], PatternToken) and var_info[0].type == PatternTokenType.PERMUTE:
-                    # For nested PERMUTE, create fresh copy to avoid state sharing
-                    var_token = var_info[0]
-                    fresh_start, fresh_end = self._process_permute(var_token, define)
-                    
-                    # Connect to current chain
-                    self.add_epsilon(current, fresh_start)
-                    current = fresh_end
+        # Check if any variable has quantifiers
+        has_quantifiers = any(
+            (isinstance(var, str) and any(var.endswith(q) for q in ['*', '+', '?'])) or
+            (isinstance(var, PatternToken) and var.quantifier)
+            for var in variables
+        )
+        
+        if has_quantifiers:
+            # For quantified PERMUTE patterns, use lexicographical ordering
+            # Sort variables by their base names to ensure consistent ordering
+            var_names_for_sorting = []
+            for var in variables:
+                if isinstance(var, PatternToken):
+                    base_name = var.value
+                elif isinstance(var, str):
+                    # Extract base name without quantifier
+                    base_name = var.rstrip('*+?')
+                    if '{' in base_name:
+                        base_name = base_name[:base_name.find('{')]
                 else:
-                    # For regular variables, create fresh copy to avoid state sharing
-                    var_base = var_info[0]
-                    fresh_start, fresh_end = self.create_var_states(var_base, define)
-                    
-                    # Connect to current chain
-                    self.add_epsilon(current, fresh_start)
-                    current = fresh_end
+                    base_name = str(var)
+                var_names_for_sorting.append((base_name, var))
             
-            # Connect this permutation branch to the main permutation end
+            # Sort by base variable name for lexicographical order
+            sorted_vars = sorted(var_names_for_sorting, key=lambda x: x[0])
+            ordered_variables = [var for _, var in sorted_vars]
+            
+            # Create a sequence of the ordered variables (not all permutations)
+            current = perm_start
+            for var in ordered_variables:
+                var_base = var
+                quantifier = None
+                
+                if isinstance(var, PatternToken):
+                    var_base = var.value if hasattr(var, 'value') else var
+                    quantifier = var.quantifier if hasattr(var, 'quantifier') else None
+                elif isinstance(var, str):
+                    if var.endswith('*'):
+                        var_base = var[:-1]
+                        quantifier = '*'
+                    elif var.endswith('+'):
+                        var_base = var[:-1]
+                        quantifier = '+'
+                    elif var.endswith('?'):
+                        var_base = var[:-1]
+                        quantifier = '?'
+                    elif '{' in var and var.endswith('}'):
+                        open_idx = var.find('{')
+                        var_base = var[:open_idx]
+                        quantifier = var[open_idx:]
+                
+                # Create states for this variable
+                var_start, var_end = self.create_var_states(var_base, define)
+                
+                # Apply quantifier if present
+                if quantifier:
+                    min_rep, max_rep, greedy = parse_quantifier(quantifier)
+                    var_start, var_end = self._apply_quantifier(
+                        var_start, var_end, min_rep, max_rep, greedy)
+                
+                # Connect to the sequence
+                self.add_epsilon(current, var_start)
+                current = var_end
+            
+            # Connect final state to permute end
             self.add_epsilon(current, perm_end)
             
-            # Connect permutation start to this branch
-            self.add_epsilon(perm_start, branch_start)
+        else:
+            # For non-quantified PERMUTE, generate all permutations as before
+            all_perms = list(itertools.permutations(range(len(processed_vars))))
+            
+            # For each permutation, create a separate branch in the NFA
+            for perm in all_perms:
+                # Create a new start state for this permutation
+                branch_start = self.new_state()
+                current = branch_start
+                
+                # Create a chain of states for this permutation
+                for idx in perm:
+                    var_info = processed_vars[idx]
+                    
+                    if isinstance(var_info[0], PatternToken) and var_info[0].type == PatternTokenType.PERMUTE:
+                        # For nested PERMUTE, create fresh copy to avoid state sharing
+                        var_token = var_info[0]
+                        fresh_start, fresh_end = self._process_permute(var_token, define)
+                        
+                        # Connect to current chain
+                        self.add_epsilon(current, fresh_start)
+                        current = fresh_end
+                    else:
+                        # For regular variables, create fresh copy to avoid state sharing
+                        var_base = var_info[0]
+                        fresh_start, fresh_end = self.create_var_states(var_base, define)
+                        
+                        # Connect to current chain
+                        self.add_epsilon(current, fresh_start)
+                        current = fresh_end
+                
+                # Connect this permutation branch to the main permutation end
+                self.add_epsilon(current, perm_end)
+                
+                # Connect permutation start to this branch
+                self.add_epsilon(perm_start, branch_start)
         
         # Apply quantifiers to the entire PERMUTE pattern if present
         if token.quantifier:
