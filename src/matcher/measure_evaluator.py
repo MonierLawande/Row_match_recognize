@@ -3,6 +3,7 @@
 from collections import defaultdict
 from functools import lru_cache
 from typing import Dict, Any, List, Optional, Set, Union, Tuple
+import ast
 import re
 import math
 import numpy as np
@@ -560,7 +561,6 @@ class MeasureEvaluator:
         # Try AST-based evaluation for complex expressions (arithmetic, etc.)
         try:
             from src.matcher.condition_evaluator import ConditionEvaluator
-            import ast
             
             # Set up context for AST evaluation
             self.context.current_row = self.context.rows[self.context.current_idx] if self.context.current_idx < len(self.context.rows) else None
@@ -1462,19 +1462,6 @@ class MeasureEvaluator:
                 return result
                 
             except Exception as e:
-                # Enhanced logging for debugging COUNT(B.*) issue
-                import traceback
-                print(f"\n=== AGGREGATE EXCEPTION DEBUG ===")
-                print(f"Function: {func_name}({args_str})")
-                print(f"Running: {is_running}")
-                print(f"Current context: {self.context.current_idx}")
-                print(f"Variables: {self.context.variables}")
-                print(f"Exception type: {type(e).__name__}")
-                print(f"Exception message: {str(e)}")
-                print(f"Traceback:")
-                traceback.print_exc()
-                print("=== END AGGREGATE EXCEPTION DEBUG ===\n")
-                
                 # Log the error with context
                 self._log_aggregate_error(func_name, args_str, e)
                 return None
