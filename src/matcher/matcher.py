@@ -1556,20 +1556,20 @@ class EnhancedMatcher:
         # Calculate target position based on FIRST or LAST
         if is_first:
             target_idx = min(var_indices)
-            skip_type = "TO_FIRST"
+            skip_type = "TO FIRST"
         else:
             target_idx = max(var_indices) 
-            skip_type = "TO_LAST"
+            skip_type = "TO LAST"
             
         # Critical validation: prevent infinite loops
         # Cannot skip to the first row of the current match
         if target_idx == start_idx:
-            logger.warning(f"AFTER MATCH SKIP {skip_type} {skip_var} would create infinite loop: "
-                          f"target position {target_idx} equals match start {start_idx}. "
-                          f"Falling back to SKIP TO NEXT ROW to prevent infinite loop.")
-            # Production-ready fix: instead of raising an error, fall back to safe skip behavior
-            # This ensures robustness while still being compliant with the intent of SQL:2016
-            return start_idx + 1
+            error_msg = (f"AFTER MATCH SKIP {skip_type} {skip_var} would create infinite loop: "
+                        f"target position {target_idx} equals match start {start_idx}. "
+                        f"This is invalid according to SQL:2016 standards.")
+            logger.error(error_msg)
+            # SQL:2016/Trino compliance: raise error for invalid skip targets that would create infinite loops
+            raise ValueError(error_msg)
             
         # For TO FIRST/TO LAST: resume AT the variable position (SQL:2016 standard)
         # For TO FIRST: skip to the first occurrence of the variable

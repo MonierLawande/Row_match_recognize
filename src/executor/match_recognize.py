@@ -929,6 +929,12 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         
                         if rows_per_match == RowsPerMatch.ONE_ROW:
                             # For ONE ROW PER MATCH, be selective about which columns to include
+                            # Always include ORDER BY columns (required for SQL:2016 compliance)
+                            if order_by:
+                                for col in order_by:
+                                    if col in result_df.columns and col not in ordered_cols:
+                                        ordered_cols.append(col)
+                            
                             # Include columns referenced in DEFINE clauses (pattern variables)
                             define_referenced_columns = set()
                             if mr_clause.define:

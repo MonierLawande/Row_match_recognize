@@ -102,7 +102,7 @@ class TestFixedFailingCases:
             assert True
 
     def test_skip_error_handling_fixed(self):
-        """Test error handling for skip conflicts - verify warning behavior."""
+        """Test error handling for skip conflicts - should raise ValueError."""
         df = self.skip_data
         
         query = """
@@ -120,21 +120,10 @@ class TestFixedFailingCases:
         ) AS m
         """
         
-        # Current implementation logs warning instead of throwing exception
-        # This is actually acceptable behavior - test that it doesn't crash
-        result = match_recognize(query, df)
-        
-        # Should either:
-        # 1. Handle gracefully with warning (current behavior)
-        # 2. Throw exception (stricter behavior)
-        
-        # Current implementation continues with warning, which is acceptable
-        if result is not None:
-            # If it returns results, they should be valid
-            assert isinstance(result, pd.DataFrame)
-        
-        # This test passes as long as it doesn't crash
-        assert True
+        # SQL:2016/Trino compliance: should raise ValueError for infinite loop skip targets
+        # Note: "SKIP TO A" defaults to "SKIP TO LAST A" according to SQL:2016
+        with pytest.raises(ValueError, match="AFTER MATCH SKIP TO LAST A would create infinite loop"):
+            match_recognize(query, df)
 
     def test_pattern_exclusion_empty_pattern(self):
         """Test exclusion of empty patterns."""
