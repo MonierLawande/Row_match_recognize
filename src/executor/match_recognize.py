@@ -23,6 +23,14 @@ from src.config.production_config import MatchRecognizeConfig
 # Module logger
 logger = get_logger(__name__)
 
+# Enable production-ready aggregate functions
+try:
+    from src.matcher.production_aggregates import enhance_measure_evaluator_with_production_aggregates
+    enhance_measure_evaluator_with_production_aggregates()
+    logger.info("Production aggregates enabled for MeasureEvaluator")
+except Exception as e:
+    logger.warning(f"Failed to enable production aggregates: {e}")
+
 def _create_dataframe_with_preserved_types(results: List[Dict[str, Any]]) -> pd.DataFrame:
     """
     Create a DataFrame from results while preserving None values and original data types.
@@ -909,7 +917,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     is_select_star = any(item.expression == '*' for item in ast.select_clause.items)
                     
                     if is_select_star:
-                        # For SELECT *, include relevant columns in SQL:2016 order:
+                        # For SELECT *, relevant columns in SQL:2016 order:
                         # For ONE ROW PER MATCH: PARTITION BY columns, columns used in DEFINE/pattern matching, MEASURES
                         # For ALL ROWS PER MATCH: All input columns plus MEASURES
                         

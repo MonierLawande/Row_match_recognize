@@ -515,92 +515,15 @@ class MeasureEvaluator:
                         
                         return total
         
-        # Handle other aggregate functions (MIN, MAX, AVG, etc.)
-        agg_match = re.match(r'(MIN|MAX|AVG|COUNT)\(([^)]+)\)', expr, re.IGNORECASE)
+        # Handle other aggregate functions using the comprehensive _evaluate_aggregate method
+        # Check if this is a standard aggregate function call
+        agg_match = re.match(r'(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\(([^)]+)\)', expr, re.IGNORECASE)
         if agg_match:
-            func_name = agg_match.group(1).upper()
-            col_expr = agg_match.group(2).strip()
+            func_name = agg_match.group(1).lower()
+            args_str = agg_match.group(2).strip()
             
-            # Handle COUNT(*) special case
-            if func_name == "COUNT" and col_expr == "*":
-                # Get all matched indices
-                matched_indices = []
-                for var, indices in self.context.variables.items():
-                    matched_indices.extend(indices)
-                
-                # For RUNNING semantics, only include rows up to current position
-                if is_running:
-                    matched_indices = [idx for idx in matched_indices if idx <= self.context.current_idx]
-                
-                return len(set(matched_indices))
-            
-            # Handle COUNT(var.*) special case (variable wildcard)
-            count_var_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\.\*$', col_expr)
-            if func_name == "COUNT" and count_var_match:
-                var_name = count_var_match.group(1)
-                
-                # Get indices for the specific variable
-                if var_name not in self.context.variables:
-                    return 0
-                    
-                var_indices = self.context.variables[var_name]
-                
-                # For RUNNING semantics, only include indices up to current position
-                if is_running:
-                    var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
-                
-                return len(var_indices)
-            
-            # Parse pattern variable reference (e.g., B.totalprice)
-            var_col_match = re.match(r'^([A-Za-z_][A-ZaZ0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$', col_expr)
-            if not var_col_match:
-                return None
-                
-            var_name = var_col_match.group(1)
-            col_name = var_col_match.group(2)
-            
-            # Get indices for the specific variable
-            if var_name not in self.context.variables:
-                return None
-                
-            var_indices = self.context.variables[var_name]
-            
-            # For RUNNING semantics, only include indices up to current position
-            if is_running:
-                var_indices = [idx for idx in var_indices if idx <= self.context.current_idx]
-            
-            # Collect values for aggregation
-            values = []
-            for idx in var_indices:
-                if idx < len(self.context.rows):
-                    row_val = self.context.rows[idx].get(col_name)
-                    if row_val is not None:
-                        try:
-                            # Convert to numeric if possible
-                            if isinstance(row_val, (str, bool)):
-                                row_val = float(row_val)
-                            values.append(row_val)
-                        except (ValueError, TypeError):
-                            # Skip non-numeric values for numeric aggregates
-                            if func_name in ("MIN", "MAX", "AVG"):
-                                continue
-                            values.append(row_val)
-            
-            # Calculate aggregate
-            if not values:
-                return None
-            
-            if func_name == "MIN":
-                return min(values)
-            elif func_name == "MAX":
-                return max(values)
-            elif func_name == "AVG":
-                numeric_values = [v for v in values if isinstance(v, (int, float))]
-                if not numeric_values:
-                    return None
-                return sum(numeric_values) / len(numeric_values)
-            elif func_name == "COUNT":
-                return len(values)
+            # Use the comprehensive aggregate evaluator
+            return self._evaluate_aggregate(func_name, args_str, is_running)
         
         # Determine if this is a PERMUTE pattern
         is_permute = False

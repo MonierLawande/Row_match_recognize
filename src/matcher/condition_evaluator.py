@@ -1283,10 +1283,14 @@ class ConditionEvaluator(ast.NodeVisitor):
 
     def visit_Num(self, node: ast.Num):
         """Handle numeric constants (Python < 3.8 compatibility)"""
+        # In Python 3.8+, ast.Num is deprecated in favor of ast.Constant
+        # But we still need to support it for backward compatibility
         return node.n
 
     def visit_Str(self, node: ast.Str):
         """Handle string constants (Python < 3.8 compatibility)"""
+        # In Python 3.8+, ast.Str is deprecated in favor of ast.Constant
+        # But we still need to support it for backward compatibility
         return node.s
 
     def visit_List(self, node: ast.List):

@@ -714,24 +714,29 @@ def enhance_measure_evaluator_with_production_aggregates():
         semantics = semantics or "RUNNING"
         is_running = semantics.upper() == "RUNNING"
         
-        # Check if this is an aggregate function
-        agg_pattern = r'\b(' + '|'.join(ProductionAggregateEvaluator.STANDARD_AGGREGATES) + r')\s*\('
-        if re.search(agg_pattern, expr, re.IGNORECASE):
-            # Use production aggregate evaluator
-            if not hasattr(self, '_prod_agg_evaluator'):
-                self._prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
-            
-            try:
-                return self._prod_agg_evaluator.evaluate_aggregate(expr, semantics)
-            except (AggregateValidationError, AggregateArgumentError) as e:
-                logger.error(f"Aggregate validation error: {e}")
-                return None
-            except Exception as e:
-                logger.error(f"Error in production aggregate evaluator: {e}")
-                # Fallback to original implementation
-                pass
+        # Check if this is a PURE aggregate function (not a complex expression)
+        # Pattern matches: FUNC(...) with optional whitespace but nothing else
+        pure_agg_pattern = r'^\s*([A-Z_]+)\s*\([^)]*\)\s*$'
+        match = re.match(pure_agg_pattern, expr.strip(), re.IGNORECASE)
         
-        # Use original implementation for non-aggregates
+        if match:
+            func_name = match.group(1).upper()
+            if func_name in ProductionAggregateEvaluator.STANDARD_AGGREGATES:
+                # Use production aggregate evaluator for pure aggregate functions
+                if not hasattr(self, '_prod_agg_evaluator'):
+                    self._prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
+                
+                try:
+                    return self._prod_agg_evaluator.evaluate_aggregate(expr, semantics)
+                except (AggregateValidationError, AggregateArgumentError) as e:
+                    logger.error(f"Aggregate validation error: {e}")
+                    return None
+                except Exception as e:
+                    logger.error(f"Error in production aggregate evaluator: {e}")
+                    # Fallback to original implementation
+                    pass
+        
+        # Use original implementation for complex expressions and non-aggregates
         return original_evaluate(self, expr, semantics)
     
     # Patch the method
