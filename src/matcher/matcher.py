@@ -2293,9 +2293,22 @@ class EnhancedMatcher:
             for alias, expr in measures.items():
                 try:
                     # Get semantics for this measure with proper defaults
-                    # According to SQL:2016, aggregate functions default to FINAL semantics
-                    # Navigation functions may default to RUNNING in ALL ROWS PER MATCH context
-                    semantics = self.measure_semantics.get(alias, "FINAL")
+                    # According to SQL:2016, for ALL ROWS PER MATCH:
+                    # - Navigation functions (FIRST, LAST, PREV, NEXT) default to RUNNING semantics
+                    # - Aggregate functions (SUM, AVG, COUNT, etc.) default to FINAL semantics
+                    if alias in self.measure_semantics:
+                        semantics = self.measure_semantics[alias]
+                    else:
+                        # Apply SQL:2016 default semantics for ALL ROWS PER MATCH
+                        expr_upper = expr.upper().strip()
+                        if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
+                            # Navigation functions default to RUNNING in ALL ROWS PER MATCH
+                            semantics = "RUNNING"
+                        else:
+                            # Aggregate and other functions default to FINAL
+                            semantics = "FINAL"
+                    
+                    logger.debug(f"Row {idx}: Measure '{alias}' = '{expr}' using {semantics} semantics")
                     
                     # Special handling for CLASSIFIER
                     if expr.upper() == "CLASSIFIER()":

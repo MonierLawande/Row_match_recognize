@@ -566,11 +566,42 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         measure_semantics[alias] = "FINAL"
                     elif m.metadata and 'semantics' in m.metadata:
                         measures[alias] = expr
-                        measure_semantics[alias] = m.metadata['semantics']
+                        # Override parser-provided semantics with SQL:2016 rules for ALL ROWS PER MATCH
+                        if rows_per_match != RowsPerMatch.ONE_ROW:
+                            # For ALL ROWS PER MATCH, apply SQL:2016 default semantics
+                            import re
+                            expr_upper = expr.upper().strip()
+                            if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
+                                # Navigation functions default to RUNNING in ALL ROWS PER MATCH
+                                measure_semantics[alias] = "RUNNING"
+                            elif re.match(r'^COUNT\s*\(', expr_upper):
+                                # COUNT function defaults to RUNNING in ALL ROWS PER MATCH
+                                measure_semantics[alias] = "RUNNING"
+                            else:
+                                # Use parser-provided semantics for other functions (typically FINAL)
+                                measure_semantics[alias] = m.metadata['semantics']
+                        else:
+                            # For ONE ROW PER MATCH, use parser-provided semantics
+                            measure_semantics[alias] = m.metadata['semantics']
                     else:
-                        # Default semantics based on rows_per_match
+                        # Default semantics based on rows_per_match and SQL:2016 specification
                         measures[alias] = expr
-                        measure_semantics[alias] = "RUNNING" if rows_per_match != RowsPerMatch.ONE_ROW else "FINAL"
+                        if rows_per_match != RowsPerMatch.ONE_ROW:
+                            # For ALL ROWS PER MATCH, apply SQL:2016 default semantics
+                            import re
+                            expr_upper = expr.upper().strip()
+                            if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
+                                # Navigation functions default to RUNNING in ALL ROWS PER MATCH
+                                measure_semantics[alias] = "RUNNING"
+                            elif re.match(r'^COUNT\s*\(', expr_upper):
+                                # COUNT function defaults to RUNNING in ALL ROWS PER MATCH
+                                measure_semantics[alias] = "RUNNING"
+                            else:
+                                # Other aggregate functions default to FINAL
+                                measure_semantics[alias] = "FINAL"
+                        else:
+                            # For ONE ROW PER MATCH, all functions default to FINAL
+                            measure_semantics[alias] = "FINAL"
         
         # Create match configuration
         match_config = MatchConfig(
@@ -938,6 +969,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             # Include columns referenced in DEFINE clauses (pattern variables)
                             define_referenced_columns = set()
                             if mr_clause.define:
+                                import re  # Import re module for regex operations
                                 for define_item in mr_clause.define.definitions:
                                     # Extract column names from the condition
                                     # This is a simple heuristic - look for column names in the condition
