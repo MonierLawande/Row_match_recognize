@@ -1494,41 +1494,134 @@ class ConditionEvaluator(ast.NodeVisitor):
 
 
 
-def validate_navigation_conditions(conditions: Dict[str, str], pattern_variables: List[str]) -> Dict[str, str]:
+def validate_navigation_conditions(conditions: Union[str, Dict[str, str]], pattern_variables: Union[Dict[str, str], List[str]]) -> Union[bool, Dict[str, str]]:
     """
     Validate and potentially modify navigation conditions for pattern compatibility.
     
-    This function checks navigation conditions in DEFINE clauses to ensure they
-    are compatible with the pattern variables and can be properly evaluated.
+    This function supports two modes:
+    1. Single condition validation: validate_navigation_conditions(condition_str, metadata_dict) -> bool
+    2. Batch validation: validate_navigation_conditions(conditions_dict, pattern_variables_list) -> dict
     
     Args:
-        conditions: Dictionary of variable -> condition mappings
-        pattern_variables: List of pattern variables
+        conditions: Either a single condition string or dictionary of variable -> condition mappings
+        pattern_variables: Either metadata dict (for single validation) or list of pattern variables
         
     Returns:
-        Dictionary of validated and potentially modified conditions
+        For single condition: boolean indicating if condition is valid
+        For batch validation: dictionary of validated and potentially modified conditions
         
     Raises:
         ValueError: If conditions are invalid or incompatible
     """
     logger = get_logger(__name__)
-    validated_conditions = {}
     
-    for var, condition in conditions.items():
+    # Handle single condition validation (test mode)
+    if isinstance(conditions, str) and isinstance(pattern_variables, dict):
+        condition = conditions
+        metadata = pattern_variables
+        
         try:
-            # For now, just pass through conditions as-is
-            # Future enhancements could include:
-            # - Checking for undefined variable references
-            # - Validating navigation function syntax
-            # - Optimizing navigation expressions
-            validated_conditions[var] = condition
+            # Validate the condition string
+            if not condition or not condition.strip():
+                logger.warning("Empty condition provided")
+                return False
+            
+            # Check for basic syntax issues
+            if not _validate_condition_syntax(condition):
+                logger.warning(f"Invalid syntax in condition: {condition}")
+                return False
+            
+            # Check clause-specific rules
+            clause_type = metadata.get("clause", "DEFINE")
+            if clause_type == "DEFINE":
+                # DEFINE clauses should not use future navigation
+                if _contains_future_navigation(condition):
+                    logger.warning(f"DEFINE clause contains future navigation: {condition}")
+                    # For now, we allow this but log a warning
+                    # In strict mode, this could return False
+                
+            # Condition is valid
+            logger.debug(f"Condition validated successfully: {condition}")
+            return True
             
         except Exception as e:
-            logger.warning(f"Issue validating condition for {var}: {e}")
-            # Keep the original condition
-            validated_conditions[var] = condition
+            logger.error(f"Error validating condition '{condition}': {e}")
+            return False
     
-    return validated_conditions
+    # Handle batch validation (original mode)
+    elif isinstance(conditions, dict) and isinstance(pattern_variables, list):
+        validated_conditions = {}
+        
+        for var, condition in conditions.items():
+            try:
+                # Validate each condition using single validation mode
+                is_valid = validate_navigation_conditions(condition, {"clause": "DEFINE"})
+                if is_valid:
+                    validated_conditions[var] = condition
+                else:
+                    logger.warning(f"Invalid condition for variable {var}: {condition}")
+                    # Keep the original condition even if invalid (non-strict mode)
+                    validated_conditions[var] = condition
+                    
+            except Exception as e:
+                logger.warning(f"Issue validating condition for {var}: {e}")
+                # Keep the original condition
+                validated_conditions[var] = condition
+        
+        return validated_conditions
+    
+    else:
+        raise ValueError(f"Invalid arguments: conditions={type(conditions)}, pattern_variables={type(pattern_variables)}")
+
+def _validate_condition_syntax(condition: str) -> bool:
+    """
+    Validate basic syntax of a condition string.
+    
+    Args:
+        condition: The condition string to validate
+        
+    Returns:
+        True if syntax is valid, False otherwise
+    """
+    try:
+        # Try to compile as Python expression to check basic syntax
+        import ast
+        ast.parse(condition, mode='eval')
+        return True
+    except SyntaxError:
+        # Try SQL-style operators
+        sql_condition = _sql_to_python_condition(condition)
+        try:
+            ast.parse(sql_condition, mode='eval')
+            return True
+        except SyntaxError:
+            return False
+    except Exception:
+        return False
+
+def _contains_future_navigation(condition: str) -> bool:
+    """
+    Check if condition contains future navigation functions.
+    
+    Args:
+        condition: The condition string to check
+        
+    Returns:
+        True if condition contains NEXT() or similar future navigation
+    """
+    import re
+    # Look for NEXT function calls
+    future_patterns = [
+        r'\bNEXT\s*\(',
+        r'\bFUTURE\s*\(',
+        # Add other future navigation patterns as needed
+    ]
+    
+    for pattern in future_patterns:
+        if re.search(pattern, condition, re.IGNORECASE):
+            return True
+    
+    return False
 
 def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str] = None) -> Any:
     """
