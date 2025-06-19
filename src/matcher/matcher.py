@@ -1319,10 +1319,19 @@ class EnhancedMatcher:
                         logger.debug(f"Rejecting empty match at index {start_idx} - pattern has unsatisfied required quantifiers")
             
             if empty_match:
-                # For SKIP TO NEXT ROW, TO_FIRST, TO_LAST modes, don't return empty matches when there's no valid non-empty match
-                # This prevents the generation of spurious empty matches at every position
-                if config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST):
-                    logger.debug(f"{config.skip_mode} mode: not returning empty match, will advance to next position")
+                # PRODUCTION FIX: Distinguish between explicit empty patterns and fallback empty matches
+                is_explicit_empty_pattern = (self.original_pattern and 
+                                           (self.original_pattern.strip() == '()' or 
+                                            self.original_pattern.strip() == '( )'))
+                
+                if is_explicit_empty_pattern:
+                    # For explicit empty patterns like (), always return empty matches regardless of skip mode
+                    logger.debug(f"Explicit empty pattern '()' - returning empty match at position {start_idx}")
+                    self.timing["find_match"] += time.time() - match_start_time
+                    return empty_match
+                elif config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST):
+                    # For fallback empty matches from failed real patterns, apply skip mode suppression
+                    logger.debug(f"{config.skip_mode} mode: not returning fallback empty match, will advance to next position")
                     self.timing["find_match"] += time.time() - match_start_time
                     return None
                 else:
