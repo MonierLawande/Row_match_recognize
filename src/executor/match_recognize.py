@@ -1120,15 +1120,6 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 sorted_results = sorted(results, key=safe_sort_key)
                 
-                # DEBUG: Log the sorting results 
-                logger.debug("Results before sorting:")
-                for i, r in enumerate(results):
-                    logger.debug(f"  {i}: partition_id={r.get('partition_id')}, _partition_index={r.get('_partition_index')}, _partition_row_index={r.get('_partition_row_index')}, match={r.get('match')}")
-                
-                logger.debug("Results after sorting:")
-                for i, r in enumerate(sorted_results):
-                    logger.debug(f"  {i}: partition_id={r.get('partition_id')}, _partition_index={r.get('_partition_index')}, _partition_row_index={r.get('_partition_row_index')}, match={r.get('match')}")
-                
                 # PRODUCTION FIX: Check if we used partition sorting before removing the tracking fields
                 used_partition_sorting = partition_by and any(
                     ('_partition_index' in result and '_partition_row_index' in result) 
@@ -1142,15 +1133,6 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     result.pop('_partition_row_index', None)
                 
                 result_df = _create_dataframe_with_preserved_types(sorted_results)
-                
-                # DEBUG: Check if DataFrame creation preserved order
-                logger.debug("Checking DataFrame order after creation:")
-                if 'partition_id' in result_df.columns:
-                    logger.debug(f"  DataFrame partition_id: {result_df['partition_id'].tolist()}")
-                if 'id' in result_df.columns:
-                    logger.debug(f"  DataFrame id: {result_df['id'].tolist()}")
-                if 'match' in result_df.columns:
-                    logger.debug(f"  DataFrame match: {result_df['match'].tolist()}")
                 
                 # Reset the DataFrame index to be sequential
                 result_df.reset_index(drop=True, inplace=True)
@@ -1195,12 +1177,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 # Debug the measure columns
                 logger.debug("Checking measure columns in final DataFrame:")
-                logger.debug(f"  DataFrame shape: {result_df.shape}")
-                logger.debug(f"  DataFrame columns: {result_df.columns.tolist()}")
                 for alias in measures.keys():
                     if alias in result_df.columns:
-                        logger.debug(f"  Measure '{alias}' exists with values: {result_df[alias].tolist()}")
-                        logger.debug(f"  Measure '{alias}' head: {result_df[alias].head(10).tolist()}")
+                        logger.debug(f"  Measure '{alias}' exists with values: {result_df[alias].head(3).tolist()}")
                     else:
                         logger.debug(f"  Measure '{alias}' is MISSING from result DataFrame")
                 
