@@ -725,6 +725,13 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             if col not in result and rows:
                                 result[col] = rows[0][col]
                 
+                # PRODUCTION FIX: Add partition order tracking for correct result sorting
+                # Add partition index and partition-relative row index to maintain order across partitions
+                for i, result in enumerate(partition_results):
+                    result['_partition_index'] = partition_idx  # Which partition this result came from
+                    result['_partition_row_index'] = i  # Position within this partition's results
+                    logger.debug(f"Added partition tracking: partition_idx={partition_idx}, row_idx={i} to result: {result}")
+                
                 results.extend(partition_results)
             
             # Filter nested PERMUTE patterns
@@ -1094,7 +1101,15 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     if match_config.include_unmatched and '_original_row_idx' in r:
                         return (r.get('_original_row_idx', 0), 0)
                     
-                    # Otherwise, sort by match number then original order
+                    # PRODUCTION FIX: For partitioned queries, sort by partition order first, then by position within partition
+                    # This ensures that all rows from partition 1 come before all rows from partition 2, etc.
+                    if '_partition_index' in r and '_partition_row_index' in r:
+                        partition_idx = r.get('_partition_index', 0)
+                        partition_row_idx = r.get('_partition_row_index', 0)
+                        logger.debug(f"Using partition sort key: partition_idx={partition_idx}, row_idx={partition_row_idx} for result: {r}")
+                        return (partition_idx, partition_row_idx)
+                    
+                    # Otherwise, sort by match number then original order (legacy behavior)
                     match_num = r.get('match', r.get('MATCH_NUMBER', 0))
                     if match_num is None:
                         match_num = 0
@@ -1105,11 +1120,37 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 sorted_results = sorted(results, key=safe_sort_key)
                 
-                # Remove the temporary ordering field
+                # DEBUG: Log the sorting results 
+                logger.debug("Results before sorting:")
+                for i, r in enumerate(results):
+                    logger.debug(f"  {i}: partition_id={r.get('partition_id')}, _partition_index={r.get('_partition_index')}, _partition_row_index={r.get('_partition_row_index')}, match={r.get('match')}")
+                
+                logger.debug("Results after sorting:")
+                for i, r in enumerate(sorted_results):
+                    logger.debug(f"  {i}: partition_id={r.get('partition_id')}, _partition_index={r.get('_partition_index')}, _partition_row_index={r.get('_partition_row_index')}, match={r.get('match')}")
+                
+                # PRODUCTION FIX: Check if we used partition sorting before removing the tracking fields
+                used_partition_sorting = partition_by and any(
+                    ('_partition_index' in result and '_partition_row_index' in result) 
+                    for result in sorted_results[:1] if sorted_results
+                )
+                
+                # Remove the temporary ordering fields
                 for result in sorted_results:
                     result.pop('_original_order', None)
+                    result.pop('_partition_index', None)
+                    result.pop('_partition_row_index', None)
                 
                 result_df = _create_dataframe_with_preserved_types(sorted_results)
+                
+                # DEBUG: Check if DataFrame creation preserved order
+                logger.debug("Checking DataFrame order after creation:")
+                if 'partition_id' in result_df.columns:
+                    logger.debug(f"  DataFrame partition_id: {result_df['partition_id'].tolist()}")
+                if 'id' in result_df.columns:
+                    logger.debug(f"  DataFrame id: {result_df['id'].tolist()}")
+                if 'match' in result_df.columns:
+                    logger.debug(f"  DataFrame match: {result_df['match'].tolist()}")
                 
                 # Reset the DataFrame index to be sequential
                 result_df.reset_index(drop=True, inplace=True)
@@ -1154,9 +1195,12 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 # Debug the measure columns
                 logger.debug("Checking measure columns in final DataFrame:")
+                logger.debug(f"  DataFrame shape: {result_df.shape}")
+                logger.debug(f"  DataFrame columns: {result_df.columns.tolist()}")
                 for alias in measures.keys():
                     if alias in result_df.columns:
-                        logger.debug(f"  Measure '{alias}' exists with values: {result_df[alias].head(3).tolist()}")
+                        logger.debug(f"  Measure '{alias}' exists with values: {result_df[alias].tolist()}")
+                        logger.debug(f"  Measure '{alias}' head: {result_df[alias].head(10).tolist()}")
                     else:
                         logger.debug(f"  Measure '{alias}' is MISSING from result DataFrame")
                 
@@ -1168,7 +1212,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             logger.warning(f"Measure column '{alias}' has all None values!")
                             
                             # Try to recover values from raw results if possible
-                            for i, row in enumerate(results):
+                            for i, row in enumerate(sorted_results):
                                 if alias in row and row[alias] is not None:
                                     result_df.at[i, alias] = row[alias]
                                     logger.info(f"  Fixed value at row {i}: {row[alias]}")
@@ -1314,8 +1358,10 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                 order_sort_cols.append(col)
                         sort_columns.extend(order_sort_cols)
                 
-                # Only sort if we have valid columns
-                if sort_columns:
+                logger.debug(f"Final sort decision: partition_by={bool(partition_by)}, used_partition_sorting={used_partition_sorting}, sort_columns={sort_columns}")
+                
+                # Only sort if we have valid columns AND haven't already done partition sorting
+                if sort_columns and not used_partition_sorting:
                     # Filter out any columns that don't exist in the DataFrame
                     valid_sort_columns = [col for col in sort_columns if col in result_df.columns]
                     
