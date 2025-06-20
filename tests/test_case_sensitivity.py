@@ -115,8 +115,8 @@ class TestCaseSensitivity:
         """Test case sensitivity in DEFINE clause references."""
         # Use data that will actually match the pattern
         df = pd.DataFrame({
-            'id': [1, 2, 3, 4],
-            'value': [90, 80, 70, 70]  # Changed last value to make c condition match
+            'id': [1, 2, 3, 4, 5],
+            'value': [90, 80, 70, 70, 70]  # Need more consecutive equal values for c+
         })
         
         query = """
@@ -139,7 +139,7 @@ class TestCaseSensitivity:
         assert not result.empty, "Result should not be empty"
         
         # Variables should maintain their defined case
-        expected_labels = ['A', 'b', 'b', 'c']
+        expected_labels = ['A', 'b', 'b', 'c', 'c']
         actual_labels = result['label'].tolist()
         assert actual_labels == expected_labels, f"Expected {expected_labels}, got {actual_labels}"
 
