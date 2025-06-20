@@ -596,6 +596,36 @@ def _tokenize_pattern_internal(pattern: str, validation_level: PatternValidation
                 pos = new_pos
                 continue
         
+        # Parse quoted identifiers
+        if pattern[pos] == '"':
+            quote_start = pos
+            pos += 1  # Skip opening quote
+            
+            # Find closing quote
+            while pos < len(pattern) and pattern[pos] != '"':
+                if pattern[pos] == '\\' and pos + 1 < len(pattern):
+                    pos += 2  # Skip escaped character
+                else:
+                    pos += 1
+            
+            if pos >= len(pattern):
+                raise PatternSyntaxError(
+                    "Unterminated quoted identifier",
+                    quote_start, pattern, "Add closing quote", "PATTERN_004"
+                )
+            
+            pos += 1  # Skip closing quote
+            var_name = pattern[quote_start:pos]  # Include quotes in the token value
+            token = PatternToken(
+                PatternTokenType.LITERAL,
+                var_name,
+                position=quote_start,
+                length=pos - quote_start,
+                validation_level=validation_level
+            )
+            tokens.append(token)
+            continue
+        
         # Parse literal variable/identifier
         var_start = pos
         while (pos < len(pattern) and 

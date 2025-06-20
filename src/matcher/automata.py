@@ -87,8 +87,10 @@ class Transition:
             if not isinstance(self.variable, str) or not self.variable.strip():
                 raise ValueError(f"Variable name must be non-empty string, got '{self.variable}'")
             
-            # Check for valid variable naming (alphanumeric + underscore)
-            if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', self.variable):
+            # Check for valid variable naming (alphanumeric + underscore, or quoted identifiers)
+            # Allow quoted identifiers like "variable_name" for SQL:2016 compliance
+            if (not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', self.variable) and 
+                not re.match(r'^"[^"]*"$', self.variable)):
                 raise ValueError(f"Invalid variable name format: '{self.variable}'")
     
     def evaluate_condition(self, row_data: Dict[str, Any], context: Any = None) -> bool:
@@ -259,8 +261,10 @@ class NFAState:
                 return True
             
             try:
-                # Validate variable naming
-                if self.variable and not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', self.variable):
+                # Validate variable naming - allow quoted identifiers for SQL:2016 compliance
+                if (self.variable and 
+                    not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', self.variable) and 
+                    not re.match(r'^"[^"]*"$', self.variable)):
                     logger.error(f"Invalid variable name: '{self.variable}'")
                     return False
                 
