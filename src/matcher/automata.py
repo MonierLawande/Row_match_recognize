@@ -778,7 +778,7 @@ class NFA:
                 old_to_new[old_idx] = len(new_states)
                 new_states.append(self.states[old_idx])
             
-            # Update state references
+            # Update transitions
             for state in new_states:
                 # Update transition targets
                 for trans in state.transitions:
@@ -1484,6 +1484,17 @@ class NFABuilder:
                 self.add_epsilon(current, exclusion_start)
                 current = exclusion_end
                 
+            elif token.type == PatternTokenType.EXCLUSION:
+                # Handle standalone exclusion tokens
+                exclusion_start, exclusion_end = self._process_exclusion_token(token, define)
+                
+                # Connect exclusion fragment to current NFA
+                self.add_epsilon(current, exclusion_start)
+                current = exclusion_end
+                
+                # Skip exclusion token
+                idx[0] += 1
+                
             elif token.type in (PatternTokenType.ANCHOR_START, PatternTokenType.ANCHOR_END):
                 # Create anchor state
                 anchor_state = self.new_state()
@@ -1592,6 +1603,121 @@ class NFABuilder:
         # Return the exclusion pattern states
         # Note: These will be processed normally by the automaton,
         # but will be filtered from output during result processing
+        return excl_start, excl_end
+
+    def _process_exclusion_token(self, token: PatternToken, define: Dict[str, str]) -> Tuple[int, int]:
+        """
+        Process a standalone exclusion token with excluded variables in metadata.
+        
+        SQL:2016 EXCLUSION SEMANTICS:
+        Exclusion patterns like {- B+ -} should match the full pattern but
+        exclude the specified variables from the output. The automata must
+        build the complete pattern and mark excluded variables for filtering.
+        
+        Args:
+            token: The exclusion token with metadata
+            define: Dictionary of variable definitions
+            
+        Returns:
+            Tuple of (start_state, end_state) for the exclusion pattern
+        """
+        # Get excluded variables from token metadata
+        excluded_vars = token.metadata.get('excluded_variables', [])
+        
+        if not excluded_vars:
+            logger.warning("Exclusion token has no excluded variables in metadata")
+            # Create a simple bypass
+            bypass_state = self.new_state()
+            return bypass_state, bypass_state
+        
+        # Create start and end states for the exclusion pattern
+        excl_start = self.new_state()
+        excl_end = self.new_state()
+        
+        # Track exclusion range start
+        exclusion_start_idx = len(self.states) - 2  # -2 because we just created 2 states
+        
+        # SQL:2016 COMPLIANT EXCLUSION: Build the complete pattern
+        # DO NOT create a bypass - we need to match the excluded variables
+        # and then filter them from output in the matcher
+        
+        current_state = excl_start
+        
+        # Process each excluded variable and connect them in sequence
+        for i, var_spec in enumerate(excluded_vars):
+            var_spec = var_spec.strip()
+            
+            # Parse variable and quantifier (e.g., "B+" -> "B", "+")
+            var_name = var_spec
+            quantifier = None
+            
+            # Extract quantifier if present
+            if var_spec.endswith('+'):
+                var_name = var_spec[:-1]
+                quantifier = '+'
+            elif var_spec.endswith('*'):
+                var_name = var_spec[:-1]
+                quantifier = '*'
+            elif var_spec.endswith('?'):
+                var_name = var_spec[:-1]
+                quantifier = '?'
+            elif '{' in var_spec and '}' in var_spec:
+                # Handle {n,m} quantifiers
+                brace_start = var_spec.find('{')
+                var_name = var_spec[:brace_start]
+                quantifier = var_spec[brace_start:]
+            
+            # Create variable states
+            var_start, var_end = self.create_var_states(var_name, define)
+            
+            # Connect to the sequence
+            self.add_epsilon(current_state, var_start)
+            
+            # Apply quantifier if present
+            if quantifier:
+                min_rep, max_rep, greedy = parse_quantifier(quantifier)
+                var_start, var_end = self._apply_quantifier(
+                    var_start, var_end, min_rep, max_rep, greedy)
+            
+            # Mark all variable transitions as excluded in metadata
+            # Do NOT mark states as excluded - we need them to match!
+            # Instead, mark the transitions/variables for output filtering
+            for state_id, state in enumerate(self.states):
+                if state is not None:
+                    for transition in state.transitions:
+                        if transition.variable == var_name:
+                            # Mark this transition as excluded in metadata
+                            transition.metadata['is_excluded'] = True
+            
+            current_state = var_end
+        
+        # Connect the last variable to the end state
+        self.add_epsilon(current_state, excl_end)
+        
+        # Mark exclusion end in NFA states
+        exclusion_end_idx = len(self.states) - 1
+        
+        # Store exclusion range for later processing
+        self.exclusion_ranges.append((exclusion_start_idx, exclusion_end_idx))
+        
+        # Store excluded variables in NFA metadata for the matcher
+        if 'excluded_variables' not in self.metadata:
+            self.metadata['excluded_variables'] = set()
+        
+        # Add excluded variable names (without quantifiers) to metadata
+        for var_spec in excluded_vars:
+            var_name = var_spec.strip()
+            # Remove quantifier suffix
+            if var_name.endswith(('+', '*', '?')):
+                var_name = var_name[:-1]
+            elif '{' in var_name and '}' in var_name:
+                var_name = var_name[:var_name.find('{')]
+            
+            self.metadata['excluded_variables'].add(var_name)
+        
+        logger.debug(f"Processed exclusion token with variables: {excluded_vars}")
+        logger.debug(f"Excluded variables added to metadata: {self.metadata['excluded_variables']}")
+        
         return excl_start, excl_end
 
     def create_var_states(self, var: Union[str, PatternToken], define: Dict[str, str]) -> Tuple[int, int]:

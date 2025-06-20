@@ -67,6 +67,7 @@ class PatternTokenType(Enum):
     GROUP_END = "GROUP_END"                # ) closer
     ANCHOR_START = "ANCHOR_START"          # ^ anchor
     ANCHOR_END = "ANCHOR_END"              # $ anchor
+    EXCLUSION = "EXCLUSION"                # {- pattern -} exclusion
     EXCLUSION_START = "EXCL_START"         # {- opener
     EXCLUSION_END = "EXCL_END"             # -} closer
     QUANTIFIER = "QUANTIFIER"              # *, +, ?, {n,m}

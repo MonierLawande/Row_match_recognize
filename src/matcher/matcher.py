@@ -960,12 +960,13 @@ class EnhancedMatcher:
                 elif state.anchor_type == PatternTokenType.ANCHOR_END and state.is_accept:
                     anchor_end_accepting_states.add(i)
         
-        # Build normal transition index with priority support
+        # Build normal transition index with priority support and full transition objects
         for i, state in enumerate(self.dfa.states):
             # Sort transitions by priority (lower is higher priority)
             sorted_transitions = sorted(state.transitions, key=lambda t: t.priority)
             for trans in sorted_transitions:
-                index[i].append((trans.variable, trans.target, trans.condition))
+                # Store the full transition object to preserve metadata
+                index[i].append((trans.variable, trans.target, trans.condition, trans))
         
         # Store anchor metadata for quick reference
         self._anchor_metadata.update({
@@ -1098,12 +1099,15 @@ class EnhancedMatcher:
             valid_transitions = []
             
             # Try all transitions and collect those that match the condition
-            for var, target, condition in trans_index:
+            for var, target, condition, transition in trans_index:
                 logger.debug(f"  Evaluating condition for var: {var}")
                 try:
-                    # Check if this is an excluded variable using our integrated logic
+                    # Check if this is an excluded variable using transition metadata
                     is_excluded = False
-                    if self.exclusion_handler:
+                    if transition and transition.metadata.get('is_excluded', False):
+                        is_excluded = True
+                        logger.debug(f"  Variable {var} marked as excluded in transition metadata")
+                    elif self.exclusion_handler:
                         is_excluded = self.exclusion_handler.is_excluded(var)
                     else:
                         is_excluded = var in self.excluded_vars
@@ -1216,8 +1220,14 @@ class EnhancedMatcher:
                 # PRODUCTION FIX: Track excluded rows for proper handling in ALL ROWS PER MATCH mode
                 excluded_rows.append(current_idx)
                 
-                # For excluded variables, we still update the state but don't assign the variable
-                # This allows the pattern matching to continue correctly through exclusion sections
+                # SQL:2016 EXCLUSION SEMANTICS: We MUST still assign the variable for condition evaluation
+                # The exclusion only affects OUTPUT, not the matching logic
+                if matched_var not in var_assignments:
+                    var_assignments[matched_var] = []
+                var_assignments[matched_var].append(current_idx)
+                logger.debug(f"  Assigned excluded row {current_idx} to variable {matched_var} (for condition evaluation)")
+                
+                # Update state and continue
                 state = next_state
                 current_idx += 1
                 trans_index = self.transition_index[state]
