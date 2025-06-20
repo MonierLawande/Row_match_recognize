@@ -74,6 +74,10 @@ class ConditionEvaluator(ast.NodeVisitor):
             'LOWER': str.lower,
             'UPPER': str.upper,
             'SUBSTR': lambda s, start, length=None: s[start:start+length] if length else s[start:],
+            'CONCAT': lambda *args: ''.join(str(arg) for arg in args if arg is not None),
+            'TRIM': lambda s: str(s).strip() if s is not None else None,
+            'LTRIM': lambda s: str(s).lstrip() if s is not None else None,
+            'RTRIM': lambda s: str(s).rstrip() if s is not None else None,
             
             # Conditional functions
             'LEAST': min,
@@ -156,8 +160,17 @@ class ConditionEvaluator(ast.NodeVisitor):
             
             # Handle different types of right-hand side for IN
             if isinstance(right, (list, tuple)):
-                # Direct list/tuple comparison
-                result = left in right
+                # Handle special empty IN placeholders
+                if len(right) == 1:
+                    if right[0] == '__EMPTY_IN_FALSE__':
+                        result = False  # Empty IN should always be false
+                    elif right[0] == '__EMPTY_IN_TRUE__':
+                        result = True   # Used for NOT IN () preprocessing
+                    else:
+                        result = left in right
+                else:
+                    # Direct list/tuple comparison
+                    result = left in right
             elif hasattr(right, '__iter__') and not isinstance(right, str):
                 # Iterable but not string
                 try:
@@ -166,8 +179,14 @@ class ConditionEvaluator(ast.NodeVisitor):
                     # If comparison fails, return False
                     result = False
             else:
-                # Single value - treat as membership test
-                result = left == right
+                # Single value - handle special placeholders
+                if right == '__EMPTY_IN_FALSE__':
+                    result = False  # Empty IN should always be false
+                elif right == '__EMPTY_IN_TRUE__':
+                    result = True   # Used for NOT IN () preprocessing
+                else:
+                    # Single value - treat as membership test
+                    result = left == right
                 
             if self.evaluation_mode == 'DEFINE':
                 logger.debug(f"[DEBUG] IN RESULT: {left} IN {right} = {result}")
@@ -183,8 +202,17 @@ class ConditionEvaluator(ast.NodeVisitor):
             
             # Handle different types of right-hand side for NOT IN
             if isinstance(right, (list, tuple)):
-                # Direct list/tuple comparison
-                result = left not in right
+                # Handle special empty IN placeholders
+                if len(right) == 1:
+                    if right[0] == '__EMPTY_IN_FALSE__':
+                        result = False  # NOT IN with empty false placeholder
+                    elif right[0] == '__EMPTY_IN_TRUE__':
+                        result = True   # NOT IN () should always be true
+                    else:
+                        result = left not in right
+                else:
+                    # Direct list/tuple comparison
+                    result = left not in right
             elif hasattr(right, '__iter__') and not isinstance(right, str):
                 # Iterable but not string
                 try:
@@ -193,8 +221,14 @@ class ConditionEvaluator(ast.NodeVisitor):
                     # If comparison fails, return True (not in)
                     result = True
             else:
-                # Single value - treat as membership test
-                result = left != right
+                # Single value - handle special placeholders
+                if right == '__EMPTY_IN_FALSE__':
+                    result = False  # NOT IN with empty false placeholder
+                elif right == '__EMPTY_IN_TRUE__':
+                    result = True   # NOT IN () should always be true
+                else:
+                    # Single value - treat as membership test
+                    result = left != right
                 
             if self.evaluation_mode == 'DEFINE':
                 logger.debug(f"[DEBUG] NOT IN RESULT: {left} NOT IN {right} = {result}")
@@ -1771,6 +1805,47 @@ def _sql_to_python_condition(condition: str) -> str:
     # But avoid changing '==' to '===='
     import re
     
+    # Convert SQL CASE expressions to Python conditional expressions
+    # Pattern: CASE WHEN condition1 THEN result1 WHEN condition2 THEN result2 ... ELSE default END
+    case_pattern = r'\bCASE\s+(.*?)\s+END\b'
+    
+    def convert_case(match):
+        case_content = match.group(1)
+        
+        # Split into WHEN/THEN clauses and optional ELSE
+        when_clauses = []
+        else_clause = None
+        
+        # Find all WHEN...THEN pairs
+        when_pattern = r'\bWHEN\s+(.*?)\s+THEN\s+(.*?)(?=\s+WHEN|\s+ELSE|$)'
+        when_matches = re.findall(when_pattern, case_content, re.IGNORECASE | re.DOTALL)
+        
+        # Find ELSE clause
+        else_match = re.search(r'\bELSE\s+(.*?)$', case_content, re.IGNORECASE | re.DOTALL)
+        if else_match:
+            else_clause = else_match.group(1).strip()
+        
+        if not when_matches:
+            return match.group(0)  # Return original if can't parse
+        
+        # Build nested conditional expression from right to left
+        result = else_clause if else_clause else 'None'
+        
+        # Process WHEN clauses in reverse order to build nested conditionals
+        for when_condition, then_result in reversed(when_matches):
+            when_condition = when_condition.strip()
+            then_result = then_result.strip()
+            
+            # Recursively convert the condition
+            when_condition = _sql_to_python_condition(when_condition)
+            
+            result = f'({then_result} if ({when_condition}) else {result})'
+        
+        return result
+    
+    # Apply CASE conversion
+    condition = re.sub(case_pattern, convert_case, condition, flags=re.IGNORECASE | re.DOTALL)
+    
     # Replace single = with == but avoid changing already existing ==
     condition = re.sub(r'(?<![=!<>])\s*=\s*(?!=)', ' == ', condition)
     
@@ -1785,7 +1860,8 @@ def _sql_to_python_condition(condition: str) -> str:
     between_pattern = r'(\w+)\s+BETWEEN\s+([^A]+?)\s+AND\s+([^A]+?)(?=\s|$)'
     condition = re.sub(between_pattern, r'(\2 <= \1 <= \3)', condition, flags=re.IGNORECASE)
     
-    # Convert SQL IN operator to Python in operator (already handled in preprocessing)
-    # This is handled in the measure evaluator preprocessing
+    # Handle empty IN predicates - convert to always false/true
+    condition = re.sub(r'\bIN\s*\(\s*\)', 'in []', condition, flags=re.IGNORECASE)
+    condition = re.sub(r'\bNOT\s+IN\s*\(\s*\)', 'not in []', condition, flags=re.IGNORECASE)
     
     return condition

@@ -1047,6 +1047,10 @@ class FullQueryExtractor(TrinoParserVisitor):
 
 def parse_match_recognize_query(query: str, dialect='default') -> MatchRecognizeClause:
     query = query.strip()
+    
+    # Preprocess query to handle edge cases that the grammar doesn't support
+    query = _preprocess_query_for_parser(query)
+    
     if not query.endswith(";"):
         query += ";"
     input_stream = InputStream(query)
@@ -1061,6 +1065,10 @@ def parse_match_recognize_query(query: str, dialect='default') -> MatchRecognize
 
 def parse_full_query(query: str, dialect='default') -> FullQueryAST:
     query = query.strip()
+    
+    # Preprocess query to handle edge cases that the grammar doesn't support
+    query = _preprocess_query_for_parser(query)
+    
     if not query.endswith(";"):
         query += ";"
     input_stream = InputStream(query)
@@ -1073,5 +1081,35 @@ def parse_full_query(query: str, dialect='default') -> FullQueryAST:
     extractor = FullQueryExtractor(query)
     extractor.visit(tree)
     return FullQueryAST(extractor.select_clause, extractor.from_clause, extractor.match_recognize)
+
+
+def _preprocess_query_for_parser(query: str) -> str:
+    """
+    Preprocess the SQL query to handle constructs not supported by the grammar.
+    
+    This includes:
+    - Empty IN predicates: IN () -> IN (NULL) WHERE FALSE
+    - Empty NOT IN predicates: NOT IN () -> NOT IN (NULL) WHERE TRUE
+    
+    Args:
+        query: Original SQL query string
+        
+    Returns:
+        Preprocessed SQL query string
+    """
+    import re
+    
+    # Handle empty IN predicates by replacing with equivalent that parser can handle
+    # IN () should always be false, so replace with IN (NULL) and add WHERE FALSE logic
+    # NOT IN () should always be true, so replace with NOT IN (NULL) and add WHERE TRUE logic
+    
+    # For empty IN predicates in DEFINE clauses, we can replace with a condition that always evaluates to false/true
+    # Pattern: value IN () -> value IN ('__EMPTY_IN_FALSE__')
+    # Pattern: value NOT IN () -> value NOT IN ('__EMPTY_IN_TRUE__')
+    
+    query = re.sub(r'\bIN\s*\(\s*\)', "IN ('__EMPTY_IN_FALSE__')", query, flags=re.IGNORECASE)
+    query = re.sub(r'\bNOT\s+IN\s*\(\s*\)', "NOT IN ('__EMPTY_IN_TRUE__')", query, flags=re.IGNORECASE)
+    
+    return query
 
 
