@@ -41,13 +41,13 @@ class TestCaseSensitivity:
         
         result = match_recognize(query, df)
         
-        if result is not None and not result.empty:
-            # Variables should be: a (default 'A'), b (lowercase), C (uppercase)
-            expected_labels = ['A', 'b', 'b', 'C']
-            actual_labels = result['label'].tolist()
-            assert actual_labels == expected_labels
-        else:
-            pytest.skip("Case sensitive labels not implemented")
+        assert result is not None, "Query should return a result"
+        assert not result.empty, "Result should not be empty"
+        
+        # Variables should be: a (default 'A'), b (lowercase), C (uppercase)
+        expected_labels = ['A', 'b', 'b', 'C']
+        actual_labels = result['label'].tolist()
+        assert actual_labels == expected_labels, f"Expected {expected_labels}, got {actual_labels}"
 
     def test_quoted_identifiers(self):
         """Test quoted identifiers for case sensitivity."""
@@ -69,13 +69,13 @@ class TestCaseSensitivity:
         
         result = match_recognize(query, df)
         
-        if result is not None and not result.empty:
-            # Quoted "b" should preserve exact case
-            expected_labels = ['A', 'b', 'b', 'C']
-            actual_labels = result['label'].tolist()
-            assert actual_labels == expected_labels
-        else:
-            pytest.skip("Quoted identifier case sensitivity not implemented")
+        assert result is not None, "Query should return a result"
+        assert not result.empty, "Result should not be empty"
+        
+        # Quoted "b" should preserve exact case
+        expected_labels = ['A', 'b', 'b', 'C']
+        actual_labels = result['label'].tolist()
+        assert actual_labels == expected_labels, f"Expected {expected_labels}, got {actual_labels}"
 
     def test_mixed_case_variables(self):
         """Test mixed case pattern variables."""
@@ -100,18 +100,24 @@ class TestCaseSensitivity:
         
         result = match_recognize(query, df)
         
-        if result is not None and not result.empty:
-            # Should preserve exact case as defined
-            expected_labels = ['STARTVAR', 'midVar', 'midVar', 'midVar', 'EndVar']
-            actual_labels = result['label'].tolist()
-            # Check if case is preserved correctly
-            assert len(actual_labels) == len(expected_labels)
-        else:
-            pytest.skip("Mixed case variables not implemented")
+        assert result is not None, "Query should return a result"
+        assert not result.empty, "Result should not be empty"
+        
+        # Should preserve exact case as defined
+        actual_labels = result['label'].tolist()
+        # Check that we have the expected number of labels and that case is preserved
+        assert len(actual_labels) == 5, f"Expected 5 labels, got {len(actual_labels)}"
+        assert 'STARTVAR' in actual_labels, "StartVar should be converted to uppercase"
+        assert 'midVar' in actual_labels, "midVar should preserve its exact case"
+        assert 'EndVar' in actual_labels, "EndVar should preserve its exact case"
 
     def test_case_sensitive_in_define(self):
         """Test case sensitivity in DEFINE clause references."""
-        df = self.test_data
+        # Use data that will actually match the pattern
+        df = pd.DataFrame({
+            'id': [1, 2, 3, 4],
+            'value': [90, 80, 70, 70]  # Changed last value to make c condition match
+        })
         
         query = """
         SELECT id, CLASSIFIER() AS label
@@ -129,13 +135,13 @@ class TestCaseSensitivity:
         
         result = match_recognize(query, df)
         
-        if result is not None and not result.empty:
-            # Variables should maintain their defined case
-            expected_labels = ['A', 'b', 'b', 'c']
-            actual_labels = result['label'].tolist()
-            assert actual_labels == expected_labels
-        else:
-            pytest.skip("Case sensitivity in DEFINE clause not implemented")
+        assert result is not None, "Query should return a result"
+        assert not result.empty, "Result should not be empty"
+        
+        # Variables should maintain their defined case
+        expected_labels = ['A', 'b', 'b', 'c']
+        actual_labels = result['label'].tolist()
+        assert actual_labels == expected_labels, f"Expected {expected_labels}, got {actual_labels}"
 
     def test_case_insensitive_keywords(self):
         """Test that SQL keywords are case insensitive while variables are case sensitive."""
@@ -157,10 +163,10 @@ class TestCaseSensitivity:
         
         result = match_recognize(query, df)
         
-        if result is not None and not result.empty:
-            # Keywords should be case insensitive, variables case sensitive
-            expected_labels = ['A', 'b', 'b', 'C']
-            actual_labels = result['label'].tolist()
-            assert actual_labels == expected_labels
-        else:
-            pytest.skip("Case insensitive keywords with case sensitive variables not implemented")
+        assert result is not None, "Query should return a result"
+        assert not result.empty, "Result should not be empty"
+        
+        # Keywords should be case insensitive, variables case sensitive
+        expected_labels = ['A', 'b', 'b', 'C']
+        actual_labels = result['label'].tolist()
+        assert actual_labels == expected_labels, f"Expected {expected_labels}, got {actual_labels}"
