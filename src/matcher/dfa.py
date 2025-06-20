@@ -1169,6 +1169,17 @@ class DFABuilder:
         # Check if this is an accepting state
         is_accept = self.nfa.accept in nfa_states
         
+        # PRODUCTION FIX: Handle patterns with optional suffixes
+        # For patterns like "A B+ C+ D?", a DFA state representing completion of "A B+ C+"
+        # should also be accepting since D? is optional
+        if not is_accept and hasattr(self.nfa, 'metadata'):
+            nfa_metadata = self.nfa.metadata
+            if nfa_metadata.get('has_optional_suffix', False):
+                # Check if this DFA state represents a position where only optional parts remain
+                is_accept = self._can_reach_accept_via_optional_only(nfa_states)
+                if is_accept:
+                    logger.debug(f"DFA state {self.build_stats['states_created']} marked as accepting due to optional suffix completion")
+        
         # Create DFA state with state ID for debugging
         state = DFAState(
             nfa_states=nfa_states,
@@ -1456,3 +1467,126 @@ class DFABuilder:
             'source_nfa_states': len(self.nfa.states),
             'subset_cache_size': len(self.subset_cache)
         }
+
+    def _can_reach_accept_via_optional_only(self, nfa_states: FrozenSet[int]) -> bool:
+        """
+        Production-ready check if the given NFA states can reach the accept state through optional-only paths.
+        
+        This handles patterns like "A B+ C+ D?" where after matching "A B+ C+", the remaining
+        "D?" is optional and should be considered as a valid completion point.
+        
+        This implementation uses the optional suffix metadata from the NFA to determine
+        if the current DFA state represents a valid completion point for required pattern parts.
+        
+        Args:
+            nfa_states: Set of NFA state indices to check
+            
+        Returns:
+            True if accept state is reachable via optional-only transitions or if this
+            represents completion of all required pattern parts
+        """
+        # First, check direct epsilon reachability to accept state
+        visited = set()
+        to_check = list(nfa_states)
+        
+        while to_check:
+            current_state_idx = to_check.pop(0)
+            
+            if current_state_idx in visited:
+                continue
+            visited.add(current_state_idx)
+            
+            if current_state_idx == self.nfa.accept:
+                return True
+                
+            # Check epsilon transitions from this state
+            current_state = self.nfa.states[current_state_idx]
+            for target_idx in current_state.epsilon:
+                if target_idx not in visited:
+                    to_check.append(target_idx)
+        
+        # If not directly reachable via epsilon, use metadata-based approach
+        # This is more reliable for complex patterns with optional suffixes
+        nfa_metadata = self.nfa.metadata
+        if not nfa_metadata.get('has_optional_suffix', False):
+            return False
+            
+        # Get the optional suffix tokens to understand what's optional
+        optional_suffix_tokens = nfa_metadata.get('optional_suffix_tokens', [])
+        last_required_token_idx = nfa_metadata.get('last_required_token_idx', -1)
+        
+        if not optional_suffix_tokens or last_required_token_idx == -1:
+            return False
+            
+        logger.debug(f"Checking optional suffix reachability: suffix_tokens={optional_suffix_tokens}, "
+                    f"last_required_idx={last_required_token_idx}, nfa_states={nfa_states}")
+        
+        # Advanced heuristic: Check if this DFA state represents completion of required parts
+        # For patterns like "A B+ C+ D?", after consuming "A B+ C+", we should be in a state
+        # that can be considered accepting since D? is optional
+        
+        # Strategy: Check if any NFA state in this DFA state can reach accept
+        # through a path that only involves optional quantifiers
+        for state_idx in nfa_states:
+            if self._can_reach_accept_through_optionals(state_idx, optional_suffix_tokens, visited=set()):
+                logger.debug(f"Found optional path to accept from NFA state {state_idx}")
+                return True
+        
+        return False
+    
+    def _can_reach_accept_through_optionals(self, state_idx: int, optional_tokens: List[str], 
+                                          visited: Set[int]) -> bool:
+        """
+        Check if a specific NFA state can reach accept through optional-only constructs.
+        
+        This method performs a depth-first search through the NFA, following transitions
+        that correspond to optional pattern elements.
+        
+        Args:
+            state_idx: NFA state index to start from
+            optional_tokens: List of optional pattern tokens (e.g., ['D?'])
+            visited: Set of already visited states to prevent infinite loops
+            
+        Returns:
+            True if accept is reachable through optional-only paths
+        """
+        if state_idx in visited:
+            return False
+        visited.add(state_idx)
+        
+        if state_idx == self.nfa.accept:
+            return True
+            
+        # Check epsilon transitions (always consider these as "optional")
+        current_state = self.nfa.states[state_idx]
+        for target_idx in current_state.epsilon:
+            if self._can_reach_accept_through_optionals(target_idx, optional_tokens, visited.copy()):
+                return True
+        
+        # Check transitions that correspond to optional pattern elements
+        for transition in current_state.transitions:
+            if transition.variable and self._is_optional_variable(transition.variable, optional_tokens):
+                target_idx = transition.target
+                if self._can_reach_accept_through_optionals(target_idx, optional_tokens, visited.copy()):
+                    return True
+        
+        return False
+    
+    def _is_optional_variable(self, variable: str, optional_tokens: List[str]) -> bool:
+        """
+        Check if a variable corresponds to an optional pattern token.
+        
+        Args:
+            variable: Variable name to check
+            optional_tokens: List of optional pattern tokens (e.g., ['D?'])
+            
+        Returns:
+            True if the variable is part of an optional pattern construct
+        """
+        # Simple check: see if the variable appears in any optional token
+        for token in optional_tokens:
+            # Remove quantifier suffix to get base variable name
+            base_token = token.rstrip('?+*{}0123456789, ')
+            if variable == base_token:
+                return True
+        return False

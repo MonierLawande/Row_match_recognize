@@ -2131,7 +2131,6 @@ class EnhancedMatcher:
             
         return True
     
-
     def _process_permute_match(self, match, original_variables):
         """Process a match from a PERMUTE pattern with lexicographical ordering."""
         # If this is a PERMUTE pattern, ensure lexicographical ordering
@@ -2423,7 +2422,7 @@ class EnhancedMatcher:
             variable: Pattern variable to check
             
         Returns:
-            True if this variable is referenced by other DEFINE conditions
+            True if a variable is referenced by other DEFINE conditions
         """
         if not hasattr(self, 'define_conditions'):
             return False
@@ -2599,7 +2598,7 @@ class EnhancedMatcher:
         
         # Find all variable patterns in this sequence
         # Matches: "A", "B*", "C+", "D?", "E*?", "F+?", etc.
-        tokens = re.findall(r'([A-Z])([*+?]{0,2})', sequence)
+        tokens = re.findall(r'([A-Z])([*+?]?)', sequence)
         
         for var, quantifier in tokens:
             # Required variables are those without *, ?, or those with + (which require at least one match)
