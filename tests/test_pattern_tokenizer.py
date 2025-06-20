@@ -25,11 +25,15 @@ class TestPatternTokenizer:
         pattern = "A B C"
         tokens = tokenize_pattern(pattern)
         assert tokens is not None
-        assert len(tokens) > 0
+        assert len(tokens) == 3, f"Expected 3 tokens for 'A B C', got {len(tokens)}"
         
         # Check that tokens represent correct pattern elements
-        pattern_str = "".join([t.symbol if hasattr(t, 'symbol') else str(t) for t in tokens])
-        assert "ABC" in pattern_str or "A B C" in pattern_str
+        token_values = [t.value for t in tokens]
+        assert token_values == ['A', 'B', 'C'], f"Expected ['A', 'B', 'C'], got {token_values}"
+        
+        # Verify token types are correct
+        for token in tokens:
+            assert token.type.value == 'LITERAL', f"Expected LITERAL token type, got {token.type}"
         
     def test_alternation_tokenization(self):
         """Test tokenization of patterns with alternation."""

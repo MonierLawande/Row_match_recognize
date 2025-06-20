@@ -733,14 +733,27 @@ def _parse_permute_pattern(pattern: str, start_pos: int,
 
 def _parse_exclusion_pattern(pattern: str, start_pos: int, 
                            validation_level: PatternValidationLevel) -> Tuple[PatternToken, int]:
-    """Parse a pattern exclusion {- ... -} with validation."""
+    """Parse a pattern exclusion {- ... -} with support for nested exclusions."""
     pos = start_pos + 2  # Skip "{-"
     exclusion_start = pos
     
-    # Find the closing "-}"
+    # Track nesting level for proper handling of nested exclusions
+    nesting_level = 0
+    
+    # Find the closing "-}" accounting for nesting
     while pos < len(pattern) - 1:
-        if pattern[pos:pos+2] == '-}':
-            break
+        if pattern[pos:pos+2] == '{-':
+            nesting_level += 1
+            pos += 2
+            continue
+        elif pattern[pos:pos+2] == '-}':
+            if nesting_level == 0:
+                # This is our closing bracket
+                break
+            else:
+                nesting_level -= 1
+                pos += 2
+                continue
         pos += 1
     
     if pos >= len(pattern) - 1:
@@ -758,8 +771,14 @@ def _parse_exclusion_pattern(pattern: str, start_pos: int,
             start_pos, pattern, "Add variables to exclude", "EXCLUSION_001"
         )
     
-    # Parse excluded variables
-    excluded_vars = [var.strip() for var in exclusion_content.split(',')]
+    # For nested exclusions, treat the whole content as a single complex pattern
+    # rather than trying to split by commas
+    if '{-' in exclusion_content:
+        # This is a complex nested exclusion - store as single pattern
+        excluded_vars = [exclusion_content.strip()]
+    else:
+        # Simple exclusion - split by commas for multiple variables
+        excluded_vars = [var.strip() for var in exclusion_content.split(',') if var.strip()]
     
     token = PatternToken(
         PatternTokenType.EXCLUSION,
@@ -769,7 +788,8 @@ def _parse_exclusion_pattern(pattern: str, start_pos: int,
         validation_level=validation_level,
         metadata={
             "excluded_variables": excluded_vars,
-            "original": pattern[start_pos:pos]
+            "original": pattern[start_pos:pos],
+            "is_nested": '{-' in exclusion_content
         }
     )
     
