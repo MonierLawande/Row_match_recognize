@@ -1812,34 +1812,34 @@ def _sql_to_python_condition(condition: str) -> str:
     def convert_case(match):
         case_content = match.group(1)
         
-        # Split into WHEN/THEN clauses and optional ELSE
-        when_clauses = []
-        else_clause = None
-        
         # Find all WHEN...THEN pairs
         when_pattern = r'\bWHEN\s+(.*?)\s+THEN\s+(.*?)(?=\s+WHEN|\s+ELSE|$)'
         when_matches = re.findall(when_pattern, case_content, re.IGNORECASE | re.DOTALL)
         
         # Find ELSE clause
         else_match = re.search(r'\bELSE\s+(.*?)$', case_content, re.IGNORECASE | re.DOTALL)
-        if else_match:
-            else_clause = else_match.group(1).strip()
+        else_clause = else_match.group(1).strip() if else_match else 'None'
         
         if not when_matches:
             return match.group(0)  # Return original if can't parse
         
         # Build nested conditional expression from right to left
-        result = else_clause if else_clause else 'None'
+        result = else_clause
         
         # Process WHEN clauses in reverse order to build nested conditionals
         for when_condition, then_result in reversed(when_matches):
             when_condition = when_condition.strip()
             then_result = then_result.strip()
             
-            # Recursively convert the condition
-            when_condition = _sql_to_python_condition(when_condition)
+            # Recursively convert the condition (but avoid infinite recursion)
+            # Don't recursively call _sql_to_python_condition here as it can cause issues
+            # Just handle basic operators in the when_condition
+            when_condition = re.sub(r'(?<![=!<>])\s*=\s*(?!=)', ' == ', when_condition)
+            when_condition = re.sub(r'\bAND\b', 'and', when_condition, flags=re.IGNORECASE)
+            when_condition = re.sub(r'\bOR\b', 'or', when_condition, flags=re.IGNORECASE)
+            when_condition = re.sub(r'\bNOT\b', 'not', when_condition, flags=re.IGNORECASE)
             
-            result = f'({then_result} if ({when_condition}) else {result})'
+            result = f'({then_result} if {when_condition} else {result})'
         
         return result
     

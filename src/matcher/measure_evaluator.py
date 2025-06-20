@@ -645,24 +645,15 @@ class MeasureEvaluator:
             else:
                 logger.debug(f"CLASSIFIER evaluation returned None for: {match.group()}")
         
-        # Replace SQL CASE expressions with Python conditional expressions
-        # Pattern: CASE WHEN condition THEN value1 ELSE value2 END
-        case_pattern = r'CASE\s+WHEN\s+(.+?)\s+THEN\s+(.+?)\s+ELSE\s+(.+?)\s+END'
-        case_matches = re.finditer(case_pattern, preprocessed, re.IGNORECASE | re.DOTALL)
+        # Replace SQL CASE expressions with Python conditional expressions using the proper converter
+        from .condition_evaluator import _sql_to_python_condition
         
-        # Process matches in reverse order to avoid position shifts when replacing
-        for match in reversed(list(case_matches)):
-            condition = match.group(1).strip()
-            then_value = match.group(2).strip()
-            else_value = match.group(3).strip()
-            
-            # Convert to Python conditional expression: (then_value if condition else else_value)
-            python_conditional = f"({then_value} if {condition} else {else_value})"
-            
-            old_expr = preprocessed[match.start():match.end()]
-            logger.debug(f"Preprocessing: replacing CASE expression '{old_expr}' with '{python_conditional}'")
-            preprocessed = preprocessed[:match.start()] + python_conditional + preprocessed[match.end():]
-            logger.debug(f"After CASE replacement: '{preprocessed}'")
+        # Check if there are any CASE expressions to convert
+        if re.search(r'\bCASE\s+WHEN\b', preprocessed, re.IGNORECASE):
+            logger.debug(f"Converting CASE expressions using _sql_to_python_condition")
+            old_preprocessed = preprocessed
+            preprocessed = _sql_to_python_condition(preprocessed)
+            logger.debug(f"After CASE conversion: '{old_preprocessed}' -> '{preprocessed}'")
         
         # Note: We could add other special function replacements here if needed
         
