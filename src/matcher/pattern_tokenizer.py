@@ -1071,7 +1071,7 @@ def parse_quantifier_at(pattern: str, start_pos: int) -> Tuple[Optional[str], bo
 
 def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[str, PatternToken]], int]:
     """
-    Process variables in a PERMUTE expression, handling nested PERMUTE patterns.
+    Process variables in a PERMUTE expression, handling alternations and nested patterns.
     
     Args:
         pattern: The full pattern string
@@ -1086,46 +1086,27 @@ def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[
     variables = []
     pos = start_pos
     current_var = ""
+    paren_depth = 0
     
-    while pos < len(pattern) and pattern[pos] != ')':
+    while pos < len(pattern):
         char = pattern[pos]
         
-        if char == ',':
-            # End of current variable
-            if current_var.strip():
-                variables.append(current_var.strip())
-                current_var = ""
-        elif char == '(':
-            # Start of nested structure - handle carefully
-            if current_var.strip().upper().endswith('PERMUTE'):
-                # This is a nested PERMUTE
-                # Parse the nested PERMUTE as a single unit
-                nested_start = pos - 7  # Back to start of 'PERMUTE'
-                nested_depth = 1
-                pos += 1
-                
-                while pos < len(pattern) and nested_depth > 0:
-                    if pattern[pos] == '(':
-                        nested_depth += 1
-                    elif pattern[pos] == ')':
-                        nested_depth -= 1
-                    pos += 1
-                
-                if nested_depth > 0:
-                    raise PermutePatternError("Unmatched parenthesis in nested PERMUTE", nested_start, pattern)
-                
-                # Create nested PERMUTE token
-                nested_content = pattern[nested_start:pos]
-                nested_token = PatternToken(
-                    PatternTokenType.PERMUTE,
-                    nested_content,
-                    metadata={"nested": True, "original": nested_content}
-                )
-                variables.append(nested_token)
-                current_var = ""
-                continue
-            else:
+        if char == '(':
+            paren_depth += 1
+            current_var += char
+        elif char == ')':
+            if paren_depth > 0:
+                paren_depth -= 1
                 current_var += char
+            else:
+                # This is the closing parenthesis of PERMUTE
+                break
+        elif char == ',' and paren_depth == 0:
+            # End of current variable/pattern (only at top level)
+            if current_var.strip():
+                processed_var = _process_permute_variable(current_var.strip())
+                variables.append(processed_var)
+                current_var = ""
         else:
             current_var += char
         
@@ -1133,9 +1114,75 @@ def process_permute_variables(pattern: str, start_pos: int) -> Tuple[List[Union[
     
     # Add the last variable if any
     if current_var.strip():
-        variables.append(current_var.strip())
+        processed_var = _process_permute_variable(current_var.strip())
+        variables.append(processed_var)
     
     return variables, pos
+
+
+def _process_permute_variable(var_text: str) -> Union[str, PatternToken]:
+    """
+    Process a single PERMUTE variable which might be:
+    - A simple variable: "A"
+    - An alternation: "A | B" 
+    - A nested PERMUTE: "PERMUTE(X, Y)"
+    
+    Args:
+        var_text: The variable text to process
+        
+    Returns:
+        Either a string (simple variable) or PatternToken (complex pattern)
+    """
+    var_text = var_text.strip()
+    
+    # Check for alternation pattern (contains | not inside parentheses)
+    if '|' in var_text and not var_text.upper().startswith('PERMUTE'):
+        # This is an alternation pattern
+        alternatives = []
+        current_alt = ""
+        paren_depth = 0
+        
+        for char in var_text:
+            if char == '(':
+                paren_depth += 1
+                current_alt += char
+            elif char == ')':
+                paren_depth -= 1
+                current_alt += char
+            elif char == '|' and paren_depth == 0:
+                # Top-level alternation separator
+                if current_alt.strip():
+                    alternatives.append(current_alt.strip())
+                    current_alt = ""
+            else:
+                current_alt += char
+        
+        # Add the last alternative
+        if current_alt.strip():
+            alternatives.append(current_alt.strip())
+        
+        # Create alternation token
+        if len(alternatives) > 1:
+            return PatternToken(
+                PatternTokenType.ALTERNATION,
+                var_text,
+                metadata={
+                    "alternatives": alternatives,
+                    "is_permute_argument": True,
+                    "original": var_text
+                }
+            )
+    
+    # Check for nested PERMUTE
+    elif var_text.upper().startswith('PERMUTE'):
+        return PatternToken(
+            PatternTokenType.PERMUTE,
+            var_text,
+            metadata={"nested": True, "original": var_text}
+        )
+    
+    # Simple variable
+    return var_text
 
 def _validate_anchor_patterns(tokens: List[PatternToken], pattern: str, 
                             validation_level: PatternValidationLevel) -> None:
