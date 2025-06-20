@@ -621,8 +621,50 @@ class MeasureEvaluator:
         preprocessed = re.sub(r'\bIN\b', 'in', preprocessed)
         preprocessed = re.sub(r'\bNOT IN\b', 'not in', preprocessed)
         
+        # Replace CLASSIFIER() calls with their actual values
+        # This is crucial for expressions like "CASE WHEN CLASSIFIER() IN ('A', 'START') THEN 1 ELSE 0 END"
+        classifier_pattern = r'CLASSIFIER\(\s*([A-Za-z][A-Za-z0-9_]*)?\s*\)'
+        classifier_matches = re.finditer(classifier_pattern, preprocessed, re.IGNORECASE)
+        
+        # Process matches in reverse order to avoid position shifts when replacing
+        for match in reversed(list(classifier_matches)):
+            var_name = match.group(1)
+            
+            # Evaluate the CLASSIFIER function
+            classifier_value = self.evaluate_classifier(var_name, running=is_running)
+            
+            # Replace the CLASSIFIER function call with its computed value (quoted string)
+            if classifier_value is not None:
+                # Quote the classifier value as a string literal for AST parsing
+                classifier_str = f"'{classifier_value}'"
+                
+                old_expr = preprocessed[match.start():match.end()]
+                logger.debug(f"Preprocessing: replacing '{old_expr}' with '{classifier_str}' in expression")
+                preprocessed = preprocessed[:match.start()] + classifier_str + preprocessed[match.end():]
+                logger.debug(f"After CLASSIFIER replacement: '{preprocessed}'")
+            else:
+                logger.debug(f"CLASSIFIER evaluation returned None for: {match.group()}")
+        
+        # Replace SQL CASE expressions with Python conditional expressions
+        # Pattern: CASE WHEN condition THEN value1 ELSE value2 END
+        case_pattern = r'CASE\s+WHEN\s+(.+?)\s+THEN\s+(.+?)\s+ELSE\s+(.+?)\s+END'
+        case_matches = re.finditer(case_pattern, preprocessed, re.IGNORECASE | re.DOTALL)
+        
+        # Process matches in reverse order to avoid position shifts when replacing
+        for match in reversed(list(case_matches)):
+            condition = match.group(1).strip()
+            then_value = match.group(2).strip()
+            else_value = match.group(3).strip()
+            
+            # Convert to Python conditional expression: (then_value if condition else else_value)
+            python_conditional = f"({then_value} if {condition} else {else_value})"
+            
+            old_expr = preprocessed[match.start():match.end()]
+            logger.debug(f"Preprocessing: replacing CASE expression '{old_expr}' with '{python_conditional}'")
+            preprocessed = preprocessed[:match.start()] + python_conditional + preprocessed[match.end():]
+            logger.debug(f"After CASE replacement: '{preprocessed}'")
+        
         # Note: We could add other special function replacements here if needed
-        # For example, CLASSIFIER() could be replaced with the classifier value
         
         logger.debug(f"Preprocessed expression: '{expr}' -> '{preprocessed}'")
         return preprocessed

@@ -88,14 +88,54 @@ class ConditionEvaluator(ast.NodeVisitor):
         # Regular comparisons between non-NULL values should work normally
         if left is None or right is None:
             return False
-            
-        return op(left, right)
+        
+        # Map AST operators to Python functions
+        import operator
+        
+        op_map = {
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+            ast.Lt: operator.lt,
+            ast.LtE: operator.le,
+            ast.Gt: operator.gt,
+            ast.GtE: operator.ge,
+            ast.Is: operator.is_,
+            ast.IsNot: operator.is_not,
+            ast.In: lambda a, b: a in b,
+            ast.NotIn: lambda a, b: a not in b,
+        }
+        
+        # If op is a callable, use it directly; otherwise map from AST type
+        if callable(op):
+            return op(left, right)
+        else:
+            op_func = op_map.get(type(op))
+            if op_func:
+                return op_func(left, right)
+            else:
+                raise ValueError(f"Unsupported comparison operator: {type(op)}")
 
     def visit_Compare(self, node: ast.Compare):
-        # Handle multiple operators for complex comparisons like IN
+        # Handle chained comparisons like (20 <= value <= 30) for BETWEEN
         if len(node.ops) > 1:
-            # For now, handle only single comparisons
-            raise ValueError("Multiple comparison operators not supported")
+            # Handle chained comparisons by evaluating them step by step
+            left = self.visit(node.left)
+            
+            for i, (op, comparator) in enumerate(zip(node.ops, node.comparators)):
+                right = self.visit(comparator)
+                
+                # Evaluate the current comparison
+                result = self._safe_compare(left, right, op)
+                
+                # If any comparison in the chain is False, return False
+                if not result:
+                    return False
+                
+                # For the next iteration, the right becomes the new left
+                left = right
+            
+            # If all comparisons passed, return True
+            return True
             
         left = self.visit(node.left)
         op = node.ops[0]
@@ -391,6 +431,49 @@ class ConditionEvaluator(ast.NodeVisitor):
                         else:
                             # Use variable-aware navigation for FIRST/LAST with no specific variable
                             return self._get_navigation_value(None, column, func_name, steps)
+                    elif isinstance(first_arg, ast.Call):
+                        # Handle nested function calls like NEXT(CLASSIFIER())
+                        if isinstance(first_arg.func, ast.Name) and first_arg.func.id.upper() == "CLASSIFIER":
+                            # Special case: NEXT(CLASSIFIER()) - navigate through classifier values
+                            if func_name in ("PREV", "NEXT"):
+                                # For PREV/NEXT with CLASSIFIER, we need to get the classifier value at the target position
+                                current_idx = self.context.current_idx
+                                target_idx = current_idx + steps if func_name == "NEXT" else current_idx - steps
+                                
+                                # Check bounds
+                                if target_idx < 0 or target_idx >= len(self.context.rows):
+                                    return None
+                                
+                                # Create a temporary context for the target position
+                                temp_context = RowContext(
+                                    rows=self.context.rows,
+                                    variables=self.context.variables,
+                                    current_idx=target_idx,
+                                    match_number=self.context.match_number
+                                )
+                                
+                                # Get the classifier value at that position
+                                temp_evaluator = ConditionEvaluator(temp_context, self.evaluation_mode)
+                                return temp_evaluator._get_classifier()
+                            else:
+                                # For FIRST/LAST with CLASSIFIER, not supported yet
+                                logger.error(f"{func_name}(CLASSIFIER()) not yet supported")
+                                return None
+                        else:
+                            # For other nested calls, evaluate the argument first
+                            evaluated_arg = self.visit(first_arg)
+                            if evaluated_arg is not None:
+                                # Use the evaluated result as a column name
+                                column = str(evaluated_arg)
+                                if func_name in ("PREV", "NEXT"):
+                                    if self.evaluation_mode == 'DEFINE':
+                                        return self.evaluate_physical_navigation(func_name, column, steps)
+                                    else:
+                                        return self.evaluate_navigation_function(func_name, column, steps)
+                                else:
+                                    return self._get_navigation_value(None, column, func_name, steps)
+                            else:
+                                return None
                     else:
                         raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
 
@@ -1277,891 +1360,432 @@ class ConditionEvaluator(ast.NodeVisitor):
         else:
             raise ValueError(f"Unsupported boolean operator: {type(node.op)}")
 
-    def visit_Constant(self, node: ast.Constant):
-        """Handle all constant values (numbers, strings, booleans, None)"""
-        return node.value
-
-    def visit_Num(self, node: ast.Num):
-        """Handle numeric constants (Python < 3.8 compatibility)"""
-        # In Python 3.8+, ast.Num is deprecated in favor of ast.Constant
-        # But we still need to support it for backward compatibility
-        return node.n
-
-    def visit_Str(self, node: ast.Str):
-        """Handle string constants (Python < 3.8 compatibility)"""
-        # In Python 3.8+, ast.Str is deprecated in favor of ast.Constant
-        # But we still need to support it for backward compatibility
-        return node.s
-
-    def visit_List(self, node: ast.List):
-        """Handle list literals for IN expressions"""
-        return [self.visit(item) for item in node.elts]
+    def visit_IfExp(self, node: ast.IfExp):
+        """
+        Handle Python conditional expressions (ternary operator): x if condition else y
+        
+        This is crucial for handling CASE WHEN expressions converted to Python conditionals.
+        For example: CASE WHEN CLASSIFIER() IN ('A', 'START') THEN 1 ELSE 0 END
+        becomes: (1 if 'A' in ('A', 'START') else 0)
+        
+        Args:
+            node: AST IfExp node representing a conditional expression
+            
+        Returns:
+            The value of either the 'then' branch or 'else' branch based on condition
+        """
+        try:
+            # Evaluate the condition (test)
+            condition = self.visit(node.test)
+            
+            logger.debug(f"[DEBUG] IfExp condition: {condition} (type: {type(condition)})")
+            
+            # Handle None condition (SQL semantics)
+            if condition is None:
+                logger.debug("[DEBUG] IfExp condition is None, returning else value")
+                return self.visit(node.orelse)
+            
+            # Python truth value evaluation
+            if condition:
+                result = self.visit(node.body)
+                logger.debug(f"[DEBUG] IfExp condition is truthy, returning then value: {result}")
+                return result
+            else:
+                result = self.visit(node.orelse)
+                logger.debug(f"[DEBUG] IfExp condition is falsy, returning else value: {result}")
+                return result
+                
+        except Exception as e:
+            logger.error(f"Error evaluating condition '{e}'")
+            # For production readiness, we should return None on errors
+            return None
 
     def visit_Tuple(self, node: ast.Tuple):
-        """Handle tuple literals for IN expressions"""
-        return tuple(self.visit(item) for item in node.elts)
-
-    def visit_BinOp(self, node: ast.BinOp):
-        """Handle binary operations (addition, subtraction, multiplication, etc.)"""
-        import operator
+        """
+        Handle tuple literals like ('A', 'START') in expressions.
         
-        # Map AST operators to Python operators
-        op_map = {
-            ast.Add: operator.add,
-            ast.Sub: operator.sub,
-            ast.Mult: operator.mul,
-            ast.Div: operator.truediv,
-            ast.FloorDiv: operator.floordiv,
-            ast.Mod: operator.mod,
-            ast.Pow: operator.pow,
-            ast.LShift: operator.lshift,
-            ast.RShift: operator.rshift,
-            ast.BitOr: operator.or_,
-            ast.BitXor: operator.xor,
-            ast.BitAnd: operator.and_,
-        }
+        This is essential for IN predicates that use tuple literals.
+        For example: 'A' in ('A', 'START') needs to parse the tuple correctly.
         
+        Args:
+            node: AST Tuple node
+            
+        Returns:
+            A Python tuple with evaluated elements
+        """
         try:
-            left = self.visit(node.left)
-            right = self.visit(node.right)
-            op = op_map.get(type(node.op))
+            # Evaluate each element in the tuple
+            elements = []
+            for elt in node.elts:
+                value = self.visit(elt)
+                elements.append(value)
             
-            if op is None:
-                raise ValueError(f"Unsupported binary operator: {type(node.op).__name__}")
-            
-            # Handle None values - if either operand is None, result is None (SQL semantics)
-            if left is None or right is None:
-                return None
-                
-            result = op(left, right)
-            logger.debug(f"[DEBUG] BinOp: {left} {type(node.op).__name__} {right} = {result}")
+            result = tuple(elements)
+            logger.debug(f"[DEBUG] Tuple evaluation: {result}")
             return result
             
         except Exception as e:
-            logger.error(f"Error in binary operation: {e}")
-            return None
+            logger.error(f"Error evaluating tuple: {e}")
+            return ()
 
-    def _is_table_prefix_in_context(self, var_name: str) -> bool:
+    def visit_List(self, node: ast.List):
         """
-        Check if a variable name looks like a table prefix in the current context.
+        Handle list literals like ['A', 'START'] in expressions.
+        
+        This supports IN predicates that use list literals.
+        For example: 'A' in ['A', 'START'] needs to parse the list correctly.
         
         Args:
-            var_name: The variable name to check
+            node: AST List node
             
         Returns:
-            True if this looks like a forbidden table prefix, False otherwise
+            A Python list with evaluated elements
         """
-        # If it's a defined pattern variable, it's not a table prefix
-        if hasattr(self.context, 'var_assignments') and var_name in self.context.var_assignments:
-            return False
-        if hasattr(self.context, 'subsets') and self.context.subsets and var_name in self.context.subsets:
-            return False
-        
-        # Use the same logic as the standalone function
-        from src.matcher.measure_evaluator import _is_table_prefix
-        return _is_table_prefix(var_name, 
-                               getattr(self.context, 'var_assignments', {}),
-                               getattr(self.context, 'subsets', {}))
-
-        # Updates for src/matcher/condition_evaluator.py
-    def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
-        """
-        Get a column value from a pattern variable's matched rows with enhanced subset support.
-        
-        For self-referential conditions (e.g., B.price < A.price when evaluating for B),
-        use the current row's value for the variable being evaluated.
-        
-        Args:
-            var_name: Pattern variable name
-            col_name: Column name
-            ctx: Row context
-            
-        Returns:
-            Column value from the matched row or current row
-        """
-        # Check if we're in DEFINE evaluation mode
-        is_define_mode = self.evaluation_mode == 'DEFINE'
-        
-        # DEBUG: Enhanced logging to trace exact values
-        current_var = getattr(ctx, 'current_var', None)
-        logger.debug(f"[DEBUG] _get_variable_column_value: var_name={var_name}, col_name={col_name}, is_define_mode={is_define_mode}, current_var={current_var}")
-        logger.debug(f"[DEBUG] ctx.current_idx={ctx.current_idx}, ctx.variables={ctx.variables}")
-        
-        # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
-        if is_define_mode:
-            # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
-            # but A.price should use A's previously matched row
-            if var_name == current_var or (current_var is None and var_name in self.visit_stack):
-                # Self-reference: use current row being tested
-                logger.debug(f"[DEBUG] DEFINE mode - self-reference for {var_name}.{col_name}")
-                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
-                    value = ctx.rows[ctx.current_idx].get(col_name)
-                    logger.debug(f"[DEBUG] Self-reference value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
-                    return value
-                else:
-                    logger.debug(f"[DEBUG] Self-reference: invalid current_idx {ctx.current_idx}")
-                    return None
-            else:
-                # Cross-reference: use previously matched row for this variable
-                logger.debug(f"[DEBUG] DEFINE mode - cross-reference for {var_name}.{col_name}")
-                
-                # Check if this is a subset variable
-                if hasattr(ctx, 'subsets') and var_name in ctx.subsets:
-                    # For subset variables, find the last row matched to any component variable
-                    component_vars = ctx.subsets[var_name]
-                    last_idx = -1
-                    
-                    for comp_var in component_vars:
-                        if comp_var in ctx.variables:
-                            var_indices = ctx.variables[comp_var]
-                            if var_indices:
-                                last_var_idx = max(var_indices)
-                                if last_var_idx > last_idx:
-                                    last_idx = last_var_idx
-                    
-                    if last_idx >= 0 and last_idx < len(ctx.rows):
-                        value = ctx.rows[last_idx].get(col_name)
-                        logger.debug(f"[DEBUG] Subset cross-reference value: {var_name}.{col_name} = {value} (from row {last_idx})")
-                        return value
-                
-                # Get the value from the last row matched to this variable
-                var_indices = ctx.variables.get(var_name, [])
-                logger.debug(f"[DEBUG] Looking for {var_name} in ctx.variables: {var_indices}")
-                if var_indices:
-                    last_idx = max(var_indices)
-                    if last_idx < len(ctx.rows):
-                        value = ctx.rows[last_idx].get(col_name)
-                        logger.debug(f"[DEBUG] Cross-reference value: {var_name}.{col_name} = {value} (from row {last_idx})")
-                        return value
-                    else:
-                        logger.debug(f"[DEBUG] Cross-reference: invalid last_idx {last_idx}")
-                        return None
-                
-                # If no rows matched yet, this variable hasn't been matched
-                logger.debug(f"[DEBUG] Cross-reference: no rows matched for {var_name} yet")
-                return None
-        
-        # For non-DEFINE modes (MEASURES mode), use standard logic
-        
-        # Track if we're evaluating a condition for the same variable (self-reference)
-        is_self_reference = False
-        
-        # If we have current_var set, this is a direct check for self-reference
-        if hasattr(ctx, 'current_var') and ctx.current_var == var_name:
-            is_self_reference = True
-        
-        # Otherwise check if current row is already assigned to this variable
-        if not is_self_reference and hasattr(ctx, 'current_var_assignments'):
-            if var_name in ctx.current_var_assignments and ctx.current_idx in ctx.current_var_assignments[var_name]:
-                is_self_reference = True
-        
-        # For self-references in other modes, use the current row's value
-        if is_self_reference:
-            if self.current_row is not None:
-                return self.current_row.get(col_name)
-            elif ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
-                return ctx.rows[ctx.current_idx].get(col_name)
-        
-        # Check if this is a subset variable
-        if hasattr(ctx, 'subsets') and var_name in ctx.subsets:
-            # For subset variables, find the last row matched to any component variable
-            component_vars = ctx.subsets[var_name]
-            last_idx = -1
-            
-            for comp_var in component_vars:
-                if comp_var in ctx.variables:
-                    var_indices = ctx.variables[comp_var]
-                    if var_indices:
-                        last_var_idx = max(var_indices)
-                        if last_var_idx > last_idx:
-                            last_idx = last_var_idx
-            
-            if last_idx >= 0 and last_idx < len(ctx.rows):
-                return ctx.rows[last_idx].get(col_name)
-        
-        # Otherwise, get the value from the last row matched to this variable
-        var_indices = ctx.variables.get(var_name, [])
-        if var_indices:
-            last_idx = max(var_indices)
-            if last_idx < len(ctx.rows):
-                return ctx.rows[last_idx].get(col_name)
-        
-        # If no rows matched yet, use the current row's value
-        # This is important for the first evaluation of a pattern variable
-        if self.current_row is not None:
-            return self.current_row.get(col_name)
-        elif ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
-            return ctx.rows[ctx.current_idx].get(col_name)
-        
-        return None
-
-
-
-
-def validate_navigation_conditions(conditions: Union[str, Dict[str, str]], pattern_variables: Union[Dict[str, str], List[str]]) -> Union[bool, Dict[str, str]]:
-    """
-    Validate and potentially modify navigation conditions for pattern compatibility.
-    
-    This function supports two modes:
-    1. Single condition validation: validate_navigation_conditions(condition_str, metadata_dict) -> bool
-    2. Batch validation: validate_navigation_conditions(conditions_dict, pattern_variables_list) -> dict
-    
-    Args:
-        conditions: Either a single condition string or dictionary of variable -> condition mappings
-        pattern_variables: Either metadata dict (for single validation) or list of pattern variables
-        
-    Returns:
-        For single condition: boolean indicating if condition is valid
-        For batch validation: dictionary of validated and potentially modified conditions
-        
-    Raises:
-        ValueError: If conditions are invalid or incompatible
-    """
-    logger = get_logger(__name__)
-    
-    # Handle single condition validation (test mode)
-    if isinstance(conditions, str) and isinstance(pattern_variables, dict):
-        condition = conditions
-        metadata = pattern_variables
-        
         try:
-            # Validate the condition string
-            if not condition or not condition.strip():
-                logger.warning("Empty condition provided")
-                return False
+            # Evaluate each element in the list
+            elements = []
+            for elt in node.elts:
+                value = self.visit(elt)
+                elements.append(value)
             
-            # Check for basic syntax issues
-            if not _validate_condition_syntax(condition):
-                logger.warning(f"Invalid syntax in condition: {condition}")
-                return False
-            
-            # Check clause-specific rules
-            clause_type = metadata.get("clause", "DEFINE")
-            if clause_type == "DEFINE":
-                # DEFINE clauses should not use future navigation
-                if _contains_future_navigation(condition):
-                    logger.warning(f"DEFINE clause contains future navigation: {condition}")
-                    # For now, we allow this but log a warning
-                    # In strict mode, this could return False
-                
-            # Condition is valid
-            logger.debug(f"Condition validated successfully: {condition}")
-            return True
+            result = elements
+            logger.debug(f"[DEBUG] List evaluation: {result}")
+            return result
             
         except Exception as e:
-            logger.error(f"Error validating condition '{condition}': {e}")
-            return False
-    
-    # Handle batch validation (original mode)
-    elif isinstance(conditions, dict) and isinstance(pattern_variables, list):
-        validated_conditions = {}
-        
-        for var, condition in conditions.items():
-            try:
-                # Validate each condition using single validation mode
-                is_valid = validate_navigation_conditions(condition, {"clause": "DEFINE"})
-                if is_valid:
-                    validated_conditions[var] = condition
-                else:
-                    logger.warning(f"Invalid condition for variable {var}: {condition}")
-                    # Keep the original condition even if invalid (non-strict mode)
-                    validated_conditions[var] = condition
-                    
-            except Exception as e:
-                logger.warning(f"Issue validating condition for {var}: {e}")
-                # Keep the original condition
-                validated_conditions[var] = condition
-        
-        return validated_conditions
-    
-    else:
-        raise ValueError(f"Invalid arguments: conditions={type(conditions)}, pattern_variables={type(pattern_variables)}")
+            logger.error(f"Error evaluating list: {e}")
+            return []
 
-def _validate_condition_syntax(condition: str) -> bool:
+
+def compile_condition(condition_str, evaluation_mode='DEFINE'):
     """
-    Validate basic syntax of a condition string.
+    Compile a condition string into a callable function.
     
     Args:
-        condition: The condition string to validate
+        condition_str: SQL condition string
+        evaluation_mode: 'DEFINE' for pattern definitions, 'MEASURES' for measures
         
     Returns:
-        True if syntax is valid, False otherwise
+        A callable function that takes a row and context and returns a boolean
     """
+    if not condition_str or condition_str.strip().upper() == 'TRUE':
+        # Optimization for true condition
+        return lambda row, ctx: True
+        
+    if condition_str.strip().upper() == 'FALSE':
+        # Optimization for false condition
+        return lambda row, ctx: False
+    
     try:
-        # Try to compile as Python expression to check basic syntax
-        import ast
-        ast.parse(condition, mode='eval')
-        return True
-    except SyntaxError:
-        # Try SQL-style operators
-        sql_condition = _sql_to_python_condition(condition)
-        try:
-            ast.parse(sql_condition, mode='eval')
-            return True
-        except SyntaxError:
-            return False
-    except Exception:
-        return False
+        # Convert SQL syntax to Python syntax
+        python_condition = _sql_to_python_condition(condition_str)
+        
+        # Parse the condition
+        tree = ast.parse(python_condition, mode='eval')
+        
+        # Create a function that evaluates the condition with the given row and context
+        def evaluate_condition(row, ctx):
+            # Create evaluator with the given context
+            evaluator = ConditionEvaluator(ctx, evaluation_mode)
+            
+            # Set the current row
+            evaluator.current_row = row
+            
+            # Evaluate the condition
+            try:
+                result = evaluator.visit(tree.body)
+                return bool(result)
+            except Exception as e:
+                logger.error(f"Error evaluating condition '{condition_str}': {e}")
+                return False
+                
+        return evaluate_condition
+    except SyntaxError as e:
+        # Log the error and return a function that always returns False
+        logger.error(f"Syntax error in condition '{condition_str}': {e}")
+        return lambda row, ctx: False
+    except Exception as e:
+        # Log the error and return a function that always returns False
+        logger.error(f"Error compiling condition '{condition_str}': {e}")
+        return lambda row, ctx: False
 
-def _contains_future_navigation(condition: str) -> bool:
+
+def validate_navigation_conditions(pattern_variables, define_clauses):
     """
-    Check if condition contains future navigation functions.
+    Validate that navigation function calls in conditions are valid for the pattern.
+    
+    For example, navigation calls that reference pattern variables that don't appear
+    in the pattern or haven't been matched yet are invalid.
     
     Args:
-        condition: The condition string to check
+        pattern_variables: List of pattern variables from the pattern definition
+        define_clauses: Dict mapping variable names to their conditions
         
     Returns:
-        True if condition contains NEXT() or similar future navigation
+        True if all navigation conditions are valid, False otherwise
     """
-    import re
-    # Look for NEXT function calls
-    future_patterns = [
-        r'\bNEXT\s*\(',
-        r'\bFUTURE\s*\(',
-        # Add other future navigation patterns as needed
-    ]
+    # Validate each condition for each variable
+    for var, condition in define_clauses.items():
+        if var not in pattern_variables:
+            logger.warning(f"Variable {var} in DEFINE clause not found in pattern")
+            continue
+            
+        # Validate navigation references to other variables
+        for ref_var in pattern_variables:
+            # Skip self-references (always valid)
+            if ref_var == var:
+                continue
+                
+            # Find PREV(var) references
+            if f"PREV({ref_var}" in condition:
+                # Ensure the referenced variable appears before this one in the pattern
+                var_idx = pattern_variables.index(var)
+                ref_idx = pattern_variables.index(ref_var)
+                
+                if ref_idx >= var_idx:
+                    logger.error(f"Invalid PREV({ref_var}) reference in condition for {var}: "
+                               f"{ref_var} does not appear before {var} in the pattern")
+                    return False
+            
+            # Find NEXT(var) references
+            if f"NEXT({ref_var}" in condition:
+                # Ensure the referenced variable appears after this one in the pattern
+                var_idx = pattern_variables.index(var)
+                ref_idx = pattern_variables.index(ref_var)
+                
+                if ref_idx <= var_idx:
+                    logger.error(f"Invalid NEXT({ref_var}) reference in condition for {var}: "
+                               f"{ref_var} does not appear after {var} in the pattern")
+                    return False
     
-    for pattern in future_patterns:
-        if re.search(pattern, condition, re.IGNORECASE):
-            return True
-    
-    return False
+    # If all checks pass
+    return True
+
 
 def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str] = None) -> Any:
     """
-    Production-ready nested navigation function evaluator.
+    Evaluate nested navigation expressions.
     
-    Handles complex nested navigation expressions like:
-    - PREV(FIRST(A.price, 3), 2)
-    - NEXT(LAST(B.quantity)) 
-    - PREV(LAST(A.value), 3) + FIRST(A.value) + PREV(LAST(B.value), 2)
+    This function handles complex navigation expressions that may contain nested function calls
+    like NEXT(PREV(value)) or FIRST(CLASSIFIER()), and SQL-specific constructs like 
+    PREV(RUNNING LAST(value)).
     
     Args:
-        expr: Navigation expression string
-        context: Row context with match state
+        expr: The navigation expression string to evaluate
+        context: The row context for evaluation
         current_idx: Current row index
-        current_var: Current variable being evaluated
+        current_var: Current pattern variable (optional)
         
     Returns:
-        Result of the nested navigation or None if invalid
+        The evaluated result
     """
-    import re
-    import time
-    
-    logger = get_logger(__name__)
-    start_time = time.time()
-    
     try:
-        # Cache key for this nested navigation
-        cache_key = f"nested_{expr}_{current_idx}_{current_var}"
-        if hasattr(context, 'navigation_cache') and cache_key in context.navigation_cache:
-            return context.navigation_cache[cache_key]
+        import re
         
-        # Initialize cache if not present
-        if not hasattr(context, 'navigation_cache'):
-            context.navigation_cache = {}
+        # Handle SQL-specific constructs that aren't valid Python syntax
+        processed_expr = expr
         
-        logger.debug(f"NESTED_NAV: Evaluating '{expr}' at idx={current_idx}, var={current_var}")
+        # Handle CLASSIFIER() inside navigation functions
+        classifier_nav_pattern = r'(FIRST|LAST)\s*\(\s*CLASSIFIER\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)\s*\)'
+        classifier_nav_match = re.match(classifier_nav_pattern, processed_expr, re.IGNORECASE)
         
-        # First check if this is a complex arithmetic expression with multiple navigation calls
-        nav_pattern = r'(PREV|NEXT|FIRST|LAST)\s*\([^()]*(?:\([^()]*\)[^()]*)*\)'
-        nav_matches = re.findall(nav_pattern, expr, re.IGNORECASE)
-        
-        if len(nav_matches) > 1 or '+' in expr or '-' in expr or '*' in expr or '/' in expr:
-            # This is a complex arithmetic expression - evaluate each navigation function separately
-            logger.debug(f"NESTED_NAV: Complex expression detected: {expr}")
-            
-            def replace_nav_func(match):
-                nav_expr = match.group(0)
-                logger.debug(f"NESTED_NAV: Evaluating sub-expression: {nav_expr}")
-                result = evaluate_nested_navigation(nav_expr, context, current_idx, current_var)
-                return str(result) if result is not None else '0'
-            
-            # Replace all navigation functions with their evaluated values
-            evaluated_expr = re.sub(nav_pattern, replace_nav_func, expr, flags=re.IGNORECASE)
-            logger.debug(f"NESTED_NAV: After substitution: {evaluated_expr}")
-            
-            try:
-                # Safely evaluate the arithmetic expression
-                result = eval(evaluated_expr, {"__builtins__": {}}, {})
-                logger.debug(f"NESTED_NAV: Final result: {result}")
-                context.navigation_cache[cache_key] = result
-                return result
-            except Exception as e:
-                logger.error(f"NESTED_NAV: Error evaluating arithmetic: {e}")
-                context.navigation_cache[cache_key] = None
-                return None
-        
-        # Single navigation function - parse it properly
-        simple_pattern = r'(PREV|NEXT|FIRST|LAST)\s*\(\s*([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)(?:\s*,\s*(\d+))?\s*\)'
-        nested_outer_pattern = r'(PREV|NEXT)\s*\(\s*((?:FIRST|LAST)\s*\([^)]+\))(?:\s*,\s*(\d+))?\s*\)'
-        # NEW: Pattern for navigation functions with CLASSIFIER() - NEXT(CLASSIFIER()), PREV(CLASSIFIER()), LAST(CLASSIFIER()), FIRST(CLASSIFIER())  
-        classifier_nav_pattern = r'(PREV|NEXT|LAST|FIRST)\s*\(\s*CLASSIFIER\s*\(\s*\)(?:\s*,\s*(\d+))?\s*\)'
-        # NEW: Pattern for navigation functions with RUNNING aggregates - PREV(RUNNING LAST(value)), NEXT(RUNNING SUM(value)), etc.
-        running_aggregate_pattern = r'(PREV|NEXT)\s*\(\s*RUNNING\s+(LAST|FIRST|SUM|COUNT|MAX|MIN|AVG)\s*\(\s*([A-Za-z0-9_]+)\s*\)(?:\s*,\s*(\d+))?\s*\)'
-        
-        # NEW: Try classifier navigation pattern first (like NEXT(CLASSIFIER()), PREV(CLASSIFIER()), LAST(CLASSIFIER()), FIRST(CLASSIFIER()))
-        classifier_nav_match = re.match(classifier_nav_pattern, expr, re.IGNORECASE)
         if classifier_nav_match:
-            nav_func = classifier_nav_match.group(1).upper()
-            offset = int(classifier_nav_match.group(2)) if classifier_nav_match.group(2) else 1
+            nav_func = classifier_nav_match.group(1).upper()  # FIRST or LAST
+            classifier_var = classifier_nav_match.group(2)  # Optional variable name
             
-            logger.debug(f"NESTED_NAV: Classifier navigation pattern: {nav_func}(CLASSIFIER(), {offset})")
+            logger.debug(f"Processing {nav_func}(CLASSIFIER({classifier_var}))")
             
-            # Calculate target index based on navigation function
-            target_classifier = None
+            # Get the match variable assignments from context
+            if hasattr(context, 'variables') and context.variables:
+                var_assignments = context.variables
+                
+                if nav_func == 'LAST':
+                    # Find the last row in the match and get its classifier
+                    max_idx = -1
+                    last_classifier = None
+                    
+                    for var_name, indices in var_assignments.items():
+                        if indices:
+                            for idx in indices:
+                                if idx > max_idx:
+                                    max_idx = idx
+                                    # Apply case sensitivity rules for classifier
+                                    if hasattr(context, 'defined_variables') and context.defined_variables:
+                                        if var_name.lower() in [v.lower() for v in context.defined_variables]:
+                                            # Preserve original case for defined variables
+                                            last_classifier = var_name
+                                        else:
+                                            # Uppercase for undefined variables
+                                            last_classifier = var_name.upper()
+                                    else:
+                                        # Default to uppercase if no defined_variables info
+                                        last_classifier = var_name.upper()
+                    
+                    logger.debug(f"LAST(CLASSIFIER()) -> last row index: {max_idx}, classifier: '{last_classifier}'")
+                    return last_classifier
+                    
+                elif nav_func == 'FIRST':
+                    # Find the first row in the match and get its classifier
+                    min_idx = float('inf')
+                    first_classifier = None
+                    
+                    for var_name, indices in var_assignments.items():
+                        if indices:
+                            for idx in indices:
+                                if idx < min_idx:
+                                    min_idx = idx
+                                    # Apply case sensitivity rules
+                                    if hasattr(context, 'defined_variables') and context.defined_variables:
+                                        if var_name.lower() in [v.lower() for v in context.defined_variables]:
+                                            first_classifier = var_name
+                                        else:
+                                            first_classifier = var_name.upper()
+                                    else:
+                                        first_classifier = var_name.upper()
+                    
+                    logger.debug(f"FIRST(CLASSIFIER()) -> first row index: {min_idx}, classifier: '{first_classifier}'")
+                    return first_classifier
             
-            if nav_func == 'NEXT':
-                target_idx = current_idx + offset
-                logger.debug(f"NESTED_NAV: NEXT - Current idx: {current_idx}, target idx: {target_idx}")
-                
-                # Check if target index is valid
-                if 0 <= target_idx < len(context.rows):
-                    # Look through all variables to find which one contains the target row
-                    for var_name, var_indices in context.variables.items():
-                        if target_idx in var_indices:
-                            target_classifier = context._apply_case_sensitivity_rule(var_name)
-                            break
-                    logger.debug(f"NESTED_NAV: Target row {target_idx} classifier: {target_classifier}")
-                else:
-                    logger.debug(f"NESTED_NAV: Target index {target_idx} out of bounds (0 to {len(context.rows)-1})")
-                    
-            elif nav_func == 'PREV':
-                target_idx = current_idx - offset
-                logger.debug(f"NESTED_NAV: PREV - Current idx: {current_idx}, target idx: {target_idx}")
-                
-                # Check if target index is valid
-                if 0 <= target_idx < len(context.rows):
-                    # Look through all variables to find which one contains the target row
-                    for var_name, var_indices in context.variables.items():
-                        if target_idx in var_indices:
-                            target_classifier = context._apply_case_sensitivity_rule(var_name)
-                            break
-                    logger.debug(f"NESTED_NAV: Target row {target_idx} classifier: {target_classifier}")
-                else:
-                    logger.debug(f"NESTED_NAV: Target index {target_idx} out of bounds (0 to {len(context.rows)-1})")
-                    
-            elif nav_func == 'LAST':
-                logger.debug(f"NESTED_NAV: LAST(CLASSIFIER()) - finding last row in match")
-                
-                # Find the last row index across all variables in the current match
-                all_match_indices = set()
-                for var_indices in context.variables.values():
-                    all_match_indices.update(var_indices)
-                
-                if all_match_indices:
-                    last_match_idx = max(all_match_indices)
-                    logger.debug(f"NESTED_NAV: Last match index: {last_match_idx}")
-                    
-                    # Find which variable this last row belongs to
-                    for var_name, var_indices in context.variables.items():
-                        if last_match_idx in var_indices:
-                            target_classifier = context._apply_case_sensitivity_rule(var_name)
-                            break
-                    logger.debug(f"NESTED_NAV: Last row {last_match_idx} classifier: {target_classifier}")
-                else:
-                    logger.debug(f"NESTED_NAV: No match indices found")
-                    
-            elif nav_func == 'FIRST':
-                logger.debug(f"NESTED_NAV: FIRST(CLASSIFIER()) - finding first row in match")
-                
-                # Find the first row index across all variables in the current match  
-                all_match_indices = set()
-                for var_indices in context.variables.values():
-                    all_match_indices.update(var_indices)
-                
-                if all_match_indices:
-                    first_match_idx = min(all_match_indices)
-                    logger.debug(f"NESTED_NAV: First match index: {first_match_idx}")
-                    
-                    # Find which variable this first row belongs to
-                    for var_name, var_indices in context.variables.items():
-                        if first_match_idx in var_indices:
-                            target_classifier = context._apply_case_sensitivity_rule(var_name)
-                            break
-                    logger.debug(f"NESTED_NAV: First row {first_match_idx} classifier: {target_classifier}")
-                else:
-                    logger.debug(f"NESTED_NAV: No match indices found")
-            
-            context.navigation_cache[cache_key] = target_classifier
-            return target_classifier
+            # Fallback: return None if no variable assignments found
+            logger.debug(f"{nav_func}(CLASSIFIER()) -> no variable assignments found")
+            return None
         
-        # NEW: Try RUNNING aggregate pattern (like PREV(RUNNING LAST(value)), NEXT(RUNNING SUM(amount)))
-        running_agg_match = re.match(running_aggregate_pattern, expr, re.IGNORECASE)
-        if running_agg_match:
-            nav_func = running_agg_match.group(1).upper()
-            agg_func = running_agg_match.group(2).upper()
-            column_name = running_agg_match.group(3)
-            offset = int(running_agg_match.group(4)) if running_agg_match.group(4) else 1
+        # Handle RUNNING/FINAL semantic modifiers with navigation functions
+        # Pattern: PREV(RUNNING LAST(value)) -> PREV(value) with RUNNING semantics
+        running_pattern = r'(PREV|NEXT)\s*\(\s*RUNNING\s+(LAST|FIRST)\s*\(\s*([^)]+)\s*\)\s*(?:,\s*(\d+))?\s*\)'
+        running_match = re.match(running_pattern, processed_expr, re.IGNORECASE)
+        
+        if running_match:
+            outer_func = running_match.group(1).upper()  # PREV or NEXT
+            inner_func = running_match.group(2).upper()  # LAST or FIRST
+            column_ref = running_match.group(3)  # value
+            steps = int(running_match.group(4)) if running_match.group(4) else 1
             
-            logger.debug(f"NESTED_NAV: Running aggregate pattern: {nav_func}(RUNNING {agg_func}({column_name}), {offset})")
+            logger.debug(f"Processing {outer_func}(RUNNING {inner_func}({column_ref}))")
             
-            # For LAST and FIRST, these are navigation functions, not aggregates
-            # RUNNING LAST(value) means "get the last value from the current running window"
-            # PREV(RUNNING LAST(value)) means "get the running last value from the previous row"
+            # For RUNNING semantics, we need to:
+            # 1. First get the RUNNING LAST/FIRST value at current position
+            # 2. Then apply PREV/NEXT to that result
             
-            if agg_func in ('LAST', 'FIRST'):
-                # Handle as navigation function in RUNNING context
-                if nav_func == 'PREV':
-                    target_idx = current_idx - offset
-                elif nav_func == 'NEXT':
-                    target_idx = current_idx + offset
-                else:
-                    logger.error(f"NESTED_NAV: Unsupported navigation function: {nav_func}")
-                    context.navigation_cache[cache_key] = None
-                    return None
-                
-                logger.debug(f"NESTED_NAV: Target index for {nav_func} by {offset}: {target_idx}")
-                
-                if 0 <= target_idx < len(context.rows):
-                    # Create a temporary context at the target position
-                    temp_context = RowContext(
-                        rows=context.rows,
-                        variables=context.variables,
-                        subsets=context.subsets,
-                        current_idx=target_idx,
-                        match_number=context.match_number,
-                        current_var=context.current_var,
-                        defined_variables=context.defined_variables
-                    )
+            if inner_func == "LAST":
+                # RUNNING LAST(value): Get the last value among matched rows up to current position
+                # This should be current row's value for simple cases
+                if current_idx >= 0 and current_idx < len(context.rows):
+                    running_value = context.rows[current_idx].get(column_ref.strip())
+                    logger.debug(f"RUNNING LAST({column_ref}) at index {current_idx}: {running_value}")
                     
-                    # Get all matched row indices up to the target position (RUNNING semantics)
-                    # For RUNNING LAST, we want the last row up to and including target_idx
-                    # This should consider ALL rows in the partition, not just matched ones
-                    all_rows_up_to_target = list(range(0, target_idx + 1))
+                    # Now apply PREV/NEXT to this position
+                    if outer_func == "PREV":
+                        target_idx = current_idx - steps
+                    else:  # NEXT
+                        target_idx = current_idx + steps
                     
-                    if all_rows_up_to_target:
-                        if agg_func == 'LAST':
-                            # Get the LAST (maximum) index from the running window
-                            last_idx = max(all_rows_up_to_target)
-                            result = temp_context.rows[last_idx].get(column_name)
-                        elif agg_func == 'FIRST':
-                            # Get the FIRST (minimum) index from the running window
-                            first_idx = min(all_rows_up_to_target)
-                            result = temp_context.rows[first_idx].get(column_name)
-                        
-                        logger.debug(f"NESTED_NAV: {nav_func}(RUNNING {agg_func}({column_name})) at row {target_idx} = {result}")
-                        context.navigation_cache[cache_key] = result
+                    # Check bounds and get value
+                    if target_idx >= 0 and target_idx < len(context.rows):
+                        result = context.rows[target_idx].get(column_ref.strip())
+                        logger.debug(f"{outer_func}(RUNNING LAST({column_ref})) -> target_idx={target_idx}, result={result}")
                         return result
                     else:
-                        logger.debug(f"NESTED_NAV: No rows found for running context at row {target_idx}")
-                        context.navigation_cache[cache_key] = None
+                        logger.debug(f"{outer_func}(RUNNING LAST({column_ref})) -> target_idx={target_idx} out of bounds")
                         return None
                 else:
-                    logger.debug(f"NESTED_NAV: Target index {target_idx} out of bounds")
-                    context.navigation_cache[cache_key] = None
                     return None
-            
-            else:
-                # Handle as traditional aggregate function (SUM, COUNT, MAX, MIN, AVG)
-                try:
-                    from src.matcher.production_aggregates import ProductionAggregateEvaluator
+            elif inner_func == "FIRST":
+                # RUNNING FIRST(value): Similar logic for FIRST
+                if current_idx >= 0 and current_idx < len(context.rows):
+                    # For RUNNING FIRST, we would need to find the first value in the current match sequence
+                    # For simplicity, use current row's value (this may need refinement)
+                    running_value = context.rows[current_idx].get(column_ref.strip())
                     
-                    # Step 1: Apply the navigation function to get the target row
-                    if nav_func == 'PREV':
-                        target_idx = current_idx - offset
-                    elif nav_func == 'NEXT':
-                        target_idx = current_idx + offset
+                    # Apply PREV/NEXT
+                    if outer_func == "PREV":
+                        target_idx = current_idx - steps
+                    else:  # NEXT
+                        target_idx = current_idx + steps
+                    
+                    if target_idx >= 0 and target_idx < len(context.rows):
+                        result = context.rows[target_idx].get(column_ref.strip())
+                        return result
                     else:
-                        logger.error(f"NESTED_NAV: Unsupported navigation function for aggregates: {nav_func}")
-                        context.navigation_cache[cache_key] = None
                         return None
-                    
-                    logger.debug(f"NESTED_NAV: Target index for {nav_func} by {offset}: {target_idx}")
-                    
-                    if 0 <= target_idx < len(context.rows):
-                        # Create a temporary context for the target row evaluation
-                        temp_context = RowContext(
-                            rows=context.rows,
-                            variables=context.variables,
-                            subsets=context.subsets,
-                            current_idx=target_idx,
-                            match_number=context.match_number,
-                            current_var=context.current_var,
-                            defined_variables=context.defined_variables
-                        )
-                        
-                        # Create evaluator for target context
-                        target_agg_evaluator = ProductionAggregateEvaluator(temp_context)
-                        
-                        # Build the aggregate expression for traditional aggregates
-                        agg_expr = f"{agg_func}({column_name})"
-                        logger.debug(f"NESTED_NAV: Evaluating aggregate: {agg_expr}")
-                        
-                        # Evaluate running aggregate at target position
-                        target_agg_value = target_agg_evaluator.evaluate_aggregate(agg_expr, "RUNNING")
-                        logger.debug(f"NESTED_NAV: Target running aggregate value at row {target_idx}: {target_agg_value}")
-                        
-                        context.navigation_cache[cache_key] = target_agg_value
-                        return target_agg_value
-                    else:
-                        logger.debug(f"NESTED_NAV: Target index {target_idx} out of bounds")
-                        context.navigation_cache[cache_key] = None
-                        return None
-                        
-                except Exception as e:
-                    logger.error(f"NESTED_NAV: Error evaluating running aggregate: {e}")
-                    context.navigation_cache[cache_key] = None
+                else:
                     return None
         
-        # Try nested pattern (like PREV(LAST(A.value), 3))
-        nested_match = re.match(nested_outer_pattern, expr, re.IGNORECASE)
-        if nested_match:
-            outer_func = nested_match.group(1).upper()
-            inner_expr = nested_match.group(2)
-            outer_offset = int(nested_match.group(3)) if nested_match.group(3) else 1
-            
-            logger.debug(f"NESTED_NAV: Nested pattern: {outer_func}({inner_expr}, {outer_offset})")
-            
-            # CRITICAL FIX: For nested navigation, we need to find the ROW INDEX where the inner
-            # expression was evaluated, then apply the outer navigation from THAT index.
-            # This is the key difference from simple value evaluation.
-            
-            # Parse the inner expression to extract variable and column
-            inner_simple_match = re.match(simple_pattern, inner_expr, re.IGNORECASE)
-            if not inner_simple_match:
-                logger.error(f"NESTED_NAV: Cannot parse inner expression: {inner_expr}")
-                context.navigation_cache[cache_key] = None
-                return None
-            
-            inner_func = inner_simple_match.group(1).upper()
-            inner_var = inner_simple_match.group(2)
-            inner_col = inner_simple_match.group(3)
-            
-            logger.debug(f"NESTED_NAV: Inner function: {inner_func}({inner_var}.{inner_col})")
-            
-            # Find the ROW INDEX where the inner function evaluates
-            inner_row_idx = None
-            if inner_var in context.variables:
-                var_indices = context.variables[inner_var]
-                if var_indices:
-                    if inner_func == 'LAST':
-                        inner_row_idx = max(var_indices)
-                    elif inner_func == 'FIRST':
-                        inner_row_idx = min(var_indices)
-                    
-                    logger.debug(f"NESTED_NAV: {inner_func}({inner_var}) found at row index: {inner_row_idx}")
-            
-            if inner_row_idx is None:
-                logger.debug(f"NESTED_NAV: Could not find row index for {inner_func}({inner_var})")
-                context.navigation_cache[cache_key] = None
-                return None
-            
-            # Get the value at the inner row index for validation
-            inner_value = context.rows[inner_row_idx].get(inner_col) if 0 <= inner_row_idx < len(context.rows) else None
-            logger.debug(f"NESTED_NAV: Inner value at row {inner_row_idx}: {inner_value}")
-            
-            # Now apply the outer navigation function FROM the inner row index
-            if outer_func == 'PREV':
-                target_idx = inner_row_idx - outer_offset
-            else:  # NEXT
-                target_idx = inner_row_idx + outer_offset
-            
-            if 0 <= target_idx < len(context.rows):
-                # Get the value from the target row using the same column as inner expression
-                result = context.rows[target_idx].get(inner_col)
-                logger.debug(f"NESTED_NAV: {outer_func}({inner_func}({inner_var}.{inner_col}), {outer_offset}) -> row[{target_idx}] = {result}")
-                logger.debug(f"NESTED_NAV: Navigation path: {inner_func} found at row {inner_row_idx}, {outer_func} by {outer_offset} -> row {target_idx}")
-            else:
-                result = None
-                logger.debug(f"NESTED_NAV: {outer_func} target index {target_idx} out of bounds")
-            
-            context.navigation_cache[cache_key] = result
-            return result
+        # Handle FINAL semantic modifiers similarly
+        final_pattern = r'(PREV|NEXT)\s*\(\s*FINAL\s+(LAST|FIRST)\s*\(\s*([^)]+)\s*\)\s*(?:,\s*(\d+))?\s*\)'
+        final_match = re.match(final_pattern, processed_expr, re.IGNORECASE)
         
-        # Try simple pattern (like FIRST(A.value) or LAST(B.value))
-        simple_match = re.match(simple_pattern, expr, re.IGNORECASE)
-        if simple_match:
-            func_name = simple_match.group(1).upper()
-            var_name = simple_match.group(2)
-            col_name = simple_match.group(3)
-            offset = int(simple_match.group(4)) if simple_match.group(4) else 1
+        if final_match:
+            # Similar processing for FINAL semantics
+            outer_func = final_match.group(1).upper()
+            inner_func = final_match.group(2).upper()
+            column_ref = final_match.group(3)
+            steps = int(final_match.group(4)) if final_match.group(4) else 1
             
-            logger.debug(f"NESTED_NAV: Simple pattern: {func_name}({var_name}.{col_name}, {offset})")
-            
-            # Create a temporary condition evaluator to use existing navigation logic
-            evaluator = ConditionEvaluator(context, evaluation_mode='DEFINE')
-            evaluator.context.current_idx = current_idx
-            evaluator.context.current_var = current_var
-            
-            # Debug the context state
-            logger.debug(f"NESTED_NAV: Before navigation, context.variables = {context.variables}")
-            logger.debug(f"NESTED_NAV: After creating evaluator, evaluator.context.variables = {evaluator.context.variables}")
-            logger.debug(f"NESTED_NAV: Looking for variable '{var_name}' in navigation")
-            
-            # Use the existing _get_navigation_value method
-            result = evaluator._get_navigation_value(var_name, col_name, func_name, offset)
-            logger.debug(f"NESTED_NAV: Direct call result from _get_navigation_value: {result}")
-            
-            # PRODUCTION FIX: If the navigation function returns None, try a direct implementation
-            if result is None and var_name in context.variables:
-                var_indices = context.variables[var_name]
-                if var_indices:
-                    if func_name == 'LAST':
-                        # Get the last index for this variable
-                        last_idx = max(var_indices)
-                        if 0 <= last_idx < len(context.rows):
-                            result = context.rows[last_idx].get(col_name)
-                            logger.debug(f"NESTED_NAV: Direct LAST implementation returned: {result}")
-                    elif func_name == 'FIRST':
-                        # Get the first index for this variable
-                        first_idx = min(var_indices)
-                        if 0 <= first_idx < len(context.rows):
-                            result = context.rows[first_idx].get(col_name)
-                            logger.debug(f"NESTED_NAV: Direct FIRST implementation returned: {result}")
-            
-            if result is None:
-                logger.debug(f"NESTED_NAV: Navigation returned None - checking context again: {context.variables}")
-            logger.debug(f"NESTED_NAV: {func_name}({var_name}.{col_name}, {offset}) = {result}")
-            context.navigation_cache[cache_key] = result
-            return result
-        
-        # If we can't parse the expression
-        logger.warning(f"NESTED_NAV: Could not parse expression: {expr}")
-        context.navigation_cache[cache_key] = None
-        return None
-        
-    except Exception as e:
-        logger.error(f"NESTED_NAV: Error evaluating {expr}: {e}")
-        context.navigation_cache[cache_key] = None
-        return None
-    
-    finally:
-        # Track performance
-        if hasattr(context, 'timing'):
-            elapsed = time.time() - start_time
-            context.timing['nested_navigation'] = context.timing.get('nested_navigation', 0) + elapsed
-
-def compile_condition(condition_text: str, evaluation_mode: str = 'DEFINE') -> ConditionFn:
-    """
-    Compile a condition string into a callable condition function.
-    
-    This is the main entry point for compiling DEFINE and other conditions
-    for use in pattern matching.
-    
-    Args:
-        condition_text: The condition to compile (e.g., "price > PREV(price)")
-        evaluation_mode: Mode for evaluation ('DEFINE' or 'MEASURES')
-        
-    Returns:
-        A callable function that takes (row, context) and returns bool
-        
-    Example:
-        condition_fn = compile_condition("price > PREV(price)")
-        result = condition_fn(row_data, row_context)
-    """
-    logger = get_logger(__name__)
-    
-    try:
-        # Handle special case for 'TRUE' condition
-        if condition_text.strip().upper() == 'TRUE':
-            def true_function(row: Dict[str, Any], context: RowContext) -> bool:
-                return True
-            return true_function
-        
-        # Preprocess SQL condition syntax to Python syntax
-        python_condition = _sql_to_python_condition(condition_text)
-        
-        # Parse the condition into an AST
-        tree = ast.parse(python_condition, mode='eval')
-        
-        def condition_function(row: Dict[str, Any], context: RowContext) -> bool:
-            """The actual condition function that gets called during matching."""
-            try:
-                # Create condition evaluator for each evaluation
-                evaluator = ConditionEvaluator(context, evaluation_mode)
+            if current_idx >= 0 and current_idx < len(context.rows):
+                if outer_func == "PREV":
+                    target_idx = current_idx - steps
+                else:  # NEXT
+                    target_idx = current_idx + steps
                 
-                # Evaluate the condition
-                result = evaluator.visit(tree.body)
-                
-                # Ensure boolean result
-                if result is None:
-                    return False
-                elif isinstance(result, bool):
+                if target_idx >= 0 and target_idx < len(context.rows):
+                    result = context.rows[target_idx].get(column_ref.strip())
                     return result
                 else:
-                    # Convert to boolean using Python truthiness
-                    return bool(result)
-                    
-            except Exception as e:
-                logger.debug(f"Condition evaluation error for '{condition_text}': {e}")
-                return False
+                    return None
+            else:
+                return None
         
-        return condition_function
+        # If no special SQL constructs, try to parse as Python AST
+        tree = ast.parse(processed_expr, mode='eval')
         
-    except SyntaxError as e:
-        logger.error(f"Syntax error in condition '{condition_text}': {e}")
-        # Return a function that always returns False for invalid conditions
-        def false_function(row: Dict[str, Any], context: RowContext) -> bool:
-            return False
-        return false_function
+        # Create a new evaluator for this expression
+        evaluator = ConditionEvaluator(context, evaluation_mode='MEASURES')
+        
+        # Evaluate the parsed expression
+        result = evaluator.visit(tree.body)
+        
+        logger.debug(f"Nested navigation evaluation: '{expr}' -> {result}")
+        return result
         
     except Exception as e:
-        logger.error(f"Error compiling condition '{condition_text}': {e}")
-        # Return a function that always returns False for invalid conditions
-        def false_function(row: Dict[str, Any], context: RowContext) -> bool:
-            return False
-        return false_function
+        logger.error(f"Error evaluating nested navigation '{expr}': {e}")
+        return None
+
 
 def _sql_to_python_condition(condition: str) -> str:
     """
-    Convert SQL condition syntax to Python syntax for AST parsing.
-    
-    This function handles the translation of SQL operators to Python equivalents:
-    - SQL '=' becomes Python '=='
-    - SQL '<>' or '!=' become Python '!='
-    - SQL 'AND' becomes Python 'and'
-    - SQL 'OR' becomes Python 'or'
-    - SQL 'NOT' becomes Python 'not'
+    Convert SQL condition syntax to Python expression syntax.
     
     Args:
         condition: SQL condition string
         
     Returns:
-        Python-compatible condition string
+        Python expression string
     """
+    if not condition:
+        return condition
+    
+    # Convert SQL equality to Python equality
+    # Handle cases like 'value = 10' -> 'value == 10'
+    # But avoid changing '==' to '===='
     import re
     
-    # Start with original condition
-    python_condition = condition.strip()
+    # Replace single = with == but avoid changing already existing ==
+    condition = re.sub(r'(?<![=!<>])\s*=\s*(?!=)', ' == ', condition)
     
-    # Replace SQL equality operator '=' with Python equality '=='
-    # Use word boundaries and lookahead/lookbehind to avoid replacing other operators
-    # This pattern matches '=' that is not part of '==', '!=', '<=', '>='
-    python_condition = re.sub(r'(?<![=!<>])\s*=\s*(?!=)', ' == ', python_condition)
+    # Convert SQL logical operators to Python operators
+    # Use word boundaries to avoid replacing parts of words
+    condition = re.sub(r'\bAND\b', 'and', condition, flags=re.IGNORECASE)
+    condition = re.sub(r'\bOR\b', 'or', condition, flags=re.IGNORECASE)
+    condition = re.sub(r'\bNOT\b', 'not', condition, flags=re.IGNORECASE)
     
-    # Replace SQL inequality operators
-    python_condition = re.sub(r'<>', ' != ', python_condition)
+    # Convert SQL BETWEEN to Python range check
+    # BETWEEN pattern: column BETWEEN value1 AND value2
+    between_pattern = r'(\w+)\s+BETWEEN\s+([^A]+?)\s+AND\s+([^A]+?)(?=\s|$)'
+    condition = re.sub(between_pattern, r'(\2 <= \1 <= \3)', condition, flags=re.IGNORECASE)
     
-    # Replace SQL boolean operators (case-insensitive, word boundaries)
-    python_condition = re.sub(r'\bAND\b', 'and', python_condition, flags=re.IGNORECASE)
-    python_condition = re.sub(r'\bOR\b', 'or', python_condition, flags=re.IGNORECASE)
-    python_condition = re.sub(r'\bNOT\b', 'not', python_condition, flags=re.IGNORECASE)
+    # Convert SQL IN operator to Python in operator (already handled in preprocessing)
+    # This is handled in the measure evaluator preprocessing
     
-    # Replace SQL IN operator (case-insensitive)
-    python_condition = re.sub(r'\bIN\b', 'in', python_condition, flags=re.IGNORECASE)
-    python_condition = re.sub(r'\bNOT\s+IN\b', 'not in', python_condition, flags=re.IGNORECASE)
-    
-    # Replace SQL BETWEEN operator (case-insensitive)
-    # Pattern: expr BETWEEN min_val AND max_val -> (min_val <= expr) and (expr <= max_val)
-    between_pattern = r'(\w+(?:\.\w+)?)\s+BETWEEN\s+([^A]+?)\s+AND\s+([^A]+?)(?=\s|$)'
-    def replace_between(match):
-        expr = match.group(1).strip()
-        min_val = match.group(2).strip()
-        max_val = match.group(3).strip()
-        return f"(({min_val} <= {expr}) and ({expr} <= {max_val}))"
-    
-    python_condition = re.sub(between_pattern, replace_between, python_condition, flags=re.IGNORECASE)
-    
-    # Replace SQL NOT BETWEEN operator (case-insensitive)  
-    # Pattern: expr NOT BETWEEN min_val AND max_val -> not ((min_val <= expr) and (expr <= max_val))
-    not_between_pattern = r'(\w+(?:\.\w+)?)\s+NOT\s+BETWEEN\s+([^A]+?)\s+AND\s+([^A]+?)(?=\s|$)'
-    def replace_not_between(match):
-        expr = match.group(1).strip()
-        min_val = match.group(2).strip()
-        max_val = match.group(3).strip()
-        return f"not (({min_val} <= {expr}) and ({expr} <= {max_val}))"
-    
-    python_condition = re.sub(not_between_pattern, replace_not_between, python_condition, flags=re.IGNORECASE)
-    
-    return python_condition
+    return condition
