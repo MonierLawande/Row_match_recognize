@@ -1162,9 +1162,9 @@ class MeasureEvaluator:
                 # For navigation functions like FIRST(value), LAST(value),
                 # the behavior differs based on RUNNING vs FINAL semantics:
                 
-                # For RUNNING semantics with no explicit offset, filter indices to only include rows up to current position
-                # For navigation functions with explicit offsets (like FIRST(value, 2)), use complete match indices
-                if is_running and offset == 0:
+                # For RUNNING semantics, always filter indices to only include rows up to current position
+                # For FINAL semantics, use complete match indices
+                if is_running:
                     all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
                 
                 if func_name == 'FIRST':
@@ -1198,18 +1198,20 @@ class MeasureEvaluator:
                     if all_indices:
                         if is_running:
                             if offset == 0:
-                                # Special case: RUNNING LAST(value) should return current row value
-                                logical_idx = self.context.current_idx
-                                logger.debug(f"RUNNING LAST({field_name}): using current_idx={logical_idx}")
+                                # RUNNING LAST(value): Return last value among matched rows up to current position
+                                # all_indices is already filtered to include only rows <= current_idx
+                                logical_idx = all_indices[-1]  # Last index in the filtered list
+                                logger.debug(f"RUNNING LAST({field_name}): using last index from filtered list: logical_idx={logical_idx}, all_indices={all_indices}")
                             else:
-                                # RUNNING LAST(value, N): Go backward N positions from current position
-                                target_idx = self.context.current_idx - offset
-                                if target_idx >= 0 and target_idx in all_indices:
-                                    logical_idx = target_idx
-                                    logger.debug(f"RUNNING LAST({field_name}, {offset}): current_idx={self.context.current_idx}, target_idx={target_idx}, logical_idx={logical_idx}")
+                                # RUNNING LAST(value, N): Go backward N positions from last position in filtered indices
+                                last_position = len(all_indices) - 1
+                                target_position = last_position - offset
+                                if target_position >= 0:
+                                    logical_idx = all_indices[target_position]
+                                    logger.debug(f"RUNNING LAST({field_name}, {offset}): all_indices={all_indices}, target_position={target_position}, logical_idx={logical_idx}")
                                 else:
                                     logical_idx = None
-                                    logger.debug(f"RUNNING LAST({field_name}, {offset}): target_idx {target_idx} out of bounds or not in match")
+                                    logger.debug(f"RUNNING LAST({field_name}, {offset}): target_position {target_position} out of bounds for filtered indices")
                         else:
                             # FINAL semantics: Navigate from final position
                             last_position = len(all_indices) - 1

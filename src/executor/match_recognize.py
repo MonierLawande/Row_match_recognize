@@ -1099,10 +1099,21 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             # Create context for measure evaluation
                             context = RowContext()
                             context.rows = all_rows
-                            context.variables = match.get("variables", {})
+                            
+                            # For RUNNING semantics, only include variables up to current row
+                            full_variables = match.get("variables", {})
+                            running_variables = {}
+                            for var_name, var_indices in full_variables.items():
+                                # Include only indices up to and including current row
+                                running_indices = [i for i in var_indices if i <= idx]
+                                if running_indices:
+                                    running_variables[var_name] = running_indices
+                            
+                            context.variables = running_variables
                             context.match_number = match_num
                             context.current_idx = idx
                             context.subsets = subset_dict.copy() if subset_dict else {}
+                            logger.debug(f"DEBUG: Row {idx} - Full variables: {full_variables}, Running variables: {running_variables}")
                             
                             # Create evaluator and process measures
                             evaluator = MeasureEvaluator(context, final=False)  # RUNNING semantics
