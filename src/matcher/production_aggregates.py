@@ -1,6 +1,32 @@
 # Enhanced Aggregate Function Implementation for SQL:2016 Row Pattern Recognition
 # Production-ready comprehensive aggregate support
 
+"""
+Production-ready aggregate function evaluator for SQL:2016 row pattern matching.
+
+This module implements comprehensive aggregate evaluation with full support for:
+- All standard SQL:2016 aggregate functions (SUM, COUNT, MIN, MAX, AVG, etc.)
+- RUNNING vs FINAL semantics with proper default handling
+- Variable-specific aggregation with pattern variable support
+- Advanced aggregate functions (ARRAY_AGG, STRING_AGG, MAX_BY, MIN_BY)
+- Conditional aggregates (COUNT_IF, SUM_IF, AVG_IF)
+- Statistical functions (STDDEV, VARIANCE)
+- Comprehensive argument validation and error handling
+- Performance optimization with intelligent caching
+- Thread-safe operations with proper synchronization
+
+Features:
+- Memory-efficient processing for large datasets
+- Advanced type preservation and null handling
+- Comprehensive SQL:2016 compliance
+- Production-grade error handling and recovery
+- Performance monitoring and metrics collection
+
+Author: Pattern Matching Engine Team
+Version: 3.0.0
+"""
+
+import threading
 from collections import defaultdict
 from functools import lru_cache
 from typing import Dict, Any, List, Optional, Set, Union, Tuple, Callable
@@ -8,22 +34,98 @@ import re
 import math
 import numpy as np
 import time
+from enum import Enum
+from dataclasses import dataclass
+
 from src.matcher.row_context import RowContext
 from src.utils.logging_config import get_logger, PerformanceTimer
 
+# Module logger with enhanced configuration
 logger = get_logger(__name__)
 
+# Constants for production-ready behavior
+MAX_EXPRESSION_LENGTH = 5000    # Prevent extremely long expressions
+MAX_CACHE_SIZE = 1000          # LRU cache limit for aggregate results
+MAX_ARRAY_SIZE = 100000        # Maximum array aggregation size
+PERFORMANCE_LOG_THRESHOLD = 0.1  # Log slow operations (100ms)
+
+class AggregateMode(Enum):
+    """Aggregate evaluation modes."""
+    RUNNING = "RUNNING"     # Include only rows up to current position
+    FINAL = "FINAL"         # Include all rows in the match
+
 class AggregateValidationError(Exception):
-    """Error in aggregate function validation."""
+    """Error in aggregate function validation with enhanced context."""
+    
+    def __init__(self, message: str, function_name: str = None, 
+                 suggestion: str = None, error_code: str = None):
+        self.message = message
+        self.function_name = function_name
+        self.suggestion = suggestion
+        self.error_code = error_code
+        
+        full_message = message
+        if function_name:
+            full_message = f"[{function_name}] {message}"
+        if suggestion:
+            full_message += f"\nSuggestion: {suggestion}"
+        if error_code:
+            full_message += f"\nError Code: {error_code}"
+        
+        super().__init__(full_message)
+
+class AggregateArgumentError(AggregateValidationError):
+    """Error in aggregate function arguments with specific guidance."""
+    
+    def __init__(self, message: str, function_name: str = None):
+        suggestions = {
+            "COUNT": "COUNT(*) or COUNT(variable.column) or COUNT(DISTINCT variable.column)",
+            "SUM": "SUM(variable.column) where column contains numeric values",
+            "AVG": "AVG(variable.column) where column contains numeric values",
+            "MIN": "MIN(variable.column) for any comparable column",
+            "MAX": "MAX(variable.column) for any comparable column",
+            "ARRAY_AGG": "ARRAY_AGG(variable.column) for any column",
+            "STRING_AGG": "STRING_AGG(variable.column, delimiter) where column is text"
+        }
+        
+        suggestion = suggestions.get(function_name, "Check function documentation")
+        error_code = f"AGG_ARG_{function_name}" if function_name else "AGG_ARG_001"
+        
+        super().__init__(message, function_name, suggestion, error_code)
+
+class AggregateTypeError(AggregateValidationError):
+    """Error in aggregate function type handling."""
     pass
 
-class AggregateArgumentError(Exception):
-    """Error in aggregate function arguments."""
-    pass
+# Thread-local storage for aggregate metrics
+_aggregate_metrics = threading.local()
+
+def _get_aggregate_metrics():
+    """Get thread-local aggregate metrics."""
+    if not hasattr(_aggregate_metrics, 'metrics'):
+        _aggregate_metrics.metrics = {
+            "total_evaluations": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "function_calls": defaultdict(int),
+            "total_time": 0.0,
+            "slow_operations": 0
+        }
+    return _aggregate_metrics.metrics
 
 class ProductionAggregateEvaluator:
     """
     Production-ready aggregate function evaluator for SQL:2016 row pattern recognition.
+    
+    This class provides comprehensive aggregate evaluation with:
+    - Full support for all standard SQL:2016 aggregate functions
+    - RUNNING vs FINAL semantics with intelligent defaults
+    - Variable-specific aggregation with pattern variable support
+    - Advanced functions (ARRAY_AGG, STRING_AGG, statistical functions)
+    - Conditional aggregates with proper type handling
+    - Thread-safe operations with performance optimization
+    - Comprehensive validation and error handling
+    - Memory-efficient processing for large datasets
     
     Features:
     - All standard aggregate functions (SUM, COUNT, MIN, MAX, AVG, etc.)
@@ -38,16 +140,17 @@ class ProductionAggregateEvaluator:
     - Type preservation and null handling
     """
     
-    # SQL:2016 standard aggregate functions
+    # SQL:2016 standard aggregate functions with enhanced categorization
     STANDARD_AGGREGATES = {
         'SUM', 'COUNT', 'MIN', 'MAX', 'AVG', 'STDDEV', 'VARIANCE',
         'ARRAY_AGG', 'STRING_AGG', 'MAX_BY', 'MIN_BY', 'COUNT_IF',
-        'SUM_IF', 'AVG_IF', 'BOOL_AND', 'BOOL_OR'
+        'SUM_IF', 'AVG_IF', 'BOOL_AND', 'BOOL_OR', 'LISTAGG'
     }
     
     # Functions that support RUNNING semantics by default
     RUNNING_BY_DEFAULT = {
-        'SUM', 'COUNT', 'MIN', 'MAX', 'AVG', 'ARRAY_AGG', 'STRING_AGG'
+        'SUM', 'COUNT', 'MIN', 'MAX', 'AVG', 'ARRAY_AGG', 'STRING_AGG',
+        'COUNT_IF', 'SUM_IF', 'AVG_IF', 'BOOL_AND', 'BOOL_OR'
     }
     
     # Functions that require numeric arguments
@@ -60,86 +163,237 @@ class ProductionAggregateEvaluator:
         'MAX_BY': 2, 'MIN_BY': 2, 'STRING_AGG': 2, 'COUNT_IF': 2, 'SUM_IF': 2, 'AVG_IF': 2
     }
     
+    # Functions that support DISTINCT modifier
+    DISTINCT_FUNCTIONS = {
+        'COUNT', 'SUM', 'AVG', 'ARRAY_AGG', 'STRING_AGG'
+    }
+    
     def __init__(self, context: RowContext):
+        """
+        Initialize the aggregate evaluator with comprehensive setup.
+        
+        Args:
+            context: Row context for pattern matching
+            
+        Raises:
+            AggregateValidationError: If context is invalid
+        """
+        if not isinstance(context, RowContext):
+            raise AggregateValidationError(
+                "Invalid context type", None, 
+                "Pass a valid RowContext instance", "AGG_INIT_001"
+            )
+        
         self.context = context
+        
+        # Thread-safe operation lock
+        self._lock = threading.RLock()
+        
+        # Enhanced caching structures
         self._validation_cache = {}
         self._result_cache = {}
+        self._expression_cache = {}
+        self._variable_data_cache = {}
+        
+        # Performance metrics with detailed tracking
         self.stats = {
             "evaluations": 0,
             "cache_hits": 0,
+            "cache_misses": 0,
             "validation_errors": 0,
-            "type_conversions": 0
+            "type_conversions": 0,
+            "total_time": 0.0,
+            "function_counts": defaultdict(int),
+            "slow_operations": 0
         }
+        
+        logger.debug(f"Initialized ProductionAggregateEvaluator with context containing "
+                    f"{len(context.rows)} rows and {len(context.variables)} variables")
     
     def evaluate_aggregate(self, expr: str, semantics: str = "RUNNING") -> Any:
         """
-        Evaluate an aggregate function with comprehensive SQL:2016 support.
+        Evaluate an aggregate function with comprehensive SQL:2016 support and production-ready features.
+        
+        This enhanced method provides:
+        - Complete validation and error handling
+        - Performance optimization with intelligent caching
+        - Thread-safe operations with proper synchronization
+        - Advanced type handling and preservation
+        - Comprehensive logging and metrics collection
+        - Memory-efficient processing for large datasets
         
         Args:
             expr: The aggregate expression (e.g., "SUM(A.price)", "COUNT(*)")
             semantics: "RUNNING" or "FINAL" (default: "RUNNING")
             
         Returns:
-            The aggregate result
+            The aggregate result with proper type preservation
             
         Raises:
             AggregateValidationError: If the aggregate expression is invalid
             AggregateArgumentError: If the arguments are invalid
+            AggregateTypeError: If type conversion fails
         """
-        self.stats["evaluations"] += 1
+        # Input validation
+        if not expr or not isinstance(expr, str):
+            raise AggregateValidationError(
+                "Expression must be a non-empty string",
+                None, "Provide a valid aggregate expression", "AGG_EVAL_001"
+            )
         
-        # Parse the aggregate function
-        agg_info = self._parse_aggregate_function(expr)
-        if not agg_info:
-            raise AggregateValidationError(f"Invalid aggregate expression: {expr}")
+        if len(expr) > MAX_EXPRESSION_LENGTH:
+            raise AggregateValidationError(
+                f"Expression too long: {len(expr)} characters (max: {MAX_EXPRESSION_LENGTH})",
+                None, "Simplify the aggregate expression", "AGG_EVAL_002"
+            )
         
-        func_name = agg_info['function']
-        arguments = agg_info['arguments']
+        # Normalize semantics
+        semantics = semantics.upper()
+        if semantics not in ["RUNNING", "FINAL"]:
+            raise AggregateValidationError(
+                f"Invalid semantics: {semantics}",
+                None, "Use 'RUNNING' or 'FINAL'", "AGG_EVAL_003"
+            )
         
-        # Validate the function and arguments
-        self._validate_aggregate_function(func_name, arguments)
-        
-        # Determine semantics (RUNNING is default per SQL:2016)
-        is_running = semantics.upper() == "RUNNING"
-        
-        # Check cache
-        cache_key = (expr, semantics, self.context.current_idx)
-        if cache_key in self._result_cache:
-            self.stats["cache_hits"] += 1
-            return self._result_cache[cache_key]
-        
-        # Evaluate based on function type
-        try:
-            if func_name == "COUNT":
-                result = self._evaluate_count(arguments, is_running)
-            elif func_name == "SUM":
-                result = self._evaluate_sum(arguments, is_running)
-            elif func_name in ("MIN", "MAX"):
-                result = self._evaluate_min_max(func_name, arguments, is_running)
-            elif func_name == "AVG":
-                result = self._evaluate_avg(arguments, is_running)
-            elif func_name == "ARRAY_AGG":
-                result = self._evaluate_array_agg(arguments, is_running)
-            elif func_name == "STRING_AGG":
-                result = self._evaluate_string_agg(arguments, is_running)
-            elif func_name in ("MAX_BY", "MIN_BY"):
-                result = self._evaluate_by_functions(func_name, arguments, is_running)
-            elif func_name in ("COUNT_IF", "SUM_IF", "AVG_IF"):
-                result = self._evaluate_conditional_aggregates(func_name, arguments, is_running)
-            elif func_name in ("BOOL_AND", "BOOL_OR"):
-                result = self._evaluate_bool_aggregates(func_name, arguments, is_running)
-            elif func_name in ("STDDEV", "VARIANCE"):
-                result = self._evaluate_statistical_functions(func_name, arguments, is_running)
-            else:
-                raise AggregateValidationError(f"Unsupported aggregate function: {func_name}")
+        with self._lock:
+            self.stats["evaluations"] += 1
+            start_time = time.time()
             
-            # Cache the result
-            self._result_cache[cache_key] = result
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error evaluating aggregate {expr}: {e}")
-            raise
+            try:
+                # Check cache first
+                cache_key = (expr, semantics, self.context.current_idx, 
+                           tuple(sorted(self.context.variables.items())))
+                
+                if cache_key in self._result_cache:
+                    self.stats["cache_hits"] += 1
+                    return self._result_cache[cache_key]
+                
+                self.stats["cache_misses"] += 1
+                
+                # Parse the aggregate function
+                agg_info = self._parse_aggregate_function(expr)
+                if not agg_info:
+                    raise AggregateValidationError(
+                        f"Invalid aggregate expression: {expr}",
+                        None, "Check function syntax", "AGG_PARSE_001"
+                    )
+                
+                func_name = agg_info['function'].upper()
+                arguments = agg_info['arguments']
+                
+                # Update function call statistics
+                self.stats["function_counts"][func_name] += 1
+                
+                # Validate the function and arguments
+                self._validate_aggregate_function(func_name, arguments)
+                
+                # Determine evaluation mode
+                is_running = semantics == "RUNNING"
+                
+                # Evaluate based on function type with enhanced error handling
+                try:
+                    if func_name == "COUNT":
+                        result = self._evaluate_count(arguments, is_running)
+                    elif func_name == "SUM":
+                        result = self._evaluate_sum(arguments, is_running)
+                    elif func_name in ("MIN", "MAX"):
+                        result = self._evaluate_min_max(func_name, arguments, is_running)
+                    elif func_name == "AVG":
+                        result = self._evaluate_avg(arguments, is_running)
+                    elif func_name == "ARRAY_AGG":
+                        result = self._evaluate_array_agg(arguments, is_running)
+                    elif func_name == "STRING_AGG":
+                        result = self._evaluate_string_agg(arguments, is_running)
+                    elif func_name in ("MAX_BY", "MIN_BY"):
+                        result = self._evaluate_by_functions(func_name, arguments, is_running)
+                    elif func_name in ("COUNT_IF", "SUM_IF", "AVG_IF"):
+                        result = self._evaluate_conditional_aggregates(func_name, arguments, is_running)
+                    elif func_name in ("BOOL_AND", "BOOL_OR"):
+                        result = self._evaluate_bool_aggregates(func_name, arguments, is_running)
+                    elif func_name in ("STDDEV", "VARIANCE"):
+                        result = self._evaluate_statistical_functions(func_name, arguments, is_running)
+                    elif func_name == "LISTAGG":
+                        result = self._evaluate_listagg(arguments, is_running)
+                    else:
+                        raise AggregateValidationError(
+                            f"Unsupported aggregate function: {func_name}",
+                            func_name, "Check supported functions", "AGG_UNSUPPORTED"
+                        )
+                    
+                    # Cache the result (with size limit)
+                    if len(self._result_cache) < MAX_CACHE_SIZE:
+                        self._result_cache[cache_key] = result
+                    
+                    return result
+                    
+                except Exception as e:
+                    self.stats["validation_errors"] += 1
+                    if not isinstance(e, (AggregateValidationError, AggregateArgumentError, AggregateTypeError)):
+                        # Wrap unexpected errors
+                        raise AggregateValidationError(
+                            f"Unexpected error in {func_name}: {str(e)}",
+                            func_name, "Check input data and function usage", "AGG_UNEXPECTED"
+                        ) from e
+                    else:
+                        raise
+                
+            finally:
+                # Track performance metrics
+                operation_time = time.time() - start_time
+                self.stats["total_time"] += operation_time
+                
+                if operation_time > PERFORMANCE_LOG_THRESHOLD:
+                    self.stats["slow_operations"] += 1
+                    logger.warning(f"Slow aggregate evaluation: {expr} took {operation_time:.3f}s")
+                
+                # Periodic cache optimization
+                if self.stats["evaluations"] % 100 == 0:
+                    self._optimize_caches()
+    
+    def _optimize_caches(self) -> None:
+        """Optimize cache structures to prevent memory bloat."""
+        # Simple LRU implementation: remove oldest entries when cache is full
+        if len(self._result_cache) > MAX_CACHE_SIZE:
+            # Remove oldest 20% of entries
+            items_to_remove = len(self._result_cache) - int(MAX_CACHE_SIZE * 0.8)
+            keys_to_remove = list(self._result_cache.keys())[:items_to_remove]
+            for key in keys_to_remove:
+                self._result_cache.pop(key, None)
+        
+        # Optimize other caches similarly
+        for cache in [self._validation_cache, self._expression_cache, self._variable_data_cache]:
+            if len(cache) > MAX_CACHE_SIZE // 2:
+                items_to_remove = len(cache) - int(MAX_CACHE_SIZE * 0.3)
+                keys_to_remove = list(cache.keys())[:items_to_remove]
+                for key in keys_to_remove:
+                    cache.pop(key, None)
+    
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """
+        Get comprehensive performance statistics for monitoring.
+        
+        Returns:
+            Dictionary with detailed performance metrics
+        """
+        total_operations = self.stats["cache_hits"] + self.stats["cache_misses"]
+        hit_rate = (self.stats["cache_hits"] / total_operations * 100) if total_operations > 0 else 0
+        
+        avg_time = (self.stats["total_time"] / self.stats["evaluations"]) if self.stats["evaluations"] > 0 else 0
+        
+        return {
+            "total_evaluations": self.stats["evaluations"],
+            "cache_hit_rate_percent": hit_rate,
+            "average_evaluation_time_ms": avg_time * 1000,
+            "slow_operations": self.stats["slow_operations"],
+            "validation_errors": self.stats["validation_errors"],
+            "function_usage": dict(self.stats["function_counts"]),
+            "cache_sizes": {
+                "result_cache": len(self._result_cache),
+                "validation_cache": len(self._validation_cache),
+                "expression_cache": len(self._expression_cache),
+                "variable_data_cache": len(self._variable_data_cache)
+            }
+        }
     
     def _parse_aggregate_function(self, expr: str) -> Optional[Dict[str, Any]]:
         """

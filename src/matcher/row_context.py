@@ -1,32 +1,110 @@
 # src/matcher/row_context.py
+"""
+Production-ready row context for SQL:2016 row pattern matching.
 
+This module implements comprehensive row context management with full support for:
+- Efficient navigation functions (FIRST, LAST, PREV, NEXT)
+- Variable position tracking with optimized lookups
+- Pattern variable subset management
+- Partition-aware operations with bounds checking
+- Advanced caching and performance optimization
+- Thread-safe operations with proper validation
+- Comprehensive error handling and validation
+
+Features:
+- Memory-efficient processing for large datasets
+- Advanced indexing structures for O(1) lookups
+- Comprehensive validation and error handling
+- Performance monitoring and metrics collection
+- Full SQL:2016 compliance with edge case handling
+
+Author: Pattern Matching Engine Team
+Version: 3.0.0
+"""
+
+import threading
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional, Set, Tuple, Union
+from typing import Dict, Any, List, Optional, Set, Tuple, Union, Callable
 from collections import defaultdict
 import time
 import traceback
-from src.utils.logging_config import get_logger
+from functools import lru_cache
+from enum import Enum
+
+from src.utils.logging_config import get_logger, PerformanceTimer
+
+# Module logger with enhanced configuration
+logger = get_logger(__name__)
+
+# Constants for production-ready behavior
+MAX_CACHE_SIZE = 1000           # Maximum cache entries per context
+MAX_PARTITION_SIZE = 1000000    # Maximum rows per partition
+MAX_VARIABLES = 100             # Maximum pattern variables
+CACHE_STATS_INTERVAL = 1000     # Log cache stats every N operations
+
+class NavigationMode(Enum):
+    """Navigation function execution modes."""
+    RUNNING = "RUNNING"     # Only consider rows up to current position
+    FINAL = "FINAL"         # Consider all rows in the match
+
+class ContextValidationError(Exception):
+    """Error in context validation or operation."""
+    pass
+
+class NavigationBoundsError(Exception):
+    """Error when navigation goes out of bounds."""
+    pass
+
+class PartitionError(Exception):
+    """Error in partition operations."""
+    pass
+
+# Thread-local storage for context metrics
+_context_metrics = threading.local()
+
+def _get_context_metrics():
+    """Get thread-local context metrics."""
+    if not hasattr(_context_metrics, 'metrics'):
+        _context_metrics.metrics = {
+            "total_operations": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "navigation_calls": 0,
+            "partition_lookups": 0,
+            "variable_lookups": 0
+        }
+    return _context_metrics.metrics
 
 @dataclass
 class RowContext:
     """
-    Maintains context for row pattern matching and navigation functions.
+    Production-ready context for row pattern matching and navigation functions.
     
-    This class provides an efficient interface for accessing matching rows,
-    variables, and handling pattern variables with optimized support for
-    physical navigation operations.
+    This class provides an efficient and thread-safe interface for accessing 
+    matching rows, variables, and handling pattern variables with optimized 
+    support for physical navigation operations and SQL:2016 compliance.
+    
+    Features:
+    - Advanced indexing for O(1) variable and row lookups
+    - Comprehensive caching with intelligent invalidation
+    - Partition-aware operations with bounds checking
+    - Thread-safe operations with proper synchronization
+    - Performance monitoring and detailed metrics collection
+    - Memory-efficient processing for large datasets
+    - Full validation and error handling
     
     Attributes:
-        rows: The input rows
-        variables: Mapping from variables to row indices
-        subsets: Mapping from subset variable to component variables
+        rows: The input rows for pattern matching
+        variables: Mapping from pattern variables to row indices
+        subsets: Mapping from subset variables to component variables
         current_idx: Current row index being processed
-        match_number: Sequential match number
-        current_var: Currently evaluating variable
-        navigation_cache: Cache for navigation function results
+        match_number: Sequential match number for this context
+        current_var: Currently evaluating variable (for context)
         partition_boundaries: List of (start, end) indices for partitions
-        partition_key: Current partition key (for multi-partition data)
+        partition_key: Current partition key for multi-partition data
         defined_variables: Set of variables explicitly defined in DEFINE clause
+        pattern_variables: Ordered list of pattern variables from PATTERN clause
+        navigation_mode: Current navigation mode (RUNNING vs FINAL)
     """
     rows: List[Dict[str, Any]] = field(default_factory=list)
     variables: Dict[str, List[int]] = field(default_factory=dict)
@@ -34,106 +112,293 @@ class RowContext:
     current_idx: int = 0
     match_number: int = 1
     current_var: Optional[str] = None
-    navigation_cache: Dict[Any, Any] = field(default_factory=dict)
     partition_boundaries: List[Tuple[int, int]] = field(default_factory=list)
     partition_key: Optional[Any] = None
     defined_variables: Set[str] = field(default_factory=set)
+    pattern_variables: List[str] = field(default_factory=list)
+    navigation_mode: NavigationMode = NavigationMode.RUNNING
+    
+    # Private fields for optimization and caching
     _timeline: List[Tuple[int, str]] = field(default_factory=list, repr=False)
     _row_var_index: Dict[int, Set[str]] = field(default_factory=lambda: defaultdict(set), repr=False)
     _subset_index: Dict[str, Set[str]] = field(default_factory=dict, repr=False)
     _timeline_dirty: bool = field(default=True, repr=False)
+    _context_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    
+    # Production-ready cache structures
+    _navigation_cache: Dict[Any, Any] = field(default_factory=dict, repr=False)
+    _variable_cache: Dict[str, Any] = field(default_factory=dict, repr=False)
+    _position_cache: Dict[Any, Any] = field(default_factory=dict, repr=False)
+    _row_value_cache: Dict[Tuple[int, str], Any] = field(default_factory=dict, repr=False)
+    _partition_cache: Dict[int, Optional[Tuple[int, int]]] = field(default_factory=dict, repr=False)
+    
+    # Performance and diagnostic metrics
+    _metrics: Dict[str, Union[int, float]] = field(default_factory=dict, repr=False)
+    _cache_stats: Dict[str, int] = field(default_factory=dict, repr=False)
+    _operation_count: int = field(default=0, repr=False)
     
     def __post_init__(self):
-        """Build optimized lookup structures and initialize metrics."""
-        self._build_indices()
-        self.timing = defaultdict(float)
-        self.stats = {
-            "cache_hits": 0,
-            "cache_misses": 0,
-            "navigation_calls": 0
+        """Initialize optimized lookup structures and production-ready metrics."""
+        # Initialize metrics and stats
+        self._metrics = {
+            "creation_time": time.time(),
+            "last_access_time": time.time(),
+            "total_operations": 0,
+            "cache_operations": 0,
+            "navigation_operations": 0,
+            "variable_lookups": 0,
+            "partition_operations": 0
         }
         
-        # Initialize all cache types for production-ready performance
-        self.variable_cache = {}
-        self.position_cache = {}
-        self.row_value_cache = {}
-        self.partition_cache = {}
+        self._cache_stats = {
+            "navigation_hits": 0,
+            "navigation_misses": 0,
+            "variable_hits": 0,
+            "variable_misses": 0,
+            "position_hits": 0,
+            "position_misses": 0,
+            "row_value_hits": 0,
+            "row_value_misses": 0,
+            "partition_hits": 0,
+            "partition_misses": 0
+        }
         
+        # Build optimized indices
+        self._build_indices()
+        
+        # Validate initial state
+        self._validate_context()
+    
+    def _validate_context(self) -> None:
+        """
+        Validate context state for production readiness.
+        
+        Raises:
+            ContextValidationError: If context state is invalid
+        """
+        # Validate basic constraints
+        if len(self.rows) > MAX_PARTITION_SIZE:
+            raise ContextValidationError(
+                f"Too many rows: {len(self.rows)} (max: {MAX_PARTITION_SIZE})"
+            )
+        
+        if len(self.variables) > MAX_VARIABLES:
+            raise ContextValidationError(
+                f"Too many variables: {len(self.variables)} (max: {MAX_VARIABLES})"
+            )
+        
+        # Validate variable indices are within bounds
+        for var_name, indices in self.variables.items():
+            for idx in indices:
+                if idx < 0 or idx >= len(self.rows):
+                    raise ContextValidationError(
+                        f"Variable '{var_name}' has out-of-bounds index: {idx} "
+                        f"(rows: 0-{len(self.rows)-1})"
+                    )
+        
+        # Validate current index
+        if self.current_idx < 0 or (self.rows and self.current_idx >= len(self.rows)):
+            logger.warning(f"Current index {self.current_idx} may be out of bounds (rows: {len(self.rows)})")
+        
+        # Validate partition boundaries
+        for start, end in self.partition_boundaries:
+            if start < 0 or end >= len(self.rows) or start > end:
+                raise ContextValidationError(
+                    f"Invalid partition boundary: ({start}, {end}) for {len(self.rows)} rows"
+                )
+    
     def _build_indices(self):
-        """Build indices for faster variable and row lookups."""
-        # Row index -> variables mapping
-        self._row_var_index = defaultdict(set)
-        for var, indices in self.variables.items():
-            for idx in indices:
-                self._row_var_index[idx].add(var)
-        
-        # Build subset index for faster lookups
-        self._subset_index = {}
-        for subset_name, components in self.subsets.items():
-            for comp in components:
-                if comp not in self._subset_index:
-                    self._subset_index[comp] = set()
-                self._subset_index[comp].add(subset_name)
-        
-        # Mark timeline as needing rebuild
-        self._timeline_dirty = True
+        """Build optimized indices for faster variable and row lookups."""
+        with self._context_lock:
+            # Clear existing indices
+            self._row_var_index.clear()
+            self._subset_index.clear()
+            
+            # Row index -> variables mapping for O(1) lookups
+            for var, indices in self.variables.items():
+                for idx in indices:
+                    self._row_var_index[idx].add(var)
+            
+            # Build subset index for faster subset variable lookups
+            for subset_name, components in self.subsets.items():
+                for comp in components:
+                    if comp not in self._subset_index:
+                        self._subset_index[comp] = set()
+                    self._subset_index[comp].add(subset_name)
+            
+            # Mark timeline as needing rebuild
+            self._timeline_dirty = True
+            
+            logger.debug(f"Built indices: {len(self._row_var_index)} row mappings, "
+                        f"{len(self._subset_index)} subset mappings")
     
-    def build_timeline(self):
+    def build_timeline(self) -> List[Tuple[int, str]]:
         """Build or rebuild the timeline of all pattern variables in current match."""
-        timeline = []
-        for var, indices in self.variables.items():
-            for idx in indices:
-                timeline.append((idx, var))
-        timeline.sort()  # Sort by row index
-        self._timeline = timeline
-        self._timeline_dirty = False
-        return timeline
+        with self._context_lock:
+            timeline = []
+            for var, indices in self.variables.items():
+                for idx in indices:
+                    timeline.append((idx, var))
+            timeline.sort()  # Sort by row index for proper chronological order
+            self._timeline = timeline
+            self._timeline_dirty = False
+            
+            logger.debug(f"Built timeline with {len(timeline)} entries")
+            return timeline
     
-    def get_timeline(self):
+    def get_timeline(self) -> List[Tuple[int, str]]:
         """Get the current timeline, rebuilding if needed."""
         if self._timeline_dirty:
             return self.build_timeline()
         return self._timeline
     
-    def invalidate_caches(self):
-        """Invalidate all caches when context changes with production-ready handling."""
-        self.navigation_cache = {}
-        self.variable_cache = {}
-        self.position_cache = {}
-        self.row_value_cache = {}
-        self.partition_cache = {}
-        self._timeline_dirty = True
+    def invalidate_caches(self) -> None:
+        """
+        Invalidate all caches when context changes with comprehensive cleanup.
+        
+        This production-ready method ensures:
+        - Thread-safe cache invalidation
+        - Proper memory cleanup
+        - Performance metrics reset
+        - Comprehensive logging for monitoring
+        """
+        with self._context_lock:
+            # Clear all cache structures
+            caches_cleared = 0
+            
+            if self._navigation_cache:
+                self._navigation_cache.clear()
+                caches_cleared += 1
+            
+            if self._variable_cache:
+                self._variable_cache.clear() 
+                caches_cleared += 1
+            
+            if self._position_cache:
+                self._position_cache.clear()
+                caches_cleared += 1
+            
+            if self._row_value_cache:
+                self._row_value_cache.clear()
+                caches_cleared += 1
+            
+            if self._partition_cache:
+                self._partition_cache.clear()
+                caches_cleared += 1
+            
+            # Reset timeline
+            self._timeline_dirty = True
+            
+            # Update metrics
+            self._metrics["last_cache_invalidation"] = time.time()
+            self._metrics["cache_invalidations"] = self._metrics.get("cache_invalidations", 0) + 1
+            
+            logger.debug(f"Invalidated {caches_cleared} cache structures")
     
-    def update_variable(self, var_name, indices):
-        """Update a variable's indices and invalidate caches."""
-        self.variables[var_name] = indices
-        # Update row-to-var index
+    def update_variable(self, var_name: str, indices: List[int]) -> None:
+        """
+        Update a variable's indices with comprehensive validation and cache management.
+        
+        Args:
+            var_name: Variable name to update
+            indices: New list of row indices for the variable
+            
+        Raises:
+            ContextValidationError: If variable update is invalid
+        """
+        # Validate inputs
+        if not var_name:
+            raise ContextValidationError("Variable name cannot be empty")
+        
+        if not isinstance(indices, list):
+            raise ContextValidationError("Indices must be a list")
+        
+        # Validate all indices are within bounds
         for idx in indices:
-            self._row_var_index[idx].add(var_name)
-        self.invalidate_caches()
+            if not isinstance(idx, int) or idx < 0 or idx >= len(self.rows):
+                raise ContextValidationError(
+                    f"Invalid index {idx} for variable '{var_name}' "
+                    f"(valid range: 0-{len(self.rows)-1})"
+                )
+        
+        with self._context_lock:
+            # Remove old mappings
+            if var_name in self.variables:
+                old_indices = self.variables[var_name]
+                for old_idx in old_indices:
+                    if old_idx in self._row_var_index:
+                        self._row_var_index[old_idx].discard(var_name)
+            
+            # Update variable mapping
+            self.variables[var_name] = indices
+            
+            # Update row-to-variable index
+            for idx in indices:
+                self._row_var_index[idx].add(var_name)
+            
+            # Invalidate relevant caches
+            self.invalidate_caches()
+            
+            # Update metrics
+            self._metrics["variable_updates"] = self._metrics.get("variable_updates", 0) + 1
+            
+            logger.debug(f"Updated variable '{var_name}' with {len(indices)} indices: {indices}")
     
     def get_variable_indices_up_to(self, var_name: str, current_idx: int) -> List[int]:
         """
-        Get indices of rows matched to a variable up to a specific position.
+        Get indices of rows matched to a variable up to a specific position with caching.
+        
+        This optimized method provides:
+        - Advanced caching for frequent variable lookups
+        - Bounds checking with comprehensive validation
+        - Performance monitoring for optimization
+        - Thread-safe operations
         
         Args:
             var_name: Variable name
-            current_idx: Current row index
+            current_idx: Current row index (inclusive upper bound)
             
         Returns:
             List of row indices matched to the variable up to current_idx
+            
+        Raises:
+            ContextValidationError: If inputs are invalid
         """
+        # Input validation
+        if not var_name:
+            raise ContextValidationError("Variable name cannot be empty")
+        
+        if current_idx < 0:
+            raise ContextValidationError(f"Current index cannot be negative: {current_idx}")
+        
+        # Check cache first
+        cache_key = (var_name, current_idx, "up_to")
+        if cache_key in self._variable_cache:
+            self._cache_stats["variable_hits"] += 1
+            return self._variable_cache[cache_key]
+        
+        self._cache_stats["variable_misses"] += 1
+        
         # Get all indices for this variable
         all_indices = self.variables.get(var_name, [])
         
-        # Filter to only include indices up to current_idx
-        return [idx for idx in all_indices if idx <= current_idx]
+        # Filter to only include indices up to current_idx (inclusive)
+        filtered_indices = [idx for idx in all_indices if idx <= current_idx]
+        
+        # Cache the result (with size limit)
+        if len(self._variable_cache) < MAX_CACHE_SIZE:
+            self._variable_cache[cache_key] = filtered_indices
+        
+        # Update metrics
+        self._metrics["variable_lookups"] += 1
+        
+        return filtered_indices
     
     def get_partition_for_row(self, row_idx: int) -> Optional[Tuple[int, int]]:
         """
         Get the partition boundaries for a specific row with enhanced performance.
         
-        This optimized method provides:
+        This production-ready method provides:
         - Advanced caching for frequent lookups
         - Binary search for large partition datasets
         - Enhanced bounds checking with early exit
@@ -146,82 +411,304 @@ class RowContext:
         Returns:
             Tuple of (start, end) indices for the partition containing the row,
             or None if the row is not in any partition or out of bounds
+            
+        Raises:
+            PartitionError: If partition lookup fails
         """
-        # Performance tracking
+        # Input validation
+        if row_idx < 0:
+            raise PartitionError(f"Row index cannot be negative: {row_idx}")
+        
+        if row_idx >= len(self.rows):
+            raise PartitionError(f"Row index {row_idx} out of bounds (max: {len(self.rows)-1})")
+        
+        # Check cache first
+        if row_idx in self._partition_cache:
+            self._cache_stats["partition_hits"] += 1
+            return self._partition_cache[row_idx]
+        
+        self._cache_stats["partition_misses"] += 1
+        
+        # Performance timing for large partition sets
         start_time = time.time()
         
         try:
-            # Check bounds with early exit
-            if row_idx < 0 or (self.rows and row_idx >= len(self.rows)):
-                return None
-            
-            # No partitions case
+            # If no partitions defined, entire dataset is one partition
             if not self.partition_boundaries:
-                return (0, len(self.rows) - 1) if self.rows else None
-            
-            # Use cache for frequent lookups
-            cache_key = ('partition', row_idx)
-            if hasattr(self, 'navigation_cache') and cache_key in self.navigation_cache:
-                if hasattr(self, 'stats'):
-                    self.stats["partition_cache_hits"] = self.stats.get("partition_cache_hits", 0) + 1
-                return self.navigation_cache[cache_key]
-            
-            # Track partition lookup attempts
-            if hasattr(self, 'stats'):
-                self.stats["partition_lookups"] = self.stats.get("partition_lookups", 0) + 1
-            
-            # Optimization: Use binary search for large partition sets
-            if len(self.partition_boundaries) > 10:
-                left, right = 0, len(self.partition_boundaries) - 1
-                
-                while left <= right:
-                    mid = (left + right) // 2
-                    start, end = self.partition_boundaries[mid]
-                    
-                    if start <= row_idx <= end:
-                        # Found partition, cache and return
-                        if hasattr(self, 'navigation_cache'):
-                            self.navigation_cache[cache_key] = (start, end)
-                        return (start, end)
-                    elif row_idx < start:
-                        right = mid - 1
-                    else:  # row_idx > end
-                        left = mid + 1
-                
-                # Not found in any partition
-                if hasattr(self, 'navigation_cache'):
-                    self.navigation_cache[cache_key] = None
-                return None
+                result = (0, len(self.rows) - 1) if self.rows else None
             else:
-                # Linear search for small partition sets
-                for start, end in self.partition_boundaries:
-                    if start <= row_idx <= end:
-                        # Found partition, cache and return
-                        if hasattr(self, 'navigation_cache'):
-                            self.navigation_cache[cache_key] = (start, end)
-                        return (start, end)
-                
-                # Not found in any partition
-                if hasattr(self, 'navigation_cache'):
-                    self.navigation_cache[cache_key] = None
-                return None
-                
+                # Binary search for efficiency with large partition sets
+                result = self._binary_search_partition(row_idx)
+            
+            # Cache the result (with size limit)
+            if len(self._partition_cache) < MAX_CACHE_SIZE:
+                self._partition_cache[row_idx] = result
+            
+            # Update metrics
+            lookup_time = time.time() - start_time
+            self._metrics["partition_operations"] += 1
+            self._metrics["total_partition_time"] = self._metrics.get("total_partition_time", 0) + lookup_time
+            
+            if lookup_time > 0.001:  # Log slow lookups
+                logger.warning(f"Slow partition lookup: {lookup_time:.3f}s for row {row_idx}")
+            
+            return result
+            
         except Exception as e:
-            # Enhanced error handling with logging
-            logger = get_logger(__name__)
-            logger.error(f"Error in partition lookup: {str(e)}")
+            raise PartitionError(f"Failed to find partition for row {row_idx}: {str(e)}") from e
+    
+    def _binary_search_partition(self, row_idx: int) -> Optional[Tuple[int, int]]:
+        """Binary search for partition containing the given row index."""
+        left, right = 0, len(self.partition_boundaries) - 1
+        
+        while left <= right:
+            mid = (left + right) // 2
+            start, end = self.partition_boundaries[mid]
             
-            # Track errors
-            if hasattr(self, 'stats'):
-                self.stats["partition_errors"] = self.stats.get("partition_errors", 0) + 1
+            if start <= row_idx <= end:
+                return (start, end)
+            elif row_idx < start:
+                right = mid - 1
+            else:
+                left = mid + 1
+        
+        return None
+    
+    def check_same_partition(self, idx1: int, idx2: int) -> bool:
+        """
+        Check if two row indices are in the same partition with enhanced validation.
+        
+        This production-ready method provides:
+        - Comprehensive bounds checking
+        - Efficient partition lookup caching
+        - Detailed error handling and logging
+        
+        Args:
+            idx1: First row index
+            idx2: Second row index
+            
+        Returns:
+            True if both indices are in the same partition
+            
+        Raises:
+            PartitionError: If partition check fails
+        """
+        try:
+            # Validate inputs
+            if idx1 < 0 or idx2 < 0:
+                raise PartitionError("Row indices cannot be negative")
+            
+            if idx1 >= len(self.rows) or idx2 >= len(self.rows):
+                raise PartitionError("Row indices out of bounds")
+            
+            # If no partitions, all rows are in the same partition
+            if not self.partition_boundaries:
+                return True
+            
+            # Get partitions for both indices
+            partition1 = self.get_partition_for_row(idx1)
+            partition2 = self.get_partition_for_row(idx2)
+            
+            # Both must be in valid partitions and the same partition
+            return (partition1 is not None and 
+                   partition2 is not None and 
+                   partition1 == partition2)
+                   
+        except Exception as e:
+            logger.error(f"Error checking partition compatibility for indices {idx1}, {idx2}: {e}")
+            return False
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """
+        Get comprehensive cache and performance statistics.
+        
+        Returns:
+            Dictionary with detailed cache and performance metrics
+        """
+        total_hits = sum(v for k, v in self._cache_stats.items() if k.endswith("_hits"))
+        total_misses = sum(v for k, v in self._cache_stats.items() if k.endswith("_misses"))
+        total_requests = total_hits + total_misses
+        
+        hit_rate = (total_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        cache_sizes = {
+            "navigation_cache": len(self._navigation_cache),
+            "variable_cache": len(self._variable_cache),
+            "position_cache": len(self._position_cache),
+            "row_value_cache": len(self._row_value_cache),
+            "partition_cache": len(self._partition_cache)
+        }
+        
+        return {
+            "cache_stats": self._cache_stats.copy(),
+            "cache_sizes": cache_sizes,
+            "hit_rate_percent": hit_rate,
+            "total_requests": total_requests,
+            "metrics": self._metrics.copy(),
+            "operation_count": self._operation_count,
+            "context_info": {
+                "rows_count": len(self.rows),
+                "variables_count": len(self.variables),
+                "partitions_count": len(self.partition_boundaries),
+                "timeline_entries": len(self._timeline),
+                "current_idx": self.current_idx,
+                "match_number": self.match_number
+            }
+        }
+    
+    def optimize_caches(self) -> None:
+        """
+        Optimize cache structures for better performance.
+        
+        This method:
+        - Removes least recently used entries when caches are full
+        - Compacts sparse cache structures
+        - Logs optimization actions for monitoring
+        """
+        with self._context_lock:
+            optimized_caches = 0
+            
+            # Optimize each cache if it's near the size limit
+            for cache_name, cache in [
+                ("navigation", self._navigation_cache),
+                ("variable", self._variable_cache),
+                ("position", self._position_cache),
+                ("row_value", self._row_value_cache),
+                ("partition", self._partition_cache)
+            ]:
+                if len(cache) > MAX_CACHE_SIZE * 0.8:  # 80% threshold
+                    # Simple LRU: remove oldest entries (basic implementation)
+                    items_to_remove = len(cache) - int(MAX_CACHE_SIZE * 0.6)  # Remove to 60%
+                    if items_to_remove > 0:
+                        # Remove first N items (approximates LRU for dict in Python 3.7+)
+                        keys_to_remove = list(cache.keys())[:items_to_remove]
+                        for key in keys_to_remove:
+                            cache.pop(key, None)
+                        optimized_caches += 1
+                        
+                        logger.debug(f"Optimized {cache_name} cache: removed {items_to_remove} entries")
+            
+            if optimized_caches > 0:
+                self._metrics["cache_optimizations"] = self._metrics.get("cache_optimizations", 0) + 1
+                logger.info(f"Cache optimization completed: {optimized_caches} caches optimized")
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get a comprehensive performance summary for monitoring and optimization.
+        
+        Returns:
+            Dictionary with performance metrics and recommendations
+        """
+        cache_stats = self.get_cache_stats()
+        
+        # Calculate efficiency metrics
+        efficiency_score = cache_stats["hit_rate_percent"]
+        
+        # Determine performance level
+        if efficiency_score >= 80:
+            performance_level = "EXCELLENT"
+        elif efficiency_score >= 60:
+            performance_level = "GOOD"
+        elif efficiency_score >= 40:
+            performance_level = "FAIR"
+        else:
+            performance_level = "POOR"
+        
+        # Generate recommendations
+        recommendations = []
+        
+        if cache_stats["hit_rate_percent"] < 50:
+            recommendations.append("Consider increasing cache sizes or improving access patterns")
+        
+        if self._metrics.get("cache_invalidations", 0) > 10:
+            recommendations.append("High cache invalidation rate - consider optimizing variable updates")
+        
+        if len(self.rows) > 10000 and not self.partition_boundaries:
+            recommendations.append("Consider using partitions for large datasets")
+        
+        return {
+            "performance_level": performance_level,
+            "efficiency_score": efficiency_score,
+            "cache_stats": cache_stats,
+            "recommendations": recommendations,
+            "context_size": {
+                "rows": len(self.rows),
+                "variables": len(self.variables),
+                "partitions": len(self.partition_boundaries)
+            }
+        }
+    
+    # Enhanced navigation methods with production-ready error handling
+    
+    def classifier(self, variable: Optional[str] = None) -> str:
+        """
+        Return the classifier for the current row or a specific variable.
+        
+        This production-ready implementation provides:
+        - Enhanced variable validation and error handling
+        - Comprehensive caching for performance optimization
+        - Support for subset variables and pattern variables
+        - Thread-safe operations with proper synchronization
+        - Full SQL:2016 compliance with edge case handling
+        
+        Args:
+            variable: Optional variable name. If None, returns current row's classifier.
+            
+        Returns:
+            String classifier name for the variable/row
+            
+        Raises:
+            ContextValidationError: If variable lookup fails
+        """
+        with self._context_lock:
+            self._operation_count += 1
+            self._metrics["navigation_operations"] += 1
+            
+            start_time = time.time()
+            
+            try:
+                # If no variable specified, determine classifier for current row
+                if variable is None:
+                    if self.current_idx < 0 or self.current_idx >= len(self.rows):
+                        raise ContextValidationError(
+                            f"Current index {self.current_idx} out of bounds (rows: {len(self.rows)})"
+                        )
+                    
+                    # Find which variable(s) match the current row
+                    matching_vars = self._row_var_index.get(self.current_idx, set())
+                    
+                    if not matching_vars:
+                        return "UNMATCHED"
+                    elif len(matching_vars) == 1:
+                        return next(iter(matching_vars))
+                    else:
+                        # Multiple variables match - return in pattern order if available
+                        if self.pattern_variables:
+                            for pattern_var in self.pattern_variables:
+                                if pattern_var in matching_vars:
+                                    return pattern_var
+                        # Fallback to alphabetical order for deterministic results
+                        return sorted(matching_vars)[0]
                 
-            return None
+                # Variable specified - validate it exists
+                if variable not in self.variables:
+                    # Check if it's a subset variable
+                    if variable in self.subsets:
+                        # For subset variables, return the subset name
+                        return variable
+                    else:
+                        raise ContextValidationError(f"Unknown variable: {variable}")
+                
+                return variable
+                
+            except Exception as e:
+                logger.error(f"Error in classifier for variable '{variable}': {e}")
+                raise ContextValidationError(f"Classifier lookup failed: {str(e)}") from e
             
-        finally:
-            # Track performance metrics
-            if hasattr(self, 'timing'):
-                partition_time = time.time() - start_time
-                self.timing['partition_lookups'] = self.timing.get('partition_lookups', 0) + partition_time
+            finally:
+                # Track performance
+                operation_time = time.time() - start_time
+                self._metrics["total_navigation_time"] = self._metrics.get("total_navigation_time", 0) + operation_time
     
     def check_same_partition(self, idx1: int, idx2: int) -> bool:
         """

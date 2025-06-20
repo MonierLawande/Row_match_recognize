@@ -2160,7 +2160,7 @@ class NFABuilder:
         
         return alt_start, alt_end
 
-    def _apply_quantifier(self, start: int, end: int, min_rep: int, max_rep: Optional[int], greedy: bool) -> Tuple[int, int]:
+    def _apply_quantifier(self, start: int, end: int, min_rep: int, max_rep: Union[int, float], greedy: bool) -> Tuple[int, int]:
         """
         Apply quantifier to a pattern segment with production-ready SQL:2016 compliance.
         
@@ -2168,7 +2168,7 @@ class NFABuilder:
             start: Start state of the pattern segment
             end: End state of the pattern segment
             min_rep: Minimum repetitions required
-            max_rep: Maximum repetitions allowed (None for unbounded)
+            max_rep: Maximum repetitions allowed (int or float('inf') for unbounded)
             greedy: Whether quantifier is greedy (True) or reluctant (False)
             
         Returns:
@@ -2192,14 +2192,14 @@ class NFABuilder:
             self.add_epsilon(end, q_end)     # Exit after one match
             self.add_epsilon(q_start, q_end) # Can skip entirely
             
-        elif min_rep == 0 and max_rep is None:
+        elif min_rep == 0 and (max_rep == float('inf') or max_rep is None):
             # * quantifier - zero or more
             self.add_epsilon(q_start, start)  # Can enter pattern
             self.add_epsilon(end, q_end)     # Exit after match
             self.add_epsilon(q_start, q_end) # Can skip entirely
             self.add_epsilon(end, start)     # Can repeat
             
-        elif min_rep == 1 and max_rep is None:
+        elif min_rep == 1 and (max_rep == float('inf') or max_rep is None):
             # + quantifier - one or more
             self.add_epsilon(q_start, start)  # Must enter pattern
             self.add_epsilon(end, q_end)     # Exit after match
@@ -2226,13 +2226,14 @@ class NFABuilder:
                     current_start = rep_end
             
             # Handle optional additional repetitions if max_rep > min_rep
-            if max_rep is None:
+            if max_rep == float('inf') or max_rep is None:
                 # Unbounded - can repeat indefinitely
                 self.add_epsilon(current_start, start)  # Can repeat original pattern
                 self.add_epsilon(current_start, q_end)  # Or exit
             elif max_rep > min_rep:
-                # Bounded additional repetitions
-                for i in range(max_rep - min_rep):
+                # Bounded additional repetitions - ensure max_rep is int for range
+                additional_reps = int(max_rep) - min_rep
+                for i in range(additional_reps):
                     rep_start = self.new_state()
                     rep_end = self.new_state()
                     
