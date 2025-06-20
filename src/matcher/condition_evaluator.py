@@ -30,17 +30,20 @@ class NavigationFunctionInfo:
     raw_expression: str
 
 class ConditionEvaluator(ast.NodeVisitor):
-    def __init__(self, context: RowContext, evaluation_mode='DEFINE'):
+    def __init__(self, context: RowContext, evaluation_mode='DEFINE', recursion_depth=0):
         """
         Initialize condition evaluator with context-aware navigation.
         
         Args:
             context: RowContext for pattern matching
             evaluation_mode: 'DEFINE' for physical navigation, 'MEASURES' for logical navigation
+            recursion_depth: Current recursion depth to prevent infinite recursion (optional)
         """
         self.context = context
         self.current_row = None
         self.evaluation_mode = evaluation_mode  # 'DEFINE' or 'MEASURES'
+        self.recursion_depth = recursion_depth  # Track recursion depth
+        self.max_recursion_depth = 10  # Maximum allowed recursion depth
         # Extended mathematical and utility functions
         self.math_functions = {
             # Basic math functions
@@ -340,8 +343,8 @@ class ConditionEvaluator(ast.NodeVisitor):
             elif isinstance(arg, ast.Constant):
                 # Constant values (numbers, strings)
                 args.append(arg.value)
-            elif isinstance(arg, ast.Num):
-                # Python < 3.8 compatibility
+            elif hasattr(ast, 'Num') and isinstance(arg, ast.Num):
+                # Python < 3.8 compatibility - ast.Num is deprecated in Python 3.14+
                 args.append(arg.n)
             else:
                 # For complex expressions, evaluate them
@@ -393,7 +396,8 @@ class ConditionEvaluator(ast.NodeVisitor):
                         navigation_expr, 
                         self.context, 
                         self.context.current_idx, 
-                        getattr(self.context, 'current_var', None)
+                        getattr(self.context, 'current_var', None),
+                        self.recursion_depth + 1
                     )
                 else:
                     # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
@@ -407,8 +411,10 @@ class ConditionEvaluator(ast.NodeVisitor):
                     steps = 1
                     if len(node.args) > 1:
                         steps_arg = node.args[1]
-                        if isinstance(steps_arg, (ast.Constant, ast.Num)):
-                            steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        if isinstance(steps_arg, ast.Constant):
+                            steps = steps_arg.value
+                        elif hasattr(ast, 'Num') and isinstance(steps_arg, ast.Num):
+                            steps = steps_arg.n
                     
                     if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
                         # Pattern: NEXT(A.value) - variable.column format
@@ -490,9 +496,27 @@ class ConditionEvaluator(ast.NodeVisitor):
                                 temp_evaluator = ConditionEvaluator(temp_context, self.evaluation_mode)
                                 return temp_evaluator._get_classifier()
                             else:
-                                # For FIRST/LAST with CLASSIFIER, not supported yet
-                                logger.error(f"{func_name}(CLASSIFIER()) not yet supported")
-                                return None
+                                # For FIRST/LAST with CLASSIFIER, implement support
+                                if func_name.upper() == 'LAST':
+                                    # Get the last classifier in the match
+                                    if self.context.current_match and len(self.context.current_match) > 0:
+                                        last_row_index = self.context.current_match[-1]['row_index']
+                                        temp_context = RowContext(
+                                            self.context.partition,
+                                            self.context.partition_index,
+                                            last_row_index,
+                                            self.context.pattern_variables,
+                                            self.context.current_match,
+                                            self.context.subset_variables
+                                        )
+                                        temp_evaluator = ConditionEvaluator(temp_context, self.evaluation_mode)
+                                        return temp_evaluator._get_classifier()
+                                    else:
+                                        return None
+                                else:
+                                    # For FIRST(CLASSIFIER()), not yet fully supported
+                                    logger.error(f"{func_name}(CLASSIFIER()) not yet supported")
+                                    return None
                         else:
                             # For other nested calls, evaluate the argument first
                             evaluated_arg = self.visit(first_arg)
@@ -1155,8 +1179,8 @@ class ConditionEvaluator(ast.NodeVisitor):
             elif isinstance(arg, ast.Constant):
                 # Literal value
                 args.append(str(arg.value))
-            elif isinstance(arg, ast.Num):
-                # Numeric literal (Python < 3.8)
+            elif hasattr(ast, 'Num') and isinstance(arg, getattr(ast, 'Num', type(None))):
+                # Numeric literal (Python < 3.8) - deprecated but handle gracefully
                 args.append(str(arg.n))
             elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
                 # Pattern variable reference (A.price)
@@ -1596,7 +1620,7 @@ def validate_navigation_conditions(pattern_variables, define_clauses):
     return True
 
 
-def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str] = None) -> Any:
+def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str] = None, recursion_depth: int = 0) -> Any:
     """
     Evaluate nested navigation expressions.
     
@@ -1616,8 +1640,85 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
     try:
         import re
         
+        # Check recursion depth early
+        max_recursion_depth = 10
+        if recursion_depth >= max_recursion_depth:
+            logger.warning(f"Maximum recursion depth {max_recursion_depth} reached for expression: '{expr}', returning None")
+            return None
+        
         # Handle SQL-specific constructs that aren't valid Python syntax
         processed_expr = expr
+        
+        # Handle complex arithmetic expressions with multiple navigation functions
+        # Pattern: PREV(LAST(A.value), 3) + FIRST(A.value) + PREV(LAST(B.value), 2)
+        arithmetic_nav_pattern = r'.*(?:PREV|NEXT|FIRST|LAST)\s*\(.*[\+\-\*\/].*(?:PREV|NEXT|FIRST|LAST)\s*\('
+        if re.search(arithmetic_nav_pattern, processed_expr, re.IGNORECASE):
+            logger.debug(f"Detected complex arithmetic expression with navigation functions: {processed_expr}")
+            
+            # For complex arithmetic expressions, we need to parse and evaluate using AST
+            # But first ensure we're in the right context for evaluation
+            try:
+                import ast
+                tree = ast.parse(processed_expr, mode='eval')
+                evaluator = ConditionEvaluator(context, 'MEASURES', recursion_depth + 1)
+                evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
+                result = evaluator.visit(tree.body)
+                logger.debug(f"Complex arithmetic navigation result: {result}")
+                return result
+            except Exception as e:
+                logger.debug(f"Failed to evaluate complex arithmetic expression via AST: {e}")
+                # Fall through to other methods
+        
+        # Handle complex nested navigation patterns like PREV(LAST(A.value), 3)
+        complex_nav_pattern = r'(PREV|NEXT)\s*\(\s*(FIRST|LAST)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\s*\)\s*(?:,\s*(\d+))?\s*\)'
+        complex_nav_match = re.match(complex_nav_pattern, processed_expr, re.IGNORECASE)
+        
+        if complex_nav_match:
+            outer_func = complex_nav_match.group(1).upper()  # PREV or NEXT
+            inner_func = complex_nav_match.group(2).upper()  # FIRST or LAST
+            column_ref = complex_nav_match.group(3)          # A.value
+            steps = int(complex_nav_match.group(4)) if complex_nav_match.group(4) else 1
+            
+            logger.debug(f"Processing complex navigation: {outer_func}({inner_func}({column_ref}), {steps})")
+            
+            # Extract variable and column
+            var_name, col_name = column_ref.split('.', 1)
+            
+            # First, find the FIRST/LAST row index for the variable using context.variables
+            if hasattr(context, 'variables') and var_name in context.variables:
+                var_indices = context.variables[var_name]
+                logger.debug(f"Found variable {var_name} with indices: {var_indices}")
+                
+                if var_indices:
+                    if inner_func == 'FIRST':
+                        target_base_idx = min(var_indices)
+                    else:  # LAST
+                        target_base_idx = max(var_indices)
+                    
+                    logger.debug(f"Using {inner_func} index: {target_base_idx} for variable {var_name}")
+                    
+                    # Now apply PREV/NEXT with steps
+                    if outer_func == 'PREV':
+                        final_idx = target_base_idx - steps
+                    else:  # NEXT
+                        final_idx = target_base_idx + steps
+                    
+                    logger.debug(f"Final index after {outer_func} with steps {steps}: {final_idx}")
+                    
+                    # Get the value at the final index
+                    if hasattr(context, 'rows') and 0 <= final_idx < len(context.rows):
+                        result = context.rows[final_idx].get(col_name)
+                        logger.debug(f"Complex navigation result: {result} from row {final_idx}")
+                        return result
+                    else:
+                        logger.debug(f"Complex navigation index {final_idx} out of bounds (total rows: {len(context.rows) if hasattr(context, 'rows') else 'unknown'})")
+                        return None
+                else:
+                    logger.debug(f"Variable {var_name} has no matched rows")
+                    return None
+            else:
+                logger.debug(f"Variable {var_name} not found in context.variables: {getattr(context, 'variables', {})}")
+                return None
         
         # Handle CLASSIFIER() inside navigation functions
         classifier_nav_pattern = r'(FIRST|LAST)\s*\(\s*CLASSIFIER\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)\s*\)'
@@ -1773,8 +1874,13 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
         # If no special SQL constructs, try to parse as Python AST
         tree = ast.parse(processed_expr, mode='eval')
         
-        # Create a new evaluator for this expression
-        evaluator = ConditionEvaluator(context, evaluation_mode='MEASURES')
+        # Create a new evaluator for this expression with recursion depth check
+        max_recursion_depth = 10  # Define max recursion depth at function level
+        if recursion_depth >= max_recursion_depth:
+            logger.warning(f"Maximum recursion depth {max_recursion_depth} reached for expression: '{expr}', returning None")
+            return None
+            
+        evaluator = ConditionEvaluator(context, evaluation_mode='MEASURES', recursion_depth=recursion_depth + 1)
         
         # Evaluate the parsed expression
         result = evaluator.visit(tree.body)

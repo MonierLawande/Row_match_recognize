@@ -989,6 +989,15 @@ class EnhancedMatcher:
             if match:
                 self.timing["find_match"] += time.time() - match_start_time
                 return match
+
+        # PRODUCTION FIX: Special handling for complex back-reference patterns
+        # These patterns require constraint satisfaction and backtracking
+        if self._has_complex_back_references():
+            logger.debug(f"Complex back-reference pattern detected - using constraint-based handler")
+            match = self._handle_complex_back_references(rows, start_idx, context, config)
+            if match:
+                self.timing["find_match"] += time.time() - match_start_time
+                return match
         
         state = self.start_state
         current_idx = start_idx
@@ -1086,6 +1095,29 @@ class EnhancedMatcher:
             # Update context with current variable assignments for condition evaluation
             context.variables = var_assignments
             context.current_var_assignments = var_assignments
+            
+            # Set current_match to provide access to rows in the current match for navigation functions
+            if start_idx <= current_idx:
+                # Build current_match with variable assignments
+                current_match = []
+                
+                # Add all rows from start to current with their variable assignments
+                for i in range(start_idx, min(current_idx + 1, len(rows))):
+                    row_data = {**rows[i], 'row_index': i}
+                    
+                    # Find which variable this row was assigned to
+                    assigned_var = None
+                    for var, indices in var_assignments.items():
+                        if i in indices:
+                            assigned_var = var
+                            break
+                    
+                    if assigned_var:
+                        row_data['variable'] = assigned_var
+                    
+                    current_match.append(row_data)
+                
+                context.current_match = current_match
             
             logger.debug(f"Testing row {current_idx}, data: {row}")
             logger.debug(f"  Current var_assignments: {var_assignments}")
@@ -2826,6 +2858,254 @@ class EnhancedMatcher:
         # Validate DFA is ready
         if not self.dfa or not self.dfa.states:
             raise ValueError("DFA is not properly initialized")
+
+    def _has_complex_back_references(self) -> bool:
+        """
+        Detect if the pattern has complex back-references that require constraint solving.
+        
+        Complex back-references are conditions that:
+        1. Reference multiple pattern variables
+        2. Use navigation functions that depend on variable assignments
+        3. Require specific variable assignment orders to be satisfied
+        
+        Returns:
+            True if the pattern has complex back-references requiring special handling
+        """
+        if not hasattr(self, 'define_conditions'):
+            return False
+            
+        # Look for conditions with multiple pattern variable references
+        import re
+        back_ref_pattern = r'\b([A-Z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)'
+        
+        for var, condition in self.define_conditions.items():
+            # Count unique pattern variables referenced in this condition
+            referenced_vars = set()
+            matches = re.findall(back_ref_pattern, condition)
+            
+            for var_name, column in matches:
+                referenced_vars.add(var_name)
+            
+            # If condition references multiple variables AND uses navigation functions,
+            # it's likely a complex back-reference that needs constraint solving
+            if len(referenced_vars) >= 2:
+                nav_functions = ['PREV', 'NEXT', 'FIRST', 'LAST']
+                if any(func in condition.upper() for func in nav_functions):
+                    logger.debug(f"Complex back-reference detected in {var}: references {referenced_vars}")
+                    return True
+                    
+        return False
+
+    def _handle_complex_back_references(self, rows: List[Dict[str, Any]], start_idx: int, 
+                                      context: RowContext, config=None) -> Optional[Dict[str, Any]]:
+        """
+        Handle complex back-reference patterns using constraint satisfaction.
+        
+        This method tries different variable assignment combinations to find
+        assignments that satisfy all back-reference constraints.
+        
+        Args:
+            rows: Input rows to match
+            start_idx: Starting index for the match
+            context: Row context for evaluation
+            config: Match configuration
+            
+        Returns:
+            Match result if successful, None otherwise
+        """
+        logger.debug(f"Starting constraint-based back-reference solving from index {start_idx}")
+        
+        # For complex back-references, we need to try different assignment strategies
+        # Strategy 1: Try all possible starting variable choices for the first row
+        available_vars = self._get_available_transitions_for_state(self.start_state)
+        
+        for first_var in available_vars:
+            logger.debug(f"Trying constraint solution starting with variable {first_var[0]}")
+            
+            # Try to build a complete match starting with this variable choice
+            match = self._solve_with_first_variable(rows, start_idx, context, first_var, config)
+            if match:
+                logger.debug(f"Constraint solution found starting with {first_var[0]}")
+                return match
+                
+        logger.debug(f"No constraint solution found for complex back-references")
+        return None
+
+    def _get_available_transitions_for_state(self, state: int) -> List[Tuple[str, int, Any, Any]]:
+        """Get list of available transitions from a state."""
+        if state not in self.transition_index:
+            return []
+            
+        trans_index = self.transition_index[state]
+        return list(trans_index)
+
+    def _solve_with_first_variable(self, rows: List[Dict[str, Any]], start_idx: int,
+                                 context: RowContext, first_var_transition: Tuple[str, int, Any, Any], config=None) -> Optional[Dict[str, Any]]:
+        """
+        Try to solve the pattern starting with a specific variable assignment for the first row.
+        
+        This uses a modified version of the standard matching algorithm but with
+        constraint checking to ensure back-reference conditions can eventually be satisfied.
+        """
+        var_name, target_state, condition, transition = first_var_transition
+        state = self.start_state
+        current_idx = start_idx
+        var_assignments = {}
+        
+        # Force the first variable assignment
+        if current_idx < len(rows):
+            first_row = rows[current_idx]
+            
+            # Check if the first variable condition is satisfied
+            context.current_var = var_name
+            if not condition(first_row, context):
+                logger.debug(f"First variable {var_name} condition failed at index {current_idx}")
+                context.current_var = None
+                return None
+                
+            # Make the first assignment
+            var_assignments[var_name] = [current_idx]
+            context.variables = var_assignments.copy()
+            context.current_idx = current_idx
+            
+            # Advance to next state
+            trans_index = self.transition_index[state]
+            target_state_found = False
+            for var, target, _, _ in trans_index:
+                if var == var_name:
+                    state = target
+                    target_state_found = True
+                    break
+            
+            if not target_state_found:
+                logger.debug(f"Could not find transition for variable {var_name}")
+                context.current_var = None
+                return None
+                
+            current_idx += 1
+            logger.debug(f"Forced assignment: {var_name} at index {current_idx-1}, advancing to state {state}")
+            context.current_var = None
+        
+        # Continue with standard matching from the new state
+        return self._continue_matching_from_state(rows, current_idx, state, var_assignments, context, config)
+
+    def _continue_matching_from_state(self, rows: List[Dict[str, Any]], current_idx: int, 
+                                    state: int, var_assignments: Dict[str, List[int]], 
+                                    context: RowContext, config=None) -> Optional[Dict[str, Any]]:
+        """
+        Continue the matching process from a given state with existing variable assignments.
+        
+        This is a simplified version of the main matching loop that continues from
+        a specific point rather than starting from scratch.
+        """
+        context.variables = var_assignments.copy()
+        
+        while current_idx < len(rows):
+            context.current_idx = current_idx
+            row = rows[current_idx]
+            
+            # Get available transitions from current state
+            if state not in self.transition_index:
+                break
+                
+            trans_index = self.transition_index[state]
+            valid_transitions = []
+            
+            # Test each possible transition
+            for var_name, target, condition, transition in trans_index:
+                context.current_var = var_name
+                if condition(row, context):
+                    valid_transitions.append((var_name, target, False))
+                context.current_var = None
+            
+            if not valid_transitions:
+                break
+                
+            # Use the same transition selection logic as the main matcher
+            best_transition = self._select_best_transition(valid_transitions, state)
+            if not best_transition:
+                break
+            
+            var_name, next_state, _ = best_transition
+            
+            # Update assignments
+            if var_name not in var_assignments:
+                var_assignments[var_name] = []
+            var_assignments[var_name].append(current_idx)
+            context.variables = var_assignments.copy()
+            
+            # Check if we reached an accepting state
+            if self.dfa.states[next_state].is_accept:
+                logger.debug(f"Reached accepting state {next_state} at index {current_idx}")
+                return {
+                    "start": self._get_match_start(var_assignments),
+                    "end": current_idx,
+                    "variables": var_assignments.copy(),
+                    "state": next_state,
+                    "is_empty": False,
+                    "excluded_vars": set(),
+                    "excluded_rows": [],
+                    "has_empty_alternation": False
+                }
+            
+            state = next_state
+            current_idx += 1
+            
+        return None
+
+    def _get_match_start(self, var_assignments: Dict[str, List[int]]) -> int:
+        """Get the starting index of a match from variable assignments."""
+        if not var_assignments:
+            return 0
+            
+        all_indices = []
+        for indices in var_assignments.values():
+            all_indices.extend(indices)
+            
+        return min(all_indices) if all_indices else 0
+
+    def _select_best_transition(self, valid_transitions: List[Tuple[str, int, bool]], 
+                              current_state: int) -> Optional[Tuple[str, int, bool]]:
+        """
+        Select the best transition using the same logic as the main matcher.
+        This is a simplified version for the constraint solver.
+        """
+        if not valid_transitions:
+            return None
+            
+        # Categorize transitions
+        categorized = {
+            'accepting': [],
+            'prerequisite': [],
+            'dependent': [],
+            'simple': []
+        }
+        
+        for var, target, is_excluded in valid_transitions:
+            is_accepting = self.dfa.states[target].is_accept
+            has_back_ref = self._variable_has_back_reference(var)
+            is_prerequisite = self._variable_is_back_reference_prerequisite(var)
+            
+            if is_accepting:
+                categorized['accepting'].append((var, target, is_excluded))
+            elif is_prerequisite:
+                categorized['prerequisite'].append((var, target, is_excluded))
+            elif not has_back_ref:
+                categorized['simple'].append((var, target, is_excluded))
+            else:
+                categorized['dependent'].append((var, target, is_excluded))
+        
+        # Select best category with transitions
+        for category in ['accepting', 'prerequisite', 'dependent', 'simple']:
+            if categorized[category]:
+                # Sort by alternation priority
+                sorted_transitions = sorted(
+                    categorized[category],
+                    key=lambda x: (x[1] == current_state, self.alternation_order.get(x[0], 999), x[0])
+                )
+                return sorted_transitions[0]
+                
+        return None
 
     def _validate_match_results(self, results: List[MatchResult]) -> None:
         """Validate matching results for consistency."""

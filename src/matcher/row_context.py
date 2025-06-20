@@ -117,6 +117,7 @@ class RowContext:
     defined_variables: Set[str] = field(default_factory=set)
     pattern_variables: List[str] = field(default_factory=list)
     navigation_mode: NavigationMode = NavigationMode.RUNNING
+    current_match: Optional[List[Dict[str, Any]]] = field(default_factory=lambda: None)
     
     # Private fields for optimization and caching
     _timeline: List[Tuple[int, str]] = field(default_factory=list, repr=False)
