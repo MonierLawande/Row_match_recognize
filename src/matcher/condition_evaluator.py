@@ -80,8 +80,8 @@ class ConditionEvaluator(ast.NodeVisitor):
             'LENGTH': len,
             'LOWER': str.lower,
             'UPPER': str.upper,
-            'SUBSTR': lambda s, start, length=None: s[start:start+length] if length else s[start:],
-            'SUBSTRING': lambda s, start, length=None: s[start:start+length] if length else s[start:],
+            'SUBSTR': lambda s, start, length=None: s[start-1:start-1+length] if length else s[start-1:],
+            'SUBSTRING': lambda s, start, length=None: s[start-1:start-1+length] if length else s[start-1:],
             'CONCAT': lambda *args: ''.join(str(arg) for arg in args if arg is not None),
             'TRIM': lambda s: str(s).strip() if s is not None else None,
             'LTRIM': lambda s: str(s).lstrip() if s is not None else None,
@@ -2259,16 +2259,25 @@ def _sql_to_python_condition(condition: str) -> str:
         python_list = f'[{in_values}]'
         return f'{left_expr} in {python_list}'
     
-    # Enhanced IN predicates pattern to handle both simple columns and function calls
-    # This pattern uses a more flexible approach to match the left side of IN
-    # It matches: word, word.word, or word(anything)
-    in_pattern = r'([A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?(?:\.[A-Za-z_][A-Za-z0-9_]*)?|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\s+IN\s*\(([^)]*)\)'
-    condition = re.sub(in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
+    # Enhanced IN predicates pattern to handle various expressions
+    # This pattern matches multiple cases:
+    # 1. Simple identifiers: column
+    # 2. Dotted expressions: table.column
+    # 3. Function calls: FUNCTION(args)
+    # 4. Parenthesized expressions: (expression)
+    # 5. Complex expressions: (value + 10), (column * 2), etc.
     
-    # If the above didn't match, try a more general pattern for complex function calls
-    # This handles cases like SUBSTR(column, 1, 1) IN (...)
+    # First try to match parenthesized expressions like (value + 10) IN (...)
+    parenthesized_in_pattern = r'(\([^)]+\))\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(parenthesized_in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Then match function calls like SUBSTR(column, 1, 1) IN (...)
     complex_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*\([^)]*(?:\([^)]*\)[^)]*)*\))\s+IN\s*\(([^)]*)\)'
     condition = re.sub(complex_in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Finally match simple expressions: column IN (...), table.column IN (...)
+    simple_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(simple_in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
     
     # Handle NOT IN predicates
     def convert_not_in_predicate(match):
@@ -2284,13 +2293,18 @@ def _sql_to_python_condition(condition: str) -> str:
         python_list = f'[{in_values}]'
         return f'{left_expr} not in {python_list}'
     
-    # Enhanced NOT IN predicates pattern to handle function calls
-    not_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?(?:\.[A-Za-z_][A-Za-z0-9_]*)?|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\s+NOT\s+IN\s*\(([^)]*)\)'
-    condition = re.sub(not_in_pattern, convert_not_in_predicate, condition, flags=re.IGNORECASE)
+    # Enhanced NOT IN predicates pattern to handle various expressions
+    # First try to match parenthesized expressions like (value + 10) NOT IN (...)
+    parenthesized_not_in_pattern = r'(\([^)]+\))\s+NOT\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(parenthesized_not_in_pattern, convert_not_in_predicate, condition, flags=re.IGNORECASE)
     
-    # Handle complex NOT IN predicates
+    # Then match function calls like SUBSTR(column, 1, 1) NOT IN (...)
     complex_not_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*\([^)]*(?:\([^)]*\)[^)]*)*\))\s+NOT\s+IN\s*\(([^)]*)\)'
     condition = re.sub(complex_not_in_pattern, convert_not_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Finally match simple expressions: column NOT IN (...), table.column NOT IN (...)
+    simple_not_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s+NOT\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(simple_not_in_pattern, convert_not_in_predicate, condition, flags=re.IGNORECASE)
     
     # Handle empty IN predicates - convert to always false/true
     condition = re.sub(r'\bIN\s*\(\s*\)', 'in []', condition, flags=re.IGNORECASE)
