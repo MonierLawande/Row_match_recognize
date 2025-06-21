@@ -472,51 +472,142 @@ class ConditionEvaluator(ast.NodeVisitor):
                             # Use variable-aware navigation for FIRST/LAST with no specific variable
                             return self._get_navigation_value(None, column, func_name, steps)
                     elif isinstance(first_arg, ast.Call):
-                        # Handle nested function calls like NEXT(CLASSIFIER())
+                        # Handle nested function calls like NEXT(CLASSIFIER()) and PREV(CLASSIFIER(U))
                         if isinstance(first_arg.func, ast.Name) and first_arg.func.id.upper() == "CLASSIFIER":
-                            # Special case: NEXT(CLASSIFIER()) - navigate through classifier values
+                            # Extract subset variable if present
+                            subset_var = None
+                            if len(first_arg.args) > 0 and isinstance(first_arg.args[0], ast.Name):
+                                subset_var = first_arg.args[0].id
+                            
+                            # Special case: Navigation with CLASSIFIER - navigate through classifier values
                             if func_name in ("PREV", "NEXT"):
-                                # For PREV/NEXT with CLASSIFIER, we need to get the classifier value at the target position
-                                current_idx = self.context.current_idx
-                                target_idx = current_idx + steps if func_name == "NEXT" else current_idx - steps
-                                
-                                # Check bounds
-                                if target_idx < 0 or target_idx >= len(self.context.rows):
-                                    return None
-                                
-                                # Create a temporary context for the target position
-                                temp_context = RowContext(
-                                    rows=self.context.rows,
-                                    variables=self.context.variables,
-                                    current_idx=target_idx,
-                                    match_number=self.context.match_number
-                                )
-                                
-                                # Get the classifier value at that position
-                                temp_evaluator = ConditionEvaluator(temp_context, self.evaluation_mode)
-                                return temp_evaluator._get_classifier()
-                            else:
-                                # For FIRST/LAST with CLASSIFIER, implement support
-                                if func_name.upper() == 'LAST':
-                                    # Get the last classifier in the match
-                                    if self.context.current_match and len(self.context.current_match) > 0:
-                                        last_row_index = self.context.current_match[-1]['row_index']
-                                        temp_context = RowContext(
-                                            self.context.partition,
-                                            self.context.partition_index,
-                                            last_row_index,
-                                            self.context.pattern_variables,
-                                            self.context.current_match,
-                                            self.context.subset_variables
-                                        )
-                                        temp_evaluator = ConditionEvaluator(temp_context, self.evaluation_mode)
-                                        return temp_evaluator._get_classifier()
+                                # For PREV/NEXT with CLASSIFIER, navigate within subset if specified
+                                if subset_var and subset_var in self.context.subsets:
+                                    # PRODUCTION FIX: Direct subset navigation without recursion
+                                    subset_components = self.context.subsets[subset_var]
+                                    all_subset_indices = []
+                                    for comp_var in subset_components:
+                                        if comp_var in self.context.variables:
+                                            all_subset_indices.extend(self.context.variables[comp_var])
+                                    
+                                    if all_subset_indices:
+                                        all_subset_indices = sorted(set(all_subset_indices))
+                                        current_idx = self.context.current_idx
+                                        
+                                        # Find current position in subset timeline
+                                        try:
+                                            current_pos = all_subset_indices.index(current_idx)
+                                            target_pos = current_pos + steps if func_name == "NEXT" else current_pos - steps
+                                            
+                                            if 0 <= target_pos < len(all_subset_indices):
+                                                target_idx = all_subset_indices[target_pos]
+                                                # PRODUCTION FIX: Direct classifier lookup to avoid recursion
+                                                return self._get_direct_classifier_at_index(target_idx, subset_var)
+                                            else:
+                                                return None
+                                        except ValueError:
+                                            # Current row not in subset timeline
+                                            return None
                                     else:
                                         return None
                                 else:
-                                    # For FIRST(CLASSIFIER()), not yet fully supported
-                                    logger.error(f"{func_name}(CLASSIFIER()) not yet supported")
-                                    return None
+                                    # Regular CLASSIFIER() without subset - use timeline navigation
+                                    current_idx = self.context.current_idx
+                                    target_idx = current_idx + steps if func_name == "NEXT" else current_idx - steps
+                                    
+                                    # Check bounds
+                                    if target_idx < 0 or target_idx >= len(self.context.rows):
+                                        return None
+                                    
+                                    # PRODUCTION FIX: Use direct classifier lookup to avoid recursion
+                                    return self._get_direct_classifier_at_index(target_idx, None)
+                            elif func_name in ("FIRST", "LAST"):
+                                # For FIRST/LAST with CLASSIFIER, implement production-ready support
+                                if func_name.upper() == 'LAST':
+                                        if subset_var and subset_var in self.context.subsets:
+                                            # Get the last classifier in the subset
+                                            subset_components = self.context.subsets[subset_var]
+                                            all_subset_indices = []
+                                            for comp_var in subset_components:
+                                                if comp_var in self.context.variables:
+                                                    all_subset_indices.extend(self.context.variables[comp_var])
+                                            
+                                            if all_subset_indices:
+                                                all_subset_indices = sorted(set(all_subset_indices))
+                                                
+                                                # Handle steps parameter for LAST function
+                                                if steps > len(all_subset_indices):
+                                                    return None
+                                                target_idx = all_subset_indices[-steps] if steps > 0 else all_subset_indices[-1]
+                                                
+                                                # PRODUCTION FIX: Use direct classifier lookup
+                                                return self._get_direct_classifier_at_index(target_idx, subset_var)
+                                        else:
+                                            # Get the last classifier in the overall match
+                                            if hasattr(self.context, 'variables') and self.context.variables:
+                                                # Find all row indices across all variables in current match
+                                                all_indices = []
+                                                for var, indices in self.context.variables.items():
+                                                    all_indices.extend(indices)
+                                                
+                                                if all_indices:
+                                                    all_indices = sorted(set(all_indices))
+                                                    # Handle steps parameter for LAST function
+                                                    if steps > len(all_indices):
+                                                        return None
+                                                    target_idx = all_indices[-steps] if steps > 0 else all_indices[-1]
+                                                    
+                                                    # PRODUCTION FIX: Use direct classifier lookup
+                                                    return self._get_direct_classifier_at_index(target_idx, None)
+                                                else:
+                                                    return None
+                                            else:
+                                                return None
+                                
+                                elif func_name.upper() == 'FIRST':
+                                        if subset_var and subset_var in self.context.subsets:
+                                            # Get the first classifier in the subset
+                                            subset_components = self.context.subsets[subset_var]
+                                            all_subset_indices = []
+                                            for comp_var in subset_components:
+                                                if comp_var in self.context.variables:
+                                                    all_subset_indices.extend(self.context.variables[comp_var])
+                                            
+                                            if all_subset_indices:
+                                                all_subset_indices = sorted(set(all_subset_indices))
+                                                
+                                                # Handle steps parameter for FIRST function  
+                                                if steps > len(all_subset_indices):
+                                                    return None
+                                                target_idx = all_subset_indices[steps - 1] if steps > 0 else all_subset_indices[0]
+                                                
+                                                # PRODUCTION FIX: Use direct classifier lookup
+                                                return self._get_direct_classifier_at_index(target_idx, subset_var)
+                                        else:
+                                            # Get the first classifier in the overall match
+                                            if hasattr(self.context, 'variables') and self.context.variables:
+                                                # Find all row indices across all variables in current match
+                                                all_indices = []
+                                                for var, indices in self.context.variables.items():
+                                                    all_indices.extend(indices)
+                                                
+                                                if all_indices:
+                                                    all_indices = sorted(set(all_indices))
+                                                    # Handle steps parameter for FIRST function
+                                                    if steps > len(all_indices):
+                                                        return None
+                                                    target_idx = all_indices[steps - 1] if steps > 0 else all_indices[0]
+                                                    
+                                                    # PRODUCTION FIX: Use direct classifier lookup
+                                                    return self._get_direct_classifier_at_index(target_idx, None)
+                                                else:
+                                                    return None
+                                            else:
+                                                return None
+                            else:
+                                # For other navigation functions with CLASSIFIER(), not yet supported
+                                logger.error(f"{func_name}(CLASSIFIER()) not yet supported")
+                                return None
                         else:
                             # For other nested calls, evaluate the argument first
                             evaluated_arg = self.visit(first_arg)
@@ -1514,6 +1605,63 @@ class ConditionEvaluator(ast.NodeVisitor):
             logger.error(f"Error evaluating list: {e}")
             return []
 
+    def _get_direct_classifier_at_index(self, row_idx: int, subset_var: Optional[str] = None) -> str:
+        """
+        Production-ready direct classifier lookup at specific row index.
+        
+        This method provides direct classifier lookup without creating temporary contexts
+        or evaluators, preventing infinite recursion in subset navigation scenarios.
+        
+        Args:
+            row_idx: Row index to get classifier for
+            subset_var: Optional subset variable name for validation
+            
+        Returns:
+            Classifier name for the specified row index
+        """
+        try:
+            # Validate row index bounds
+            if row_idx < 0 or row_idx >= len(self.context.rows):
+                return None
+            
+            # Find which variable(s) match this row index
+            matching_vars = []
+            for var_name, indices in self.context.variables.items():
+                if row_idx in indices:
+                    matching_vars.append(var_name)
+            
+            if not matching_vars:
+                return None
+            
+            # If subset variable specified, validate it's a component
+            if subset_var and subset_var in self.context.subsets:
+                subset_components = self.context.subsets[subset_var]
+                # Filter to only subset component variables
+                matching_vars = [var for var in matching_vars if var in subset_components]
+            
+            # Return the first matching variable (or the most appropriate one)
+            if matching_vars:
+                # Apply case sensitivity rules for classifier
+                result_var = matching_vars[0]  # Take first match
+                
+                # Apply case sensitivity rules
+                if hasattr(self.context, 'defined_variables') and self.context.defined_variables:
+                    if result_var.lower() in [v.lower() for v in self.context.defined_variables]:
+                        # Preserve original case for defined variables
+                        return result_var
+                    else:
+                        # Uppercase for undefined variables
+                        return result_var.upper()
+                else:
+                    # Default to uppercase if no defined_variables info
+                    return result_var.upper()
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error in direct classifier lookup at index {row_idx}: {e}")
+            return None
+
 
 def compile_condition(condition_str, evaluation_mode='DEFINE'):
     """
@@ -1660,8 +1808,18 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
             try:
                 import ast
                 tree = ast.parse(processed_expr, mode='eval')
-                evaluator = ConditionEvaluator(context, 'MEASURES', recursion_depth + 1)
-                evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
+                # PRODUCTION FIX: Use existing evaluator context to prevent recursion
+                if hasattr(context, '_active_evaluator') and context._active_evaluator is not None:
+                    # Reuse existing evaluator to prevent infinite recursion
+                    evaluator = context._active_evaluator
+                    evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
+                else:
+                    # Create new evaluator with recursion protection
+                    evaluator = ConditionEvaluator(context, 'MEASURES', recursion_depth + 1)
+                    evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
+                    # Set context reference to prevent further nesting
+                    context._active_evaluator = evaluator
+                
                 result = evaluator.visit(tree.body)
                 logger.debug(f"Complex arithmetic navigation result: {result}")
                 return result
@@ -1721,12 +1879,13 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
                 return None
         
         # Handle CLASSIFIER() inside navigation functions
-        classifier_nav_pattern = r'(FIRST|LAST)\s*\(\s*CLASSIFIER\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)\s*\)'
+        classifier_nav_pattern = r'(FIRST|LAST)\s*\(\s*CLASSIFIER\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)\s*(?:,\s*(\d+))?\s*\)'
         classifier_nav_match = re.match(classifier_nav_pattern, processed_expr, re.IGNORECASE)
         
         if classifier_nav_match:
             nav_func = classifier_nav_match.group(1).upper()  # FIRST or LAST
             classifier_var = classifier_nav_match.group(2)  # Optional variable name
+            steps = int(classifier_nav_match.group(3)) if classifier_nav_match.group(3) else 1  # Steps parameter
             
             logger.debug(f"Processing {nav_func}(CLASSIFIER({classifier_var}))")
             
@@ -1735,51 +1894,78 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
                 var_assignments = context.variables
                 
                 if nav_func == 'LAST':
-                    # Find the last row in the match and get its classifier
-                    max_idx = -1
-                    last_classifier = None
-                    
+                    # Find all indices in the match, sort them, and get the nth from the end
+                    all_indices = []
                     for var_name, indices in var_assignments.items():
                         if indices:
-                            for idx in indices:
-                                if idx > max_idx:
-                                    max_idx = idx
-                                    # Apply case sensitivity rules for classifier
-                                    if hasattr(context, 'defined_variables') and context.defined_variables:
-                                        if var_name.lower() in [v.lower() for v in context.defined_variables]:
-                                            # Preserve original case for defined variables
-                                            last_classifier = var_name
-                                        else:
-                                            # Uppercase for undefined variables
-                                            last_classifier = var_name.upper()
-                                    else:
-                                        # Default to uppercase if no defined_variables info
-                                        last_classifier = var_name.upper()
+                            all_indices.extend([(idx, var_name) for idx in indices])
                     
-                    logger.debug(f"LAST(CLASSIFIER()) -> last row index: {max_idx}, classifier: '{last_classifier}'")
-                    return last_classifier
+                    if all_indices:
+                        # Sort by index
+                        all_indices.sort(key=lambda x: x[0])
+                        
+                        # For LAST(CLASSIFIER(), steps), get the steps-th from the end
+                        if steps > len(all_indices):
+                            logger.debug(f"LAST(CLASSIFIER(), {steps}) -> steps {steps} > total indices {len(all_indices)}, returning None")
+                            return None
+                        
+                        # Get the nth from the end (1-indexed)
+                        target_idx, target_var = all_indices[-steps]
+                        
+                        # Apply case sensitivity rules for classifier
+                        if hasattr(context, 'defined_variables') and context.defined_variables:
+                            if target_var.lower() in [v.lower() for v in context.defined_variables]:
+                                # Preserve original case for defined variables
+                                result_classifier = target_var
+                            else:
+                                # Uppercase for undefined variables
+                                result_classifier = target_var.upper()
+                        else:
+                            # Default to uppercase if no defined_variables info
+                            result_classifier = target_var.upper()
+                        
+                        logger.debug(f"LAST(CLASSIFIER(), {steps}) -> target row index: {target_idx}, classifier: '{result_classifier}'")
+                        return result_classifier
+                    else:
+                        logger.debug(f"LAST(CLASSIFIER(), {steps}) -> no indices found")
+                        return None
                     
                 elif nav_func == 'FIRST':
-                    # Find the first row in the match and get its classifier
-                    min_idx = float('inf')
-                    first_classifier = None
-                    
+                    # Find all indices in the match, sort them, and get the nth from the start
+                    all_indices = []
                     for var_name, indices in var_assignments.items():
                         if indices:
-                            for idx in indices:
-                                if idx < min_idx:
-                                    min_idx = idx
-                                    # Apply case sensitivity rules
-                                    if hasattr(context, 'defined_variables') and context.defined_variables:
-                                        if var_name.lower() in [v.lower() for v in context.defined_variables]:
-                                            first_classifier = var_name
-                                        else:
-                                            first_classifier = var_name.upper()
-                                    else:
-                                        first_classifier = var_name.upper()
+                            all_indices.extend([(idx, var_name) for idx in indices])
                     
-                    logger.debug(f"FIRST(CLASSIFIER()) -> first row index: {min_idx}, classifier: '{first_classifier}'")
-                    return first_classifier
+                    if all_indices:
+                        # Sort by index
+                        all_indices.sort(key=lambda x: x[0])
+                        
+                        # For FIRST(CLASSIFIER(), steps), get the steps-th from the start
+                        if steps > len(all_indices):
+                            logger.debug(f"FIRST(CLASSIFIER(), {steps}) -> steps {steps} > total indices {len(all_indices)}, returning None")
+                            return None
+                        
+                        # Get the nth from the start (1-indexed)
+                        target_idx, target_var = all_indices[steps - 1]
+                        
+                        # Apply case sensitivity rules for classifier
+                        if hasattr(context, 'defined_variables') and context.defined_variables:
+                            if target_var.lower() in [v.lower() for v in context.defined_variables]:
+                                # Preserve original case for defined variables
+                                result_classifier = target_var
+                            else:
+                                # Uppercase for undefined variables
+                                result_classifier = target_var.upper()
+                        else:
+                            # Default to uppercase if no defined_variables info
+                            result_classifier = target_var.upper()
+                        
+                        logger.debug(f"FIRST(CLASSIFIER(), {steps}) -> target row index: {target_idx}, classifier: '{result_classifier}'")
+                        return result_classifier
+                    else:
+                        logger.debug(f"FIRST(CLASSIFIER(), {steps}) -> no indices found")
+                        return None
             
             # Fallback: return None if no variable assignments found
             logger.debug(f"{nav_func}(CLASSIFIER()) -> no variable assignments found")

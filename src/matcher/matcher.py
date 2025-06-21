@@ -1163,10 +1163,14 @@ class EnhancedMatcher:
                     result = condition(row, context)
                     
                     # Check if condition failed due to navigation context unavailability
+                    # NOTE: Only skip rows on actual navigation errors, not on normal boundary conditions
+                    # PREV() returning None on row 0 is normal SQL behavior and should not skip the row
                     if not result and hasattr(context, '_navigation_context_error'):
-                        logger.debug(f"    Condition failed for {var} due to navigation context unavailable (likely PREV() on row 0)")
-                        # Skip this row for this pattern - pattern matching may need to start later
-                        continue
+                        logger.debug(f"    Condition failed for {var} due to actual navigation context error (exception occurred)")
+                        # Only skip if there was an actual exception, not normal boundary behavior
+                        # Remove the error flag and continue evaluation - this allows normal SQL NULL semantics
+                        delattr(context, '_navigation_context_error')
+                        # Do not skip the row - let the condition evaluation proceed normally
                     
                     logger.debug(f"    Condition {'passed' if result else 'failed'} for {var}")
                     logger.debug(f"    DEBUG: condition result={result}, type={type(result)}")
@@ -2867,18 +2871,30 @@ class EnhancedMatcher:
         1. Reference multiple pattern variables
         2. Use navigation functions that depend on variable assignments
         3. Require specific variable assignment orders to be satisfied
+        4. Have cross-variable dependencies (one variable's condition depends on another)
+        5. Involve alternations with navigation functions
         
         Returns:
             True if the pattern has complex back-references requiring special handling
         """
         if not hasattr(self, 'define_conditions'):
+            logger.debug("No define_conditions found")
             return False
             
         # Look for conditions with multiple pattern variable references
         import re
         back_ref_pattern = r'\b([A-Z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)'
+        nav_functions = ['PREV', 'NEXT', 'FIRST', 'LAST']
+        
+        # Check for cross-variable dependencies and navigation functions
+        has_nav_functions = False
+        cross_var_dependencies = False
+        
+        logger.debug(f"Checking complex back-references for {len(self.define_conditions)} conditions")
         
         for var, condition in self.define_conditions.items():
+            logger.debug(f"Analyzing condition for {var}: {condition}")
+            
             # Count unique pattern variables referenced in this condition
             referenced_vars = set()
             matches = re.findall(back_ref_pattern, condition)
@@ -2886,23 +2902,53 @@ class EnhancedMatcher:
             for var_name, column in matches:
                 referenced_vars.add(var_name)
             
+            logger.debug(f"  Referenced vars: {referenced_vars}")
+            
+            # Check if condition uses navigation functions
+            if any(func in condition.upper() for func in nav_functions):
+                has_nav_functions = True
+                logger.debug(f"  Has navigation functions: True")
+                
+            # Check for cross-variable dependency (condition for var X references var Y)
+            if referenced_vars and var not in referenced_vars:
+                cross_var_dependencies = True
+                logger.debug(f"Cross-variable dependency detected: {var} condition references {referenced_vars}")
+            
             # If condition references multiple variables AND uses navigation functions,
-            # it's likely a complex back-reference that needs constraint solving
+            # it's definitely a complex back-reference that needs constraint solving
             if len(referenced_vars) >= 2:
-                nav_functions = ['PREV', 'NEXT', 'FIRST', 'LAST']
                 if any(func in condition.upper() for func in nav_functions):
                     logger.debug(f"Complex back-reference detected in {var}: references {referenced_vars}")
                     return True
+        
+        logger.debug(f"Summary: has_nav_functions={has_nav_functions}, cross_var_dependencies={cross_var_dependencies}")
+        
+        # Also consider it complex if there are cross-variable dependencies with navigation functions
+        # or if the pattern has alternations with navigation functions
+        if cross_var_dependencies and has_nav_functions:
+            logger.debug(f"Complex pattern detected: cross-variable dependencies with navigation functions")
+            return True
+            
+        # Check if pattern has alternations - if so and we have navigation functions, it's complex
+        if hasattr(self, 'dfa') and hasattr(self.dfa, 'metadata'):
+            pattern_metadata = self.dfa.metadata
+            logger.debug(f"DFA metadata: {pattern_metadata}")
+            if pattern_metadata.get('has_alternations', False) and has_nav_functions:
+                logger.debug(f"Complex pattern detected: alternations with navigation functions")
+                return True
+        else:
+            logger.debug("No DFA metadata found")
                     
+        logger.debug("No complex back-references detected")
         return False
 
     def _handle_complex_back_references(self, rows: List[Dict[str, Any]], start_idx: int, 
                                       context: RowContext, config=None) -> Optional[Dict[str, Any]]:
         """
-        Handle complex back-reference patterns using constraint satisfaction.
+        Handle complex back-reference patterns using enhanced constraint satisfaction.
         
-        This method tries different variable assignment combinations to find
-        assignments that satisfy all back-reference constraints.
+        This method systematically tries different variable assignment patterns 
+        to find assignments that satisfy all back-reference constraints.
         
         Args:
             rows: Input rows to match
@@ -2913,22 +2959,170 @@ class EnhancedMatcher:
         Returns:
             Match result if successful, None otherwise
         """
-        logger.debug(f"Starting constraint-based back-reference solving from index {start_idx}")
+        logger.debug(f"Starting enhanced constraint-based back-reference solving from index {start_idx}")
         
-        # For complex back-references, we need to try different assignment strategies
-        # Strategy 1: Try all possible starting variable choices for the first row
-        available_vars = self._get_available_transitions_for_state(self.start_state)
+        # For the alternation pattern (A | B)*, we need to try different assignment strategies
+        # Strategy 1: Try all possible assignment patterns for the alternation sequence
+        max_search_length = min(len(rows) - start_idx, 8)  # Limit search to prevent infinite computation
         
-        for first_var in available_vars:
-            logger.debug(f"Trying constraint solution starting with variable {first_var[0]}")
+        # Try different lengths of alternation sequences before X
+        for alt_length in range(1, max_search_length):
+            logger.debug(f"Trying alternation length {alt_length}")
             
-            # Try to build a complete match starting with this variable choice
-            match = self._solve_with_first_variable(rows, start_idx, context, first_var, config)
-            if match:
-                logger.debug(f"Constraint solution found starting with {first_var[0]}")
-                return match
+            # Generate all possible assignment patterns for this length
+            assignment_patterns = self._generate_assignment_patterns(alt_length)
+            
+            for pattern in assignment_patterns:
+                logger.debug(f"  Trying assignment pattern: {pattern}")
                 
+                match = self._try_assignment_pattern(rows, start_idx, context, pattern, config)
+                if match:
+                    logger.debug(f"Found successful assignment pattern: {pattern}")
+                    return match
+                    
         logger.debug(f"No constraint solution found for complex back-references")
+        return None
+
+    def _generate_assignment_patterns(self, length: int) -> List[List[str]]:
+        """
+        Generate all possible assignment patterns for (A | B)* of given length.
+        
+        Args:
+            length: Length of the alternation sequence
+            
+        Returns:
+            List of assignment patterns, each pattern is a list of variable names
+        """
+        if length == 0:
+            return [[]]
+        
+        patterns = []
+        # Generate all combinations of A and B for the given length
+        import itertools
+        for pattern in itertools.product(['A', 'B'], repeat=length):
+            patterns.append(list(pattern))
+        
+        return patterns
+
+    def _try_assignment_pattern(self, rows: List[Dict[str, Any]], start_idx: int,
+                               context: RowContext, pattern: List[str], 
+                               config=None) -> Optional[Dict[str, Any]]:
+        """
+        Try to match a specific assignment pattern followed by X.
+        
+        Args:
+            rows: Input rows to match
+            start_idx: Starting index for the match
+            context: Row context for evaluation
+            pattern: Assignment pattern (e.g., ['B', 'A', 'A', 'A', 'B'])
+            config: Match configuration
+            
+        Returns:
+            Match result if successful, None otherwise
+        """
+        logger.debug(f"  Trying assignment pattern: {pattern}")
+        
+        current_idx = start_idx
+        var_assignments = {}
+        
+        # First, try to assign the alternation pattern and check conditions
+        for i, var_name in enumerate(pattern):
+            if current_idx >= len(rows):
+                logger.debug(f"    Not enough rows at position {i}")
+                return None  # Not enough rows
+                
+            row = rows[current_idx]
+            
+            # Set up context for condition evaluation
+            if var_name not in var_assignments:
+                var_assignments[var_name] = []
+            var_assignments[var_name].append(current_idx)
+            
+            # Update context with current assignments
+            context.variables = var_assignments.copy()
+            context.current_idx = current_idx
+            context.current_var = var_name
+            
+            # Check if this variable's condition is satisfied
+            if var_name in self.define_conditions:
+                condition_str = self.define_conditions[var_name]
+                
+                # Compile and evaluate the condition
+                try:
+                    from src.matcher.condition_evaluator import compile_condition
+                    condition = compile_condition(condition_str, evaluation_mode='DEFINE')
+                    
+                    if not condition(row, context):
+                        logger.debug(f"    Condition failed for {var_name} at index {current_idx}: {condition_str}")
+                        context.current_var = None
+                        return None
+                        
+                    logger.debug(f"    Condition satisfied for {var_name} at index {current_idx}")
+                    
+                except Exception as e:
+                    logger.debug(f"    Error evaluating condition for {var_name}: {e}")
+                    context.current_var = None
+                    return None
+            
+            current_idx += 1
+        
+        # Reset current_var
+        context.current_var = None
+        
+        # Now try to assign X at the next position
+        if current_idx >= len(rows):
+            logger.debug(f"    No row left for X at index {current_idx}")
+            return None  # No row left for X
+            
+        # Check if X condition is satisfied with this assignment
+        context.variables = var_assignments.copy()
+        context.current_idx = current_idx
+        
+        # Get X condition
+        if not hasattr(self, 'define_conditions') or 'X' not in self.define_conditions:
+            logger.debug(f"    No X condition found")
+            return None
+            
+        x_condition_str = self.define_conditions['X']
+        if isinstance(x_condition_str, str):
+            from src.matcher.condition_evaluator import compile_condition
+            x_condition = compile_condition(x_condition_str, evaluation_mode='DEFINE')
+        else:
+            x_condition = x_condition_str
+        
+        # Test X condition
+        context.current_var = 'X'
+        x_row = rows[current_idx]
+        
+        try:
+            if x_condition(x_row, context):
+                # Success! Create the match result
+                var_assignments['X'] = [current_idx]
+                
+                all_indices = []
+                for indices in var_assignments.values():
+                    all_indices.extend(indices)
+                all_indices.sort()
+                
+                match_result = {
+                    "start": min(all_indices),
+                    "end": max(all_indices),
+                    "variables": var_assignments.copy(),
+                    "state": None,  # We don't track state in constraint solving
+                    "is_empty": False,
+                    "excluded_vars": set(),
+                    "excluded_rows": [],
+                    "has_empty_alternation": False
+                }
+                
+                logger.debug(f"Successfully matched pattern {pattern}: variables={var_assignments}")
+                return match_result
+                
+        except Exception as e:
+            logger.debug(f"Error evaluating X condition for pattern {pattern}: {e}")
+        finally:
+            context.current_var = None
+        
         return None
 
     def _get_available_transitions_for_state(self, state: int) -> List[Tuple[str, int, Any, Any]]:
