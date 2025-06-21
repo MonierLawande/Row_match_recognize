@@ -93,7 +93,7 @@ class ConditionEvaluator(ast.NodeVisitor):
             # Conditional functions
             'LEAST': min,
             'GREATEST': max,
-            'COALESCE': lambda *args: next((arg for arg in args if arg is not None), None),
+            'COALESCE': self._coalesce_function,
             'NULLIF': lambda x, y: None if x == y else x,
             'IF': lambda condition, true_val, false_val: true_val if condition else false_val,
             
@@ -1745,6 +1745,33 @@ class ConditionEvaluator(ast.NodeVisitor):
             return pd.isna(value)
         except (TypeError, ValueError):
             return False
+
+    def _coalesce_function(self, *args):
+        """
+        Implementation of COALESCE function that returns the first non-null value.
+        Properly handles both None and NaN values as SQL nulls.
+        """
+        import math
+        import numpy as np
+        
+        for arg in args:
+            if arg is not None:
+                # Check for NaN values
+                try:
+                    if isinstance(arg, float) and math.isnan(arg):
+                        continue  # NaN is considered null, skip it
+                    elif hasattr(arg, '__array__') and hasattr(np, 'isnan'):
+                        # Handle numpy values
+                        if np.isscalar(arg) and np.isnan(arg):
+                            continue  # NaN is considered null, skip it
+                    # Found a non-null value
+                    return arg
+                except (TypeError, ValueError):
+                    # If NaN check fails, assume it's not NaN and return it
+                    return arg
+        
+        # All arguments were null/NaN
+        return None
 
 
 def compile_condition(condition_str, evaluation_mode='DEFINE'):
