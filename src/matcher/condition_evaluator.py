@@ -2154,6 +2154,43 @@ def _sql_to_python_condition(condition: str) -> str:
     between_pattern = r'(\w+)\s+BETWEEN\s+([^A]+?)\s+AND\s+([^A]+?)(?=\s|$)'
     condition = re.sub(between_pattern, r'(\2 <= \1 <= \3)', condition, flags=re.IGNORECASE)
     
+    # Handle IN predicates - convert SQL IN to Python in
+    # Pattern: column IN (value1, value2, ...) -> column in [value1, value2, ...]
+    def convert_in_predicate(match):
+        full_match = match.group(0)
+        column = match.group(1).strip()
+        in_values = match.group(2).strip()
+        
+        # If empty, return special handling
+        if not in_values:
+            return f'{column} in []'
+        
+        # Convert parentheses to square brackets for Python list syntax
+        python_list = f'[{in_values}]'
+        return f'{column} in {python_list}'
+    
+    # Handle IN predicates with parentheses
+    in_pattern = r'(\w+(?:\.\w+)?)\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Handle NOT IN predicates
+    def convert_not_in_predicate(match):
+        full_match = match.group(0)
+        column = match.group(1).strip()
+        in_values = match.group(2).strip()
+        
+        # If empty, return special handling
+        if not in_values:
+            return f'{column} not in []'
+        
+        # Convert parentheses to square brackets for Python list syntax
+        python_list = f'[{in_values}]'
+        return f'{column} not in {python_list}'
+    
+    # Handle NOT IN predicates with parentheses
+    not_in_pattern = r'(\w+(?:\.\w+)?)\s+NOT\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(not_in_pattern, convert_not_in_predicate, condition, flags=re.IGNORECASE)
+    
     # Handle empty IN predicates - convert to always false/true
     condition = re.sub(r'\bIN\s*\(\s*\)', 'in []', condition, flags=re.IGNORECASE)
     condition = re.sub(r'\bNOT\s+IN\s*\(\s*\)', 'not in []', condition, flags=re.IGNORECASE)
