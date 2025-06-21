@@ -47,6 +47,37 @@ class SecurityConfig:
     max_query_complexity: int = 1000
     rate_limit_queries_per_minute: int = 60
     enable_query_sanitization: bool = True
+    max_pattern_length: int = 50_000
+    max_nesting_depth: int = 100
+    max_permute_variables: int = 50
+
+
+@dataclass
+class MonitoringConfig:
+    """Monitoring and observability configuration."""
+    enable_metrics: bool = True
+    metrics_interval_seconds: int = 60
+    enable_health_checks: bool = True
+    health_check_interval_seconds: int = 30
+    enable_profiling: bool = False
+    profiling_sample_rate: float = 0.01
+    alert_on_high_memory: bool = True
+    alert_memory_threshold_mb: int = 800
+    alert_on_slow_queries: bool = True
+    alert_slow_query_threshold_seconds: float = 10.0
+
+
+@dataclass
+class ResourceConfig:
+    """Resource management configuration."""
+    max_concurrent_queries: int = 10
+    query_queue_size: int = 100
+    enable_resource_limits: bool = True
+    cpu_usage_threshold: float = 80.0
+    memory_usage_threshold: float = 85.0
+    disk_usage_threshold: float = 90.0
+    enable_graceful_degradation: bool = True
+    emergency_cache_clear_threshold: float = 95.0
 
 
 @dataclass
@@ -68,16 +99,18 @@ class MatchRecognizeConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+    resources: ResourceConfig = field(default_factory=ResourceConfig)
     
     # Environment
     environment: str = "development"
     debug: bool = False
-    version: str = "1.0.0"
+    version: str = "2.0.0"
     
     # Feature flags
     enable_advanced_patterns: bool = True
     enable_permute_functions: bool = True
     enable_experimental_features: bool = False
+    enable_production_mode: bool = False
 
     @classmethod
     def from_env(cls) -> 'MatchRecognizeConfig':
