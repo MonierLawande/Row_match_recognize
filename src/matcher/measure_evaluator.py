@@ -655,7 +655,106 @@ class MeasureEvaluator:
             preprocessed = _sql_to_python_condition(preprocessed)
             logger.debug(f"After CASE conversion: '{old_preprocessed}' -> '{preprocessed}'")
         
-        # Note: We could add other special function replacements here if needed
+        # Handle CAST and TRY_CAST functions by evaluating them and replacing with their values
+        # Use a more robust approach to handle nested parentheses in type specifications
+        def find_cast_expressions(text):
+            """Find CAST/TRY_CAST expressions with proper parentheses balancing."""
+            cast_expressions = []
+            pattern = r'(CAST|TRY_CAST)\s*\('
+            
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                func_name = match.group(1)
+                start_pos = match.start()
+                paren_pos = match.end() - 1  # Position of the opening parenthesis
+                
+                # Find the matching closing parenthesis
+                paren_count = 1
+                pos = paren_pos + 1
+                while pos < len(text) and paren_count > 0:
+                    if text[pos] == '(':
+                        paren_count += 1
+                    elif text[pos] == ')':
+                        paren_count -= 1
+                    pos += 1
+                
+                if paren_count == 0:
+                    # Found complete expression
+                    full_expr = text[start_pos:pos]
+                    inner_content = text[paren_pos + 1:pos - 1].strip()
+                    
+                    # Split on ' AS ' (case insensitive)
+                    as_match = re.search(r'\s+AS\s+', inner_content, re.IGNORECASE)
+                    if as_match:
+                        value_expr = inner_content[:as_match.start()].strip()
+                        target_type = inner_content[as_match.end():].strip()
+                        
+                        cast_expressions.append({
+                            'full_expr': full_expr,
+                            'func_name': func_name.upper(),
+                            'value_expr': value_expr,
+                            'target_type': target_type,
+                            'start_pos': start_pos,
+                            'end_pos': pos
+                        })
+            
+            return cast_expressions
+        
+        cast_expressions = find_cast_expressions(preprocessed)
+        
+        # Process in reverse order to avoid position shifts when replacing
+        
+        # Process in reverse order to avoid position shifts when replacing
+        for cast_info in reversed(cast_expressions):
+            func_name = cast_info['func_name']
+            value_expr = cast_info['value_expr']
+            target_type = cast_info['target_type']
+            
+            try:
+                # First evaluate the inner expression (e.g., "value" in "CAST(value AS VARCHAR)")
+                from .condition_evaluator import ConditionEvaluator
+                
+                # Set up context for evaluating the inner expression
+                temp_context = self.context
+                temp_context.current_row = temp_context.rows[temp_context.current_idx] if temp_context.current_idx < len(temp_context.rows) else None
+                
+                evaluator = ConditionEvaluator(temp_context, evaluation_mode='MEASURES')
+                
+                # Try to evaluate the inner expression as an AST
+                try:
+                    inner_tree = ast.parse(value_expr, mode='eval')
+                    inner_value = evaluator.visit(inner_tree.body)
+                except:
+                    # Fallback: try as simple column reference
+                    inner_value = temp_context.current_row.get(value_expr) if temp_context.current_row else None
+                
+                # Apply the CAST function
+                if func_name == 'CAST':
+                    cast_result = evaluator._cast_function(inner_value, target_type)
+                else:  # TRY_CAST
+                    cast_result = evaluator._try_cast_function(inner_value, target_type)
+                
+                # Replace the CAST function call with its computed value
+                if cast_result is not None:
+                    # Quote string results, use literal representation for others
+                    if isinstance(cast_result, str):
+                        cast_str = f"'{cast_result}'"
+                    else:
+                        cast_str = str(cast_result)
+                    
+                    old_expr = cast_info['full_expr']
+                    logger.debug(f"Preprocessing: replacing '{old_expr}' with '{cast_str}' in expression")
+                    preprocessed = preprocessed[:cast_info['start_pos']] + cast_str + preprocessed[cast_info['end_pos']:]
+                    logger.debug(f"After CAST replacement: '{preprocessed}'")
+                else:
+                    # For TRY_CAST or failed CAST, replace with None
+                    old_expr = cast_info['full_expr']
+                    logger.debug(f"Preprocessing: replacing '{old_expr}' with 'None' (CAST failed)")
+                    preprocessed = preprocessed[:cast_info['start_pos']] + 'None' + preprocessed[cast_info['end_pos']:]
+                    
+            except Exception as e:
+                logger.error(f"Error preprocessing CAST function {cast_info['full_expr']}: {e}")
+                # Leave the CAST expression as-is if preprocessing fails
+                continue
         
         logger.debug(f"Preprocessed expression: '{expr}' -> '{preprocessed}'")
         return preprocessed

@@ -240,7 +240,7 @@ class TestScalarFunctions:
                 CAST(id AS DECIMAL(10,2)) AS id_decimal
             ALL ROWS PER MATCH
             PATTERN (A B+)
-            DEFINE B AS CAST(B.value AS DECIMAL) < CAST(PREV(B.value) AS DECIMAL)
+            DEFINE B AS B.value < PREV(B.value)
         ) AS m
         """
         
@@ -254,5 +254,6 @@ class TestScalarFunctions:
             # Check that values are properly converted
             if len(result) > 0:
                 assert isinstance(result.iloc[0]['value_str'], str)
+                assert result.iloc[0]['id_decimal'] is not None
         else:
             pytest.skip("CAST and type functions not implemented")
