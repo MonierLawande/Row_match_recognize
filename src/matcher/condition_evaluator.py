@@ -8,6 +8,8 @@ import time
 import warnings
 import datetime
 import decimal
+import pandas as pd
+import numpy as np
 from typing import Dict, Any, Optional, Callable, List, Union, Tuple, Set
 from dataclasses import dataclass
 from src.matcher.row_context import RowContext
@@ -272,6 +274,8 @@ class ConditionEvaluator(ast.NodeVisitor):
             ast.LtE: operator.le,
             ast.Eq: operator.eq,
             ast.NotEq: operator.ne,
+            ast.Is: operator.is_,
+            ast.IsNot: operator.is_not,
         }
         
         func = OPERATORS.get(type(op))
@@ -378,6 +382,15 @@ class ConditionEvaluator(ast.NodeVisitor):
         func_name = None
         if isinstance(node.func, ast.Name):
             func_name = node.func.id.upper()
+            
+            # Handle null checking helper function
+            if func_name == "_IS_NULL":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 1:
+                    return self._is_null(args[0])
+                else:
+                    raise ValueError("_is_null function requires exactly one argument")
+            
             if func_name in self.math_functions:
                 args = [self.visit(arg) for arg in node.args]
                 try:
@@ -1724,6 +1737,15 @@ class ConditionEvaluator(ast.NodeVisitor):
             logger.error(f"Error in direct classifier lookup at index {row_idx}: {e}")
             return None
 
+    def _is_null(self, value):
+        """Helper function to check if a value is null (None or NaN)"""
+        if value is None:
+            return True
+        try:
+            return pd.isna(value)
+        except (TypeError, ValueError):
+            return False
+
 
 def compile_condition(condition_str, evaluation_mode='DEFINE'):
     """
@@ -2217,45 +2239,58 @@ def _sql_to_python_condition(condition: str) -> str:
     condition = re.sub(between_pattern, r'(\2 <= \1 <= \3)', condition, flags=re.IGNORECASE)
     
     # Handle IS NULL and IS NOT NULL
-    condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NULL\b', r'\1 is None', condition, flags=re.IGNORECASE)
-    condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NOT\s+NULL\b', r'\1 is not None', condition, flags=re.IGNORECASE)
+    # Use a helper function for null checking that handles both None and NaN
+    condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NULL\b', r'_is_null(\1)', condition, flags=re.IGNORECASE)
+    condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NOT\s+NULL\b', r'(not _is_null(\1))', condition, flags=re.IGNORECASE)
     
     # Handle IN predicates - convert SQL IN to Python in
-    # Pattern: column IN (value1, value2, ...) -> column in [value1, value2, ...]
+    # Pattern: expression IN (value1, value2, ...) -> expression in [value1, value2, ...]
+    # Enhanced to support function calls like LOWER(column) IN (...)
     def convert_in_predicate(match):
         full_match = match.group(0)
-        column = match.group(1).strip()
+        left_expr = match.group(1).strip()
         in_values = match.group(2).strip()
         
         # If empty, return special handling
         if not in_values:
-            return f'{column} in []'
+            return f'{left_expr} in []'
         
         # Convert parentheses to square brackets for Python list syntax
         python_list = f'[{in_values}]'
-        return f'{column} in {python_list}'
+        return f'{left_expr} in {python_list}'
     
-    # Handle IN predicates with parentheses
-    in_pattern = r'(\w+(?:\.\w+)?)\s+IN\s*\(([^)]*)\)'
+    # Enhanced IN predicates pattern to handle both simple columns and function calls
+    # This pattern uses a more flexible approach to match the left side of IN
+    # It matches: word, word.word, or word(anything)
+    in_pattern = r'([A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?(?:\.[A-Za-z_][A-Za-z0-9_]*)?|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\s+IN\s*\(([^)]*)\)'
     condition = re.sub(in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # If the above didn't match, try a more general pattern for complex function calls
+    # This handles cases like SUBSTR(column, 1, 1) IN (...)
+    complex_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*\([^)]*(?:\([^)]*\)[^)]*)*\))\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(complex_in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
     
     # Handle NOT IN predicates
     def convert_not_in_predicate(match):
         full_match = match.group(0)
-        column = match.group(1).strip()
+        left_expr = match.group(1).strip()
         in_values = match.group(2).strip()
         
         # If empty, return special handling
         if not in_values:
-            return f'{column} not in []'
+            return f'{left_expr} not in []'
         
         # Convert parentheses to square brackets for Python list syntax
         python_list = f'[{in_values}]'
-        return f'{column} not in {python_list}'
+        return f'{left_expr} not in {python_list}'
     
-    # Handle NOT IN predicates with parentheses
-    not_in_pattern = r'(\w+(?:\.\w+)?)\s+NOT\s+IN\s*\(([^)]*)\)'
+    # Enhanced NOT IN predicates pattern to handle function calls
+    not_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?(?:\.[A-Za-z_][A-Za-z0-9_]*)?|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\s+NOT\s+IN\s*\(([^)]*)\)'
     condition = re.sub(not_in_pattern, convert_not_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Handle complex NOT IN predicates
+    complex_not_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*\([^)]*(?:\([^)]*\)[^)]*)*\))\s+NOT\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(complex_not_in_pattern, convert_not_in_predicate, condition, flags=re.IGNORECASE)
     
     # Handle empty IN predicates - convert to always false/true
     condition = re.sub(r'\bIN\s*\(\s*\)', 'in []', condition, flags=re.IGNORECASE)

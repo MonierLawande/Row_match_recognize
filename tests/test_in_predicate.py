@@ -264,9 +264,9 @@ class TestInPredicate:
     def test_in_predicate_with_nulls(self):
         """Test IN predicate with NULL values."""
         df = pd.DataFrame({
-            'id': [1, 2, 3, 4],
-            'value': [90, None, 70, 80],
-            'category': ['high', None, 'low', 'medium']
+            'id': [1, 2, 3, 4, 5],
+            'value': [90, None, 70, 80, 85],  # Added more valid values
+            'category': ['high', None, 'low', 'medium', 'high']  # Rearranged to allow A B+ matches
         })
         
         query = """
@@ -280,7 +280,7 @@ class TestInPredicate:
             PATTERN (A B+)
             DEFINE
                 A AS category IN ('high', 'medium'),
-                B AS value IN (70, 80)
+                B AS value IN (70, 80, 85)
         ) AS m
         """
         
@@ -292,21 +292,23 @@ class TestInPredicate:
             
             # Check that NULL values are handled correctly
             for _, row in result.iterrows():
+                # Get original row data for checking
+                orig_row = df[df['id'] == row['id']].iloc[0]
                 if row['label'] == 'A':
-                    assert row['category'] in ['high', 'medium']
-                    assert pd.notna(row['category'])
+                    assert orig_row['category'] in ['high', 'medium']
+                    assert pd.notna(orig_row['category'])
                 elif row['label'] == 'B':
-                    assert row['value'] in [70, 80]
-                    assert pd.notna(row['value'])
+                    assert orig_row['value'] in [70, 80, 85]
+                    assert pd.notna(orig_row['value'])
         else:
             pytest.skip("IN predicate with NULLs not implemented")
 
     def test_in_predicate_case_sensitivity(self):
         """Test IN predicate case sensitivity."""
         df = pd.DataFrame({
-            'id': [1, 2, 3, 4],
-            'value': [90, 80, 70, 60],
-            'category': ['High', 'MEDIUM', 'low', 'Low']
+            'id': [1, 2, 3, 4, 5],
+            'value': [90, 80, 70, 60, 50],
+            'category': ['High', 'MEDIUM', 'low', 'Low', 'high']  # Added case for pattern match
         })
         
         query = """
@@ -330,17 +332,15 @@ class TestInPredicate:
             # Check case sensitivity
             assert 'label' in result.columns
             
-            # A should match exact case
-            a_rows = result[result['label'] == 'A']
-            if len(a_rows) > 0:
-                for _, row in a_rows.iterrows():
-                    assert row['category'] in ['High', 'MEDIUM']
-            
-            # B should match case-insensitive via LOWER
-            b_rows = result[result['label'] == 'B']
-            if len(b_rows) > 0:
-                for _, row in b_rows.iterrows():
-                    assert row['category'].lower() == 'low'
+            # Get original data for validation
+            for _, row in result.iterrows():
+                orig_row = df[df['id'] == row['id']].iloc[0]
+                if row['label'] == 'A':
+                    # A should match exact case
+                    assert orig_row['category'] in ['High', 'MEDIUM']
+                elif row['label'] == 'B':
+                    # B should match case-insensitive via LOWER
+                    assert orig_row['category'].lower() == 'low'
         else:
             pytest.skip("Case sensitivity in IN predicate not implemented")
 
