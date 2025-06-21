@@ -6,6 +6,8 @@ import re
 import math
 import time
 import warnings
+import datetime
+import decimal
 from typing import Dict, Any, Optional, Callable, List, Union, Tuple, Set
 from dataclasses import dataclass
 from src.matcher.row_context import RowContext
@@ -77,16 +79,31 @@ class ConditionEvaluator(ast.NodeVisitor):
             'LOWER': str.lower,
             'UPPER': str.upper,
             'SUBSTR': lambda s, start, length=None: s[start:start+length] if length else s[start:],
+            'SUBSTRING': lambda s, start, length=None: s[start:start+length] if length else s[start:],
             'CONCAT': lambda *args: ''.join(str(arg) for arg in args if arg is not None),
             'TRIM': lambda s: str(s).strip() if s is not None else None,
             'LTRIM': lambda s: str(s).lstrip() if s is not None else None,
             'RTRIM': lambda s: str(s).rstrip() if s is not None else None,
+            'LEFT': lambda s, n: str(s)[:n] if s is not None else None,
+            'RIGHT': lambda s, n: str(s)[-n:] if s is not None else None,
+            'REPLACE': lambda s, old, new: str(s).replace(old, new) if s is not None else None,
             
             # Conditional functions
             'LEAST': min,
             'GREATEST': max,
             'COALESCE': lambda *args: next((arg for arg in args if arg is not None), None),
             'NULLIF': lambda x, y: None if x == y else x,
+            'IF': lambda condition, true_val, false_val: true_val if condition else false_val,
+            
+            # Type conversion functions
+            'CAST': self._cast_function,
+            'TRY_CAST': self._try_cast_function,
+            
+            # Date/time functions
+            'NOW': lambda: datetime.datetime.now(),
+            'CURRENT_DATE': lambda: datetime.date.today(),
+            'CURRENT_TIME': lambda: datetime.datetime.now().time(),
+            'CURRENT_TIMESTAMP': lambda: datetime.datetime.now(),
         }
 
     def _safe_compare(self, left, right, op):
@@ -1234,6 +1251,51 @@ class ConditionEvaluator(ast.NodeVisitor):
                 navigation_time = time.time() - start_time
                 self.context.timing['navigation'] = self.context.timing.get('navigation', 0) + navigation_time
 
+    def _cast_function(self, value, target_type):
+        """Implementation of CAST function for type conversion."""
+        if value is None:
+            return None
+        
+        target_type = str(target_type).upper()
+        
+        try:
+            if target_type in ('VARCHAR', 'TEXT', 'STRING'):
+                return str(value)
+            elif target_type in ('INTEGER', 'INT', 'BIGINT'):
+                return int(float(value))  # Handle decimal strings
+            elif target_type in ('DECIMAL', 'NUMERIC', 'DOUBLE', 'FLOAT', 'REAL'):
+                return float(value)
+            elif target_type in ('BOOLEAN', 'BOOL'):
+                if isinstance(value, str):
+                    return value.lower() in ('true', '1', 'yes', 'on')
+                return bool(value)
+            elif target_type == 'DATE':
+                if isinstance(value, str):
+                    return datetime.datetime.strptime(value, '%Y-%m-%d').date()
+                return value
+            elif target_type in ('TIMESTAMP', 'DATETIME'):
+                if isinstance(value, str):
+                    # Try common timestamp formats
+                    for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S']:
+                        try:
+                            return datetime.datetime.strptime(value, fmt)
+                        except ValueError:
+                            continue
+                    raise ValueError(f"Cannot parse timestamp: {value}")
+                return value
+            else:
+                # For unknown types, return as string
+                return str(value)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Cannot cast {value} to {target_type}: {e}")
+    
+    def _try_cast_function(self, value, target_type):
+        """Implementation of TRY_CAST function - returns NULL on failure."""
+        try:
+            return self._cast_function(value, target_type)
+        except:
+            return None
+
     def _get_classifier(self, variable: Optional[str] = None) -> str:
         """Implementation of CLASSIFIER function with subset support."""
         return self.context.classifier(variable)
@@ -2153,6 +2215,10 @@ def _sql_to_python_condition(condition: str) -> str:
     # BETWEEN pattern: column BETWEEN value1 AND value2
     between_pattern = r'(\w+)\s+BETWEEN\s+([^A]+?)\s+AND\s+([^A]+?)(?=\s|$)'
     condition = re.sub(between_pattern, r'(\2 <= \1 <= \3)', condition, flags=re.IGNORECASE)
+    
+    # Handle IS NULL and IS NOT NULL
+    condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NULL\b', r'\1 is None', condition, flags=re.IGNORECASE)
+    condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NOT\s+NULL\b', r'\1 is not None', condition, flags=re.IGNORECASE)
     
     # Handle IN predicates - convert SQL IN to Python in
     # Pattern: column IN (value1, value2, ...) -> column in [value1, value2, ...]

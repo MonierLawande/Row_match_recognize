@@ -66,7 +66,11 @@ class TestCompleteJavaReferenceCoverage:
     # ========== CASE SENSITIVE LABELS ==========
     def test_case_sensitive_labels(self):
         """Test case sensitivity in pattern variables (testCaseSensitiveLabels)."""
-        df = self.basic_data
+        # Use data that matches the Trino test case exactly
+        df = pd.DataFrame({
+            'id': [1, 2, 3, 4],
+            'value': [90, 80, 70, 80]
+        })
         
         query = """
         SELECT id, CLASSIFIER() AS label
