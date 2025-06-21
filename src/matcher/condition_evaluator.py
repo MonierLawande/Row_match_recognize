@@ -1785,9 +1785,11 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
     Returns:
         The evaluated result
     """
+    
     try:
         import re
-        
+        import ast  # Ensure ast is available in this scope
+
         # Check recursion depth early
         max_recursion_depth = 10
         if recursion_depth >= max_recursion_depth:
