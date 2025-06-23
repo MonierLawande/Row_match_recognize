@@ -1684,12 +1684,6 @@ class DFABuilder:
                            f"{self.build_stats['transitions_created']} transitions, "
                            f"{self.build_stats['build_time']:.3f}s")
                 
-                # Debug final DFA metadata
-                logger.debug(f"Final DFA metadata keys: {list(dfa.metadata.keys())}")
-                logger.debug(f"Final DFA has_permute: {dfa.metadata.get('has_permute', 'MISSING')}")
-                logger.debug(f"Final DFA has_alternations: {dfa.metadata.get('has_alternations', 'MISSING')}")
-                logger.debug(f"Final DFA alternation_combinations: {dfa.metadata.get('alternation_combinations', 'MISSING')}")
-                
                 return dfa
                 
         except Exception as e:
