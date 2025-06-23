@@ -18,7 +18,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 # Import test utilities
-from test_utils import (
+from .test_utils import (
     mock_match_recognize, 
     test_data_generator, 
     test_validator,

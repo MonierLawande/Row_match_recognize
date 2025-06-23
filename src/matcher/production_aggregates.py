@@ -143,8 +143,10 @@ class ProductionAggregateEvaluator:
     # SQL:2016 standard aggregate functions with enhanced categorization
     STANDARD_AGGREGATES = {
         'SUM', 'COUNT', 'MIN', 'MAX', 'AVG', 'STDDEV', 'VARIANCE',
+        'STDDEV_SAMP', 'STDDEV_POP', 'VAR_SAMP', 'VAR_POP',
         'ARRAY_AGG', 'STRING_AGG', 'MAX_BY', 'MIN_BY', 'COUNT_IF',
-        'SUM_IF', 'AVG_IF', 'BOOL_AND', 'BOOL_OR', 'LISTAGG'
+        'SUM_IF', 'AVG_IF', 'BOOL_AND', 'BOOL_OR', 'LISTAGG',
+        'FIRST_VALUE', 'LAST_VALUE', 'COUNT_DISTINCT'
     }
     
     # Functions that support RUNNING semantics by default
@@ -155,7 +157,8 @@ class ProductionAggregateEvaluator:
     
     # Functions that require numeric arguments
     NUMERIC_FUNCTIONS = {
-        'SUM', 'AVG', 'STDDEV', 'VARIANCE', 'SUM_IF', 'AVG_IF'
+        'SUM', 'AVG', 'STDDEV', 'VARIANCE', 'STDDEV_SAMP', 'STDDEV_POP',
+        'VAR_SAMP', 'VAR_POP', 'SUM_IF', 'AVG_IF'
     }
     
     # Functions that support multiple arguments
@@ -314,7 +317,7 @@ class ProductionAggregateEvaluator:
                         result = self._evaluate_conditional_aggregates(func_name, arguments, is_running)
                     elif func_name in ("BOOL_AND", "BOOL_OR"):
                         result = self._evaluate_bool_aggregates(func_name, arguments, is_running)
-                    elif func_name in ("STDDEV", "VARIANCE"):
+                    elif func_name in ("STDDEV", "VARIANCE", "STDDEV_SAMP", "STDDEV_POP", "VAR_SAMP", "VAR_POP"):
                         result = self._evaluate_statistical_functions(func_name, arguments, is_running)
                     elif func_name == "LISTAGG":
                         result = self._evaluate_listagg(arguments, is_running)
@@ -547,7 +550,7 @@ class ProductionAggregateEvaluator:
                 )
     
     def _evaluate_count(self, arguments: List[str], is_running: bool) -> int:
-        """Evaluate COUNT function with all SQL:2016 variants."""
+        """Evaluate COUNT function with all SQL:2016 variants including DISTINCT."""
         if not arguments:
             return 0
         
@@ -557,6 +560,14 @@ class ProductionAggregateEvaluator:
         if arg == "*":
             return self._count_all_rows(is_running)
         
+        # COUNT(DISTINCT expression) - count distinct non-null values
+        distinct_match = re.match(r'^\s*DISTINCT\s+(.+)$', arg, re.IGNORECASE)
+        if distinct_match:
+            expr = distinct_match.group(1).strip()
+            values = self._get_expression_values(expr, is_running)
+            non_null_values = [v for v in values if v is not None]
+            return len(set(non_null_values))  # Use set to get distinct values
+        
         # COUNT(var.*) - count rows for specific variable
         var_wildcard_match = re.match(r'^([A-Z_][A-Z0-9_]*)\.\*$', arg, re.IGNORECASE)
         if var_wildcard_match:
@@ -565,7 +576,8 @@ class ProductionAggregateEvaluator:
         
         # COUNT(expression) - count non-null values
         values = self._get_expression_values(arg, is_running)
-        return len([v for v in values if v is not None])
+        # Handle both None and NaN values properly
+        return len([v for v in values if v is not None and not (isinstance(v, float) and math.isnan(v))])
     
     def _evaluate_sum(self, arguments: List[str], is_running: bool) -> Union[int, float, None]:
         """Evaluate SUM function with type preservation."""
@@ -746,15 +758,29 @@ class ProductionAggregateEvaluator:
             return None
         
         values = self._get_numeric_values(arguments[0], is_running)
-        if len(values) < 2:  # Need at least 2 values for variance/stddev
+        if len(values) < 1:
             return None
         
-        mean = sum(values) / len(values)
-        variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)  # Sample variance
+        # Handle single value case
+        if len(values) == 1:
+            if func_name in ("STDDEV_POP", "VAR_POP"):
+                return 0.0  # Population variance/stddev of single value is 0
+            elif func_name in ("STDDEV_SAMP", "VAR_SAMP", "STDDEV", "VARIANCE"):
+                return None  # Sample variance/stddev undefined for single value
         
-        if func_name == "VARIANCE":
+        mean = sum(values) / len(values)
+        
+        # Determine denominator based on function type
+        if func_name in ("STDDEV_POP", "VAR_POP"):
+            # Population variance/stddev
+            variance = sum((x - mean) ** 2 for x in values) / len(values)
+        else:
+            # Sample variance/stddev (STDDEV_SAMP, VAR_SAMP, STDDEV, VARIANCE)
+            variance = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
+        
+        if func_name in ("VARIANCE", "VAR_SAMP", "VAR_POP"):
             return variance
-        else:  # STDDEV
+        else:  # STDDEV variants
             return math.sqrt(variance)
     
     def _get_expression_values(self, expr: str, is_running: bool) -> List[Any]:
@@ -788,7 +814,8 @@ class ProductionAggregateEvaluator:
         numeric_values = []
         
         for value in values:
-            if value is None:
+            # Filter out None and NaN values
+            if value is None or (isinstance(value, float) and math.isnan(value)):
                 continue
             
             if isinstance(value, (int, float)):
