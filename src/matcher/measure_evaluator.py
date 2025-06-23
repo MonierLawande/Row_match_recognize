@@ -18,6 +18,8 @@ Features:
 - Memory-efficient processing for large datasets
 - Full SQL:2016 compliance with edge case handling
 
+Refactored to eliminate duplication and improve maintainability.
+
 Author: Pattern Matching Engine Team
 Version: 3.0.0
 """
@@ -28,13 +30,19 @@ from typing import Dict, Any, List, Optional, Set, Union, Tuple, Callable
 import ast
 import re
 import math
-import numpy as np
 import time
 import threading
 from dataclasses import dataclass
 from enum import Enum
 
 from src.matcher.row_context import RowContext
+from src.matcher.evaluation_utils import (
+    EvaluationMode, ValidationError, ExpressionValidationError,
+    validate_expression_length, validate_recursion_depth,
+    is_null, is_table_prefix, get_column_value_with_type_preservation,
+    preserve_data_type, MATH_FUNCTIONS, evaluate_math_function,
+    get_evaluation_metrics, cast_function, try_cast_function
+)
 from src.utils.logging_config import get_logger, PerformanceTimer
 
 # Module logger with enhanced configuration
@@ -64,59 +72,6 @@ class EvaluationContext:
     recursion_depth: int = 0
     cache: Optional[Dict[str, Any]] = None
 
-def _get_column_value_with_type_preservation(row: Dict[str, Any], column_name: str) -> Any:
-    """
-    Get column value from row with proper type preservation and validation.
-    
-    This production-ready function ensures that:
-    1. Original data types are preserved (int stays int, not converted to float)
-    2. Missing values return None instead of NaN for Trino compatibility
-    3. Proper validation and error handling
-    4. Thread-safe operation
-    
-    Args:
-        row: Dictionary representing a row (validated)
-        column_name: Name of the column to retrieve (validated)
-        
-    Returns:
-        The value with original type preserved, or None if missing
-        
-    Raises:
-        ValueError: If inputs are invalid
-    """
-    # Input validation
-    if row is None:
-        return None
-    
-    if not isinstance(row, dict):
-        raise ValueError(f"Expected dict for row, got {type(row)}")
-    
-    if not isinstance(column_name, str):
-        raise ValueError(f"Expected str for column_name, got {type(column_name)}")
-    
-    if column_name not in row:
-        return None
-    
-    value = row[column_name]
-    
-    # Handle NaN values - convert to None for Trino compatibility
-    try:
-        if isinstance(value, float):
-            if math.isnan(value):
-                return None
-        elif hasattr(value, '__array__') and hasattr(np, 'isnan'):
-            # Handle numpy values
-            if np.isscalar(value) and np.isnan(value):
-                return None
-    except (TypeError, ValueError):
-        # If NaN check fails, continue with original value
-        pass
-    
-    # Preserve original types - don't auto-convert
-    return value
-
-
-
 class MeasureEvaluationError(Exception):
     """Base class for measure evaluation errors."""
     pass
@@ -131,10 +86,6 @@ class NavigationError(MeasureEvaluationError):
 
 class AggregateError(MeasureEvaluationError):
     """Error in aggregate function evaluation."""
-    pass
-
-class ExpressionValidationError(MeasureEvaluationError):
-    """Error in expression validation."""
     pass
 
 # Thread-local storage for evaluation context
@@ -152,113 +103,6 @@ def _clear_evaluation_context() -> None:
     """Clear the current thread's evaluation context."""
     if hasattr(_evaluation_context, 'context'):
         delattr(_evaluation_context, 'context')
-
-def _validate_expression_length(expr: str) -> None:
-    """
-    Validate expression length to prevent resource exhaustion.
-    
-    Args:
-        expr: Expression to validate
-        
-    Raises:
-        ExpressionValidationError: If expression is too long
-    """
-    if len(expr) > MAX_EXPRESSION_LENGTH:
-        raise ExpressionValidationError(
-            f"Expression too long: {len(expr)} characters (max: {MAX_EXPRESSION_LENGTH})"
-        )
-
-def _validate_recursion_depth(depth: int) -> None:
-    """
-    Validate recursion depth to prevent stack overflow.
-    
-    Args:
-        depth: Current recursion depth
-        
-    Raises:
-        ExpressionValidationError: If recursion depth exceeded
-    """
-    if depth > MAX_RECURSION_DEPTH:
-        raise ExpressionValidationError(
-            f"Maximum recursion depth exceeded: {depth} (max: {MAX_RECURSION_DEPTH})"
-        )
-
-def _is_table_prefix(var_name: str, var_assignments: Dict[str, List[int]], 
-                    subsets: Dict[str, List[str]] = None) -> bool:
-    """
-    Check if a variable name looks like a table prefix rather than a pattern variable.
-    
-    This production-ready function provides comprehensive validation to prevent
-    common SQL injection patterns and ensure proper variable naming.
-    
-    Args:
-        var_name: The variable name to check (validated)
-        var_assignments: Dictionary of defined pattern variables
-        subsets: Dictionary of defined subset variables
-        
-    Returns:
-        True if this looks like a forbidden table prefix, False otherwise
-        
-    Raises:
-        ValueError: If inputs are invalid
-    """
-    # Input validation
-    if not isinstance(var_name, str):
-        raise ValueError(f"Expected str for var_name, got {type(var_name)}")
-    
-    if not isinstance(var_assignments, dict):
-        raise ValueError(f"Expected dict for var_assignments, got {type(var_assignments)}")
-    
-    # If it's a defined pattern variable or subset variable, it's not a table prefix
-    if var_name in var_assignments:
-        return False
-    if subsets and var_name in subsets:
-        return False
-    
-    # Security: Check for SQL injection patterns
-    dangerous_patterns = [
-        r'[;\'"\\]',              # SQL injection characters
-        r'--',                    # SQL comments
-        r'/\*',                   # SQL block comments
-        r'\bdrop\b',              # DROP statements
-        r'\bdelete\b',            # DELETE statements
-        r'\bupdate\b',            # UPDATE statements
-        r'\binsert\b',            # INSERT statements
-        r'\bexec\b',              # EXEC statements
-        r'\bunion\b',             # UNION statements
-    ]
-    
-    var_lower = var_name.lower()
-    for pattern in dangerous_patterns:
-        if re.search(pattern, var_lower, re.IGNORECASE):
-            logger.warning(f"Potentially dangerous pattern detected in variable name: {var_name}")
-            return True
-    
-    # Common table name patterns that should be rejected
-    table_patterns = [
-        r'^[a-z]+_table$',      # ending with _table
-        r'^tbl_[a-z]+$',        # starting with tbl_
-        r'^[a-z]+_tbl$',        # ending with _tbl
-        r'^[a-z]+_tab$',        # ending with _tab
-        r'^[a-z]+s$',           # plural forms (likely table names)
-        r'^[a-z]+_data$',       # ending with _data
-        r'^data_[a-z]+$',       # starting with data_
-    ]
-    
-    # Check against common table naming patterns
-    for pattern in table_patterns:
-        if re.match(pattern, var_lower):
-            return True
-    
-    # Check for overly long names (likely table names)
-    if len(var_name) > 20:
-        return True
-    
-    # If it contains underscores and is longer than typical pattern variable names
-    if '_' in var_name and len(var_name) > 10:
-        return True
-    
-    return False
 
 # Updates for src/matcher/measure_evaluator.py
 
@@ -298,7 +142,7 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
         
         # Table prefix validation: prevent forbidden table.column references
         # Check if this looks like a table prefix (common table naming patterns)
-        if _is_table_prefix(var_name, var_assignments, subsets):
+        if is_table_prefix(var_name, var_assignments, subsets):
             raise ValueError(f"Forbidden table prefix reference: '{expr}'. "
                            f"In MATCH_RECOGNIZE, use pattern variable references like 'A.{col_name}' "
                            f"instead of table references like '{var_name}.{col_name}'")
@@ -324,39 +168,26 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
         if subsets and var_name in subsets:
             components = subsets[var_name]
             
-            # Find the latest position among all component variables
-            # Map components to their positions in the match
-            component_positions = {}
+            # For subset variables, use the first component that has assignments
+            # This follows the SQL standard where subset variables reference the first matching component
             for component in components:
                 if component in var_assignments and var_assignments[component]:
-                    # For RUNNING semantics, only consider positions at or before current_idx
-                    valid_positions = var_assignments[component]
-                    if is_running and current_idx is not None:
-                        valid_positions = [pos for pos in valid_positions if pos <= current_idx]
+                    var_indices = var_assignments[component]
                     
-                    if valid_positions:
-                        component_positions[component] = max(valid_positions)
-            
-            # If we have any components, get the one with the latest position
-            if component_positions:
-                latest_component = max(component_positions.items(), key=lambda x: x[1])[0]
-                var_indices = var_assignments[latest_component]
-                
-                # For RUNNING semantics, ensure the variable position is at or before current_idx
-                if is_running and current_idx is not None:
-                    valid_indices = [idx for idx in var_indices if idx <= current_idx]
-                    if not valid_indices:
+                    # For RUNNING semantics, only consider positions at or before current_idx
+                    if is_running and current_idx is not None:
+                        valid_indices = [idx for idx in var_indices if idx <= current_idx]
+                        if not valid_indices:
+                            continue  # Try next component
+                        var_indices = valid_indices
+                    
+                    if var_indices and var_indices[0] < len(all_rows):
+                        value = all_rows[var_indices[0]].get(col_name)
                         if cache is not None:
-                            cache[cache_key] = None
-                        return True, None
-                    var_indices = valid_indices
-                
-                if var_indices and var_indices[0] < len(all_rows):
-                    value = all_rows[var_indices[0]].get(col_name)
-                    if cache is not None:
-                        cache[cache_key] = value
-                    return True, value
+                            cache[cache_key] = value
+                        return True, value
             
+            # No valid component found
             if cache is not None:
                 cache[cache_key] = None
             return True, None
@@ -485,66 +316,9 @@ class MeasureEvaluator:
     
     def _preserve_data_type(self, original_value: Any, new_value: Any) -> Any:
         """
-        Preserve the data type of the original value with comprehensive type handling.
-        
-        This production-ready function provides robust type preservation for Trino
-        compatibility and handles edge cases gracefully.
-        
-        Args:
-            original_value: The original value whose type should be preserved
-            new_value: The new value to type-cast
-            
-        Returns:
-            The new value cast to the type of the original value, or None if conversion fails
+        Preserve the data type of the original value using shared utility.
         """
-        if new_value is None:
-            return None
-        
-        if original_value is None:
-            return new_value
-        
-        try:
-            # Handle NaN values with comprehensive checking
-            if isinstance(new_value, (float, np.floating)):
-                if math.isnan(new_value) or (hasattr(np, 'isnan') and np.isnan(new_value)):
-                    return None
-            
-            # Preserve integer types with overflow protection
-            if isinstance(original_value, (int, np.integer)):
-                if isinstance(new_value, (int, float, np.number)):
-                    if isinstance(new_value, (float, np.floating)):
-                        if new_value.is_integer():
-                            # Check for overflow
-                            int_val = int(new_value)
-                            if -(2**63) <= int_val <= (2**63 - 1):  # 64-bit int range
-                                return int_val
-                    elif isinstance(new_value, (int, np.integer)):
-                        return int(new_value)
-            
-            # Preserve float types
-            if isinstance(original_value, (float, np.floating)):
-                if isinstance(new_value, (int, float, np.number)):
-                    return float(new_value)
-            
-            # Preserve string types with encoding safety
-            if isinstance(original_value, str):
-                try:
-                    return str(new_value)
-                except UnicodeEncodeError:
-                    logger.warning(f"Unicode encoding error converting {new_value} to string")
-                    return None
-            
-            # Handle complex types
-            if isinstance(original_value, (list, tuple)):
-                if isinstance(new_value, (list, tuple)):
-                    return type(original_value)(new_value)
-            
-            # For other types, return as-is with validation
-            return new_value
-            
-        except (ValueError, TypeError, OverflowError) as e:
-            logger.warning(f"Type preservation failed for {original_value} -> {new_value}: {e}")
-            return new_value  # Fallback to original new_value
+        return preserve_data_type(original_value, new_value)
 
     def _build_row_variable_index(self):
         """Build an index of which variables each row belongs to for faster lookup."""
@@ -729,9 +503,9 @@ class MeasureEvaluator:
                 
                 # Apply the CAST function
                 if func_name == 'CAST':
-                    cast_result = evaluator._cast_function(inner_value, target_type)
+                    cast_result = cast_function(inner_value, target_type)
                 else:  # TRY_CAST
-                    cast_result = evaluator._try_cast_function(inner_value, target_type)
+                    cast_result = try_cast_function(inner_value, target_type)
                 
                 # Replace the CAST function call with its computed value
                 if cast_result is not None:
@@ -793,7 +567,7 @@ class MeasureEvaluator:
             if not expr:
                 raise ExpressionValidationError("Empty expression")
             
-            _validate_expression_length(expr)
+            validate_expression_length(expr)
             
             # Get evaluation context
             eval_context = _get_evaluation_context()
@@ -806,7 +580,7 @@ class MeasureEvaluator:
                 )
                 _set_evaluation_context(eval_context)
             
-            _validate_recursion_depth(eval_context.recursion_depth)
+            validate_recursion_depth(eval_context.recursion_depth)
             eval_context.recursion_depth += 1
             
             # Thread-safe statistics update
@@ -1587,14 +1361,14 @@ class MeasureEvaluator:
                 if func_name == 'PREV':
                     prev_idx = self.context.current_idx - steps
                     if prev_idx >= 0 and prev_idx < len(self.context.rows):
-                        result = _get_column_value_with_type_preservation(self.context.rows[prev_idx], field_name)
+                        result = get_column_value_with_type_preservation(self.context.rows[prev_idx], field_name)
                     else:
                         result = None
                 
                 elif func_name == 'NEXT':
                     next_idx = self.context.current_idx + steps
                     if next_idx >= 0 and next_idx < len(self.context.rows):
-                        result = _get_column_value_with_type_preservation(self.context.rows[next_idx], field_name)
+                        result = get_column_value_with_type_preservation(self.context.rows[next_idx], field_name)
                     else:
                         result = None
             
