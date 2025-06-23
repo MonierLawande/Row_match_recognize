@@ -1087,21 +1087,27 @@ class NFABuilder:
         self.states.append(state)
         return len(self.states) - 1
     
-    def add_epsilon(self, from_state: int, to_state: int):
-        """Add an epsilon transition between states."""
+    def add_epsilon(self, from_state: int, to_state: int, priority: int = 0):
+        """
+        Add an epsilon transition between states with optional priority.
+        
+        Args:
+            from_state: Source state index
+            to_state: Target state index
+            priority: Priority for transition resolution (lower = higher priority)
+        """
         if to_state not in self.states[from_state].epsilon:
             self.states[from_state].epsilon.append(to_state)
-    
-    def add_epsilon_with_priority(self, from_state: int, to_state: int, priority: int):
-        """Add an epsilon transition with priority for alternation precedence."""
-        # For now, we'll use the standard epsilon transition but mark the priority
-        # The actual priority handling will be done during matching
-        if to_state not in self.states[from_state].epsilon:
-            self.states[from_state].epsilon.append(to_state)
-            # Store priority information in state metadata for use during matching
+            
+        # Store priority if specified
+        if priority != 0:
             if not hasattr(self.states[from_state], 'epsilon_priorities'):
                 self.states[from_state].epsilon_priorities = {}
             self.states[from_state].epsilon_priorities[to_state] = priority
+    
+    def add_epsilon_with_priority(self, from_state: int, to_state: int, priority: int):
+        """Add an epsilon transition with explicit priority (delegates to add_epsilon)."""
+        self.add_epsilon(from_state, to_state, priority)
     
     def _is_empty_pattern_branch(self, start: int, end: int) -> bool:
         """
@@ -1729,13 +1735,14 @@ class NFABuilder:
         
         return excl_start, excl_end
 
-    def create_var_states(self, var: Union[str, PatternToken], define: Dict[str, str]) -> Tuple[int, int]:
+    def create_var_states(self, var: Union[str, PatternToken], define: Dict[str, str], priority: int = 0) -> Tuple[int, int]:
         """
         Create states for a pattern variable with enhanced SQL:2016 support.
         
         Args:
             var: Variable name or PatternToken object
             define: Dictionary of variable definitions
+            priority: Priority for transitions (lower = higher priority), defaults to 0
             
         Returns:
             Tuple of (start_state, end_state)
@@ -1795,100 +1802,7 @@ class NFABuilder:
         # Compile the condition with DEFINE evaluation mode for pattern variables
         condition_fn = compile_condition(condition_str, evaluation_mode='DEFINE')
         
-        # Create transition with condition, variable tracking
-        self.states[start].add_transition(condition_fn, end, var_base)
-        
-        # Store variable name on both states
-        self.states[start].variable = var_base
-        self.states[end].variable = var_base  # Also mark end state for better variable tracking
-        
-        # Handle subset variables - SQL:2016 compliant
-        if var_base in self.subset_vars:
-            # Add subset components to states
-            subset_components = self.subset_vars[var_base]
-            self.states[start].subset_vars = set(subset_components)
-            self.states[end].subset_vars = set(subset_components)
-            
-            # Store metadata about subset variable relationship
-            if not hasattr(self.states[start], "subset_parent"):
-                self.states[start].subset_parent = var_base
-                self.states[end].subset_parent = var_base
-        
-        # Apply quantifier if present
-        if quantifier:
-            min_rep, max_rep, greedy = parse_quantifier(quantifier)
-            start, end = self._apply_quantifier(start, end, min_rep, max_rep, greedy)
-        
-        return start, end
-
-    def create_var_states_with_priority(self, var: Union[str, PatternToken], define: Dict[str, str], priority: int = 0) -> Tuple[int, int]:
-        """
-        Create states for a pattern variable with explicit priority assignment.
-        
-        Args:
-            var: Variable name or PatternToken object
-            define: Dictionary of variable definitions
-            priority: Priority for transitions (lower = higher priority)
-            
-        Returns:
-            Tuple of (start_state, end_state)
-        """
-        start = self.new_state()
-        end = self.new_state()
-        
-        # Handle PatternToken objects (for nested patterns)
-        if isinstance(var, PatternToken):
-            # This is a PatternToken object
-            if var.type == PatternTokenType.PERMUTE:
-                # Process nested PERMUTE token
-                nested_start, nested_end = self._process_permute(var, define)
-                self.add_epsilon(start, nested_start)
-                self.add_epsilon(nested_end, end)
-                return start, end
-            elif var.type == PatternTokenType.GROUP_START:
-                # Process group token
-                idx = [0]  # Use list for mutable reference
-                tokens = [var]  # Create token list with this token
-                group_start, group_end = self._process_sequence(tokens, idx, define)
-                self.add_epsilon(start, group_start)
-                self.add_epsilon(group_end, end)
-                return start, end
-            else:
-                # Use the value from the token
-                var_base = var.value
-                quantifier = var.quantifier
-        else:
-            # String variable - extract any quantifiers
-            var_base = var
-            quantifier = None
-            
-            # Extract quantifiers from variable name
-            if isinstance(var, str):
-                if var.endswith('?'):
-                    var_base = var[:-1]
-                    quantifier = '?'
-                elif var.endswith('+'):
-                    var_base = var[:-1]
-                    quantifier = '+'
-                elif var.endswith('*'):
-                    var_base = var[:-1]
-                    quantifier = '*'
-                elif '{' in var and var.endswith('}'):
-                    open_idx = var.find('{')
-                    var_base = var[:open_idx]
-                    quantifier = var[open_idx:]
-        
-        # Get condition from DEFINE clause with improved handling
-        if var_base in define:
-            condition_str = define[var_base]
-        else:
-            # Default to TRUE if no definition exists
-            condition_str = "TRUE"
-            
-        # Compile the condition with DEFINE evaluation mode for pattern variables
-        condition_fn = compile_condition(condition_str, evaluation_mode='DEFINE')
-        
-        # Create transition with condition, variable tracking, AND priority
+        # Create transition with condition, variable tracking, and priority
         self.states[start].add_transition(condition_fn, end, var_base, priority)
         
         # Store variable name on both states
@@ -1914,25 +1828,6 @@ class NFABuilder:
         
         return start, end
 
-    def add_epsilon_with_priority(self, source: int, target: int, priority: int):
-        """
-        Add an epsilon transition with priority tracking.
-        
-        Args:
-            source: Source state index
-            target: Target state index  
-            priority: Priority for this epsilon transition
-        """
-        self.states[source].add_epsilon(target)
-        # Store priority in the epsilon_priorities dict
-        if not hasattr(self.states[source], 'epsilon_priorities'):
-            self.states[source].epsilon_priorities = {}
-        self.states[source].epsilon_priorities[target] = priority
-
-    def add_epsilon(self, source: int, target: int):
-        """Add an epsilon transition (wrapper for backward compatibility)."""
-        self.states[source].add_epsilon(target)
-    
     def _validate_anchor_semantics(self, tokens: List[PatternToken]) -> bool:
         """
         Validate anchor semantics to ensure patterns like A^ are marked as impossible.
@@ -2195,8 +2090,8 @@ class NFABuilder:
                         base_priority = var_info[3]  # Get the priority we calculated
                         
                         # Create fresh copy to avoid state sharing
-                        fresh_start, fresh_end = self.create_var_states_with_priority(
-                            var_base, define, base_priority + chain_pos)
+                        fresh_start, fresh_end = self.create_var_states(
+                            var_base, define, priority=base_priority + chain_pos)
                         
                         # Connect to current chain
                         self.add_epsilon(current, fresh_start)
@@ -2515,7 +2410,7 @@ class NFABuilder:
             return self._apply_quantifier_safe(alternative, define)
         else:
             # Regular pattern token
-            return self.create_var_states_with_priority(alternative.value, define, priority)
+            return self.create_var_states(alternative.value, define, priority=priority)
 
     def _create_enhanced_variable_states(self, variable, define, priority):
         """Create variable states with enhanced optimization."""
@@ -2607,7 +2502,7 @@ class NFABuilder:
         pattern = quantifier_token.value
         
         # Create states for the base pattern
-        pattern_start, pattern_end = self.create_var_states_with_priority(pattern, define, 0)
+        pattern_start, pattern_end = self.create_var_states(pattern, define, priority=0)
         
         # Apply quantifier logic
         return self._apply_quantifier(pattern_start, pattern_end, min_rep, max_rep, greedy)
