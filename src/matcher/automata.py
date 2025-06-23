@@ -1662,6 +1662,13 @@ class NFABuilder:
         for i, var_spec in enumerate(excluded_vars):
             var_spec = var_spec.strip()
             
+            # Check for empty pattern variations
+            if var_spec in ['()', '()*', '()+', '()?', '(){}']:
+                # This is an empty pattern exclusion - create a no-op epsilon transition
+                logger.debug(f"Detected empty pattern exclusion: {var_spec}")
+                # Skip this iteration as empty patterns don't contribute to the automaton
+                continue
+            
             # Parse variable and quantifier (e.g., "B+" -> "B", "+")
             var_name = var_spec
             quantifier = None
@@ -1681,6 +1688,11 @@ class NFABuilder:
                 brace_start = var_spec.find('{')
                 var_name = var_spec[:brace_start]
                 quantifier = var_spec[brace_start:]
+            
+            # Skip empty variable names (after removing quantifiers)
+            if not var_name or var_name in ['()', '']:
+                logger.debug(f"Skipping empty variable after quantifier removal: '{var_name}'")
+                continue
             
             # Create variable states
             var_start, var_end = self.create_var_states(var_name, define)
