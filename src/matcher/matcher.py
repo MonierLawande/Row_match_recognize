@@ -924,13 +924,6 @@ class EnhancedMatcher:
             self.excluded_vars = set()
             for state in self.dfa.states:
                 self.excluded_vars.update(state.excluded_variables)
-                
-            # Extract anchor information
-            self._anchor_metadata = {
-                "has_start_anchor": self.metadata.get("has_start_anchor", False),
-                "has_end_anchor": self.metadata.get("has_end_anchor", False),
-                "spans_partition": self.metadata.get("spans_partition", False)
-            }
         else:
             # Fallback to legacy behavior
             self.metadata = {}
@@ -939,11 +932,33 @@ class EnhancedMatcher:
                 self.excluded_vars = self.exclusion_handler.excluded_vars
             else:
                 self.excluded_vars = set()
-            self._anchor_metadata = {
-                "has_start_anchor": False,
-                "has_end_anchor": False,
-                "spans_partition": False
-            }
+        
+        # Always extract anchor information directly from DFA states
+        # to ensure we have accurate anchor metadata
+        self._anchor_metadata = {
+            "has_start_anchor": False,
+            "has_end_anchor": False,
+            "spans_partition": False,
+            "start_anchor_states": set(),
+            "end_anchor_accepting_states": set()
+        }
+        
+        # Extract anchor information from DFA states
+        for i, state in enumerate(self.dfa.states):
+            if hasattr(state, 'is_anchor') and state.is_anchor:
+                if hasattr(state, 'anchor_type'):
+                    if state.anchor_type == PatternTokenType.ANCHOR_START:
+                        self._anchor_metadata["has_start_anchor"] = True
+                        self._anchor_metadata["start_anchor_states"].add(i)
+                    elif state.anchor_type == PatternTokenType.ANCHOR_END:
+                        self._anchor_metadata["has_end_anchor"] = True
+                        if state.is_accept:
+                            self._anchor_metadata["end_anchor_accepting_states"].add(i)
+        
+        # Check if pattern spans partition
+        if (self._anchor_metadata["has_start_anchor"] and 
+            self._anchor_metadata["has_end_anchor"]):
+            self._anchor_metadata["spans_partition"] = True
     def _build_transition_index(self):
         """Build index of transitions with enhanced metadata support."""
         index = defaultdict(list)
@@ -1447,9 +1462,12 @@ class EnhancedMatcher:
         
         # For patterns with only end anchor, verify the match ends at the last row
         if longest_match and has_end_anchor and not has_both_anchors:
+            logger.debug(f"Checking end anchor for match ending at row {longest_match['end']}, partition ends at {len(rows) - 1}")
             if longest_match["end"] != len(rows) - 1:
                 logger.debug(f"Match doesn't end at last row for $ pattern, rejecting")
                 longest_match = None
+            else:
+                logger.debug(f"Match correctly ends at last row for $ pattern, accepting")
         
         # Special handling for patterns with exclusions
         # If we have a match and it contains excluded rows, make sure they're properly tracked
@@ -2134,10 +2152,12 @@ class EnhancedMatcher:
                 logger.debug(f"Start anchor failed: row_idx={row_idx} is not at partition start")
                 return False
                 
-        # Check end anchor if requested and only for accepting states
+        # Check end anchor if requested
         if check_type in ("end", "both") and state_info.anchor_type == PatternTokenType.ANCHOR_END:
-            if state_info.is_accept and row_idx != total_rows - 1:
-                logger.debug(f"End anchor failed: row_idx={row_idx} is not at partition end")
+            # For end anchors, check if we're at the partition end regardless of accepting state
+            # This ensures that matches with end anchors only succeed when ending at the last row
+            if row_idx != total_rows - 1:
+                logger.debug(f"End anchor failed: row_idx={row_idx} is not at partition end (expected {total_rows - 1})")
                 return False
                     
         return True

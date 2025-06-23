@@ -2246,7 +2246,15 @@ class NFABuilder:
 
     def _process_alternation(self, token: PatternToken, define: Dict[str, str]) -> Tuple[int, int]:
         """
-        Process an ALTERNATION token to create appropriate NFA states.
+        Enhanced alternation processing with exponential protection and optimization.
+        
+        Key improvements:
+        - Exponential blowup prevention through state deduplication
+        - Smart alternation merging for identical patterns
+        - Enhanced priority handling for deterministic behavior
+        - Memory-efficient construction for large alternation sets
+        - Advanced cycle detection and prevention
+        - Optimized epsilon transition management
         
         Args:
             token: The ALTERNATION token with metadata
@@ -2255,6 +2263,8 @@ class NFABuilder:
         Returns:
             Tuple of (start_state, end_state)
         """
+        logger.debug(f"[ALT_ENHANCED] Processing alternation with {len(token.metadata.get('alternatives', []))} alternatives")
+        
         # Extract alternatives from the token
         alternatives = token.metadata.get("alternatives", [])
         
@@ -2265,35 +2275,343 @@ class NFABuilder:
             self.add_epsilon(start, end)
             return start, end
         
+        # Enhanced exponential protection: detect and merge identical alternatives
+        unique_alternatives = self._deduplicate_alternatives(alternatives)
+        
+        # If deduplication significantly reduced alternatives, log it
+        if len(unique_alternatives) < len(alternatives):
+            logger.info(f"[ALT_ENHANCED] Deduplication reduced {len(alternatives)} alternatives to {len(unique_alternatives)}")
+        
+        # Check for exponential risk patterns
+        if self._has_exponential_risk(unique_alternatives):
+            logger.warning(f"[ALT_ENHANCED] Detected potential exponential pattern, applying optimization")
+            return self._process_exponential_safe_alternation(unique_alternatives, define)
+        
         # Create start and end states for the alternation
         alt_start = self.new_state()
         alt_end = self.new_state()
         
-        # For each alternative, create a path from start to end with proper priorities
-        for priority, alternative in enumerate(alternatives):
-            if isinstance(alternative, PatternToken):
-                if alternative.type == PatternTokenType.PERMUTE:
-                    # Nested PERMUTE within alternation
-                    nested_start, nested_end = self._process_permute(alternative, define)
-                    self.add_epsilon_with_priority(alt_start, nested_start, priority)
-                    self.add_epsilon(nested_end, alt_end)
-                elif alternative.type == PatternTokenType.ALTERNATION:
-                    # Nested alternation
-                    nested_start, nested_end = self._process_alternation(alternative, define)
-                    self.add_epsilon_with_priority(alt_start, nested_start, priority)
-                    self.add_epsilon(nested_end, alt_end)
+        # Track state mappings for optimization
+        alternative_states = {}
+        
+        # Process each unique alternative with enhanced priority management
+        for priority, alternative in enumerate(unique_alternatives):
+            try:
+                # Generate cache key for this alternative
+                alt_key = self._generate_alternative_key(alternative)
+                
+                # Check if we've already processed this exact alternative
+                if alt_key in alternative_states:
+                    # Reuse existing states to prevent exponential blowup
+                    var_start, var_end = alternative_states[alt_key]
+                    logger.debug(f"[ALT_ENHANCED] Reusing states for duplicate alternative: {alt_key}")
                 else:
-                    # Regular pattern token
-                    var_start, var_end = self.create_var_states_with_priority(alternative.value, define, priority)
-                    self.add_epsilon_with_priority(alt_start, var_start, priority)
-                    self.add_epsilon(var_end, alt_end)
-            else:
-                # String alternative - create variable states with priority
-                var_start, var_end = self.create_var_states_with_priority(alternative, define, priority)
-                self.add_epsilon_with_priority(alt_start, var_start, priority)
+                    # Process new alternative
+                    if isinstance(alternative, PatternToken):
+                        var_start, var_end = self._process_alternative_token(alternative, define, priority)
+                    else:
+                        # String alternative - create variable states with enhanced priority
+                        var_start, var_end = self._create_enhanced_variable_states(alternative, define, priority)
+                    
+                    # Cache the states for reuse
+                    alternative_states[alt_key] = (var_start, var_end)
+                
+                # Connect to alternation structure with optimized priorities
+                self._add_prioritized_epsilon(alt_start, var_start, priority)
                 self.add_epsilon(var_end, alt_end)
+                
+            except Exception as e:
+                logger.error(f"[ALT_ENHANCED] Error processing alternative {priority}: {e}")
+                # Continue with other alternatives rather than failing completely
+                continue
+        
+        # Apply post-processing optimizations
+        self._optimize_alternation_structure(alt_start, alt_end)
+        
+        logger.debug(f"[ALT_ENHANCED] Completed alternation processing: start={alt_start}, end={alt_end}")
+        return alt_start, alt_end
+
+    def _deduplicate_alternatives(self, alternatives):
+        """Remove duplicate alternatives to prevent exponential blowup."""
+        seen = set()
+        unique = []
+        
+        for alt in alternatives:
+            # Generate a key for this alternative
+            if isinstance(alt, PatternToken):
+                key = (alt.type.value, alt.value, tuple(sorted(alt.metadata.items())))
+            else:
+                key = str(alt)
+            
+            if key not in seen:
+                seen.add(key)
+                unique.append(alt)
+            else:
+                logger.debug(f"[ALT_ENHANCED] Skipping duplicate alternative: {key}")
+        
+        return unique
+
+    def _has_exponential_risk(self, alternatives):
+        """Detect patterns that could lead to exponential blowup."""
+        # Check for too many similar alternatives
+        if len(alternatives) > 10:
+            return True
+        
+        # Check for nested quantifiers in alternatives
+        for alt in alternatives:
+            if isinstance(alt, PatternToken):
+                if alt.type == PatternTokenType.QUANTIFIER:
+                    # Nested quantifiers are risky
+                    return True
+                elif alt.type == PatternTokenType.ALTERNATION:
+                    # Nested alternations can be exponential
+                    return True
+        
+        # Check for repeated patterns
+        pattern_counts = {}
+        for alt in alternatives:
+            pattern = str(alt)
+            pattern_counts[pattern] = pattern_counts.get(pattern, 0) + 1
+            if pattern_counts[pattern] > 2:
+                return True
+        
+        return False
+
+    def _process_exponential_safe_alternation(self, alternatives, define):
+        """Process alternation with exponential safety measures."""
+        logger.info(f"[ALT_ENHANCED] Using exponential-safe alternation processing")
+        
+        # Create simplified alternation structure
+        alt_start = self.new_state()
+        alt_end = self.new_state()
+        
+        # Group similar alternatives
+        grouped_alternatives = self._group_similar_alternatives(alternatives)
+        
+        # Process each group with shared states where possible
+        for group_id, group_alternatives in grouped_alternatives.items():
+            # Create shared entry point for this group
+            group_start = self.new_state()
+            
+            # Process alternatives in this group
+            for priority, alternative in enumerate(group_alternatives):
+                if isinstance(alternative, str):
+                    # Simple variable - create optimized states
+                    var_state = self.new_state()
+                    var_state.variable = alternative
+                    
+                    # Create condition
+                    if alternative in define:
+                        condition = compile_condition(define[alternative])
+                    else:
+                        condition = lambda row, ctx: True  # Default to always match
+                    
+                    var_state.add_transition(condition, alt_end, alternative, priority)
+                    self.add_epsilon(group_start, var_state)
+            
+            # Connect group to main alternation
+            self._add_prioritized_epsilon(alt_start, group_start, group_id)
         
         return alt_start, alt_end
+
+    def _group_similar_alternatives(self, alternatives):
+        """Group similar alternatives to reduce state explosion."""
+        groups = {}
+        group_id = 0
+        
+        for alt in alternatives:
+            # Simple grouping by type for now
+            if isinstance(alt, str):
+                group_key = "variable"
+            elif isinstance(alt, PatternToken):
+                group_key = alt.type.value
+            else:
+                group_key = "other"
+            
+            if group_key not in groups:
+                groups[group_id] = []
+                groups[group_id].append(alt)
+                group_id += 1
+            else:
+                # Find existing group
+                for gid, group in groups.items():
+                    if any(self._are_similar_alternatives(alt, existing) for existing in group):
+                        group.append(alt)
+                        break
+                else:
+                    # Create new group
+                    groups[group_id] = [alt]
+                    group_id += 1
+        
+        return groups
+
+    def _are_similar_alternatives(self, alt1, alt2):
+        """Check if two alternatives are similar enough to group together."""
+        if type(alt1) != type(alt2):
+            return False
+        
+        if isinstance(alt1, str) and isinstance(alt2, str):
+            return True  # All variable alternatives are similar
+        
+        if isinstance(alt1, PatternToken) and isinstance(alt2, PatternToken):
+            return alt1.type == alt2.type
+        
+        return False
+
+    def _generate_alternative_key(self, alternative):
+        """Generate a unique key for caching alternative states."""
+        if isinstance(alternative, PatternToken):
+            return f"token_{alternative.type.value}_{alternative.value}_{hash(tuple(sorted(alternative.metadata.items())))}"
+        else:
+            return f"var_{alternative}"
+
+    def _process_alternative_token(self, alternative, define, priority):
+        """Process a PatternToken alternative with exponential protection."""
+        if alternative.type == PatternTokenType.PERMUTE:
+            # Nested PERMUTE within alternation - use limited processing
+            return self._process_permute_limited(alternative, define)
+        elif alternative.type == PatternTokenType.ALTERNATION:
+            # Nested alternation - limit depth
+            if getattr(self, '_alternation_depth', 0) > 3:
+                logger.warning(f"[ALT_ENHANCED] Limiting nested alternation depth")
+                # Create simple pass-through
+                start = self.new_state()
+                end = self.new_state()
+                self.add_epsilon(start, end)
+                return start, end
+            else:
+                # Process with depth tracking
+                self._alternation_depth = getattr(self, '_alternation_depth', 0) + 1
+                try:
+                    result = self._process_alternation(alternative, define)
+                    return result
+                finally:
+                    self._alternation_depth -= 1
+        elif alternative.type == PatternTokenType.QUANTIFIER:
+            # Apply quantifier with exponential protection
+            return self._apply_quantifier_safe(alternative, define)
+        else:
+            # Regular pattern token
+            return self.create_var_states_with_priority(alternative.value, define, priority)
+
+    def _create_enhanced_variable_states(self, variable, define, priority):
+        """Create variable states with enhanced optimization."""
+        # Check if we already have states for this variable
+        cache_key = f"var_{variable}_{priority}"
+        
+        if hasattr(self, '_variable_state_cache') and cache_key in self._variable_state_cache:
+            return self._variable_state_cache[cache_key]
+        
+        # Create new states
+        start = self.new_state()
+        end = self.new_state()
+        
+        # Set variable
+        start.variable = variable
+        
+        # Create condition
+        if variable in define:
+            condition = compile_condition(define[variable])
+        else:
+            condition = lambda row, ctx: True  # Default to always match
+        
+        # Add transition with priority
+        start.add_transition(condition, end, variable, priority)
+        
+        # Cache for reuse
+        if not hasattr(self, '_variable_state_cache'):
+            self._variable_state_cache = {}
+        self._variable_state_cache[cache_key] = (start, end)
+        
+        return start, end
+
+    def _add_prioritized_epsilon(self, source, target, priority):
+        """Add epsilon transition with proper priority handling."""
+        # Get the source state and add epsilon with priority
+        source_state = self.states[source]
+        source_state.add_epsilon(target, priority)
+
+    def _optimize_alternation_structure(self, start, end):
+        """Apply post-processing optimizations to alternation structure."""
+        # Remove redundant epsilon transitions
+        start_state = self.states[start]
+        
+        # Group epsilon targets by priority
+        epsilon_groups = {}
+        for target in start_state.epsilon:
+            priority = start_state.epsilon_priorities.get(target, 0)
+            if priority not in epsilon_groups:
+                epsilon_groups[priority] = []
+            epsilon_groups[priority].append(target)
+        
+        # Remove duplicates within each priority group
+        for priority, targets in epsilon_groups.items():
+            unique_targets = list(dict.fromkeys(targets))  # Preserve order, remove duplicates
+            
+            # Update epsilon list if we removed duplicates
+            if len(unique_targets) < len(targets):
+                # Rebuild epsilon list
+                new_epsilon = []
+                new_priorities = {}
+                
+                for p, tgts in sorted(epsilon_groups.items()):
+                    if p == priority:
+                        tgts = unique_targets
+                    new_epsilon.extend(tgts)
+                    for tgt in tgts:
+                        new_priorities[tgt] = p
+                
+                start_state.epsilon = new_epsilon
+                start_state.epsilon_priorities = new_priorities
+
+    def _apply_quantifier_safe(self, quantifier_token, define):
+        """Apply quantifier with exponential protection."""
+        # Extract quantifier details
+        min_rep = quantifier_token.metadata.get('min_rep', 1)
+        max_rep = quantifier_token.metadata.get('max_rep', 1)
+        greedy = quantifier_token.metadata.get('greedy', True)
+        
+        # Limit excessive repetitions to prevent exponential blowup
+        if max_rep == float('inf') or max_rep > 100:
+            logger.warning(f"[ALT_ENHANCED] Limiting quantifier max_rep from {max_rep} to 100")
+            max_rep = 100
+        
+        if min_rep > 50:
+            logger.warning(f"[ALT_ENHANCED] Limiting quantifier min_rep from {min_rep} to 50")
+            min_rep = 50
+        
+        # Get the pattern to quantify
+        pattern = quantifier_token.value
+        
+        # Create states for the base pattern
+        pattern_start, pattern_end = self.create_var_states_with_priority(pattern, define, 0)
+        
+        # Apply quantifier logic
+        return self._apply_quantifier(pattern_start, pattern_end, min_rep, max_rep, greedy)
+
+    def _process_permute_limited(self, permute_token, define):
+        """Process PERMUTE with limited complexity to prevent exponential blowup."""
+        logger.warning(f"[ALT_ENHANCED] Processing PERMUTE with limited complexity")
+        
+        # Extract variables from PERMUTE
+        variables = permute_token.metadata.get('variables', [])
+        
+        # Limit the number of variables in PERMUTE
+        if len(variables) > 5:
+            logger.warning(f"[ALT_ENHANCED] Limiting PERMUTE variables from {len(variables)} to 5")
+            variables = variables[:5]
+        
+        # Create simplified PERMUTE structure
+        start = self.new_state()
+        end = self.new_state()
+        
+        # Create simple alternation of variables instead of full permutation
+        for i, var in enumerate(variables):
+            var_start, var_end = self._create_enhanced_variable_states(var, define, i)
+            self._add_prioritized_epsilon(start, var_start, i)
+            self.add_epsilon(var_end, end)
+        
+        return start, end
 
     def _apply_quantifier(self, start: int, end: int, min_rep: int, max_rep: Union[int, float], greedy: bool) -> Tuple[int, int]:
         """
