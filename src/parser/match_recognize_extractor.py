@@ -750,10 +750,11 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             ("SUM_IF", r"(?:FINAL|RUNNING)?\s*SUM_IF\(\s*.*?,\s*.*?\s*\)"),
             ("AVG_IF", r"(?:FINAL|RUNNING)?\s*AVG_IF\(\s*.*?,\s*.*?\s*\)"),
             ("COUNT", r"(?:FINAL|RUNNING)?\s*COUNT\(\s*.*?\s*\)"),
-            ("FIRST", r"(?:FINAL|RUNNING)?\s*FIRST\(\s*.+?(?:\s*,\s*\d+)?\s*\)"),
-            ("LAST", r"(?:FINAL|RUNNING)?\s*LAST\(\s*.+?(?:\s*,\s*\d+)?\s*\)"),
-            ("PREV", r"(?:FINAL|RUNNING)?\s*PREV\(\s*.+?(?:,\s*\d+)?\s*\)"),
-            ("NEXT", r"(?:FINAL|RUNNING)?\s*NEXT\(\s*.+?(?:,\s*\d+)?\s*\)"),
+            # Use word boundaries to prevent matching "first_value" as "FIRST"
+            ("FIRST\\b", r"(?:FINAL|RUNNING)?\s*FIRST\(\s*.+?(?:\s*,\s*\d+)?\s*\)"),
+            ("LAST\\b", r"(?:FINAL|RUNNING)?\s*LAST\(\s*.+?(?:\s*,\s*\d+)?\s*\)"),
+            ("PREV\\b", r"(?:FINAL|RUNNING)?\s*PREV\(\s*.+?(?:,\s*\d+)?\s*\)"),
+            ("NEXT\\b", r"(?:FINAL|RUNNING)?\s*NEXT\(\s*.+?(?:,\s*\d+)?\s*\)"),
         ]
         
         for measure in self.ast.measures.measures if self.ast.measures else []:

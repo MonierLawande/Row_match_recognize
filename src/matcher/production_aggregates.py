@@ -260,9 +260,13 @@ class ProductionAggregateEvaluator:
             start_time = time.time()
             
             try:
-                # Check cache first
-                cache_key = (expr, semantics, self.context.current_idx, 
-                           tuple(sorted(self.context.variables.items())))
+                # Check cache first - fix unhashable type issue
+                # Convert variable indices lists to tuples for hashing
+                hashable_variables = tuple(sorted(
+                    (k, tuple(v) if isinstance(v, list) else v) 
+                    for k, v in self.context.variables.items()
+                ))
+                cache_key = (expr, semantics, self.context.current_idx, hashable_variables)
                 
                 if cache_key in self._result_cache:
                     self.stats["cache_hits"] += 1
@@ -402,11 +406,15 @@ class ProductionAggregateEvaluator:
         Returns:
             Dict with 'function' and 'arguments' keys, or None if invalid
         """
+        # Remove RUNNING/FINAL prefix if present
+        clean_expr = re.sub(r'^\s*(RUNNING|FINAL)\s+', '', expr.strip(), flags=re.IGNORECASE)
+        
         # Enhanced pattern to handle complex arguments including nested functions
         pattern = r'([A-Z_]+)\s*\(\s*(.*)\s*\)$'
-        match = re.match(pattern, expr.strip(), re.IGNORECASE)
+        match = re.match(pattern, clean_expr, re.IGNORECASE)
         
         if not match:
+            logger.debug(f"Failed to parse aggregate function: {expr} (cleaned: {clean_expr})")
             return None
         
         func_name = match.group(1).upper()
@@ -414,6 +422,13 @@ class ProductionAggregateEvaluator:
         
         # Parse arguments (handling nested parentheses)
         arguments = self._parse_function_arguments(args_str) if args_str else []
+        
+        logger.debug(f"Parsed aggregate function {func_name} with args: {arguments}")
+        
+        return {
+            'function': func_name,
+            'arguments': arguments
+        }
         
         return {
             'function': func_name,
@@ -964,33 +979,75 @@ def enhance_measure_evaluator_with_production_aggregates():
     
     def enhanced_evaluate(self, expr: str, semantics: str = None) -> Any:
         """Enhanced evaluate method with production aggregate support."""
+        logger.debug(f"Enhanced evaluate called with expr: '{expr}', semantics: '{semantics}'")
+        
         # Determine semantics (default to RUNNING per SQL:2016)
         semantics = semantics or "RUNNING"
         is_running = semantics.upper() == "RUNNING"
         
         # Check if this is a PURE aggregate function (not a complex expression)
-        # Pattern matches: FUNC(...) with optional whitespace but nothing else
-        pure_agg_pattern = r'^\s*([A-Z_]+)\s*\([^)]*\)\s*$'
+        # Pattern matches: [RUNNING|FINAL] FUNC(...) with optional whitespace but nothing else
+        # This regex handles nested parentheses by counting them
+        pure_agg_pattern = r'^\s*(?:(RUNNING|FINAL)\s+)?([A-Z_]+)\s*\('
         match = re.match(pure_agg_pattern, expr.strip(), re.IGNORECASE)
         
+        logger.debug(f"Pattern match result for '{expr}': {match}")
+        
         if match:
-            func_name = match.group(1).upper()
+            # Manually check if the expression ends properly (all parentheses balanced)
+            paren_count = 0
+            func_start = match.end() - 1  # Position of the opening parenthesis
+            for i, char in enumerate(expr[func_start:]):
+                if char == '(':
+                    paren_count += 1
+                elif char == ')':
+                    paren_count -= 1
+                    if paren_count == 0:
+                        # Found the matching closing parenthesis
+                        remaining = expr[func_start + i + 1:].strip()
+                        if remaining == '':  # Nothing after the function call
+                            break
+                        else:
+                            match = None  # Not a pure function call
+                            break
+            else:
+                # Unbalanced parentheses
+                match = None
+            
+        if match:
+            semantics_prefix = match.group(1)
+            func_name = match.group(2).upper()
+            
+            logger.debug(f"Matched function: {func_name}, semantics_prefix: {semantics_prefix}")
+            
+            # If semantics is in the expression, use that instead of parameter
+            if semantics_prefix:
+                semantics = semantics_prefix.upper()
+            
             if func_name in ProductionAggregateEvaluator.STANDARD_AGGREGATES:
+                logger.debug(f"Using production aggregate evaluator for: {expr} -> {func_name}")
                 # Use production aggregate evaluator for pure aggregate functions
                 if not hasattr(self, '_prod_agg_evaluator'):
                     self._prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
                 
                 try:
-                    return self._prod_agg_evaluator.evaluate_aggregate(expr, semantics)
+                    result = self._prod_agg_evaluator.evaluate_aggregate(expr, semantics)
+                    logger.debug(f"Production aggregate result for {expr}: {result}")
+                    return result
                 except (AggregateValidationError, AggregateArgumentError) as e:
-                    logger.error(f"Aggregate validation error: {e}")
+                    logger.warning(f"Aggregate validation error: {e}")
                     return None
                 except Exception as e:
                     logger.error(f"Error in production aggregate evaluator: {e}")
                     # Fallback to original implementation
                     pass
+            else:
+                logger.debug(f"Function {func_name} not in standard aggregates, using original evaluator")
+        else:
+            logger.debug(f"Expression doesn't match pure aggregate pattern: {expr}")
         
         # Use original implementation for complex expressions and non-aggregates
+        logger.debug(f"Falling back to original evaluator for: {expr}")
         return original_evaluate(self, expr, semantics)
     
     # Patch the method
