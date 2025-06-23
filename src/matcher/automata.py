@@ -1997,8 +1997,10 @@ class NFABuilder:
             return perm_start, perm_end
         
         # Check for alternations in the variables
+        # Check for alternations - can be PatternToken objects or strings containing '|'
         has_alternations = any(
-            isinstance(var, PatternToken) and var.type == PatternTokenType.ALTERNATION 
+            (isinstance(var, PatternToken) and var.type == PatternTokenType.ALTERNATION) or
+            (isinstance(var, str) and '|' in var)
             for var in variables
         )
         
@@ -2091,8 +2093,21 @@ class NFABuilder:
                 rest_vars = variables[1:]
                 
                 if isinstance(first_var, PatternToken) and first_var.type == PatternTokenType.ALTERNATION:
-                    # This is an alternation group
+                    # This is an alternation group (PatternToken)
                     alternatives = first_var.metadata.get("alternatives", [])
+                    
+                    # Get combinations for the rest
+                    rest_combinations = extract_alternatives(rest_vars)
+                    
+                    # Create combinations with each alternative
+                    result = []
+                    for alt in alternatives:
+                        for rest_combo in rest_combinations:
+                            result.append([alt] + rest_combo)
+                    return result
+                elif isinstance(first_var, str) and '|' in first_var:
+                    # This is a string containing alternations (e.g., "A | B")
+                    alternatives = [alt.strip() for alt in first_var.split('|')]
                     
                     # Get combinations for the rest
                     rest_combinations = extract_alternatives(rest_vars)
@@ -2119,6 +2134,14 @@ class NFABuilder:
                     original_var = variables[i]
                     if isinstance(original_var, PatternToken) and original_var.type == PatternTokenType.ALTERNATION:
                         alternatives = original_var.metadata.get("alternatives", [])
+                        try:
+                            alt_index = alternatives.index(var)
+                            priority.append(alt_index)
+                        except ValueError:
+                            priority.append(999)  # Unknown alternative gets low priority
+                    elif isinstance(original_var, str) and '|' in original_var:
+                        # This is a string containing alternations (e.g., "A | B")
+                        alternatives = [alt.strip() for alt in original_var.split('|')]
                         try:
                             alt_index = alternatives.index(var)
                             priority.append(alt_index)

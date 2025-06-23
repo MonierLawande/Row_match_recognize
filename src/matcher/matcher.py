@@ -740,11 +740,11 @@ class EnhancedMatcher:
         # Analyze pattern text for specific constructs (e.g., empty alternations)
         self._analyze_pattern_text()
         
-        # Initialize alternation order for variable priority
-        self.alternation_order = self._parse_alternation_order(self.original_pattern)
-        
         # Extract metadata from DFA for optimization
         self._extract_dfa_metadata()
+        
+        # Initialize alternation order for variable priority (after DFA metadata is available)
+        self.alternation_order = self._parse_alternation_order(self.original_pattern)
         
         # Initialize exclusion handler
         self.exclusion_handler = PatternExclusionHandler(self.original_pattern) if self.original_pattern else None
@@ -773,7 +773,7 @@ class EnhancedMatcher:
         
         # Analyze DFA metadata
         if self.dfa.metadata:
-            self.is_permute_pattern = self.dfa.metadata.get('permute', False)
+            self.is_permute_pattern = self.dfa.metadata.get('has_permute', False)
             self.has_alternations = self.dfa.metadata.get('has_alternations', False)
         logger.debug(f"Pattern analysis: permute={self.is_permute_pattern}, "
                     f"alternations={self.has_alternations}, "
@@ -878,6 +878,8 @@ class EnhancedMatcher:
         Parse the pattern to determine the order of variables in alternations.
         
         For PATTERN (B | C | A), this returns {'B': 0, 'C': 1, 'A': 2}
+        For PERMUTE(A | B, C | D), this uses the alternation_combinations metadata 
+        from the DFA to establish lexicographical priority.
         Lower numbers have higher priority (left-to-right order).
         
         Args:
@@ -888,6 +890,30 @@ class EnhancedMatcher:
         """
         if not pattern:
             return {}
+        
+        # Check if we have PERMUTE alternation combinations from DFA metadata
+        if (hasattr(self.dfa, 'metadata') and 
+            'alternation_combinations' in self.dfa.metadata and
+            self.dfa.metadata.get('has_permute') and 
+            self.dfa.metadata.get('has_alternations')):
+            
+            logger.debug("Using DFA metadata for PERMUTE alternation order")
+            combinations = self.dfa.metadata['alternation_combinations']
+            order_map = {}
+            
+            # Assign priorities based on lexicographical order of combinations
+            # The first combination gets the highest priority (lowest numbers)
+            for combo_idx, combination in enumerate(combinations):
+                for var_idx, var in enumerate(combination):
+                    if var not in order_map:
+                        # Priority = combination_index * 100 + variable_position_in_combination
+                        # This ensures (A,C) gets priority 0,1 and (B,C) gets 100,101
+                        priority = combo_idx * 100 + var_idx
+                        order_map[var] = priority
+                        logger.debug(f"  Variable '{var}' assigned priority {priority} (combo {combo_idx}, pos {var_idx})")
+            
+            logger.debug(f"PERMUTE alternation order: {order_map}")
+            return order_map
             
         order_map = {}
         order_counter = 0

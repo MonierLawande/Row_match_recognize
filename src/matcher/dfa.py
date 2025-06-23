@@ -1036,8 +1036,13 @@ class DFABuilder:
             'states_merged': 0
         }
         
-        # Metadata for final DFA
-        self.metadata = {
+        # Metadata for final DFA - start with NFA metadata
+        self.metadata = {}
+        if hasattr(nfa, 'metadata') and nfa.metadata:
+            self.metadata.update(nfa.metadata)
+        
+        # Add DFA-specific metadata
+        self.metadata.update({
             'original_nfa_states': len(nfa.states),
             'original_nfa_transitions': sum(len(state.transitions) for state in nfa.states),
             'construction_method': 'enhanced_subset_construction',
@@ -1048,7 +1053,7 @@ class DFABuilder:
                 'early_termination',
                 'cache_optimization'
             ]
-        }
+        })
         
         # Validation and safety flags
         self._exponential_detected = False
@@ -1550,7 +1555,9 @@ class DFABuilder:
         self.subset_cache: Dict[FrozenSet[int], int] = {}
         
         # Copy and enhance metadata from NFA
+        logger.debug(f"DFA: Copying metadata from NFA: {nfa.metadata}")
         self.metadata: Dict[str, Any] = nfa.metadata.copy() if nfa.metadata else {}
+        logger.debug(f"DFA: Metadata after copy: {self.metadata}")
         
         # Add builder-specific metadata
         self.metadata.update({
@@ -1676,6 +1683,12 @@ class DFABuilder:
                 logger.info(f"DFA construction completed: {len(dfa_states)} states, "
                            f"{self.build_stats['transitions_created']} transitions, "
                            f"{self.build_stats['build_time']:.3f}s")
+                
+                # Debug final DFA metadata
+                logger.debug(f"Final DFA metadata keys: {list(dfa.metadata.keys())}")
+                logger.debug(f"Final DFA has_permute: {dfa.metadata.get('has_permute', 'MISSING')}")
+                logger.debug(f"Final DFA has_alternations: {dfa.metadata.get('has_alternations', 'MISSING')}")
+                logger.debug(f"Final DFA alternation_combinations: {dfa.metadata.get('alternation_combinations', 'MISSING')}")
                 
                 return dfa
                 
