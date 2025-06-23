@@ -1669,6 +1669,16 @@ class NFABuilder:
                 # Skip this iteration as empty patterns don't contribute to the automaton
                 continue
             
+            # HANDLE NESTED EXCLUSIONS: If var_spec contains exclusion patterns,
+            # we need to parse it as a sub-pattern rather than as a variable name
+            if '{-' in var_spec and '-}' in var_spec:
+                logger.debug(f"Processing nested exclusion pattern: {var_spec}")
+                # This is a complex pattern with nested exclusions
+                # For now, skip nested exclusions to avoid circular imports
+                # TODO: Implement proper nested exclusion support
+                logger.warning(f"Nested exclusion patterns not fully implemented yet: {var_spec}")
+                continue
+            
             # Parse variable and quantifier (e.g., "B+" -> "B", "+")
             var_name = var_spec
             quantifier = None
@@ -1683,8 +1693,8 @@ class NFABuilder:
             elif var_spec.endswith('?'):
                 var_name = var_spec[:-1]
                 quantifier = '?'
-            elif '{' in var_spec and '}' in var_spec:
-                # Handle {n,m} quantifiers
+            elif '{' in var_spec and '}' in var_spec and not ('{-' in var_spec and '-}' in var_spec):
+                # Handle {n,m} quantifiers (but not exclusion patterns)
                 brace_start = var_spec.find('{')
                 var_name = var_spec[:brace_start]
                 quantifier = var_spec[brace_start:]
@@ -1692,6 +1702,11 @@ class NFABuilder:
             # Skip empty variable names (after removing quantifiers)
             if not var_name or var_name in ['()', '']:
                 logger.debug(f"Skipping empty variable after quantifier removal: '{var_name}'")
+                continue
+            
+            # Validate that we have a proper variable name (not a pattern)
+            if '{-' in var_name or '-}' in var_name or '|' in var_name:
+                logger.warning(f"Skipping invalid variable name '{var_name}' that appears to be a pattern")
                 continue
             
             # Create variable states

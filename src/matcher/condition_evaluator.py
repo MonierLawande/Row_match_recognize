@@ -2437,10 +2437,33 @@ def _sql_to_python_condition(condition: str) -> str:
     if not condition:
         return condition
     
+    import re
+    
+    # Clean up whitespace and newlines to make valid Python expression
+    # Replace newlines and multiple spaces with single spaces
+    condition = re.sub(r'\s+', ' ', condition.strip())
+    
     # Convert SQL equality to Python equality
     # Handle cases like 'value = 10' -> 'value == 10'
     # But avoid changing '==' to '===='
-    import re
+    
+    # First, preserve quoted strings to avoid corrupting them during regex replacements
+    # Find all quoted strings and replace them with placeholders
+    quote_patterns = [
+        (r"'([^']*)'", "SINGLE_QUOTE_"),  # Single quotes
+        (r'"([^"]*)"', "DOUBLE_QUOTE_"),  # Double quotes
+    ]
+    
+    preserved_strings = {}
+    placeholder_counter = 0
+    
+    for pattern, prefix in quote_patterns:
+        matches = re.finditer(pattern, condition)
+        for match in matches:
+            placeholder = f"{prefix}{placeholder_counter}"
+            preserved_strings[placeholder] = match.group(0)
+            condition = condition.replace(match.group(0), placeholder, 1)
+            placeholder_counter += 1
     
     # Convert SQL CASE expressions to Python conditional expressions
     # Pattern: CASE WHEN condition1 THEN result1 WHEN condition2 THEN result2 ... ELSE default END
@@ -2568,5 +2591,9 @@ def _sql_to_python_condition(condition: str) -> str:
     # Handle empty IN predicates - convert to always false/true
     condition = re.sub(r'\bIN\s*\(\s*\)', 'in []', condition, flags=re.IGNORECASE)
     condition = re.sub(r'\bNOT\s+IN\s*\(\s*\)', 'not in []', condition, flags=re.IGNORECASE)
+    
+    # Restore preserved quoted strings
+    for placeholder, original_string in preserved_strings.items():
+        condition = condition.replace(placeholder, original_string)
     
     return condition
