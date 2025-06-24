@@ -831,11 +831,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         try:
             # Handle empty results case
             if not results and not all_matches:
-                # Create empty DataFrame with appropriate columns
-                columns = []
-                columns.extend(partition_by)
-                if measures:
-                    columns.extend(measures.keys())
+                # Create empty DataFrame with appropriate columns from SELECT clause
+                columns = _get_empty_result_columns(ast, partition_by, measures)
                 metrics["result_processing_time"] = time.time() - processing_start
                 metrics["total_time"] = time.time() - start_time
                 return pd.DataFrame(columns=columns)
@@ -928,11 +925,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 # Handle empty result case
                 if result_df.empty:
-                    # Create empty DataFrame with appropriate columns
-                    columns = []
-                    columns.extend(partition_by)
-                    if measures:
-                        columns.extend(measures.keys())
+                    # Create empty DataFrame with appropriate columns from SELECT clause
+                    columns = _get_empty_result_columns(ast, partition_by, measures)
                     metrics["result_processing_time"] = time.time() - processing_start
                     metrics["total_time"] = time.time() - start_time
                     return pd.DataFrame(columns=columns)
@@ -1267,11 +1261,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 # Handle empty result case
                 if result_df.empty:
-                    # Create empty DataFrame with appropriate columns
-                    columns = []
-                    columns.extend(partition_by)
-                    if measures:
-                        columns.extend(measures.keys())
+                    # Create empty DataFrame with appropriate columns from SELECT clause
+                    columns = _get_empty_result_columns(ast, partition_by, measures)
                     metrics["result_processing_time"] = time.time() - processing_start
                     metrics["total_time"] = time.time() - start_time
                     return pd.DataFrame(columns=columns)
@@ -1717,3 +1708,37 @@ def filter_lexicographically(all_matches, pattern_metadata, all_rows=None, parti
     # Sort filtered matches by partition key for consistent output
     filtered_matches.sort(key=lambda m: m.get("start", 0))
     return filtered_matches
+
+def _get_empty_result_columns(ast, partition_by: List[str], measures: Dict[str, str]) -> List[str]:
+    """
+    Determine the correct columns for empty result DataFrames based on SELECT clause.
+    
+    This ensures that empty results have the same column structure as non-empty results,
+    which is critical for SQL compatibility.
+    """
+    columns = []
+    
+    if ast.select_clause and ast.select_clause.items:
+        # Check if this is a SELECT * query
+        has_select_star = any(item.expression == '*' for item in ast.select_clause.items)
+        
+        if has_select_star:
+            # For SELECT *, include partition columns, then measures, then any other relevant columns
+            if partition_by:
+                columns.extend(partition_by)
+            if measures:
+                columns.extend(measures.keys())
+        else:
+            # For specific SELECT columns, extract them from the SELECT clause
+            for item in ast.select_clause.items:
+                expression = item.expression.split('.')[-1] if '.' in item.expression else item.expression
+                alias = item.alias if item.alias else expression
+                columns.append(alias)
+    else:
+        # Fallback: if no SELECT clause, include partition and measure columns
+        if partition_by:
+            columns.extend(partition_by)
+        if measures:
+            columns.extend(measures.keys())
+    
+    return columns

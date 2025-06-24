@@ -1682,6 +1682,7 @@ class EnhancedMatcher:
 
             # Find next match using optimized transitions
             context = RowContext(rows=rows, defined_variables=self.defined_variables)
+            context.subsets = self.subsets.copy() if self.subsets else {}
             match = self._find_single_match(rows, start_idx, context, config)
             if not match:
                 # Move to next position without marking as processed (unmatched rows will be handled later)
@@ -2365,6 +2366,7 @@ class EnhancedMatcher:
                             variables=match["variables"],
                             current_idx=idx
                         )
+                        temp_context.subsets = self.subsets.copy() if self.subsets else {}
                         
                         # Use production aggregate evaluator
                         prod_evaluator = ProductionAggregateEvaluator(temp_context)
