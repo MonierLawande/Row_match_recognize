@@ -563,9 +563,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         measures[alias] = expr[6:].strip()
                         measure_semantics[alias] = "FINAL"
                     elif m.metadata and 'semantics' in m.metadata:
+                        # Use parser-provided semantics when available
                         measures[alias] = expr
-                        # Use parser-provided semantics - these are already correctly determined
-                        # based on explicit RUNNING/FINAL keywords in the query
                         measure_semantics[alias] = m.metadata['semantics']
                     else:
                         # Default semantics based on rows_per_match and SQL:2016 specification
@@ -578,6 +577,12 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                 measure_semantics[alias] = "RUNNING"
                             elif re.match(r'^COUNT\s*\(', expr_upper):
                                 # COUNT function defaults to RUNNING in ALL ROWS PER MATCH
+                                measure_semantics[alias] = "RUNNING"
+                            elif re.match(r'^ARRAY_AGG\s*\(', expr_upper, re.IGNORECASE):
+                                # ARRAY_AGG function defaults to RUNNING in ALL ROWS PER MATCH
+                                measure_semantics[alias] = "RUNNING"
+                            elif re.match(r'^SUM\s*\(', expr_upper, re.IGNORECASE):
+                                # SUM function defaults to RUNNING in ALL ROWS PER MATCH
                                 measure_semantics[alias] = "RUNNING"
                             else:
                                 # Other aggregate functions default to FINAL

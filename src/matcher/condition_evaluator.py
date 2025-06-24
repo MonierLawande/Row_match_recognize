@@ -384,6 +384,21 @@ class ConditionEvaluator(ast.NodeVisitor):
                     var_name, col_name, ctx = args
                     return self._get_variable_column_value(var_name, col_name, ctx)
             
+            # Special handling for CLASSIFIER function
+            if func_name == "CLASSIFIER":
+                # For CLASSIFIER, we need the literal variable name, not its evaluated value
+                if len(node.args) == 0:
+                    return self._get_classifier(None)
+                elif len(node.args) == 1:
+                    arg = node.args[0]
+                    if isinstance(arg, ast.Name):
+                        # Pass the literal variable name
+                        return self._get_classifier(arg.id)
+                    else:
+                        raise ValueError("CLASSIFIER function requires a variable name argument")
+                else:
+                    raise ValueError("CLASSIFIER function takes at most one argument")
+            
             # Enhanced navigation function handling
             if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
                 return self._handle_navigation_function(node, func_name)
@@ -840,10 +855,21 @@ class ConditionEvaluator(ast.NodeVisitor):
         
         # Check if this is a subset variable
         if hasattr(ctx, 'subsets') and var_name in ctx.subsets:
-            # For subset variables, find the last row matched to any component variable
+            # For subset variables in MEASURES mode, return the value from the current row
+            # if the current row matches any component of the subset
             component_vars = ctx.subsets[var_name]
-            last_idx = -1
+            current_idx = ctx.current_idx
             
+            # Check if current row matches any component of this subset
+            for comp_var in component_vars:
+                if comp_var in ctx.variables and current_idx in ctx.variables[comp_var]:
+                    # Current row matches this component, return its value
+                    if current_idx >= 0 and current_idx < len(ctx.rows):
+                        return ctx.rows[current_idx].get(col_name)
+            
+            # If current row doesn't match any component, fall back to original logic
+            # (find the last row matched to any component variable)
+            last_idx = -1
             for comp_var in component_vars:
                 if comp_var in ctx.variables:
                     var_indices = ctx.variables[comp_var]
@@ -1206,8 +1232,17 @@ class ConditionEvaluator(ast.NodeVisitor):
     def _get_classifier(self, variable: Optional[str] = None) -> str:
         """Get the classifier (pattern variable name) for the current or specified position."""
         if variable is not None:
-            # Return the specific variable name
-            return variable
+            # Check if this is a subset variable
+            if hasattr(self.context, 'subsets') and variable in self.context.subsets:
+                # For subset variables, return the component variable that matches the current row
+                current_idx = self.context.current_idx
+                for comp in self.context.subsets[variable]:
+                    if comp in self.context.variables and current_idx in self.context.variables[comp]:
+                        return comp
+                return variable  # Fallback if no component matches
+            else:
+                # Return the specific variable name for non-subset variables
+                return variable
         
         # Get the classifier for the current row
         current_idx = self.context.current_idx

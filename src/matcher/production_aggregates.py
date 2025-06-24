@@ -1012,35 +1012,13 @@ def enhance_measure_evaluator_with_production_aggregates():
         semantics = semantics or "RUNNING"
         is_running = semantics.upper() == "RUNNING"
         
-        # Check if this is a PURE aggregate function (not a complex expression)
-        # Pattern matches: [RUNNING|FINAL] FUNC(...) with optional whitespace but nothing else
-        # This regex handles nested parentheses by counting them
-        pure_agg_pattern = r'^\s*(?:(RUNNING|FINAL)\s+)?([A-Z_]+)\s*\('
-        match = re.match(pure_agg_pattern, expr.strip(), re.IGNORECASE)
+        # Check if this is an aggregate function expression
+        # Pattern matches: [RUNNING|FINAL] FUNC(...) - allows any arguments
+        agg_pattern = r'^\s*(?:(RUNNING|FINAL)\s+)?([A-Z_]+)\s*\('
+        match = re.match(agg_pattern, expr.strip(), re.IGNORECASE)
         
         logger.debug(f"Pattern match result for '{expr}': {match}")
         
-        if match:
-            # Manually check if the expression ends properly (all parentheses balanced)
-            paren_count = 0
-            func_start = match.end() - 1  # Position of the opening parenthesis
-            for i, char in enumerate(expr[func_start:]):
-                if char == '(':
-                    paren_count += 1
-                elif char == ')':
-                    paren_count -= 1
-                    if paren_count == 0:
-                        # Found the matching closing parenthesis
-                        remaining = expr[func_start + i + 1:].strip()
-                        if remaining == '':  # Nothing after the function call
-                            break
-                        else:
-                            match = None  # Not a pure function call
-                            break
-            else:
-                # Unbalanced parentheses
-                match = None
-            
         if match:
             semantics_prefix = match.group(1)
             func_name = match.group(2).upper()
@@ -1053,12 +1031,11 @@ def enhance_measure_evaluator_with_production_aggregates():
             
             if func_name in ProductionAggregateEvaluator.STANDARD_AGGREGATES:
                 logger.debug(f"Using production aggregate evaluator for: {expr} -> {func_name}")
-                # Use production aggregate evaluator for pure aggregate functions
-                if not hasattr(self, '_prod_agg_evaluator'):
-                    self._prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
+                # Create fresh production aggregate evaluator with current context
+                prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
                 
                 try:
-                    result = self._prod_agg_evaluator.evaluate_aggregate(expr, semantics)
+                    result = prod_agg_evaluator.evaluate_aggregate(expr, semantics)
                     logger.debug(f"Production aggregate result for {expr}: {result}")
                     return result
                 except (AggregateValidationError, AggregateArgumentError) as e:
