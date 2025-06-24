@@ -2341,30 +2341,59 @@ class EnhancedMatcher:
             all_indices = list(range(match["start"], match["end"] + 1))
             logger.debug(f"Regular pattern: using range {all_indices}")
         
-        # Pre-calculate running sums for efficiency
-        running_sums = {}
+        # Pre-calculate running aggregates for efficiency using production aggregates
+        running_aggregates = {}
         for alias, expr in measures.items():
-            if expr.upper().startswith("SUM("):
-                # Extract column name
-                col_match = re.match(r'SUM\(([^)]+)\)', expr, re.IGNORECASE)
-                if col_match:
-                    col_name = col_match.group(1).strip()
-                    
-                    # Calculate running sum for each position
-                    total = 0
-                    running_sums[alias] = {}
+            # Handle any aggregate function that starts with a known function name
+            agg_functions = ['SUM', 'AVG', 'COUNT', 'MIN', 'MAX', 'ARRAY_AGG', 'STRING_AGG']
+            expr_upper = expr.upper().strip()
+            
+            is_aggregate = any(expr_upper.startswith(f"{func}(") for func in agg_functions)
+            
+            if is_aggregate:
+                # Use production aggregate evaluator for all aggregate expressions
+                from src.matcher.production_aggregates import ProductionAggregateEvaluator
+                
+                try:
+                    # Calculate running aggregate for each position using production evaluator
+                    running_aggregates[alias] = {}
                     
                     for idx in all_indices:
-                        # INCLUDE excluded rows in running sum calculation per SQL:2016
-                        # (They are excluded from output but INCLUDED in RUNNING aggregations)
-                        if idx < len(rows):
-                            row_val = rows[idx].get(col_name)
-                            if row_val is not None:
-                                try:
-                                    total += float(row_val)
-                                except (ValueError, TypeError):
-                                    pass
-                        running_sums[alias][idx] = total
+                        # Create context for this position
+                        temp_context = RowContext(
+                            rows=rows,
+                            variables=match["variables"],
+                            current_idx=idx
+                        )
+                        
+                        # Use production aggregate evaluator
+                        prod_evaluator = ProductionAggregateEvaluator(temp_context)
+                        result = prod_evaluator.evaluate_aggregate(expr, "RUNNING")
+                        running_aggregates[alias][idx] = result if result is not None else ([] if 'ARRAY_AGG' in expr_upper else 0)
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to use production aggregates for running aggregate {alias}: {e}")
+                    # For backward compatibility, keep the old SUM-only fallback
+                    if expr_upper.startswith("SUM("):
+                        col_match = re.match(r'SUM\(([^)]+)\)', expr, re.IGNORECASE)
+                        if col_match:
+                            col_name = col_match.group(1).strip()
+                            
+                            # Calculate running sum for each position (simple case)
+                            total = 0
+                            running_aggregates[alias] = {}
+                            
+                            for idx in all_indices:
+                                # INCLUDE excluded rows in running sum calculation per SQL:2016
+                                # (They are excluded from output but INCLUDED in RUNNING aggregations)
+                                if idx < len(rows):
+                                    row_val = rows[idx].get(col_name)
+                                    if row_val is not None:
+                                        try:
+                                            total += float(row_val)
+                                        except (ValueError, TypeError):
+                                            pass
+                                running_aggregates[alias][idx] = total
         
         # Process each row in the match range
         for idx in all_indices:
@@ -2431,15 +2460,20 @@ class EnhancedMatcher:
                             result[alias] = pattern_var
                             logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {pattern_var}")
                     
-                    # Special handling for running sum
+                    # Special handling for running aggregates (backward compatibility)
                     elif expr.upper().startswith("SUM(") and semantics == "RUNNING":
-                        if alias in running_sums and idx in running_sums[alias]:
-                            result[alias] = running_sums[alias][idx]
+                        if alias in running_aggregates and idx in running_aggregates[alias]:
+                            result[alias] = running_aggregates[alias][idx]
                             logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
                         else:
                             # Fallback to standard evaluation
                             result[alias] = measure_evaluator.evaluate(expr, semantics)
                             logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
+                    
+                    # Enhanced: Handle other running aggregates
+                    elif semantics == "RUNNING" and alias in running_aggregates and idx in running_aggregates[alias]:
+                        result[alias] = running_aggregates[alias][idx]
+                        logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
                     
                     # Standard evaluation for other measures
                     else:

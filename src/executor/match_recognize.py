@@ -562,15 +562,25 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     elif expr.upper().startswith("FINAL "):
                         measures[alias] = expr[6:].strip()
                         measure_semantics[alias] = "FINAL"
-                    elif m.metadata and 'semantics' in m.metadata:
-                        # Use parser-provided semantics when available
+                    elif m.metadata and 'semantics' in m.metadata and m.metadata.get('explicit_semantics', False):
+                        # Use parser-provided semantics only when explicitly specified
                         measures[alias] = expr
                         measure_semantics[alias] = m.metadata['semantics']
                     else:
-                        # Default semantics based on rows_per_match and SQL:2016 specification
+                        # Default semantics based on explicit vs implicit usage
                         measures[alias] = expr
-                        if rows_per_match != RowsPerMatch.ONE_ROW:
-                            # For ALL ROWS PER MATCH, apply SQL:2016 default semantics
+                        
+                        # Check if any measures in the query have explicit semantics
+                        has_explicit_semantics = any(
+                            m.metadata and m.metadata.get('explicit_semantics', False) 
+                            for m in mr_clause.measures.measures
+                        )
+                        
+                        if has_explicit_semantics:
+                            # If query has explicit RUNNING/FINAL anywhere, default implicit ones to FINAL
+                            measure_semantics[alias] = "FINAL"
+                        elif rows_per_match != RowsPerMatch.ONE_ROW:
+                            # For ALL ROWS PER MATCH with no explicit semantics, apply SQL:2016 default semantics
                             expr_upper = expr.upper().strip()
                             if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
                                 # Navigation functions default to RUNNING in ALL ROWS PER MATCH

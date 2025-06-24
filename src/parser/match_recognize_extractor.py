@@ -362,6 +362,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             # - Navigation functions (FIRST, LAST, PREV, NEXT) may default to RUNNING in some contexts
             # For consistency with Trino and the standard, use FINAL as default for all functions
             semantics = "FINAL"
+            explicit_semantics = False  # Track if semantics were explicitly specified
             raw_expr = raw_text.strip()
             
             # Use regex to match RUNNING or FINAL with flexible whitespace
@@ -370,14 +371,17 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             
             if running_match:
                 semantics = "RUNNING"
+                explicit_semantics = True
                 raw_expr = raw_expr[running_match.end():].strip()
             elif final_match:
                 semantics = "FINAL"
+                explicit_semantics = True
                 raw_expr = raw_expr[final_match.end():].strip()
             
             # Alternative: If the expression is already concatenated (e.g., "RUNNINGLAST")
             elif raw_expr.upper().startswith("RUNNING"):
                 semantics = "RUNNING"
+                explicit_semantics = True
                 # Extract function name after "RUNNING"
                 function_match = re.match(r'(?i)RUNNING([A-Z]+)', raw_expr)
                 if function_match:
@@ -385,6 +389,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                     raw_expr = func_name + raw_expr[len("RUNNING" + func_name):]
             elif raw_expr.upper().startswith("FINAL"):
                 semantics = "FINAL"
+                explicit_semantics = True
                 # Extract function name after "FINAL"
                 function_match = re.match(r'(?i)FINAL([A-Z]+)', raw_expr)
                 if function_match:
@@ -397,7 +402,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             else:
                 expr, alias = post_process_text(raw_expr), None
 
-            measure_metadata = {"semantics": semantics}
+            measure_metadata = {"semantics": semantics, "explicit_semantics": explicit_semantics}
             measures.append(Measure(expr, alias, measure_metadata))
         return MeasuresClause(measures)
 

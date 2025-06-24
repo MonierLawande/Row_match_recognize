@@ -556,6 +556,7 @@ class MeasureEvaluator:
             ExpressionValidationError: If expression is invalid
             MeasureEvaluationError: If evaluation fails
         """
+        print(f"[ORIGINAL_EVAL] Called with expr: '{expr}', semantics: '{semantics}'")
         start_time = time.time()
         
         try:

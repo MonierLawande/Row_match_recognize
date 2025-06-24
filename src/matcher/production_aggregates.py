@@ -933,12 +933,77 @@ class ProductionAggregateEvaluator:
             from src.matcher.condition_evaluator import ConditionEvaluator
             import ast
             
+            logger.debug(f"Production aggregates evaluating complex expression: '{expr}' at row {self.context.current_idx}")
+            
             evaluator = ConditionEvaluator(self.context, evaluation_mode='MEASURES')
             tree = ast.parse(expr, mode='eval')
-            return evaluator.visit(tree.body)
-        except Exception:
+            result = evaluator.visit(tree.body)
+            
+            logger.debug(f"Production aggregates expression '{expr}' evaluated to: {result}")
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to evaluate expression '{expr}': {e}")
+            # Try simpler evaluation approach for arithmetic expressions
+            return self._try_simple_arithmetic_evaluation(expr)
+    
+    def _try_simple_arithmetic_evaluation(self, expr: str) -> Any:
+        """Try simple arithmetic evaluation as fallback when ConditionEvaluator fails."""
+        try:
+            # Handle simple arithmetic expressions manually
+            import operator
+            import ast
+            
+            logger.debug(f"Trying simple arithmetic evaluation for: '{expr}'")
+            
+            tree = ast.parse(expr, mode='eval')
+            result = self._eval_ast_node(tree.body, ast, operator)
+            
+            logger.debug(f"Simple arithmetic result for '{expr}': {result}")
+            return result
+        except Exception as e:
+            logger.warning(f"Simple arithmetic evaluation also failed for '{expr}': {e}")
             return None
     
+    def _eval_ast_node(self, node, ast, operator):
+        """Recursively evaluate AST nodes for simple arithmetic expressions."""
+        if isinstance(node, ast.BinOp):
+            left = self._eval_ast_node(node.left, ast, operator)
+            right = self._eval_ast_node(node.right, ast, operator)
+            
+            if left is None or right is None:
+                return None
+            
+            op_map = {
+                ast.Add: operator.add,
+                ast.Sub: operator.sub,
+                ast.Mult: operator.mul,
+                ast.Div: operator.truediv,
+                ast.FloorDiv: operator.floordiv,
+                ast.Mod: operator.mod,
+                ast.Pow: operator.pow,
+            }
+            
+            op = op_map.get(type(node.op))
+            if op:
+                result = op(left, right)
+                logger.debug(f"Simple BinOp: {left} {type(node.op).__name__} {right} = {result}")
+                return result
+                
+        elif isinstance(node, ast.Name):
+            # Simple column reference
+            column_name = node.id
+            if self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(column_name)
+                logger.debug(f"Simple column '{column_name}' resolved to: {value}")
+                return value
+                
+        elif isinstance(node, ast.Constant):
+            return node.value
+        elif isinstance(node, ast.Num):  # For older Python versions
+            return node.n
+            
+        return None
+
     def _get_variable_column_value(self, var_name: str, col_name: str) -> Any:
         """Get value for a variable.column reference."""
         # For the current context, find the row assigned to this variable
