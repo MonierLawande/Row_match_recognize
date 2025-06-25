@@ -321,6 +321,8 @@ class ProductionAggregateEvaluator:
                         result = self._evaluate_statistical_functions(func_name, arguments, is_running)
                     elif func_name == "LISTAGG":
                         result = self._evaluate_listagg(arguments, is_running)
+                    elif func_name in ("FIRST_VALUE", "LAST_VALUE"):
+                        result = self._evaluate_window_functions(func_name, arguments, is_running)
                     else:
                         raise AggregateValidationError(
                             f"Unsupported aggregate function: {func_name}",
@@ -331,6 +333,7 @@ class ProductionAggregateEvaluator:
                     if len(self._result_cache) < MAX_CACHE_SIZE:
                         self._result_cache[cache_key] = result
                     
+                    logger.debug(f"PROD_AGG_FINAL: evaluate_aggregate returning: {result} (type: {type(result)})")
                     return result
                     
                 except Exception as e:
@@ -440,10 +443,18 @@ class ProductionAggregateEvaluator:
     
     def _parse_function_arguments(self, args_str: str) -> List[str]:
         """
-        Parse function arguments handling nested parentheses and commas.
+        Parse function arguments handling nested parentheses, commas, and ORDER BY clauses.
         """
         if not args_str:
             return []
+        
+        # Check for ORDER BY clause in aggregate functions like array_agg(expr ORDER BY col)
+        order_by_match = re.match(r'^(.+?)\s+ORDER\s+BY\s+(.+)$', args_str, re.IGNORECASE)
+        if order_by_match:
+            main_expr = order_by_match.group(1).strip()
+            order_clause = order_by_match.group(2).strip()
+            # Return as special format that includes ORDER BY information
+            return [main_expr, f"ORDER_BY:{order_clause}"]
         
         arguments = []
         current_arg = ""
@@ -483,27 +494,36 @@ class ProductionAggregateEvaluator:
         if func_name not in self.STANDARD_AGGREGATES:
             raise AggregateValidationError(f"Unsupported aggregate function: {func_name}")
         
+        # Handle ORDER BY clause for ARRAY_AGG and STRING_AGG
+        has_order_by = len(arguments) > 1 and arguments[1].startswith("ORDER_BY:")
+        effective_arg_count = len(arguments) - (1 if has_order_by else 0)
+        
         # Validate argument count
         if func_name in self.MULTI_ARG_FUNCTIONS:
             expected_args = self.MULTI_ARG_FUNCTIONS[func_name]
-            if len(arguments) != expected_args:
+            if effective_arg_count != expected_args:
                 raise AggregateArgumentError(
-                    f"{func_name} requires exactly {expected_args} arguments, got {len(arguments)}"
+                    f"{func_name} requires exactly {expected_args} arguments, got {effective_arg_count}"
                 )
         elif func_name == "COUNT":
-            if len(arguments) == 0:
+            if effective_arg_count == 0:
                 raise AggregateArgumentError("COUNT requires at least one argument")
+        elif func_name in ("ARRAY_AGG", "STRING_AGG") and has_order_by:
+            # Special case: ARRAY_AGG and STRING_AGG can have ORDER BY as second argument
+            if effective_arg_count != 1:
+                raise AggregateArgumentError(f"{func_name} with ORDER BY requires exactly one expression argument")
         else:
-            if len(arguments) != 1:
+            if effective_arg_count != 1:
                 raise AggregateArgumentError(f"{func_name} requires exactly one argument")
         
         # Validate argument consistency for pattern variables
-        if len(arguments) > 1:
+        if len(arguments) > 1 and not has_order_by:
             self._validate_argument_consistency(arguments)
         
         # Check for illegal nesting (no aggregates in navigation functions)
         for arg in arguments:
-            self._validate_no_nested_aggregates(arg)
+            if not arg.startswith("ORDER_BY:"):
+                self._validate_no_nested_aggregates(arg)
     
     def _validate_argument_consistency(self, arguments: List[str]) -> None:
         """
@@ -615,22 +635,76 @@ class ProductionAggregateEvaluator:
     def _evaluate_avg(self, arguments: List[str], is_running: bool) -> Optional[float]:
         """Evaluate AVG function."""
         if not arguments:
+            logger.debug(f"AVG: No arguments, returning None")
             return None
         
         values = self._get_numeric_values(arguments[0], is_running)
+        logger.debug(f"AVG: Got numeric values: {values}")
         if not values:
+            logger.info(f"AVG_DEBUG: Empty values list, returning None")
             return None
         
-        return sum(values) / len(values)
+        result = sum(values) / len(values)
+        logger.debug(f"AVG: Calculated result: {result}")
+        return result
     
     def _evaluate_array_agg(self, arguments: List[str], is_running: bool) -> List[Any]:
-        """Evaluate ARRAY_AGG function."""
+        """Evaluate ARRAY_AGG function with optional ORDER BY support."""
         if not arguments:
             return []
         
-        values = self._get_expression_values(arguments[0], is_running)
-        # Filter out nulls for array aggregation
-        return [v for v in values if v is not None]
+        # Check if there's an ORDER BY clause
+        if len(arguments) > 1 and arguments[1].startswith("ORDER_BY:"):
+            value_expr = arguments[0]
+            order_clause = arguments[1][9:]  # Remove "ORDER_BY:" prefix
+            
+            # Parse ORDER BY clause (column [ASC|DESC])
+            order_parts = order_clause.strip().split()
+            order_column = order_parts[0]
+            order_direction = order_parts[1].upper() if len(order_parts) > 1 else 'ASC'
+            
+            # Get matched row indices using same logic as regular aggregates
+            row_indices = self._get_row_indices(value_expr, is_running)
+            
+            if not row_indices:
+                return []
+            
+            # Get values and order keys for each row
+            value_order_pairs = []
+            for idx in row_indices:
+                if idx >= len(self.context.rows):
+                    continue
+                
+                # Temporarily set current index for expression evaluation
+                old_idx = self.context.current_idx
+                self.context.current_idx = idx
+                
+                try:
+                    # Get the value to include in array
+                    value_result = self._evaluate_single_expression(value_expr)
+                    # Get the value to order by
+                    order_result = self._evaluate_single_expression(order_column)
+                    
+                    if value_result is not None and order_result is not None:
+                        value_order_pairs.append((value_result, order_result))
+                
+                except Exception as e:
+                    logger.warning(f"Failed to evaluate array_agg expressions for row {idx}: {e}")
+                finally:
+                    self.context.current_idx = old_idx
+            
+            # Sort by order key
+            reverse_order = (order_direction == 'DESC')
+            value_order_pairs.sort(key=lambda x: x[1], reverse=reverse_order)
+            
+            # Return just the values in sorted order
+            return [pair[0] for pair in value_order_pairs]
+        
+        else:
+            # Standard ARRAY_AGG without ORDER BY
+            values = self._get_expression_values(arguments[0], is_running)
+            # Filter out nulls for array aggregation
+            return [v for v in values if v is not None]
     
     def _evaluate_string_agg(self, arguments: List[str], is_running: bool) -> Optional[str]:
         """Evaluate STRING_AGG function."""
@@ -1212,6 +1286,11 @@ def enhance_measure_evaluator_with_production_aggregates():
         is_running = semantics.upper() == "RUNNING"
         
         # Check if this is an aggregate function expression
+        # Pattern matches: [RUNNING|FINAL] FUNC(...) - allows complex arguments including CASE WHEN
+        agg_pattern = r'^\s*(?:(RUNNING|FINAL)\s+)?([A-Z_]+)\s*\('
+        match = re.match(agg_pattern, expr.strip(), re.IGNORECASE)
+        
+        # Check if this is an aggregate function expression
         # Pattern matches: [RUNNING|FINAL] FUNC(...) - allows any arguments
         agg_pattern = r'^\s*(?:(RUNNING|FINAL)\s+)?([A-Z_]+)\s*\('
         match = re.match(agg_pattern, expr.strip(), re.IGNORECASE)
@@ -1235,13 +1314,15 @@ def enhance_measure_evaluator_with_production_aggregates():
                 
                 try:
                     result = prod_agg_evaluator.evaluate_aggregate(expr, semantics)
-                    logger.debug(f"Production aggregate result for {expr}: {result}")
+                    logger.info(f"ENHANCED_EVAL_DEBUG: Production aggregate result for {expr}: {result} (type: {type(result)})")
                     return result
                 except (AggregateValidationError, AggregateArgumentError) as e:
-                    logger.warning(f"Aggregate validation error: {e}")
+                    logger.warning(f"ENHANCED_EVAL: Aggregate validation error for {expr}: {e}")
+                    logger.warning(f"ENHANCED_EVAL: Falling back to original evaluator")
                     return None
                 except Exception as e:
-                    logger.error(f"Error in production aggregate evaluator: {e}")
+                    logger.error(f"ENHANCED_EVAL: Error in production aggregate evaluator for {expr}: {e}")
+                    logger.error(f"ENHANCED_EVAL: Falling back to original evaluator")
                     # Fallback to original implementation
                     pass
             else:
@@ -1250,8 +1331,10 @@ def enhance_measure_evaluator_with_production_aggregates():
             logger.debug(f"Expression doesn't match pure aggregate pattern: {expr}")
         
         # Use original implementation for complex expressions and non-aggregates
-        logger.debug(f"Falling back to original evaluator for: {expr}")
-        return original_evaluate(self, expr, semantics)
+        logger.info(f"ENHANCED_EVAL_DEBUG: Falling back to original evaluator for: {expr}")
+        original_result = original_evaluate(self, expr, semantics)
+        logger.info(f"ENHANCED_EVAL_DEBUG: Original evaluator returned: {original_result} (type: {type(original_result)})")
+        return original_result
     
     # Patch the method
     MeasureEvaluator.evaluate = enhanced_evaluate
