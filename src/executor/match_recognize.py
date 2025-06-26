@@ -540,66 +540,85 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         # Extract measures and semantics
         measures = {}
-        measure_semantics = {}
+        measure_metadata = {}
         
         if mr_clause.measures:
             for m in mr_clause.measures.measures:
                 expr = m.expression
                 alias = m.alias if m.alias else expr
-                
-                # Determine semantics based on measure type and rows_per_match
-                if m.is_classifier:
-                    measures[alias] = expr
-                    measure_semantics[alias] = "FINAL" if rows_per_match == RowsPerMatch.ONE_ROW else "RUNNING"
-                elif expr.upper() == "MATCH_NUMBER()":
-                    measures[alias] = "MATCH_NUMBER()"
-                    measure_semantics[alias] = "FINAL" if rows_per_match == RowsPerMatch.ONE_ROW else "RUNNING"
+                measures[alias] = expr
+                # Store metadata for semantics processing
+                measure_metadata[alias] = getattr(m, 'metadata', {})
+        
+        # Determine measure semantics for SQL:2016 compliance
+        logger.debug(f"Determining measure semantics for {len(measures)} measures")
+        measure_semantics = {}
+        explicit_semantics_found = False
+        
+        # First pass: check if any measure has explicit RUNNING/FINAL semantics (from metadata or expression)
+        for alias, expr in measures.items():
+            metadata = measure_metadata.get(alias, {})
+            has_explicit_semantics = (
+                metadata.get('explicit_semantics', False) or
+                expr.upper().startswith("RUNNING ") or 
+                expr.upper().startswith("FINAL ")
+            )
+            if has_explicit_semantics:
+                explicit_semantics_found = True
+                break
+        
+        for alias, expr in measures.items():
+            metadata = measure_metadata.get(alias, {})
+            
+            # Check for explicit semantics from metadata first, then expression text
+            if metadata.get('explicit_semantics', False) and metadata.get('semantics'):
+                measure_semantics[alias] = metadata['semantics']
+                logger.debug(f"Explicit {metadata['semantics']} semantics from metadata for measure {alias}: {expr}")
+            elif expr.upper().startswith("RUNNING "):
+                measure_semantics[alias] = "RUNNING"
+                logger.debug(f"Explicit RUNNING semantics from expression for measure {alias}: {expr}")
+            elif expr.upper().startswith("FINAL "):
+                measure_semantics[alias] = "FINAL"
+                logger.debug(f"Explicit FINAL semantics from expression for measure {alias}: {expr}")
+            else:
+                # Default semantics based on rows per match mode and function type
+                if rows_per_match == RowsPerMatch.ONE_ROW:
+                    measure_semantics[alias] = "FINAL"
+                    logger.debug(f"ONE ROW mode: FINAL semantics for measure {alias}: {expr}")
                 else:
-                    # Handle explicit semantics prefixes
-                    if expr.upper().startswith("RUNNING "):
-                        measures[alias] = expr[8:].strip()
+                    # For ALL ROWS mode, apply SQL:2016 default semantics
+                    expr_upper = expr.upper().strip()
+                    
+                    # Navigation functions always default to RUNNING regardless of mixed semantics
+                    if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
                         measure_semantics[alias] = "RUNNING"
-                    elif expr.upper().startswith("FINAL "):
-                        measures[alias] = expr[6:].strip()
+                        logger.debug(f"Navigation function: RUNNING semantics for measure {alias}: {expr}")
+                    elif re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
+                        # Expressions containing navigation functions default to RUNNING
+                        measure_semantics[alias] = "RUNNING"
+                        logger.debug(f"Expression with navigation function: RUNNING semantics for measure {alias}: {expr}")
+                    elif explicit_semantics_found:
+                        # In mixed semantics queries, implicit measures default to FINAL per SQL:2016
                         measure_semantics[alias] = "FINAL"
-                    elif m.metadata and 'semantics' in m.metadata and m.metadata.get('explicit_semantics', False):
-                        # Use parser-provided semantics only when explicitly specified
-                        measures[alias] = expr
-                        measure_semantics[alias] = m.metadata['semantics']
+                        logger.debug(f"Mixed semantics query: FINAL default for measure {alias}: {expr}")
+                    elif re.match(r'^COUNT\s*\(', expr_upper):
+                        # COUNT function defaults to RUNNING in ALL ROWS PER MATCH when no explicit semantics
+                        measure_semantics[alias] = "RUNNING"
+                        logger.debug(f"COUNT function: RUNNING semantics for measure {alias}: {expr}")
+                    elif re.match(r'^ARRAY_AGG\s*\(', expr_upper, re.IGNORECASE):
+                        # ARRAY_AGG function defaults to RUNNING in ALL ROWS PER MATCH when no explicit semantics
+                        measure_semantics[alias] = "RUNNING"
+                        logger.debug(f"ARRAY_AGG function: RUNNING semantics for measure {alias}: {expr}")
+                    elif re.match(r'^SUM\s*\(', expr_upper, re.IGNORECASE):
+                        # SUM function defaults to RUNNING in ALL ROWS PER MATCH when no explicit semantics
+                        measure_semantics[alias] = "RUNNING"
+                        logger.debug(f"SUM function: RUNNING semantics for measure {alias}: {expr}")
                     else:
-                        # Default semantics based on explicit vs implicit usage
-                        measures[alias] = expr
-                        
-                        # Check if any measures in the query have explicit semantics
-                        has_explicit_semantics = any(
-                            m.metadata and m.metadata.get('explicit_semantics', False) 
-                            for m in mr_clause.measures.measures
-                        )
-                        
-                        if has_explicit_semantics:
-                            # If query has explicit RUNNING/FINAL anywhere, default implicit ones to FINAL
-                            measure_semantics[alias] = "FINAL"
-                        elif rows_per_match != RowsPerMatch.ONE_ROW:
-                            # For ALL ROWS PER MATCH with no explicit semantics, apply SQL:2016 default semantics
-                            expr_upper = expr.upper().strip()
-                            if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                                # Navigation functions default to RUNNING in ALL ROWS PER MATCH
-                                measure_semantics[alias] = "RUNNING"
-                            elif re.match(r'^COUNT\s*\(', expr_upper):
-                                # COUNT function defaults to RUNNING in ALL ROWS PER MATCH
-                                measure_semantics[alias] = "RUNNING"
-                            elif re.match(r'^ARRAY_AGG\s*\(', expr_upper, re.IGNORECASE):
-                                # ARRAY_AGG function defaults to RUNNING in ALL ROWS PER MATCH
-                                measure_semantics[alias] = "RUNNING"
-                            elif re.match(r'^SUM\s*\(', expr_upper, re.IGNORECASE):
-                                # SUM function defaults to RUNNING in ALL ROWS PER MATCH
-                                measure_semantics[alias] = "RUNNING"
-                            else:
-                                # Other aggregate functions default to FINAL
-                                measure_semantics[alias] = "FINAL"
-                        else:
-                            # For ONE ROW PER MATCH, all functions default to FINAL
-                            measure_semantics[alias] = "FINAL"
+                        # Other aggregate functions default to FINAL
+                        measure_semantics[alias] = "FINAL"
+                        logger.debug(f"Other function: FINAL semantics for measure {alias}: {expr}")
+        
+        logger.info(f"Final measure semantics: {measure_semantics}")
         
         # Create match configuration
         match_config = MatchConfig(
