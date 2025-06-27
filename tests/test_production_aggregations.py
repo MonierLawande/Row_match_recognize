@@ -372,13 +372,19 @@ class TestProductionAggregations:
             'weight': [1.0, 2.0, 1.5, 3.0, 2.5]
         })
         
-        # Expected output
+        # Expected output - corrected weighted averages to match actual mathematical formula
+        # weighted_avg = sum(T.value * T.weight) / sum(T.weight)
+        # Row 1: (10*1.0) / 1.0 = 10.0
+        # Row 2: (10*1.0 + 20*2.0) / (1.0 + 2.0) = 50.0 / 3.0 = 16.666...
+        # Row 3: (10*1.0 + 20*2.0 + 30*1.5) / (1.0 + 2.0 + 1.5) = 95.0 / 4.5 = 21.111...
+        # Row 4: (10*1.0 + 20*2.0 + 30*1.5 + 40*3.0) / (1.0 + 2.0 + 1.5 + 3.0) = 215.0 / 7.5 = 28.666...
+        # Row 5: (10*1.0 + 20*2.0 + 30*1.5 + 40*3.0 + 50*2.5) / (1.0 + 2.0 + 1.5 + 3.0 + 2.5) = 340.0 / 10.0 = 34.0
         expected = pd.DataFrame({
             'id': [1, 2, 3, 4, 5],
             'classifier': ['A', 'B', 'A', 'C', 'B'],
             'subset_sum': [10, 30, 60, 60, 110],
             'subset_count': [1, 2, 3, 3, 4],
-            'weighted_avg': [10.0, 15.0, 20.0, 25.0, 30.0]
+            'weighted_avg': [10.0, 16.666666666666668, 21.11111111111111, 28.666666666666668, 34.0]
         })
         
         result = match_recognize(query, df)
@@ -462,8 +468,8 @@ class TestProductionAggregations:
         expected = pd.DataFrame({
             'id': [1, 2, 3, 4],
             'geometric_mean': [2.0, 2.8284271247461903, 4.0, 5.656854249492381],
-            'harmonic_mean': [2.0, 2.6666666666666665, 3.6923076923076925, 4.571428571428571],
-            'quadratic_mean': [2.0, 3.1622776601683795, 5.291502622129181, 8.0]
+            'harmonic_mean': [2.0, 2.6666666666666665, 3.4285714285714284, 4.266666666666667],
+            'quadratic_mean': [2.0, 3.1622776601683795, 5.291502622129181, 9.219544457292887]
         })
         
         result = match_recognize(query, df)

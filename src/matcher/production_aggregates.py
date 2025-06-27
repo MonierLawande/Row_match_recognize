@@ -147,19 +147,24 @@ class ProductionAggregateEvaluator:
         'ARRAY_AGG', 'STRING_AGG', 'MAX_BY', 'MIN_BY', 'COUNT_IF',
         'SUM_IF', 'AVG_IF', 'BOOL_AND', 'BOOL_OR', 'LISTAGG',
         'FIRST_VALUE', 'LAST_VALUE', 'COUNT_DISTINCT',
-        'APPROX_DISTINCT', 'APPROX_PERCENTILE'
+        'APPROX_DISTINCT', 'APPROX_PERCENTILE', 'GEOMETRIC_MEAN', 'HARMONIC_MEAN'
+    }
+    
+    # Mathematical functions that can wrap aggregates
+    MATHEMATICAL_FUNCTIONS = {
+        'SQRT', 'ABS', 'FLOOR', 'CEIL', 'ROUND'
     }
     
     # Functions that support RUNNING semantics by default
     RUNNING_BY_DEFAULT = {
         'SUM', 'COUNT', 'MIN', 'MAX', 'AVG', 'ARRAY_AGG', 'STRING_AGG',
-        'COUNT_IF', 'SUM_IF', 'AVG_IF', 'BOOL_AND', 'BOOL_OR'
+        'COUNT_IF', 'SUM_IF', 'AVG_IF', 'BOOL_AND', 'BOOL_OR', 'GEOMETRIC_MEAN', 'HARMONIC_MEAN'
     }
     
     # Functions that require numeric arguments
     NUMERIC_FUNCTIONS = {
         'SUM', 'AVG', 'STDDEV', 'VARIANCE', 'STDDEV_SAMP', 'STDDEV_POP',
-        'VAR_SAMP', 'VAR_POP', 'SUM_IF', 'AVG_IF'
+        'VAR_SAMP', 'VAR_POP', 'SUM_IF', 'AVG_IF', 'GEOMETRIC_MEAN', 'HARMONIC_MEAN'
     }
     
     # Functions that support multiple arguments
@@ -279,6 +284,28 @@ class ProductionAggregateEvaluator:
                 
                 self.stats["cache_misses"] += 1
                 
+                # First check if this is a mathematical function
+                math_pattern = r'^\s*([A-Z_]+)\s*\('
+                math_match = re.match(math_pattern, expr.strip(), re.IGNORECASE)
+                if math_match:
+                    func_name = math_match.group(1).upper()
+                    if func_name in self.MATHEMATICAL_FUNCTIONS:
+                        # Parse the function to get arguments
+                        agg_info = self._parse_aggregate_function(expr)
+                        if agg_info:
+                            arguments = agg_info['arguments']
+                            filter_condition = agg_info.get('filter')
+                            is_running = semantics == "RUNNING"
+                            result = self._evaluate_mathematical_functions(func_name, arguments, is_running, filter_condition)
+                            logger.debug(f"PROD_AGG_FINAL: mathematical function '{expr}' evaluated to: {result}")
+                            return result
+                
+                # First check if this is an arithmetic expression between aggregates
+                arithmetic_result = self._evaluate_arithmetic_expression(expr, semantics)
+                if arithmetic_result is not None:
+                    logger.debug(f"PROD_AGG_FINAL: arithmetic expression '{expr}' evaluated to: {arithmetic_result}")
+                    return arithmetic_result
+                
                 # Parse the aggregate function
                 agg_info = self._parse_aggregate_function(expr)
                 if not agg_info:
@@ -328,6 +355,10 @@ class ProductionAggregateEvaluator:
                         result = self._evaluate_window_functions(func_name, arguments, is_running, filter_condition)
                     elif func_name in ("APPROX_DISTINCT", "APPROX_PERCENTILE"):
                         result = self._evaluate_approximate_functions(func_name, arguments, is_running, filter_condition)
+                    elif func_name in ("GEOMETRIC_MEAN", "HARMONIC_MEAN"):
+                        result = self._evaluate_statistical_means(func_name, arguments, is_running, filter_condition)
+                    elif func_name in self.MATHEMATICAL_FUNCTIONS:
+                        result = self._evaluate_mathematical_functions(func_name, arguments, is_running, filter_condition)
                     else:
                         raise AggregateValidationError(
                             f"Unsupported aggregate function: {func_name}",
@@ -589,6 +620,184 @@ class ProductionAggregateEvaluator:
                     "Aggregate functions cannot be nested inside navigation functions"
                 )
     
+    def _evaluate_arithmetic_expression(self, expr: str, semantics: str) -> Any:
+        """
+        Evaluate arithmetic expressions between aggregate functions.
+        
+        Handles expressions like: sum(A.x) / sum(A.y), sum(A.x) + count(B.*), etc.
+        
+        Args:
+            expr: The arithmetic expression containing aggregates
+            semantics: "RUNNING" or "FINAL"
+            
+        Returns:
+            Result of the arithmetic operation or None if not an arithmetic expression
+        """
+        import re
+        import ast
+        import operator
+        
+        # Check if this contains arithmetic operators between aggregates
+        # Pattern to match aggregate functions: FUNC_NAME(arguments)
+        agg_pattern = r'\b([A-Z_]+)\s*\([^)]*\)'
+        
+        # Find all aggregate function calls in the expression
+        agg_matches = list(re.finditer(agg_pattern, expr, re.IGNORECASE))
+        
+        # If there's only one aggregate or none, this isn't an arithmetic expression
+        if len(agg_matches) <= 1:
+            return None
+            
+        # Check if there are arithmetic operators between the aggregates
+        arithmetic_ops = ['+', '-', '*', '/', '%', '**']
+        has_arithmetic = any(op in expr for op in arithmetic_ops)
+        
+        if not has_arithmetic:
+            return None
+            
+        logger.debug(f"Detected arithmetic expression between aggregates: {expr}")
+        
+        try:
+            # Parse the expression into an AST to evaluate it properly
+            # First, replace each aggregate function call with a placeholder
+            expr_with_placeholders = expr
+            agg_values = {}
+            
+            for i, match in enumerate(agg_matches):
+                agg_expr = match.group(0)
+                placeholder = f"__AGG_{i}__"
+                
+                # Evaluate this individual aggregate
+                try:
+                    agg_value = self._evaluate_single_aggregate(agg_expr, semantics)
+                    agg_values[placeholder] = agg_value
+                    expr_with_placeholders = expr_with_placeholders.replace(agg_expr, placeholder, 1)
+                except Exception as e:
+                    logger.warning(f"Failed to evaluate aggregate '{agg_expr}': {e}")
+                    return None
+            
+            logger.debug(f"Expression with placeholders: {expr_with_placeholders}")
+            logger.debug(f"Aggregate values: {agg_values}")
+            
+            # Parse and evaluate the arithmetic expression
+            tree = ast.parse(expr_with_placeholders, mode='eval')
+            result = self._eval_arithmetic_ast(tree.body, agg_values)
+            
+            logger.debug(f"Arithmetic expression '{expr}' evaluated to: {result}")
+            return result
+            
+        except Exception as e:
+            logger.warning(f"Failed to evaluate arithmetic expression '{expr}': {e}")
+            return None
+    
+    def _evaluate_single_aggregate(self, agg_expr: str, semantics: str) -> Any:
+        """
+        Evaluate a single aggregate function call.
+        
+        This method handles individual aggregate functions without arithmetic operations.
+        """
+        # Parse the aggregate function
+        agg_info = self._parse_aggregate_function(agg_expr)
+        if not agg_info:
+            raise AggregateValidationError(
+                f"Invalid aggregate expression: {agg_expr}",
+                None, "Check function syntax", "AGG_PARSE_001"
+            )
+        
+        func_name = agg_info['function'].upper()
+        arguments = agg_info['arguments']
+        filter_condition = agg_info.get('filter')
+        
+        # Validate the function and arguments
+        self._validate_aggregate_function(func_name, arguments)
+        
+        # Determine evaluation mode
+        is_running = semantics == "RUNNING"
+        
+        # Evaluate based on function type
+        if func_name == "COUNT":
+            return self._evaluate_count(arguments, is_running, filter_condition)
+        elif func_name == "SUM":
+            return self._evaluate_sum(arguments, is_running, filter_condition)
+        elif func_name in ("MIN", "MAX"):
+            return self._evaluate_min_max(func_name, arguments, is_running, filter_condition)
+        elif func_name == "AVG":
+            return self._evaluate_avg(arguments, is_running, filter_condition)
+        elif func_name == "ARRAY_AGG":
+            return self._evaluate_array_agg(arguments, is_running, filter_condition)
+        elif func_name == "STRING_AGG":
+            return self._evaluate_string_agg(arguments, is_running, filter_condition)
+        elif func_name in ("MAX_BY", "MIN_BY"):
+            return self._evaluate_by_functions(func_name, arguments, is_running, filter_condition)
+        elif func_name in ("COUNT_IF", "SUM_IF", "AVG_IF"):
+            return self._evaluate_conditional_aggregates(func_name, arguments, is_running, filter_condition)
+        elif func_name in ("BOOL_AND", "BOOL_OR"):
+            return self._evaluate_bool_aggregates(func_name, arguments, is_running, filter_condition)
+        elif func_name in ("STDDEV", "VARIANCE", "STDDEV_SAMP", "STDDEV_POP", "VAR_SAMP", "VAR_POP"):
+            return self._evaluate_statistical_functions(func_name, arguments, is_running, filter_condition)
+        elif func_name == "LISTAGG":
+            return self._evaluate_listagg(arguments, is_running, filter_condition)
+        elif func_name in ("FIRST_VALUE", "LAST_VALUE"):
+            return self._evaluate_window_functions(func_name, arguments, is_running, filter_condition)
+        elif func_name in ("APPROX_DISTINCT", "APPROX_PERCENTILE"):
+            return self._evaluate_approximate_functions(func_name, arguments, is_running, filter_condition)
+        elif func_name in ("GEOMETRIC_MEAN", "HARMONIC_MEAN"):
+            return self._evaluate_statistical_means(func_name, arguments, is_running, filter_condition)
+        else:
+            raise AggregateValidationError(
+                f"Unsupported aggregate function: {func_name}",
+                func_name, "Check supported functions", "AGG_UNSUPPORTED"
+            )
+    
+    def _eval_arithmetic_ast(self, node, agg_values):
+        """
+        Recursively evaluate AST nodes for arithmetic expressions with aggregate placeholders.
+        """
+        import ast
+        import operator
+        
+        if isinstance(node, ast.BinOp):
+            left = self._eval_arithmetic_ast(node.left, agg_values)
+            right = self._eval_arithmetic_ast(node.right, agg_values)
+            
+            # Handle None values (SQL NULL semantics)
+            if left is None or right is None:
+                return None
+            
+            op_map = {
+                ast.Add: operator.add,
+                ast.Sub: operator.sub,
+                ast.Mult: operator.mul,
+                ast.Div: operator.truediv,
+                ast.FloorDiv: operator.floordiv,
+                ast.Mod: operator.mod,
+                ast.Pow: operator.pow,
+            }
+            
+            op = op_map.get(type(node.op))
+            if op:
+                try:
+                    result = op(left, right)
+                    return result
+                except ZeroDivisionError:
+                    return None  # SQL NULL for division by zero
+                except Exception:
+                    return None
+                    
+        elif isinstance(node, ast.Name):
+            # This should be one of our aggregate placeholders
+            placeholder = node.id
+            return agg_values.get(placeholder)
+            
+        elif isinstance(node, ast.Constant):
+            # Literal number
+            return node.value
+            
+        elif isinstance(node, ast.Num):  # For older Python versions
+            return node.n
+            
+        return None
+
     def _evaluate_count(self, arguments: List[str], is_running: bool, filter_condition: str = None) -> int:
         """Evaluate COUNT function with all SQL:2016 variants including DISTINCT and FILTER support."""
         if not arguments:
@@ -907,6 +1116,15 @@ class ProductionAggregateEvaluator:
         else:  # STDDEV variants
             return math.sqrt(variance)
     
+    def _get_aggregate_values(self, expr: str, is_running: bool, filter_condition: str = None) -> List[Any]:
+        """Get values for an aggregate expression across all relevant rows, optionally filtered."""
+        # Get filter mask if filter condition is specified
+        filter_mask = None
+        if filter_condition:
+            filter_mask = self._apply_filter_condition(filter_condition, is_running)
+        
+        return self._get_expression_values(expr, is_running, filter_mask)
+
     def _get_expression_values(self, expr: str, is_running: bool, filter_mask: List[bool] = None) -> List[Any]:
         """Get values for an expression across all relevant rows, optionally filtered."""
         row_indices = self._get_row_indices(expr, is_running)
@@ -1106,24 +1324,31 @@ class ProductionAggregateEvaluator:
                 except TypeError:
                     return False
         
-        # For complex expressions, try SQL-to-Python conversion with ConditionEvaluator
+        # For complex expressions, try ConditionEvaluator first with original SQL syntax
         try:
             from src.matcher.condition_evaluator import ConditionEvaluator
             import ast
             
             logger.debug(f"Production aggregates evaluating complex expression: '{expr}' at row {self.context.current_idx}")
             
-            # Try to convert SQL function syntax to Python-compatible syntax
-            converted_expr = self._convert_sql_to_python(expr)
-            if converted_expr != expr:
-                logger.debug(f"Converted SQL expression '{expr}' to '{converted_expr}'")
-            
+            # First try to evaluate with original SQL syntax (for navigation functions)
             evaluator = ConditionEvaluator(self.context, evaluation_mode='MEASURES')
-            tree = ast.parse(converted_expr, mode='eval')
-            result = evaluator.visit(tree.body)
-            
-            logger.debug(f"Production aggregates expression '{converted_expr}' evaluated to: {result}")
-            return result
+            try:
+                # Try parsing and evaluating the original expression directly
+                tree = ast.parse(expr, mode='eval')
+                result = evaluator.visit(tree.body)
+                logger.debug(f"Original expression '{expr}' evaluated to: {result}")
+                return result
+            except SyntaxError:
+                # If direct parsing fails, try SQL-to-Python conversion
+                converted_expr = self._convert_sql_to_python(expr)
+                if converted_expr != expr:
+                    logger.debug(f"Converted SQL expression '{expr}' to '{converted_expr}'")
+                
+                tree = ast.parse(converted_expr, mode='eval')
+                result = evaluator.visit(tree.body)
+                logger.debug(f"Converted expression '{converted_expr}' evaluated to: {result}")
+                return result
         except Exception as e:
             logger.warning(f"Failed to evaluate expression '{expr}': {e}")
             # Try simpler evaluation approach for arithmetic expressions
@@ -1256,6 +1481,27 @@ class ProductionAggregateEvaluator:
         
         converted = re.sub(cast_pattern, cast_replacer, converted, flags=re.IGNORECASE)
         
+        # Convert SQL NULL to Python None (for both null and NULL)
+        converted = re.sub(r'\bnull\b', 'None', converted, flags=re.IGNORECASE)
+        
+        # Convert pattern variable dot notation: A.value -> value (when evaluating for variable A)
+        # For now, we'll assume the context variable is set correctly by the caller
+        pattern_var_pattern = r'\b([A-Z]+)\.(\w+)'
+        def var_replacer(match):
+            var = match.group(1)
+            column = match.group(2)
+            # For production, we'll simply use the column name
+            # The context evaluator will handle variable resolution
+            return column
+        converted = re.sub(pattern_var_pattern, var_replacer, converted)
+        
+        # Convert navigation functions to uppercase for consistency
+        nav_functions = ['first', 'last', 'prev', 'next']
+        for func in nav_functions:
+            pattern = rf'\b{func}\s*\('
+            replacement = f'{func.upper()}('
+            converted = re.sub(pattern, replacement, converted, flags=re.IGNORECASE)
+        
         # Convert SQL functions to uppercase for consistency with MATH_FUNCTIONS
         sql_functions = ['concat', 'substr', 'substring', 'trim', 'ltrim', 'rtrim', 
                         'upper', 'lower', 'length', 'replace', 'left', 'right']
@@ -1266,16 +1512,8 @@ class ProductionAggregateEvaluator:
             replacement = f'{func.upper()}('
             converted = re.sub(pattern, replacement, converted, flags=re.IGNORECASE)
         
-        # Convert SQL operators to Python operators
-        # Handle compound operators first to avoid conflicts
-        converted = re.sub(r'<>', '!=', converted)  # SQL inequality
-        
-        # Handle equality operator: = -> ==
-        # Be careful not to convert assignment operators in contexts like 'AS column_name = expression'
-        # Also avoid converting operators that are part of compound operators (<=, >=, <>, !=)
-        # Use negative lookbehind to avoid converting after AS, and negative lookahead to ensure it's a comparison
-        # Also use negative lookbehind and lookahead to avoid converting = that's part of <= or >=
-        converted = re.sub(r'(?<!AS\s)(?<!as\s)(?<![<>!=])(\w+(?:\.\w+)?)\s*=\s*([^=].*)(?!\s*(?:AS|as)\s)', r'\1 == \2', converted)
+        # Convert SQL operators to Python operators using the dedicated method
+        converted = self._convert_sql_operators_to_python(converted)
         
         # Handle % modulo operator - already correct in Python
         # SQL: value % 2 = 0 -> Python: value % 2 == 0 (handled by equality conversion above)
@@ -1367,9 +1605,22 @@ class ProductionAggregateEvaluator:
         """Convert SQL operators to Python equivalents."""
         import re
         
+        # First handle SQL IN operator 
+        # Convert: expression IN (value1, value2, ...) -> expression in [value1, value2, ...]
+        in_pattern = r'\b(\w+(?:\(\))?)\s+IN\s*\(\s*([^)]+)\s*\)'
+        def in_replacer(match):
+            expr = match.group(1)
+            values = match.group(2)
+            # Parse the values and wrap in square brackets
+            values_list = [v.strip().strip("'\"") for v in values.split(',')]
+            values_python = "[" + ", ".join(f"'{v}'" for v in values_list) + "]"
+            return f"{expr} in {values_python}"
+        
+        converted = re.sub(in_pattern, in_replacer, condition, flags=re.IGNORECASE)
+        
         # Convert SQL operators to Python
         conversions = [
-            (r'\s*=\s*', ' == '),       # SQL equality to Python equality
+            (r'(?<!=)\s*=\s*(?!=)', ' == '),  # SQL equality to Python equality (not already ==)
             (r'\s*<>\s*', ' != '),      # SQL not equal to Python not equal
             (r'\s*%\s*', ' % '),        # Modulo (already Python compatible)
             (r'\bAND\b', 'and'),        # SQL AND to Python and
@@ -1377,7 +1628,6 @@ class ProductionAggregateEvaluator:
             (r'\bNOT\b', 'not'),        # SQL NOT to Python not
         ]
         
-        converted = condition
         for pattern, replacement in conversions:
             converted = re.sub(pattern, replacement, converted, flags=re.IGNORECASE)
         
@@ -1418,36 +1668,153 @@ class ProductionAggregateEvaluator:
             except Exception as e:
                 raise AggregateArgumentError(f"Invalid percentile expression: {arguments[1]}")
             
-            # Sort values and calculate percentile using custom method to match test expectations
+            # Sort values and calculate percentile using numpy's percentile function
             sorted_values = sorted(values)
             n = len(sorted_values)
             
             if n == 1:
                 return sorted_values[0]
-            elif n == 2:
-                # For 2 elements, use average (standard median behavior)
-                return (sorted_values[0] + sorted_values[1]) / 2
-            elif n % 2 == 1:
-                # For odd number of elements, use middle element
-                return sorted_values[n // 2]
-            else:
-                # For even number of elements (n >= 4), use custom logic to match test expectations
-                if n == 4:
-                    # For 4 elements, use the higher of the two middle elements 
-                    return sorted_values[n // 2]
+            
+            # Convert percentile (0-1) to percentage (0-100) for numpy
+            percentile_pct = percentile * 100
+            
+            # Use numpy's percentile function for accurate calculation
+            try:
+                import numpy as np
+                result = np.percentile(sorted_values, percentile_pct)
+                return float(result)
+            except ImportError:
+                # Fallback implementation if numpy not available
+                # Linear interpolation method
+                index = percentile * (n - 1)
+                lower_index = int(index)
+                upper_index = min(lower_index + 1, n - 1)
+                weight = index - lower_index
+                
+                if weight == 0:
+                    return sorted_values[lower_index]
                 else:
-                    # For 6+ elements, use average of elements at positions (n/2-1) and (n/2+1)
-                    # This skips the exact middle two elements
-                    mid_lower = n // 2 - 1
-                    mid_upper = n // 2 + 1
-                    if mid_upper < n:
-                        return (sorted_values[mid_lower] + sorted_values[mid_upper]) / 2
-                    else:
-                        # Fallback to standard median for edge cases
-                        return (sorted_values[n // 2 - 1] + sorted_values[n // 2]) / 2
+                    return sorted_values[lower_index] * (1 - weight) + sorted_values[upper_index] * weight
         
         else:
             raise AggregateValidationError(f"Unsupported approximate function: {func_name}")
+        
+    def _evaluate_statistical_means(self, func_name: str, arguments: List[str], is_running: bool, filter_condition: str = None) -> float:
+        """
+        Evaluate statistical mean functions like GEOMETRIC_MEAN and HARMONIC_MEAN.
+        
+        Args:
+            func_name: The statistical mean function name
+            arguments: Function arguments
+            is_running: Whether this is a RUNNING aggregate
+            filter_condition: Optional FILTER WHERE condition
+            
+        Returns:
+            The calculated statistical mean
+        """
+        if len(arguments) != 1:
+            raise AggregateArgumentError(f"{func_name} requires exactly one argument")
+        
+        # Get values for the aggregate
+        values = self._get_aggregate_values(arguments[0], is_running, filter_condition)
+        
+        # Filter out None/NaN values
+        numeric_values = [v for v in values if v is not None and not (isinstance(v, float) and math.isnan(v)) and v > 0]
+        
+        if not numeric_values:
+            return None
+        
+        if func_name == "GEOMETRIC_MEAN":
+            # Geometric mean: (x1 * x2 * ... * xn)^(1/n)
+            # Using log space for numerical stability: exp(mean(log(xi)))
+            try:
+                log_sum = sum(math.log(v) for v in numeric_values)
+                return math.exp(log_sum / len(numeric_values))
+            except (ValueError, OverflowError):
+                return None
+                
+        elif func_name == "HARMONIC_MEAN":
+            # Harmonic mean: n / (1/x1 + 1/x2 + ... + 1/xn)
+            try:
+                reciprocal_sum = sum(1.0 / v for v in numeric_values)
+                return len(numeric_values) / reciprocal_sum
+            except (ZeroDivisionError, OverflowError):
+                return None
+        
+        else:
+            raise AggregateValidationError(f"Unsupported statistical mean function: {func_name}")
+    
+    def _evaluate_mathematical_functions(self, func_name: str, arguments: List[str], is_running: bool, filter_condition: str = None) -> float:
+        """
+        Evaluate mathematical functions that wrap other expressions.
+        
+        Args:
+            func_name: The mathematical function name (e.g., 'SQRT', 'ABS', 'LOG')
+            arguments: Function arguments
+            is_running: Whether this is a RUNNING aggregate
+            filter_condition: Optional FILTER WHERE condition
+            
+        Returns:
+            The calculated result
+        """
+        if len(arguments) != 1:
+            raise AggregateArgumentError(f"{func_name} requires exactly one argument")
+        
+        # Evaluate the inner expression (could be an aggregate or arithmetic expression)
+        inner_expr = arguments[0]
+        
+        # If the inner expression contains aggregate functions, use the enhanced evaluator
+        if any(agg in inner_expr.upper() for agg in ['AVG', 'SUM', 'COUNT', 'MIN', 'MAX', 'STDDEV', 'VARIANCE']):
+            try:
+                # Use enhanced evaluator for aggregate expressions
+                inner_value = self.evaluate_aggregate(
+                    inner_expr, 'RUNNING' if is_running else 'FINAL'
+                )
+            except Exception as e:
+                logger.warning(f"Enhanced evaluator failed for inner expression '{inner_expr}': {e}")
+                # Fallback to simple expression evaluation
+                inner_value = self._evaluate_single_expression(inner_expr)
+        else:
+            # Use simple expression evaluation for non-aggregate expressions
+            inner_value = self._evaluate_single_expression(inner_expr)
+        
+        if inner_value is None:
+            return None
+        
+        try:
+            if func_name == "SQRT":
+                return math.sqrt(float(inner_value))
+            elif func_name == "ABS":
+                return abs(float(inner_value))
+            elif func_name == "LOG":
+                return math.log(float(inner_value))
+            elif func_name == "LOG10":
+                return math.log10(float(inner_value))
+            elif func_name == "EXP":
+                return math.exp(float(inner_value))
+            elif func_name == "SIN":
+                return math.sin(float(inner_value))
+            elif func_name == "COS":
+                return math.cos(float(inner_value))
+            elif func_name == "TAN":
+                return math.tan(float(inner_value))
+            elif func_name == "ASIN":
+                return math.asin(float(inner_value))
+            elif func_name == "ACOS":
+                return math.acos(float(inner_value))
+            elif func_name == "ATAN":
+                return math.atan(float(inner_value))
+            elif func_name == "CEIL":
+                return math.ceil(float(inner_value))
+            elif func_name == "FLOOR":
+                return math.floor(float(inner_value))
+            elif func_name == "ROUND":
+                return round(float(inner_value))
+            else:
+                raise AggregateValidationError(f"Unsupported mathematical function: {func_name}")
+        except (ValueError, OverflowError, ZeroDivisionError) as e:
+            logger.warning(f"Mathematical function {func_name} failed: {e}")
+            return None
         
     def _apply_filter_condition(self, filter_condition: str, is_running: bool) -> List[bool]:
         """
@@ -1537,7 +1904,7 @@ def enhance_measure_evaluator_with_production_aggregates():
             if semantics_prefix:
                 semantics = semantics_prefix.upper()
             
-            if func_name in ProductionAggregateEvaluator.STANDARD_AGGREGATES:
+            if func_name in ProductionAggregateEvaluator.STANDARD_AGGREGATES or func_name in ProductionAggregateEvaluator.MATHEMATICAL_FUNCTIONS:
                 logger.debug(f"Using production aggregate evaluator for: {expr} -> {func_name}")
                 # Create fresh production aggregate evaluator with current context
                 prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
