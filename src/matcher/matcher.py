@@ -2373,16 +2373,14 @@ class EnhancedMatcher:
                         result = prod_evaluator.evaluate_aggregate(expr, "RUNNING")
                         
                         # Preserve None for functions that should return NULL when all inputs are NULL
-                        # Only convert None to 0 for COUNT and SUM functions where it makes sense
+                        # Only convert None to 0 for COUNT functions where it makes sense
                         if result is None:
                             if 'ARRAY_AGG' in expr_upper:
                                 running_aggregates[alias][idx] = []
                             elif 'COUNT' in expr_upper:
                                 running_aggregates[alias][idx] = 0
-                            elif 'SUM' in expr_upper:
-                                running_aggregates[alias][idx] = 0
                             else:
-                                # For AVG, MIN, MAX, etc., preserve None to represent SQL NULL
+                                # For SUM, AVG, MIN, MAX, etc., preserve None to represent SQL NULL
                                 running_aggregates[alias][idx] = None
                         else:
                             running_aggregates[alias][idx] = result

@@ -751,9 +751,9 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
     def validate_function_usage(self, ctx):
         # Order matters! Check specific functions (COUNT_IF, SUM_IF, AVG_IF) before generic ones (COUNT)
         allowed_functions = [
-            ("COUNT_IF", r"(?:FINAL|RUNNING)?\s*COUNT_IF\(\s*.*?,\s*.*?\s*\)"),
-            ("SUM_IF", r"(?:FINAL|RUNNING)?\s*SUM_IF\(\s*.*?,\s*.*?\s*\)"),
-            ("AVG_IF", r"(?:FINAL|RUNNING)?\s*AVG_IF\(\s*.*?,\s*.*?\s*\)"),
+            ("COUNT_IF", r"(?:FINAL|RUNNING)?\s*COUNT_IF\(\s*.*?\s*\)"),  # COUNT_IF takes one condition parameter
+            ("SUM_IF", r"(?:FINAL|RUNNING)?\s*SUM_IF\(\s*.*?,\s*.*?\s*\)"),  # SUM_IF takes two parameters
+            ("AVG_IF", r"(?:FINAL|RUNNING)?\s*AVG_IF\(\s*.*?,\s*.*?\s*\)"),  # AVG_IF takes two parameters
             ("COUNT", r"(?:FINAL|RUNNING)?\s*COUNT\(\s*.*?\s*\)"),
             # Use word boundaries to prevent matching "first_value" as "FIRST"
             ("FIRST\\b", r"(?:FINAL|RUNNING)?\s*FIRST\(\s*.+?(?:\s*,\s*\d+)?\s*\)"),

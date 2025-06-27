@@ -733,6 +733,37 @@ class ConditionEvaluator(ast.NodeVisitor):
             logger.error(f"Error in binary operation: {e}")
             return None
 
+    def visit_UnaryOp(self, node: ast.UnaryOp):
+        """Handle unary operations (not, -, +, ~)"""
+        import operator
+        
+        # Map AST unary operators to Python operators
+        op_map = {
+            ast.Not: operator.not_,
+            ast.UAdd: operator.pos,
+            ast.USub: operator.neg,
+            ast.Invert: operator.invert,
+        }
+        
+        try:
+            operand = self.visit(node.operand)
+            op = op_map.get(type(node.op))
+            
+            if op is None:
+                raise ValueError(f"Unsupported unary operator: {type(node.op).__name__}")
+            
+            # Handle None values - SQL semantics
+            if operand is None:
+                return None
+                
+            result = op(operand)
+            logger.debug(f"[DEBUG] UnaryOp: {type(node.op).__name__} {operand} = {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in unary operation: {e}")
+            return None
+
     def _is_table_prefix_in_context(self, var_name: str) -> bool:
         """
         Check if a variable name looks like a table prefix in the current context.
@@ -881,11 +912,27 @@ class ConditionEvaluator(ast.NodeVisitor):
             if last_idx >= 0 and last_idx < len(ctx.rows):
                 return ctx.rows[last_idx].get(col_name)
         
-        # Otherwise, get the value from the last row matched to this variable
+        # CRITICAL FIX: For RUNNING aggregates in MEASURES mode, use current row instead of last matched row
+        # This is essential for conditional aggregates like COUNT_IF, SUM_IF, AVG_IF
+        if (self.evaluation_mode == 'MEASURES' and 
+            hasattr(ctx, 'current_idx') and 
+            ctx.current_idx >= 0 and 
+            ctx.current_idx < len(ctx.rows)):
+            
+            # Check if the current row is within the variable's matched indices
+            var_indices = ctx.variables.get(var_name, [])
+            if var_indices and ctx.current_idx in var_indices:
+                logger.debug(f"[DEBUG] RUNNING aggregate: using current row {ctx.current_idx} for {var_name}.{col_name}")
+                value = ctx.rows[ctx.current_idx].get(col_name)
+                logger.debug(f"[DEBUG] RUNNING aggregate value: {var_name}.{col_name} = {value} (from current row {ctx.current_idx})")
+                return value
+        
+        # Otherwise, get the value from the last row matched to this variable (traditional behavior)
         var_indices = ctx.variables.get(var_name, [])
         if var_indices:
             last_idx = max(var_indices)
             if last_idx < len(ctx.rows):
+                logger.debug(f"[DEBUG] Using traditional last row logic: {var_name}.{col_name} from row {last_idx}")
                 return ctx.rows[last_idx].get(col_name)
         
         # If no rows matched yet, use the current row's value
