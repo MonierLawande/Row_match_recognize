@@ -589,14 +589,14 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     # For ALL ROWS mode, apply SQL:2016 default semantics
                     expr_upper = expr.upper().strip()
                     
-                    # Navigation functions always default to RUNNING regardless of mixed semantics
+                    # SQL:2016: Navigation functions default to FINAL semantics unless explicitly prefixed with RUNNING
                     if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        measure_semantics[alias] = "RUNNING"
-                        logger.debug(f"Navigation function: RUNNING semantics for measure {alias}: {expr}")
+                        measure_semantics[alias] = "FINAL"
+                        logger.debug(f"Navigation function: FINAL semantics (SQL:2016 default) for measure {alias}: {expr}")
                     elif re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        # Expressions containing navigation functions default to RUNNING
-                        measure_semantics[alias] = "RUNNING"
-                        logger.debug(f"Expression with navigation function: RUNNING semantics for measure {alias}: {expr}")
+                        # Expressions containing navigation functions also default to FINAL per SQL:2016
+                        measure_semantics[alias] = "FINAL" 
+                        logger.debug(f"Expression with navigation function: FINAL semantics (SQL:2016 default) for measure {alias}: {expr}")
                     elif explicit_semantics_found:
                         # In mixed semantics queries, implicit measures default to FINAL per SQL:2016
                         measure_semantics[alias] = "FINAL"
@@ -1144,13 +1144,14 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             logger.debug(f"DEBUG: Row {idx} - Full variables: {full_variables}, Running variables: {running_variables}")
                             
                             # Create evaluator and process measures
-                            evaluator = MeasureEvaluator(context, final=False)  # RUNNING semantics
+                            evaluator = MeasureEvaluator(context, final=True)  # Use FINAL semantics by default per SQL:2016
                             for alias, expr in measures.items():
                                 try:
-                                    semantics = measure_semantics.get(alias, "RUNNING")
+                                    # SQL:2016 default: measures use FINAL semantics unless explicitly prefixed with RUNNING
+                                    semantics = measure_semantics.get(alias, "FINAL")
                                     # Standard evaluation for all expressions - no special case handling
                                     result[alias] = evaluator.evaluate(expr, semantics)
-                                    logger.debug(f"DEBUG: Set {alias}={result[alias]} for row {idx}")
+                                    logger.debug(f"DEBUG: Set {alias}={result[alias]} for row {idx} with {semantics} semantics")
                                 except Exception as e:
                                     logger.warning(f"Error evaluating measure {alias} for row {idx}: {e}")
                                     result[alias] = None

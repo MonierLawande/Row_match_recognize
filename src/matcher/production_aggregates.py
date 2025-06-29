@@ -644,16 +644,29 @@ class ProductionAggregateEvaluator:
         # Find all aggregate function calls in the expression
         agg_matches = list(re.finditer(agg_pattern, expr, re.IGNORECASE))
         
-        # If there's only one aggregate or none, this isn't an arithmetic expression
-        if len(agg_matches) <= 1:
-            return None
-            
-        # Check if there are arithmetic operators between the aggregates
+        # Check if there are arithmetic operators
         arithmetic_ops = ['+', '-', '*', '/', '%', '**']
         has_arithmetic = any(op in expr for op in arithmetic_ops)
         
-        if not has_arithmetic:
+        # If there are no aggregates or no arithmetic, this isn't an arithmetic expression
+        if len(agg_matches) == 0 or not has_arithmetic:
             return None
+            
+        # Handle single aggregate with arithmetic (e.g., AVG(value) * 0.9)
+        if len(agg_matches) == 1:
+            # Check if the aggregate is part of a larger arithmetic expression
+            agg_match = agg_matches[0]
+            agg_start, agg_end = agg_match.span()
+            
+            # Check if there's arithmetic before or after the aggregate
+            before_agg = expr[:agg_start].strip()
+            after_agg = expr[agg_end:].strip()
+            
+            has_arithmetic_before = any(op in before_agg for op in arithmetic_ops)
+            has_arithmetic_after = any(op in after_agg for op in arithmetic_ops)
+            
+            if not (has_arithmetic_before or has_arithmetic_after):
+                return None
             
         logger.debug(f"Detected arithmetic expression between aggregates: {expr}")
         

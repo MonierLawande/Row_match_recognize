@@ -788,6 +788,17 @@ class MeasureEvaluator:
                         
                         return total
         
+        # Handle arithmetic expressions containing aggregates (like "AVG(value) * 0.9")
+        # First check if this contains aggregate functions as part of a larger arithmetic expression
+        agg_arith_pattern = r'.*\b(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\([^)]+\).*[+\-*/].*'
+        if re.match(agg_arith_pattern, expr, re.IGNORECASE):
+            # This is an arithmetic expression containing aggregates
+            logger.debug(f"Detected arithmetic expression with aggregates: {expr}")
+            result = self._evaluate_arithmetic_with_aggregates(expr, is_running)
+            logger.debug(f"Arithmetic aggregates result: {result}")
+            if result is not None:
+                return result
+        
         # Handle other aggregate functions using the comprehensive _evaluate_aggregate method
         # Check if this is a standalone aggregate function call (not part of a larger expression)
         # Only match if the entire expression is an aggregate function to avoid breaking complex expressions like "AVG(value) * 0.9"
@@ -1328,21 +1339,6 @@ class MeasureEvaluator:
                         result = row.get(field_name)
                     else:
                         result = None
-                if func_name == 'FIRST':
-                    semantics = 'RUNNING' if is_running else 'FINAL'
-                    row = self.context.first(var_name, occurrence, semantics)
-                    if row and field_name in row:
-                        result = row.get(field_name)
-                    else:
-                        result = None
-                        
-                elif func_name == 'LAST':
-                    semantics = 'RUNNING' if is_running else 'FINAL'
-                    row = self.context.last(var_name, occurrence, semantics)
-                    if row and field_name in row:
-                        result = row.get(field_name)
-                    else:
-                        result = None
         
         else:
             # Handle simple field references (no variable prefix) for all functions
@@ -1722,7 +1718,7 @@ class MeasureEvaluator:
                     result = self._evaluate_count_star(is_running)
                     
                 # Handle pattern variable COUNT(A.*) special case
-                elif func_name == 'count' and re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.\*', args_str):
+                elif func_name == 'count' and re.match(r'([A-Za-z_][A-ZaZ0-9_]*)\.\*', args_str):
                     pattern_count_match = re.match(r'([A-Za-z_][A-ZaZ0-9_]*)\.\*', args_str)
                     result = self._evaluate_count_var(pattern_count_match.group(1), is_running)
                     
@@ -1748,3 +1744,80 @@ class MeasureEvaluator:
             duration = time.time() - start_time
             if hasattr(self, 'timing'):
                 self.timing[f'aggregate_{func_name}'] += duration
+    
+    def _evaluate_arithmetic_with_aggregates(self, expr: str, is_running: bool) -> Any:
+        """
+        Safely evaluate arithmetic expressions containing aggregate functions.
+        
+        This handles expressions like:
+        - AVG(value) * 0.9
+        - SUM(price) + COUNT(*)
+        - MAX(value) - MIN(value)
+        
+        Args:
+            expr: The arithmetic expression containing aggregates
+            is_running: Whether to use RUNNING semantics
+            
+        Returns:
+            The computed result or None if evaluation fails
+        """
+        try:
+            # First, find all aggregate function calls in the expression
+            agg_pattern = r'\b(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\([^)]+\)'
+            agg_functions = list(re.finditer(agg_pattern, expr, re.IGNORECASE))
+            
+            if not agg_functions:
+                return None
+            
+            # Create a working copy of the expression
+            working_expr = expr
+            substitutions = {}
+            
+            # Replace each aggregate function with a placeholder and compute its value
+            for i, match in enumerate(agg_functions):
+                agg_func = match.group(0)
+                placeholder = f"__AGG_{i}__"
+                
+                # Parse the aggregate function
+                func_match = re.match(r'(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\(([^)]+)\)', agg_func, re.IGNORECASE)
+                if func_match:
+                    func_name = func_match.group(1).lower()
+                    args_str = func_match.group(2).strip()
+                    
+                    # Evaluate the aggregate function
+                    try:
+                        agg_result = self._evaluate_aggregate(func_name, args_str, is_running)
+                        if agg_result is None:
+                            logger.debug(f"Aggregate {agg_func} returned None")
+                            return None
+                        substitutions[placeholder] = agg_result
+                    except Exception as e:
+                        logger.warning(f"Failed to evaluate aggregate {agg_func}: {e}")
+                        return None
+                    
+                    # Replace the aggregate function call with the placeholder
+                    working_expr = working_expr.replace(agg_func, placeholder, 1)
+            
+            # Now substitute the actual values and evaluate
+            for placeholder, value in substitutions.items():
+                working_expr = working_expr.replace(placeholder, str(value))
+            
+            # Evaluate the arithmetic expression safely
+            try:
+                # Only allow safe arithmetic operations
+                if re.match(r'^[\d\.\+\-\*/\(\)\s]+$', working_expr):
+                    result = eval(working_expr)
+                    logger.debug(f"Arithmetic expression {expr} -> {working_expr} = {result}")
+                    return result
+                else:
+                    logger.warning(f"Unsafe arithmetic expression: {working_expr}")
+                    return None
+                    
+            except Exception as e:
+                logger.warning(f"Failed to evaluate arithmetic expression: {working_expr}, error: {e}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Failed to process arithmetic expression with aggregates: {expr}, error: {e}")
+            return None
+
