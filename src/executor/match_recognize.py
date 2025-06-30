@@ -957,60 +957,78 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 if ast.select_clause and ast.select_clause.items:
                     # Check if this is a SELECT * query
                     is_select_star = any(item.expression == '*' for item in ast.select_clause.items)
+                    column_alias_map = {}  # Initialize for both cases
                     
                     if is_select_star:
                         # For SELECT *, relevant columns in SQL:2016 order:
-                        # For ONE ROW PER MATCH: PARTITION BY columns, columns used in DEFINE/pattern matching, MEASURES
+                        # For ONE ROW PER MATCH: Only MEASURES (production-ready standard)
                         # For ALL ROWS PER MATCH: All input columns plus MEASURES
                         
-                        # Start with PARTITION BY columns
-                        if partition_by:
-                            for col in partition_by:
-                                if col in result_df.columns:
-                                    ordered_cols.append(col)
-                        
                         if rows_per_match == RowsPerMatch.ONE_ROW:
-                            # For ONE ROW PER MATCH, be selective about which columns to include
-                            # Always include ORDER BY columns (required for SQL:2016 compliance)
-                            if order_by:
-                                for col in order_by:
-                                    if col in result_df.columns and col not in ordered_cols:
+                            # For ONE ROW PER MATCH with SELECT *, behavior depends on whether explicit MEASURES exist
+                            logger.debug(f"ONE ROW PER MATCH with SELECT * - PARTITION BY: {partition_by}, ORDER BY: {order_by}, MEASURES: {list(measures.keys())}")
+                            
+                            if measures:
+                                # If explicit MEASURES exist: PARTITION BY + ORDER BY + MEASURES (SQL:2016 standard)
+                                # Add PARTITION BY columns first
+                                if partition_by:
+                                    for col in partition_by:
+                                        if col in result_df.columns:
+                                            ordered_cols.append(col)
+                                
+                                # Add ORDER BY columns (if not already included)
+                                if order_by:
+                                    for col in order_by:
+                                        if col in result_df.columns and col not in ordered_cols:
+                                            ordered_cols.append(col)
+                                
+                                # Add MEASURES columns
+                                for alias in measures.keys():
+                                    if alias in result_df.columns and alias not in ordered_cols:
+                                        ordered_cols.append(alias)
+                            else:
+                                # If NO explicit MEASURES: Include all input columns (standard behavior for SELECT *)
+                                # Add PARTITION BY columns first to maintain SQL:2016 ordering
+                                if partition_by:
+                                    for col in partition_by:
+                                        if col in result_df.columns:
+                                            ordered_cols.append(col)
+                                
+                                # Add ORDER BY columns (if not already included)
+                                if order_by:
+                                    for col in order_by:
+                                        if col in result_df.columns and col not in ordered_cols:
+                                            ordered_cols.append(col)
+                                
+                                # Add all remaining input columns (excluding internal columns)
+                                for col in result_df.columns:
+                                    if (col not in ordered_cols and 
+                                        not col.startswith('_') and  # Skip internal columns
+                                        col not in ['MATCH_NUMBER']):  # Skip auto-generated measure columns
+                                        ordered_cols.append(col)
+                        else:
+                            print(f"DEBUG: Taking ALL ROWS PER MATCH path, rows_per_match={rows_per_match}")
+                            # For ALL ROWS PER MATCH, include all table columns + pattern navigation columns
+                            # 1. PARTITION BY columns
+                            # 2. ORDER BY columns  
+                            # 3. MEASURES
+                            # 4. Remaining input columns
+                            
+                            # Start with PARTITION BY columns
+                            if partition_by:
+                                for col in partition_by:
+                                    if col in result_df.columns:
                                         ordered_cols.append(col)
                             
-                            # Include columns referenced in DEFINE clauses (pattern variables)
-                            define_referenced_columns = set()
-                            if mr_clause.define:
-                                for define_item in mr_clause.define.definitions:
-                                    # Extract column names from the condition
-                                    # This is a simple heuristic - look for column names in the condition
-                                    condition = define_item.condition
-                                    # Find potential column names (this is simplified)
-                                    potential_columns = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', condition)
-                                    for col in potential_columns:
-                                        if col in result_df.columns and col not in ['PREV', 'NEXT', 'FIRST', 'LAST', 'COUNT', 'AVG', 'SUM', 'MIN', 'MAX', 'true', 'false', 'AND', 'OR', 'NOT']:
-                                            define_referenced_columns.add(col)
-                            
-                            # Add columns referenced in DEFINE that aren't already included
-                            for col in define_referenced_columns:
+                            # Add ORDER BY columns (if not already included)
+                            for col in order_by:
                                 if col in result_df.columns and col not in ordered_cols:
                                     ordered_cols.append(col)
-                        else:
-                            # For ALL ROWS PER MATCH, add ORDER BY columns that aren't already included
-                            if order_by:
-                                for col in order_by:
-                                    if col in result_df.columns and col not in ordered_cols:
-                                        ordered_cols.append(col)
                             
-                            # Add all other input columns that aren't already included
-                            for col in result_df.columns:
-                                if col not in ordered_cols and col not in measures.keys():
-                                    # This is an original input column
-                                    ordered_cols.append(col)
-                        
-                        # Add MEASURES columns last
-                        for alias in measures.keys():
-                            if alias in result_df.columns and alias not in ordered_cols:
-                                ordered_cols.append(alias)
+                            # Add MEASURES columns last
+                            for alias in measures.keys():
+                                if alias in result_df.columns and alias not in ordered_cols:
+                                    ordered_cols.append(alias)
                         
                         logger.debug(f"SELECT * - SQL:2016 column ordering: {ordered_cols}")
                         logger.debug(f"Available columns in result_df: {list(result_df.columns)}")
@@ -1294,36 +1312,63 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 if ast.select_clause and ast.select_clause.items:
                     # Check if this is a SELECT * query
                     has_select_star = any(item.expression == '*' for item in ast.select_clause.items)
-                    column_alias_map = {}  # Initialize for both cases
+                    
+                    # Initialize column alias map for all cases
+                    column_alias_map = {}
                     
                     if has_select_star:
                         # For SELECT *, implement SQL:2016 column ordering:
-                        # 1. PARTITION BY columns
-                        # 2. ORDER BY columns  
-                        # 3. MEASURES
-                        # 4. Remaining input columns
+                        # For ONE ROW PER MATCH: only MEASURES are included
+                        # For ALL ROWS PER MATCH: include all table columns + pattern navigation columns
                         
-                        # Start with PARTITION BY columns
-                        if partition_by:
-                            for col in partition_by:
-                                if col in result_df.columns:
+                        if rows_per_match == RowsPerMatch.ONE_ROW:
+                            # For ONE ROW PER MATCH with SELECT *, include PARTITION BY columns + ORDER BY columns + MEASURES
+                            logger.debug(f"ONE ROW PER MATCH with SELECT * - PARTITION BY: {partition_by}, ORDER BY: {order_by}, MEASURES: {list(measures.keys())}")
+                            
+                            # Add PARTITION BY columns first
+                            if partition_by:
+                                for col in partition_by:
+                                    if col in result_df.columns:
+                                        ordered_cols.append(col)
+                            
+                            # Add ORDER BY columns (if not already included)
+                            if order_by:
+                                for col in order_by:
+                                    if col in result_df.columns and col not in ordered_cols:
+                                        ordered_cols.append(col)
+                            
+                            # Add MEASURES columns
+                            for alias in measures.keys():
+                                if alias in result_df.columns and alias not in ordered_cols:
+                                    ordered_cols.append(alias)
+                        else:
+                            # For ALL ROWS PER MATCH, include all table columns + pattern navigation columns
+                            # 1. PARTITION BY columns
+                            # 2. ORDER BY columns  
+                            # 3. MEASURES
+                            # 4. Remaining input columns
+                            
+                            # Start with PARTITION BY columns
+                            if partition_by:
+                                for col in partition_by:
+                                    if col in result_df.columns:
+                                        ordered_cols.append(col)
+                            
+                            # Add ORDER BY columns (if not already included)
+                            for col in order_by:
+                                if col in result_df.columns and col not in ordered_cols:
                                     ordered_cols.append(col)
-                        
-                        # Add ORDER BY columns (if not already included)
-                        for col in order_by:
-                            if col in result_df.columns and col not in ordered_cols:
-                                ordered_cols.append(col)
-                        
-                        # Add MEASURES (if not already included)
-                        for alias in measures.keys():
-                            if alias in result_df.columns and alias not in ordered_cols:
-                                ordered_cols.append(alias)
-                        
-                        # Add remaining input columns (if not already included)
-                        for col in result_df.columns:
-                            if (col not in ordered_cols and 
-                                col not in ['MATCH_NUMBER', 'IS_EMPTY_MATCH', '_original_row_idx']):
-                                ordered_cols.append(col)
+                            
+                            # Add MEASURES (if not already included)
+                            for alias in measures.keys():
+                                if alias in result_df.columns and alias not in ordered_cols:
+                                    ordered_cols.append(alias)
+                            
+                            # Add remaining input columns (if not already included)
+                            for col in result_df.columns:
+                                if (col not in ordered_cols and 
+                                    col not in ['MATCH_NUMBER', 'IS_EMPTY_MATCH', '_original_row_idx']):
+                                    ordered_cols.append(col)
                         
                         logger.debug(f"SELECT * - SQL:2016 column ordering: {ordered_cols}")
                     else:

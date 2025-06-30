@@ -1909,6 +1909,14 @@ class NFABuilder:
         variables = token.metadata.get("variables", [])
         original_pattern = token.metadata.get("original", "")
         
+        print(f"DEBUG: _process_permute called with variables: {variables}")
+        print(f"DEBUG: Token metadata: {token.metadata}")
+        print(f"DEBUG: Token type: {token.type}")
+        
+        # Add debug output to stdout
+        import sys
+        sys.stdout.flush()
+        
         # Create states for the permutation
         perm_start = self.new_state()
         perm_end = self.new_state()
@@ -1960,46 +1968,53 @@ class NFABuilder:
             return perm_start, perm_end
         
         if len(variables) > 1 and not has_alternations:
-            # Simple permutation without alternations - handle as before
-            current = perm_start
-            
-            # Create states for each variable with quantifiers handled
-            var_states = []
+            # For simple PERMUTE without alternations, generate all permutations
+            # Pre-process variables to handle nested PERMUTE
+            processed_vars = []
             for var in variables:
-                var_base = var
-                quantifier = None
-                
-                if isinstance(var, str):
-                    # Extract quantifiers from variable name
-                    if var.endswith('?'):
-                        var_base = var[:-1]
-                        quantifier = '?'
-                    elif var.endswith('+'):
-                        var_base = var[:-1]
-                        quantifier = '+'
-                    elif var.endswith('*'):
-                        var_base = var[:-1]
-                        quantifier = '*'
-                    elif '{' in var and var.endswith('}'):
-                        open_idx = var.find('{')
-                        var_base = var[:open_idx]
-                        quantifier = var[open_idx:]
-                
-                # Create states for this variable
-                var_start, var_end = self.create_var_states(var_base, define)
-                
-                # Apply quantifier if present
-                if quantifier:
-                    min_rep, max_rep, greedy = parse_quantifier(quantifier)
-                    var_start, var_end = self._apply_quantifier(
-                        var_start, var_end, min_rep, max_rep, greedy)
-                
-                # Connect to the sequence
-                self.add_epsilon(current, var_start)
-                current = var_end
+                if isinstance(var, PatternToken) and var.type == PatternTokenType.PERMUTE:
+                    # Recursively process nested PERMUTE
+                    nested_start, nested_end = self._process_permute(var, define)
+                    processed_vars.append((var, nested_start, nested_end))
+                else:
+                    # Regular variable
+                    var_start, var_end = self.create_var_states(var, define)
+                    processed_vars.append((var, var_start, var_end))
             
-            # Connect final state to permute end
-            self.add_epsilon(current, perm_end)
+            all_perms = list(itertools.permutations(range(len(processed_vars))))
+            
+            # For each permutation, create a separate branch in the NFA
+            for perm in all_perms:
+                # Create a new start state for this permutation
+                branch_start = self.new_state()
+                current = branch_start
+                
+                # Create a chain of states for this permutation
+                for idx in perm:
+                    var_info = processed_vars[idx]
+                    
+                    if isinstance(var_info[0], PatternToken) and var_info[0].type == PatternTokenType.PERMUTE:
+                        # For nested PERMUTE, create fresh copy to avoid state sharing
+                        var_token = var_info[0]
+                        fresh_start, fresh_end = self._process_permute(var_token, define)
+                        
+                        # Connect to current chain
+                        self.add_epsilon(current, fresh_start)
+                        current = fresh_end
+                    else:
+                        # For regular variables, create fresh copy to avoid state sharing
+                        var_base = var_info[0]
+                        fresh_start, fresh_end = self.create_var_states(var_base, define)
+                        
+                        # Connect to current chain
+                        self.add_epsilon(current, fresh_start)
+                        current = fresh_end
+                
+                # Connect this permutation branch to the main permutation end
+                self.add_epsilon(current, perm_end)
+                
+                # Connect permutation start to this branch
+                self.add_epsilon(perm_start, branch_start)
             
         elif has_alternations:
             # For PERMUTE with alternations, we need to handle all combinations
@@ -2132,55 +2147,6 @@ class NFABuilder:
                     branch_priority = combo_idx * 1000 + perm_idx
                     self.add_epsilon_with_priority(perm_start, branch_start, branch_priority)
             
-        else:
-            # For non-quantified, non-alternation PERMUTE, generate all permutations as before
-            # Pre-process variables to handle nested PERMUTE
-            processed_vars = []
-            for var in variables:
-                if isinstance(var, PatternToken) and var.type == PatternTokenType.PERMUTE:
-                    # Recursively process nested PERMUTE
-                    nested_start, nested_end = self._process_permute(var, define)
-                    processed_vars.append((var, nested_start, nested_end))
-                else:
-                    # Regular variable
-                    var_start, var_end = self.create_var_states(var, define)
-                    processed_vars.append((var, var_start, var_end))
-            
-            all_perms = list(itertools.permutations(range(len(processed_vars))))
-            
-            # For each permutation, create a separate branch in the NFA
-            for perm in all_perms:
-                # Create a new start state for this permutation
-                branch_start = self.new_state()
-                current = branch_start
-                
-                # Create a chain of states for this permutation
-                for idx in perm:
-                    var_info = processed_vars[idx]
-                    
-                    if isinstance(var_info[0], PatternToken) and var_info[0].type == PatternTokenType.PERMUTE:
-                        # For nested PERMUTE, create fresh copy to avoid state sharing
-                        var_token = var_info[0]
-                        fresh_start, fresh_end = self._process_permute(var_token, define)
-                        
-                        # Connect to current chain
-                        self.add_epsilon(current, fresh_start)
-                        current = fresh_end
-                    else:
-                        # For regular variables, create fresh copy to avoid state sharing
-                        var_base = var_info[0]
-                        fresh_start, fresh_end = self.create_var_states(var_base, define)
-                        
-                        # Connect to current chain
-                        self.add_epsilon(current, fresh_start)
-                        current = fresh_end
-                
-                # Connect this permutation branch to the main permutation end
-                self.add_epsilon(current, perm_end)
-                
-                # Connect permutation start to this branch
-                self.add_epsilon(perm_start, branch_start)
-        
         # Apply quantifiers to the entire PERMUTE pattern if present
         if token.quantifier:
             min_rep, max_rep, greedy = parse_quantifier(token.quantifier)
