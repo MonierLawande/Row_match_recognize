@@ -3007,8 +3007,10 @@ class EnhancedMatcher:
                     else:
                         # Apply SQL:2016 default semantics for ALL ROWS PER MATCH
                         expr_upper = expr.upper().strip()
-                        if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                            # Navigation functions default to RUNNING in ALL ROWS PER MATCH
+                        # Check if expression contains navigation functions
+                        has_nav_functions = bool(re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper))
+                        if has_nav_functions:
+                            # Expressions with navigation functions default to RUNNING in ALL ROWS PER MATCH
                             semantics = "RUNNING"
                         else:
                             # Aggregate and other functions default to FINAL
@@ -3016,7 +3018,41 @@ class EnhancedMatcher:
                     
                     logger.debug(f"Row {idx}: Measure '{alias}' = '{expr}' using {semantics} semantics")
                     
-                    # Special handling for CLASSIFIER
+                    # For RUNNING semantics, create a context with variables only up to current row
+                    if semantics == "RUNNING":
+                        # Create running context with variables up to current row
+                        running_context = RowContext(defined_variables=self.defined_variables)
+                        running_context.rows = rows
+                        running_context.match_number = match_number
+                        running_context.current_idx = idx
+                        running_context.subsets = self.subsets.copy() if self.subsets else {}
+                        running_context.excluded_rows = excluded_rows
+                        
+                        # Include only variables assigned up to and including current row
+                        full_variables = match["variables"]
+                        running_variables = {}
+                        for var_name, var_indices in full_variables.items():
+                            # Include only indices up to and including current row
+                            running_indices = [i for i in var_indices if i <= idx]
+                            if running_indices:
+                                running_variables[var_name] = running_indices
+                        
+                        running_context.variables = running_variables
+                        logger.debug(f"DEBUG: Row {idx} - Full variables: {full_variables}, Running variables: {running_variables}")
+                        
+                        # Create evaluator with running context
+                        running_evaluator = MeasureEvaluator(running_context)
+                        
+                        # Evaluate with running context
+                        result[alias] = running_evaluator.evaluate(expr, semantics)
+                        logger.debug(f"DEBUG: Set {alias}={result[alias]} for row {idx} with {semantics} semantics")
+                    else:
+                        # Use original context for FINAL semantics
+                        context.current_idx = idx
+                        result[alias] = measure_evaluator.evaluate(expr, semantics)
+                        logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
+                    
+                    # Override for special cases
                     if expr.upper() == "CLASSIFIER()":
                         # Check if this is an empty pattern match
                         if match.get("is_empty", False):
@@ -3044,26 +3080,17 @@ class EnhancedMatcher:
                             if pattern_var is not None:
                                 pattern_var = context._apply_case_sensitivity_rule(pattern_var)
                             result[alias] = pattern_var
-                            logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {pattern_var}")
+                            logger.debug(f"Evaluated CLASSIFIER() for row {idx}: {pattern_var}")
                     
                     # Special handling for running aggregates (backward compatibility)
                     elif expr.upper().startswith("SUM(") and semantics == "RUNNING":
                         if alias in running_aggregates and idx in running_aggregates[alias]:
                             result[alias] = running_aggregates[alias][idx]
                             logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
-                        else:
-                            # Fallback to standard evaluation
-                            result[alias] = measure_evaluator.evaluate(expr, semantics)
-                            logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
                     
                     # Enhanced: Handle other running aggregates
                     elif semantics == "RUNNING" and alias in running_aggregates and idx in running_aggregates[alias]:
                         result[alias] = running_aggregates[alias][idx]
-                        logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
-                    
-                    # Standard evaluation for other measures
-                    else:
-                        result[alias] = measure_evaluator.evaluate(expr, semantics)
                         logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
                         
                 except Exception as e:
