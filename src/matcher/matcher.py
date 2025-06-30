@@ -48,12 +48,16 @@ RowData = Dict[str, Any]
 @dataclass
 class BacktrackingState:
     """Represents a state in the backtracking search."""
-    state_id: int
-    row_index: int
-    variable_assignments: Dict[str, List[int]]
-    path: List[Tuple[int, int, str]]  # (state, row, variable) tuples
-    excluded_rows: List[int]
-    depth: int = 0
+    def __init__(self, state_id: int, row_index: int, variable_assignments: Dict[str, List[int]], 
+                 path: List[Tuple[int, int, str]], excluded_rows: List[int], 
+                 depth: int = 0, deferred_validations: List[Tuple[str, int]] = None):
+        self.state_id = state_id
+        self.row_index = row_index
+        self.variable_assignments = variable_assignments
+        self.path = path
+        self.excluded_rows = excluded_rows
+        self.depth = depth
+        self.deferred_validations = deferred_validations or []
     
     def copy(self) -> 'BacktrackingState':
         """Create a deep copy of this state."""
@@ -63,7 +67,8 @@ class BacktrackingState:
             variable_assignments=copy.deepcopy(self.variable_assignments),
             path=self.path.copy(),
             excluded_rows=self.excluded_rows.copy(),
-            depth=self.depth
+            depth=self.depth,
+            deferred_validations=self.deferred_validations.copy()
         )
 
 @dataclass
@@ -1187,6 +1192,10 @@ class EnhancedMatcher:
                 'max_depth_reached': 0
             }
             
+            # Reasonable limits for backtracking - reduced to prevent hanging
+            self.max_iterations = 5000  # Reduced from 10000
+            self.max_depth = 25  # Reduced from 50
+                
             # Caching
             self._condition_cache = {}
             self._pruning_cache = {}
@@ -1234,9 +1243,14 @@ class EnhancedMatcher:
             backtrack_count = 0
             stack = [state]
             
+            print(f"DEBUG: Starting backtracking search with {len(rows)} rows, max_iterations={self.max_iterations}")
+            
             while stack and explored_states < self.max_iterations:
                 current_state = stack.pop()
                 explored_states += 1
+                
+                if explored_states % 100 == 0:
+                    print(f"DEBUG: Explored {explored_states} states, stack size: {len(stack)}")
                 
                 # Check depth limit
                 if current_state.depth > self.max_depth:
@@ -1259,6 +1273,8 @@ class EnhancedMatcher:
                 
                 if not successors:
                     backtrack_count += 1
+                    if explored_states <= 10:  # Only log for first few states
+                        print(f"DEBUG: No successors from state {current_state.state_id} at row {current_state.row_index}")
                     continue
                 
                 # Add successors to stack (reverse order for DFS)
@@ -1291,15 +1307,26 @@ class EnhancedMatcher:
                 try:
                     context.current_var = var
                     
-                    # Check condition with caching
-                    cache_key = (var, state.row_index, id(current_row))
-                    if cache_key in self._condition_cache:
-                        condition_result = self._condition_cache[cache_key]
-                    else:
-                        condition_result = condition(current_row, context)
-                        self._condition_cache[cache_key] = condition_result
+                    # For variables with complex back-reference conditions (like X in our test),
+                    # defer condition evaluation until we have a complete match
+                    has_complex_condition = (hasattr(self, 'define_conditions') and 
+                                           var in self.define_conditions and
+                                           self._has_navigation_functions(self.define_conditions[var]))
                     
-                    logger.debug(f"  Transition {var} -> {target_state}: condition={condition_result}")
+                    if has_complex_condition:
+                        # For complex conditions, always allow the transition but mark for later validation
+                        condition_result = True
+                        logger.debug(f"  Transition {var} -> {target_state}: deferred complex condition")
+                    else:
+                        # Check condition with caching for simple conditions
+                        cache_key = (var, state.row_index, id(current_row))
+                        if cache_key in self._condition_cache:
+                            condition_result = self._condition_cache[cache_key]
+                        else:
+                            condition_result = condition(current_row, context)
+                            self._condition_cache[cache_key] = condition_result
+                        
+                        logger.debug(f"  Transition {var} -> {target_state}: condition={condition_result}")
                     
                     if not condition_result:
                         continue
@@ -1318,7 +1345,13 @@ class EnhancedMatcher:
                     # Update path
                     new_state.path.append((state.state_id, state.row_index, var))
                     
-                    # Validate constraints
+                    # For variables with complex conditions, mark them for validation
+                    if has_complex_condition:
+                        if not hasattr(new_state, 'deferred_validations'):
+                            new_state.deferred_validations = []
+                        new_state.deferred_validations.append((var, state.row_index))
+                    
+                    # Validate constraints (but skip complex condition validation for now)
                     if self._validate_constraints(new_state, rows, context):
                         successors.append(new_state)
                         
@@ -1380,6 +1413,22 @@ class EnhancedMatcher:
             
             return successors
         
+        def _has_navigation_functions(self, condition_str: str) -> bool:
+            """Check if a condition contains navigation functions."""
+            import re
+            navigation_patterns = [
+                r'\bPREV\s*\(',
+                r'\bNEXT\s*\(',
+                r'\bFIRST\s*\(',
+                r'\bLAST\s*\(',
+                r'\bCLASSIFIER\s*\('
+            ]
+            
+            for pattern in navigation_patterns:
+                if re.search(pattern, condition_str, re.IGNORECASE):
+                    return True
+            return False
+        
         def _validate_constraints(self, state: BacktrackingState, rows: List[Dict[str, Any]], 
                                 context: RowContext) -> bool:
             """Validate that the current state satisfies all constraints."""
@@ -1396,11 +1445,53 @@ class EnhancedMatcher:
             
             logger.debug(f"Validating complete match: state={state.state_id}, assignments={state.variable_assignments}")
             
-            # For complex back-references, validate that all DEFINE conditions are satisfied
+            # For patterns with DEFINE conditions, ensure all defined variables are assigned
             if hasattr(self, 'define_conditions'):
                 logger.debug(f"Checking {len(self.define_conditions)} DEFINE conditions")
-                # Update context with current variable assignments
-                context.variables = state.variable_assignments.copy()
+                
+                # For back-reference patterns, ensure defined variables are actually assigned
+                for var in self.define_conditions.keys():
+                    if var not in state.variable_assignments or not state.variable_assignments[var]:
+                        logger.debug(f"Required variable {var} is not assigned - rejecting empty match")
+                        return False
+                
+                # Validate any deferred conditions now that we have the complete context
+                if hasattr(state, 'deferred_validations'):
+                    logger.debug(f"Validating {len(state.deferred_validations)} deferred conditions")
+                    for var, row_idx in state.deferred_validations:
+                        if var in self.define_conditions:
+                            condition_str = self.define_conditions[var]
+                            logger.debug(f"Validating deferred condition for {var} at row {row_idx}: {condition_str}")
+                            
+                            if row_idx >= len(rows):
+                                continue
+                                
+                            row = rows[row_idx]
+                            
+                            # Create a fresh context with the complete variable assignments for deferred validation
+                            # This ensures navigation functions can correctly access all variable assignments
+                            validation_context = RowContext(
+                                rows=rows, 
+                                variables=state.variable_assignments.copy(),
+                                subsets=context.subsets.copy() if hasattr(context, 'subsets') else {},
+                                defined_variables=context.defined_variables.copy() if hasattr(context, 'defined_variables') else set(),
+                                pattern_variables=context.pattern_variables.copy() if hasattr(context, 'pattern_variables') else []
+                            )
+                            validation_context.current_idx = row_idx
+                            validation_context.current_var = var
+                            
+                            try:
+                                # Compile and evaluate the condition with full context
+                                from src.matcher.condition_evaluator import compile_condition
+                                condition = compile_condition(condition_str)
+                                if not condition(row, validation_context):
+                                    logger.debug(f"Deferred DEFINE condition failed for {var} at row {row_idx}: {condition_str}")
+                                    return False
+                                else:
+                                    logger.debug(f"Deferred DEFINE condition passed for {var} at row {row_idx}")
+                            except Exception as e:
+                                logger.debug(f"Error evaluating deferred DEFINE condition for {var}: {e}")
+                                return False
                 
                 # Check if any DEFINE conditions require back-references to other variables
                 # If so, those variables must have been assigned for the match to be valid
@@ -1417,20 +1508,16 @@ class EnhancedMatcher:
                         logger.debug(f"DEFINE condition for {var} references unassigned variables {missing_refs}: {condition_str}")
                         return False
                     
-                    # For variables with complex navigation conditions (no direct variable references),
-                    # we still need to validate the condition even if no references were found
-                    has_navigation_functions = ('PREV(' in condition_str or 'NEXT(' in condition_str or 
-                                              'FIRST(' in condition_str or 'LAST(' in condition_str or
-                                              'CLASSIFIER(' in condition_str)
-                    
-                    # Skip variables that don't have assignments ONLY if they don't have navigation functions
+                    # Skip variables that don't have assignments (like variables with TRUE conditions)
                     if var not in state.variable_assignments:
-                        if has_navigation_functions:
-                            logger.debug(f"  Variable {var} has no assignments but uses navigation functions - rejecting empty match")
-                            return False
-                        else:
-                            logger.debug(f"  Variable {var} has no assignments, skipping condition validation")
-                            continue
+                        logger.debug(f"  Variable {var} has no assignments, skipping condition validation")
+                        continue
+                    
+                    # Skip if we've already validated this via deferred validation
+                    if (hasattr(state, 'deferred_validations') and 
+                        any(v == var for v, _ in state.deferred_validations)):
+                        logger.debug(f"  Variable {var} already validated via deferred validation")
+                        continue
                         
                     # For each row assigned to this variable, verify the condition
                     assigned_rows = state.variable_assignments[var]
