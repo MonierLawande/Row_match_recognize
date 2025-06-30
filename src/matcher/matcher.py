@@ -1394,16 +1394,21 @@ class EnhancedMatcher:
             if not self.dfa.states[state.state_id].is_accept:
                 return False
             
+            logger.debug(f"Validating complete match: state={state.state_id}, assignments={state.variable_assignments}")
+            
             # For complex back-references, validate that all DEFINE conditions are satisfied
             if hasattr(self, 'define_conditions'):
+                logger.debug(f"Checking {len(self.define_conditions)} DEFINE conditions")
                 # Update context with current variable assignments
                 context.variables = state.variable_assignments.copy()
                 
                 # Check if any DEFINE conditions require back-references to other variables
                 # If so, those variables must have been assigned for the match to be valid
                 for var, condition_str in self.define_conditions.items():
+                    logger.debug(f"Validating condition for {var}: {condition_str}")
                     # Check if this condition references other pattern variables
                     referenced_vars = self._extract_referenced_variables_from_condition(condition_str)
+                    logger.debug(f"  Referenced variables: {referenced_vars}")
                     
                     # If the condition references other variables but those variables aren't assigned,
                     # this indicates an incomplete match for a back-reference pattern
@@ -1414,6 +1419,7 @@ class EnhancedMatcher:
                     
                     # Skip variables that don't have assignments (like variables with TRUE conditions)
                     if var not in state.variable_assignments:
+                        logger.debug(f"  Variable {var} has no assignments, skipping condition validation")
                         continue
                         
                     # For each row assigned to this variable, verify the condition
@@ -1440,6 +1446,7 @@ class EnhancedMatcher:
                             logger.debug(f"Error evaluating DEFINE condition for {var}: {e}")
                             return False
             
+            logger.debug("Match validation passed")
             return True
         
         def _extract_referenced_variables_from_condition(self, condition_str: str) -> set:
@@ -1447,22 +1454,37 @@ class EnhancedMatcher:
             import re
             referenced_vars = set()
             
+            logger.debug(f"Extracting variables from condition: {condition_str}")
+            
             # Look for pattern variable references like A.value, B.value, etc.
             back_ref_pattern = r'\b([A-Z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)'
             matches = re.findall(back_ref_pattern, condition_str)
             
+            logger.debug(f"Found potential variable references: {matches}")
+            
             for var_name, column in matches:
+                logger.debug(f"Checking if '{var_name}' is a pattern variable")
                 # Only count variables that are known pattern variables
                 if hasattr(self, 'defined_variables') and var_name in self.defined_variables:
                     referenced_vars.add(var_name)
+                    logger.debug(f"  Added {var_name} (from defined_variables)")
                 elif hasattr(self, 'define_conditions') and var_name in self.define_conditions:
                     referenced_vars.add(var_name)
+                    logger.debug(f"  Added {var_name} (from define_conditions)")
                 # Also check against the original pattern variables
                 elif hasattr(self, 'original_pattern') and hasattr(self.original_pattern, 'metadata'):
                     pattern_vars = self.original_pattern.metadata.get('base_variables', [])
                     if var_name in pattern_vars:
                         referenced_vars.add(var_name)
+                        logger.debug(f"  Added {var_name} (from original_pattern)")
+                else:
+                    # For back-reference testing, also try some common patterns
+                    # Check if it looks like a pattern variable (single capital letter)
+                    if len(var_name) == 1 and var_name.isupper():
+                        referenced_vars.add(var_name)
+                        logger.debug(f"  Added {var_name} (looks like pattern variable)")
             
+            logger.debug(f"Final referenced variables: {referenced_vars}")
             return referenced_vars
         
         def _should_prune(self, state: BacktrackingState, rows: List[Dict[str, Any]], 
