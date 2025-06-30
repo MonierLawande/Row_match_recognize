@@ -1322,25 +1322,47 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         # For ALL ROWS PER MATCH: include all table columns + pattern navigation columns
                         
                         if rows_per_match == RowsPerMatch.ONE_ROW:
-                            # For ONE ROW PER MATCH with SELECT *, include PARTITION BY columns + ORDER BY columns + MEASURES
+                            # For ONE ROW PER MATCH with SELECT *, behavior depends on whether explicit MEASURES exist
                             logger.debug(f"ONE ROW PER MATCH with SELECT * - PARTITION BY: {partition_by}, ORDER BY: {order_by}, MEASURES: {list(measures.keys())}")
                             
-                            # Add PARTITION BY columns first
-                            if partition_by:
-                                for col in partition_by:
-                                    if col in result_df.columns:
+                            if measures:
+                                # If explicit MEASURES exist: PARTITION BY + ORDER BY + MEASURES (SQL:2016 standard)
+                                # Add PARTITION BY columns first
+                                if partition_by:
+                                    for col in partition_by:
+                                        if col in result_df.columns:
+                                            ordered_cols.append(col)
+                                
+                                # Add ORDER BY columns (if not already included)
+                                if order_by:
+                                    for col in order_by:
+                                        if col in result_df.columns and col not in ordered_cols:
+                                            ordered_cols.append(col)
+                                
+                                # Add MEASURES columns
+                                for alias in measures.keys():
+                                    if alias in result_df.columns and alias not in ordered_cols:
+                                        ordered_cols.append(alias)
+                            else:
+                                # If NO explicit MEASURES: Include all input columns (standard behavior for SELECT *)
+                                # Add PARTITION BY columns first to maintain SQL:2016 ordering
+                                if partition_by:
+                                    for col in partition_by:
+                                        if col in result_df.columns:
+                                            ordered_cols.append(col)
+                                
+                                # Add ORDER BY columns (if not already included)
+                                if order_by:
+                                    for col in order_by:
+                                        if col in result_df.columns and col not in ordered_cols:
+                                            ordered_cols.append(col)
+                                
+                                # Add all remaining input columns (excluding internal columns)
+                                for col in result_df.columns:
+                                    if (col not in ordered_cols and 
+                                        not col.startswith('_') and  # Skip internal columns
+                                        col not in ['MATCH_NUMBER']):  # Skip auto-generated measure columns
                                         ordered_cols.append(col)
-                            
-                            # Add ORDER BY columns (if not already included)
-                            if order_by:
-                                for col in order_by:
-                                    if col in result_df.columns and col not in ordered_cols:
-                                        ordered_cols.append(col)
-                            
-                            # Add MEASURES columns
-                            for alias in measures.keys():
-                                if alias in result_df.columns and alias not in ordered_cols:
-                                    ordered_cols.append(alias)
                         else:
                             # For ALL ROWS PER MATCH, include all table columns + pattern navigation columns
                             # 1. PARTITION BY columns
