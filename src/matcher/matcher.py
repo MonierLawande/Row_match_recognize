@@ -1417,10 +1417,20 @@ class EnhancedMatcher:
                         logger.debug(f"DEFINE condition for {var} references unassigned variables {missing_refs}: {condition_str}")
                         return False
                     
-                    # Skip variables that don't have assignments (like variables with TRUE conditions)
+                    # For variables with complex navigation conditions (no direct variable references),
+                    # we still need to validate the condition even if no references were found
+                    has_navigation_functions = ('PREV(' in condition_str or 'NEXT(' in condition_str or 
+                                              'FIRST(' in condition_str or 'LAST(' in condition_str or
+                                              'CLASSIFIER(' in condition_str)
+                    
+                    # Skip variables that don't have assignments ONLY if they don't have navigation functions
                     if var not in state.variable_assignments:
-                        logger.debug(f"  Variable {var} has no assignments, skipping condition validation")
-                        continue
+                        if has_navigation_functions:
+                            logger.debug(f"  Variable {var} has no assignments but uses navigation functions - rejecting empty match")
+                            return False
+                        else:
+                            logger.debug(f"  Variable {var} has no assignments, skipping condition validation")
+                            continue
                         
                     # For each row assigned to this variable, verify the condition
                     assigned_rows = state.variable_assignments[var]
@@ -3018,8 +3028,18 @@ class EnhancedMatcher:
                     
                     logger.debug(f"Row {idx}: Measure '{alias}' = '{expr}' using {semantics} semantics")
                     
-                    # For RUNNING semantics, create a context with variables only up to current row
-                    if semantics == "RUNNING":
+                    # For RUNNING semantics or complex navigation expressions, create a context with variables only up to current row
+                    # Complex expressions with nested navigation or arithmetic should use temporal context
+                    expr_upper = expr.upper()
+                    has_complex_navigation = (
+                        # Complex expressions with arithmetic and navigation
+                        ('+' in expr or '-' in expr or '*' in expr or '/' in expr) and 
+                        any(nav_func in expr_upper for nav_func in ['FIRST(', 'LAST(', 'PREV(', 'NEXT(']) and
+                        # Skip simple expressions like "FIRST(value) + 1" 
+                        (expr_upper.count('FIRST(') + expr_upper.count('LAST(') + expr_upper.count('PREV(') + expr_upper.count('NEXT(')) > 1
+                    )
+                    
+                    if semantics == "RUNNING" or has_complex_navigation:
                         # Create running context with variables up to current row
                         running_context = RowContext(defined_variables=self.defined_variables)
                         running_context.rows = rows
@@ -3045,7 +3065,7 @@ class EnhancedMatcher:
                         
                         # Evaluate with running context
                         result[alias] = running_evaluator.evaluate(expr, semantics)
-                        logger.debug(f"DEBUG: Set {alias}={result[alias]} for row {idx} with {semantics} semantics")
+                        logger.debug(f"DEBUG: Set {alias}={result[alias]} for row {idx} with {semantics} semantics (using running context for complex navigation)")
                     else:
                         # Use original context for FINAL semantics
                         context.current_idx = idx
@@ -3635,6 +3655,7 @@ class EnhancedMatcher:
         3. Require specific variable assignment orders to be satisfied
         4. Have cross-variable dependencies (one variable's condition depends on another)
         5. Involve alternations with navigation functions
+        6. Use CLASSIFIER functions with subsets that depend on variable assignments
         
         Returns:
             True if the pattern has complex back-references requiring special handling
@@ -3651,6 +3672,7 @@ class EnhancedMatcher:
         # Check for cross-variable dependencies and navigation functions
         has_nav_functions = False
         cross_var_dependencies = False
+        has_classifier_subset_refs = False
         
         logger.debug(f"Checking complex back-references for {len(self.define_conditions)} conditions")
         
@@ -3671,6 +3693,21 @@ class EnhancedMatcher:
                 has_nav_functions = True
                 logger.debug(f"  Has navigation functions: True")
                 
+            # Check for CLASSIFIER function with subset references
+            classifier_subset_pattern = r'CLASSIFIER\s*\(\s*([A-Z][A-Za-z0-9_]*)\s*\)'
+            classifier_matches = re.findall(classifier_subset_pattern, condition)
+            if classifier_matches:
+                has_classifier_subset_refs = True
+                logger.debug(f"  Has CLASSIFIER subset references: {classifier_matches}")
+                
+                # If we have subset variables defined, this creates implicit dependencies
+                if hasattr(self, 'subset_variables') and self.subset_variables:
+                    for subset_var in classifier_matches:
+                        if subset_var in self.subset_variables:
+                            subset_components = self.subset_variables[subset_var]
+                            referenced_vars.update(subset_components)
+                            logger.debug(f"  Added subset components for {subset_var}: {subset_components}")
+                
             # Check for cross-variable dependency (condition for var X references var Y)
             if referenced_vars and var not in referenced_vars:
                 cross_var_dependencies = True
@@ -3682,8 +3719,13 @@ class EnhancedMatcher:
                 if any(func in condition.upper() for func in nav_functions):
                     logger.debug(f"Complex back-reference detected in {var}: references {referenced_vars}")
                     return True
+                    
+            # CLASSIFIER functions with navigation functions are also complex
+            if has_classifier_subset_refs and has_nav_functions:
+                logger.debug(f"Complex back-reference detected in {var}: CLASSIFIER with navigation functions")
+                return True
         
-        logger.debug(f"Summary: has_nav_functions={has_nav_functions}, cross_var_dependencies={cross_var_dependencies}")
+        logger.debug(f"Summary: has_nav_functions={has_nav_functions}, cross_var_dependencies={cross_var_dependencies}, has_classifier_subset_refs={has_classifier_subset_refs}")
         
         # Also consider it complex if there are cross-variable dependencies with navigation functions
         # or if the pattern has alternations with navigation functions
