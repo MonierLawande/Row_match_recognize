@@ -589,14 +589,15 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     # For ALL ROWS mode, apply SQL:2016 default semantics
                     expr_upper = expr.upper().strip()
                     
-                    # SQL:2016: Navigation functions default to FINAL semantics unless explicitly prefixed with RUNNING
+                    # SQL:2016: For ALL ROWS PER MATCH, navigation functions default to RUNNING semantics
+                    # This ensures that early rows return NULL when navigation goes out of bounds
                     if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        measure_semantics[alias] = "FINAL"
-                        logger.debug(f"Navigation function: FINAL semantics (SQL:2016 default) for measure {alias}: {expr}")
+                        measure_semantics[alias] = "RUNNING"
+                        logger.debug(f"Navigation function: RUNNING semantics (ALL ROWS PER MATCH) for measure {alias}: {expr}")
                     elif re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        # Expressions containing navigation functions also default to FINAL per SQL:2016
-                        measure_semantics[alias] = "FINAL" 
-                        logger.debug(f"Expression with navigation function: FINAL semantics (SQL:2016 default) for measure {alias}: {expr}")
+                        # Expressions containing navigation functions also use RUNNING for ALL ROWS PER MATCH
+                        measure_semantics[alias] = "RUNNING" 
+                        logger.debug(f"Expression with navigation function: RUNNING semantics (ALL ROWS PER MATCH) for measure {alias}: {expr}")
                     elif explicit_semantics_found:
                         # In mixed semantics queries, implicit measures default to FINAL per SQL:2016
                         measure_semantics[alias] = "FINAL"
