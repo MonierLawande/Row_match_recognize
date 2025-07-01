@@ -1464,15 +1464,42 @@ class EnhancedMatcher:
                         return False
                     logger.debug("End anchor validation passed")
             
-            # For patterns with DEFINE conditions, ensure all defined variables are assigned
+            # For patterns with DEFINE conditions, validate variable assignments
             if hasattr(self, 'define_conditions'):
                 logger.debug(f"Checking {len(self.define_conditions)} DEFINE conditions")
                 
-                # For back-reference patterns, ensure defined variables are actually assigned
-                for var in self.define_conditions.keys():
-                    if var not in state.variable_assignments or not state.variable_assignments[var]:
-                        logger.debug(f"Required variable {var} is not assigned - rejecting empty match")
+                # Check if this is an alternation pattern
+                is_alternation = (hasattr(self.parent, 'dfa') and 
+                                hasattr(self.parent.dfa, 'metadata') and 
+                                self.parent.dfa.metadata.get('has_alternations', False))
+                
+                if is_alternation:
+                    # For alternation patterns, at least one variable should be assigned
+                    assigned_vars = [var for var in self.define_conditions.keys() 
+                                   if var in state.variable_assignments and state.variable_assignments[var]]
+                    
+                    # Also check for variables without DEFINE conditions (like A in our test)
+                    all_pattern_vars = set()
+                    if hasattr(self.parent, 'defined_variables'):
+                        all_pattern_vars.update(self.parent.defined_variables)
+                    if hasattr(self.parent, 'alternation_order'):
+                        all_pattern_vars.update(self.parent.alternation_order.keys())
+                    
+                    # Check if any pattern variable is assigned
+                    any_assigned = any(var in state.variable_assignments and state.variable_assignments[var] 
+                                     for var in all_pattern_vars)
+                    
+                    if not any_assigned:
+                        logger.debug(f"Alternation pattern: no variables assigned - rejecting match")
                         return False
+                    else:
+                        logger.debug(f"Alternation pattern: found assigned variables - validation passed")
+                else:
+                    # For non-alternation patterns, ensure all defined variables are assigned
+                    for var in self.define_conditions.keys():
+                        if var not in state.variable_assignments or not state.variable_assignments[var]:
+                            logger.debug(f"Sequential pattern: required variable {var} is not assigned - rejecting match")
+                            return False
                 
                 # Validate any deferred conditions now that we have the complete context
                 if hasattr(state, 'deferred_validations'):
@@ -1520,12 +1547,21 @@ class EnhancedMatcher:
                     referenced_vars = self._extract_referenced_variables_from_condition(condition_str)
                     logger.debug(f"  Referenced variables: {referenced_vars}")
                     
-                    # If the condition references other variables but those variables aren't assigned,
-                    # this indicates an incomplete match for a back-reference pattern
-                    missing_refs = referenced_vars - set(state.variable_assignments.keys())
-                    if missing_refs:
-                        logger.debug(f"DEFINE condition for {var} references unassigned variables {missing_refs}: {condition_str}")
-                        return False
+                    # For alternation patterns, ignore self-references - only check cross-references
+                    if is_alternation:
+                        # Remove self-references - a variable can reference itself in its DEFINE condition
+                        cross_refs = referenced_vars - {var}
+                        missing_refs = cross_refs - set(state.variable_assignments.keys())
+                        if missing_refs:
+                            logger.debug(f"Alternation pattern: DEFINE condition for {var} references unassigned cross-variables {missing_refs}: {condition_str}")
+                            return False
+                        logger.debug(f"Alternation pattern: Allowed self-reference for {var}")
+                    else:
+                        # For sequential patterns, all referenced variables must be assigned
+                        missing_refs = referenced_vars - set(state.variable_assignments.keys())
+                        if missing_refs:
+                            logger.debug(f"Sequential pattern: DEFINE condition for {var} references unassigned variables {missing_refs}: {condition_str}")
+                            return False
                     
                     # Skip variables that don't have assignments (like variables with TRUE conditions)
                     if var not in state.variable_assignments:
