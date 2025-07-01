@@ -414,7 +414,7 @@ def get_column_value_with_type_preservation(row: Dict[str, Any], column_name: st
     # Preserve original types - don't auto-convert
     return value
 
-def safe_compare(left: Any, right: Any, op: Union[Callable, ast.operator]) -> bool:
+def safe_compare(left: Any, right: Any, op: Union[Callable, ast.operator]) -> Any:
     """
     Perform SQL-style comparison with NULL handling.
     
@@ -424,11 +424,11 @@ def safe_compare(left: Any, right: Any, op: Union[Callable, ast.operator]) -> bo
         op: Comparison operator (function or AST operator)
         
     Returns:
-        Comparison result with SQL NULL semantics
+        Comparison result with SQL NULL semantics (None if any operand is NULL)
     """
-    # SQL NULL semantics: any comparison with NULL is NULL (False)
+    # SQL NULL semantics: any comparison with NULL is NULL (None)
     if is_null(left) or is_null(right):
-        return False
+        return None
     
     # Map AST operators to Python functions
     import operator

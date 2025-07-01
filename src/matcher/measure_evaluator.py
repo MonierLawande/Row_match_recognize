@@ -342,7 +342,7 @@ class MeasureEvaluator:
         
         This method handles:
         - MATCH_NUMBER() -> actual match number value
-        - CLASSIFIER() -> classifier value (if needed)
+        - CLASSIFIER() -> classifier value (if needed, but not inside navigation functions)
         - Aggregate functions (SUM, AVG, COUNT, MIN, MAX, etc.) -> computed values
         - SQL IN operator -> Python in operator (case conversion)
         
@@ -352,6 +352,10 @@ class MeasureEvaluator:
         Returns:
             The preprocessed expression that can be parsed by AST
         """
+        # Check if expression contains navigation functions
+        # If it does, don't preprocess CLASSIFIER calls as they should be handled by the AST evaluator
+        has_navigation_functions = re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr, re.IGNORECASE)
+        
         preprocessed = expr
         
         # Replace MATCH_NUMBER() with the actual match number
@@ -396,28 +400,31 @@ class MeasureEvaluator:
         preprocessed = re.sub(r'\bNOT IN\b', 'not in', preprocessed)
         
         # Replace CLASSIFIER() calls with their actual values
-        # This is crucial for expressions like "CASE WHEN CLASSIFIER() IN ('A', 'START') THEN 1 ELSE 0 END"
-        classifier_pattern = r'CLASSIFIER\(\s*([A-Za-z][A-Za-z0-9_]*)?\s*\)'
-        classifier_matches = re.finditer(classifier_pattern, preprocessed, re.IGNORECASE)
-        
-        # Process matches in reverse order to avoid position shifts when replacing
-        for match in reversed(list(classifier_matches)):
-            var_name = match.group(1)
+        # Skip this if expression contains navigation functions, as they should handle CLASSIFIER calls directly
+        if not has_navigation_functions:
+            classifier_pattern = r'CLASSIFIER\(\s*([A-Za-z][A-Za-z0-9_]*)?\s*\)'
+            classifier_matches = re.finditer(classifier_pattern, preprocessed, re.IGNORECASE)
             
-            # Evaluate the CLASSIFIER function
-            classifier_value = self.evaluate_classifier(var_name, running=is_running)
-            
-            # Replace the CLASSIFIER function call with its computed value (quoted string)
-            if classifier_value is not None:
-                # Quote the classifier value as a string literal for AST parsing
-                classifier_str = f"'{classifier_value}'"
+            # Process matches in reverse order to avoid position shifts when replacing
+            for match in reversed(list(classifier_matches)):
+                var_name = match.group(1)
                 
-                old_expr = preprocessed[match.start():match.end()]
-                logger.debug(f"Preprocessing: replacing '{old_expr}' with '{classifier_str}' in expression")
-                preprocessed = preprocessed[:match.start()] + classifier_str + preprocessed[match.end():]
-                logger.debug(f"After CLASSIFIER replacement: '{preprocessed}'")
-            else:
-                logger.debug(f"CLASSIFIER evaluation returned None for: {match.group()}")
+                # Evaluate the CLASSIFIER function
+                classifier_value = self.evaluate_classifier(var_name, running=is_running)
+                
+                # Replace the CLASSIFIER function call with its computed value (quoted string)
+                if classifier_value is not None:
+                    # Quote the classifier value as a string literal for AST parsing
+                    classifier_str = f"'{classifier_value}'"
+                    
+                    old_expr = preprocessed[match.start():match.end()]
+                    logger.debug(f"Preprocessing: replacing '{old_expr}' with '{classifier_str}' in expression")
+                    preprocessed = preprocessed[:match.start()] + classifier_str + preprocessed[match.end():]
+                    logger.debug(f"After CLASSIFIER replacement: '{preprocessed}'")
+                else:
+                    logger.debug(f"CLASSIFIER evaluation returned None for: {match.group()}")
+        else:
+            logger.debug("Skipping CLASSIFIER preprocessing due to presence of navigation functions")
         
         # Replace SQL CASE expressions with Python conditional expressions using the proper converter
         from .condition_evaluator import _sql_to_python_condition
@@ -428,6 +435,20 @@ class MeasureEvaluator:
             old_preprocessed = preprocessed
             preprocessed = _sql_to_python_condition(preprocessed)
             logger.debug(f"After CASE conversion: '{old_preprocessed}' -> '{preprocessed}'")
+        
+        # Convert SQL operators to Python operators for AST parsing
+        # This is critical for expressions like "PREV(CLASSIFIER(U), 1) = 'A'"
+        if '=' in preprocessed and '==' not in preprocessed:
+            # Convert SQL equality (=) to Python equality (==)
+            # Be careful to avoid converting already-converted == operators
+            # Use negative lookbehind and lookahead to avoid matching parts of != or ==
+            preprocessed = re.sub(r'(?<![\!=])=(?!=)', '==', preprocessed)
+            logger.debug(f"Converted SQL = to Python ==: '{preprocessed}'")
+        
+        # Convert SQL logical operators to Python logical operators
+        preprocessed = re.sub(r'\bAND\b', 'and', preprocessed, flags=re.IGNORECASE)
+        preprocessed = re.sub(r'\bOR\b', 'or', preprocessed, flags=re.IGNORECASE)
+        preprocessed = re.sub(r'\bNOT\b', 'not', preprocessed, flags=re.IGNORECASE)
         
         # Handle CAST and TRY_CAST functions by evaluating them and replacing with their values
         # Use a more robust approach to handle nested parentheses in type specifications
@@ -833,11 +854,16 @@ class MeasureEvaluator:
             return value
         
         # Enhanced navigation function detection
-        # Check for both simple and nested navigation functions
-        simple_nav_pattern = r'^(FIRST|LAST|PREV|NEXT)\s*\('
-        nested_nav_pattern = r'^(FIRST|LAST|PREV|NEXT)\s*\(\s*(FIRST|LAST|PREV|NEXT)'
+        # Only match complete navigation function expressions, not complex expressions that contain them
+        # Strategy: Look for expressions that are ONLY navigation functions (no operators after)
+        complete_nav_pattern = r'^(FIRST|LAST|PREV|NEXT)\s*\(.*\)\s*$'
+        nested_nav_pattern = r'^(FIRST|LAST|PREV|NEXT)\s*\(\s*(FIRST|LAST|PREV|NEXT)\s*\([^)]*\)\s*,\s*[^)]*\)\s*$'
+        has_operators_pattern = r'.*\)\s*[=<>!]+.*|.*\)\s+(AND|OR|NOT)\s+.*'
         
-        is_simple_nav = re.match(simple_nav_pattern, expr, re.IGNORECASE) is not None
+        # Check if expression is a simple navigation function (not a complex boolean expression)
+        matches_nav = re.match(complete_nav_pattern, expr, re.IGNORECASE) is not None
+        has_operators = re.match(has_operators_pattern, expr, re.IGNORECASE) is not None
+        is_simple_nav = matches_nav and not has_operators
         is_nested_nav = re.match(nested_nav_pattern, expr, re.IGNORECASE) is not None
         
         if is_simple_nav or is_nested_nav:
@@ -1244,14 +1270,24 @@ class MeasureEvaluator:
             
             current_idx = self.context.current_idx
             
-            # For RUNNING semantics, limit to current row
-            if is_running:
-                # When using RUNNING semantics, we only consider rows up to the current position
-                # This affects nested navigation functions
-                return evaluate_nested_navigation(expr, self.context, current_idx, None)
-            else:
-                # With FINAL semantics, we consider all rows in the match
-                return evaluate_nested_navigation(expr, self.context, current_idx, None)
+            # Set semantics information in context for classifier navigation
+            original_semantics = getattr(self.context, '_current_semantics', None)
+            try:
+                if is_running:
+                    # When using RUNNING semantics, we only consider rows up to the current position
+                    # This affects nested navigation functions
+                    self.context._current_semantics = 'RUNNING'
+                    return evaluate_nested_navigation(expr, self.context, current_idx, None)
+                else:
+                    # With FINAL semantics, we consider all rows in the match
+                    self.context._current_semantics = 'FINAL'
+                    return evaluate_nested_navigation(expr, self.context, current_idx, None)
+            finally:
+                # Restore original semantics
+                if original_semantics is not None:
+                    self.context._current_semantics = original_semantics
+                elif hasattr(self.context, '_current_semantics'):
+                    delattr(self.context, '_current_semantics')
         
         # Cache key for memoization - include running semantics in the key
         cache_key = (expr, is_running, self.context.current_idx)

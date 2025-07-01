@@ -1445,6 +1445,25 @@ class EnhancedMatcher:
             
             logger.debug(f"Validating complete match: state={state.state_id}, assignments={state.variable_assignments}")
             
+            # Check end anchor validation - critical for patterns with $ anchor
+            logger.debug(f"Checking end anchor validation - has _anchor_metadata: {hasattr(self.parent, '_anchor_metadata')}")
+            if hasattr(self.parent, '_anchor_metadata'):
+                logger.debug(f"Anchor metadata: {self.parent._anchor_metadata}")
+                if self.parent._anchor_metadata.get("has_end_anchor", False):
+                    # Get the last assigned row index from all variables
+                    max_row_idx = -1
+                    for var, indices in state.variable_assignments.items():
+                        if indices:
+                            max_row_idx = max(max_row_idx, max(indices))
+                    
+                    # For end anchored patterns, the match must consume all rows
+                    last_row_idx = len(rows) - 1
+                    logger.debug(f"End anchor check: match ends at row {max_row_idx}, partition ends at row {last_row_idx}")
+                    if max_row_idx != last_row_idx:
+                        logger.debug(f"End anchor validation failed: match does not consume all rows (ends at {max_row_idx}, should be {last_row_idx})")
+                        return False
+                    logger.debug("End anchor validation passed")
+            
             # For patterns with DEFINE conditions, ensure all defined variables are assigned
             if hasattr(self, 'define_conditions'):
                 logger.debug(f"Checking {len(self.define_conditions)} DEFINE conditions")

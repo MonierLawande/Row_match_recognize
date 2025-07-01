@@ -129,7 +129,7 @@ class ConditionEvaluator(ast.NodeVisitor):
             logger.warning(f"Error building evaluation indices: {e}")
             self._row_var_index = {}
 
-    def _safe_compare(self, left: Any, right: Any, op: Union[Callable, ast.operator]) -> bool:
+    def _safe_compare(self, left: Any, right: Any, op: Union[Callable, ast.operator]) -> Any:
         """Perform SQL-style comparison with NULL handling."""
         self.stats["evaluations"] += 1
         return safe_compare(left, right, op)
@@ -341,9 +341,6 @@ class ConditionEvaluator(ast.NodeVisitor):
             elif isinstance(arg, ast.Constant):
                 # Constant values (numbers, strings)
                 args.append(arg.value)
-            elif hasattr(ast, 'Num') and isinstance(arg, ast.Num):
-                # Python < 3.8 compatibility - ast.Num is deprecated in Python 3.14+
-                args.append(arg.n)
             else:
                 # For complex expressions, evaluate them
                 value = self.visit(arg)
@@ -450,8 +447,6 @@ class ConditionEvaluator(ast.NodeVisitor):
                 steps_arg = node.args[1]
                 if isinstance(steps_arg, ast.Constant):
                     steps = steps_arg.value
-                elif hasattr(ast, 'Num') and isinstance(steps_arg, ast.Num):
-                    steps = steps_arg.n
             
             if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
                 # Pattern: NEXT(A.value) - variable.column format
@@ -546,19 +541,23 @@ class ConditionEvaluator(ast.NodeVisitor):
                     all_subset_indices = sorted(set(all_subset_indices))
                     current_idx = self.context.current_idx
                     
-                    # Find current position in subset timeline
-                    try:
-                        current_pos = all_subset_indices.index(current_idx)
-                        target_pos = current_pos + steps if func_name == "NEXT" else current_pos - steps
-                        
-                        if 0 <= target_pos < len(all_subset_indices):
-                            target_idx = all_subset_indices[target_pos]
+                    # Enhanced logic: navigate from current position even if not in subset
+                    if func_name == "PREV":
+                        # Find the most recent subset position before current_idx
+                        target_indices = [idx for idx in all_subset_indices if idx < current_idx]
+                        if target_indices and steps <= len(target_indices):
+                            target_idx = target_indices[-steps]  # steps positions back
                             return self._get_direct_classifier_at_index(target_idx, subset_var)
                         else:
                             return None
-                    except ValueError:
-                        # Current row not in subset timeline
-                        return None
+                    else:  # NEXT
+                        # Find the next subset position after current_idx
+                        target_indices = [idx for idx in all_subset_indices if idx > current_idx]
+                        if target_indices and steps <= len(target_indices):
+                            target_idx = target_indices[steps - 1]  # steps positions forward
+                            return self._get_direct_classifier_at_index(target_idx, subset_var)
+                        else:
+                            return None
                 else:
                     return None
             else:
@@ -593,30 +592,46 @@ class ConditionEvaluator(ast.NodeVisitor):
                 if all_subset_indices:
                     all_subset_indices = sorted(set(all_subset_indices))
                     
-                    # Handle steps parameter for LAST function
-                    if steps > len(all_subset_indices):
-                        return None
-                    target_idx = all_subset_indices[-steps] if steps > 0 else all_subset_indices[-1]
-                    
-                    return self._get_direct_classifier_at_index(target_idx, subset_var)
+                    # Handle steps parameter for LAST function - relative to current position
+                    if steps > 0:
+                        # LAST(CLASSIFIER(subset), N) means N positions back from current
+                        current_idx = self.context.current_idx
+                        target_idx = current_idx - steps
+                        if target_idx < 0 or target_idx not in all_subset_indices:
+                            return None
+                        return self._get_direct_classifier_at_index(target_idx, subset_var)
+                    else:
+                        # LAST(CLASSIFIER(subset)) means the most recent position in subset
+                        target_idx = all_subset_indices[-1]
+                        return self._get_direct_classifier_at_index(target_idx, subset_var)
             else:
                 # Get the last classifier in the overall match
                 if hasattr(self.context, 'variables') and self.context.variables:
-                    # Find all row indices across all variables in current match
-                    all_indices = []
-                    for var, indices in self.context.variables.items():
-                        all_indices.extend(indices)
-                    
-                    if all_indices:
-                        all_indices = sorted(set(all_indices))
-                        # Handle steps parameter for LAST function
-                        if steps > len(all_indices):
+                    # Handle steps parameter for LAST function - relative to current position
+                    if steps > 0:
+                        # LAST(CLASSIFIER(), N) means N positions back from current
+                        current_idx = self.context.current_idx
+                        target_idx = current_idx - steps
+                        logger.debug(f"[LAST_DEBUG] LAST(CLASSIFIER(), {steps}): current_idx={current_idx}, target_idx={target_idx}")
+                        if target_idx < 0:
+                            logger.debug(f"[LAST_DEBUG] target_idx={target_idx} < 0, returning None")
                             return None
-                        target_idx = all_indices[-steps] if steps > 0 else all_indices[-1]
-                        
-                        return self._get_direct_classifier_at_index(target_idx, None)
+                        result = self._get_direct_classifier_at_index(target_idx, None)
+                        logger.debug(f"[LAST_DEBUG] _get_direct_classifier_at_index({target_idx}) returned: {result}")
+                        return result
                     else:
-                        return None
+                        # LAST(CLASSIFIER()) means the most recent position in match
+                        # Find all row indices across all variables in current match
+                        all_indices = []
+                        for var, indices in self.context.variables.items():
+                            all_indices.extend(indices)
+                        
+                        if all_indices:
+                            all_indices = sorted(set(all_indices))
+                            target_idx = all_indices[-1]
+                            return self._get_direct_classifier_at_index(target_idx, None)
+                        else:
+                            return None
                 else:
                     return None
         
@@ -1322,29 +1337,42 @@ class ConditionEvaluator(ast.NodeVisitor):
         Returns:
             The classifier value at the specified index
         """
+        logger.debug(f"[CLASSIFIER_DEBUG] _get_direct_classifier_at_index(row_idx={row_idx}, subset_var={subset_var})")
+        
         if subset_var:
-            # For subset variables, return the subset name if the row belongs to any component
+            # For subset variables, return the actual component variable name that matches
             if subset_var in self.context.subsets:
                 component_vars = self.context.subsets[subset_var]
                 for comp_var in component_vars:
                     if comp_var in self.context.variables and row_idx in self.context.variables[comp_var]:
-                        return subset_var
+                        logger.debug(f"[CLASSIFIER_DEBUG] Found subset component {comp_var} for row {row_idx}")
+                        return comp_var  # Return the actual component variable, not the subset name
+            logger.debug(f"[CLASSIFIER_DEBUG] No subset component found for row {row_idx}, returning empty string")
             return ""
         
         # Check which variable this row belongs to
+        logger.debug(f"[CLASSIFIER_DEBUG] Context variables: {self.context.variables}")
+        
         if hasattr(self, '_row_var_index') and row_idx in self._row_var_index:
             variables = self._row_var_index[row_idx]
+            logger.debug(f"[CLASSIFIER_DEBUG] Found in _row_var_index: {variables}")
             if len(variables) == 1:
-                return next(iter(variables))
+                result = next(iter(variables))
+                logger.debug(f"[CLASSIFIER_DEBUG] Single variable: {result}")
+                return result
             elif len(variables) > 1:
                 # Multiple variables - return the first one alphabetically for consistency
-                return min(variables)
+                result = min(variables)
+                logger.debug(f"[CLASSIFIER_DEBUG] Multiple variables, returning: {result}")
+                return result
         
         # Fallback to searching through all variables
         for var_name, indices in self.context.variables.items():
             if row_idx in indices:
+                logger.debug(f"[CLASSIFIER_DEBUG] Found row {row_idx} in variable {var_name}")
                 return var_name
         
+        logger.debug(f"[CLASSIFIER_DEBUG] No variable found for row {row_idx}, returning empty string")
         return ""
 
     def _build_navigation_expr(self, node):
@@ -1379,9 +1407,6 @@ class ConditionEvaluator(ast.NodeVisitor):
             elif isinstance(arg, ast.Constant):
                 # Literal value
                 args.append(str(arg.value))
-            elif hasattr(ast, 'Num') and isinstance(arg, getattr(ast, 'Num', type(None))):
-                # Numeric literal (Python < 3.8) - deprecated but handle gracefully
-                args.append(str(arg.n))
             elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
                 # Pattern variable reference (A.price)
                 args.append(f"{arg.value.id}.{arg.attr}")
@@ -1585,7 +1610,7 @@ class ConditionEvaluator(ast.NodeVisitor):
             
         # Check partition boundaries if defined
         if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-            current_partition = self.context.get_partition_for_row(self.context.current_idx)
+            current_partition = self.context.get_partition_for_row(target_idx)
             target_partition = self.context.get_partition_for_row(target_idx)
             
             if (current_partition is None or target_partition is None or
@@ -1600,20 +1625,38 @@ class ConditionEvaluator(ast.NodeVisitor):
         return node.value
 
     def visit_BoolOp(self, node: ast.BoolOp):
-        """Handle boolean operations (AND, OR)"""
+        """Handle boolean operations (AND, OR) with SQL NULL semantics"""
         if isinstance(node.op, ast.And):
-            # For AND, all values must be True
+            # For AND with SQL semantics:
+            # - If any operand is None (NULL), result is None
+            # - If any operand is False, result is False
+            # - If all operands are True, result is True
+            has_none = False
             for value in node.values:
                 result = self.visit(value)
-                if not result:
+                if result is None:
+                    has_none = True
+                elif not result:  # False (but not None)
                     return False
+            # If we found None but no False, return None
+            if has_none:
+                return None
             return True
         elif isinstance(node.op, ast.Or):
-            # For OR, at least one value must be True
+            # For OR with SQL semantics:
+            # - If any operand is True, result is True
+            # - If any operand is None and no True found, result is None
+            # - If all operands are False, result is False
+            has_none = False
             for value in node.values:
                 result = self.visit(value)
-                if result:
+                if result is True:
                     return True
+                elif result is None:
+                    has_none = True
+            # If we found None but no True, return None
+            if has_none:
+                return None
             return False
         else:
             raise ValueError(f"Unsupported boolean operator: {type(node.op)}")
@@ -1745,7 +1788,6 @@ class ConditionEvaluator(ast.NodeVisitor):
             # If subset variable specified, validate it's a component
             if subset_var and subset_var in self.context.subsets:
                 subset_components = self.context.subsets[subset_var]
-                # Filter to only subset component variables
                 matching_vars = [var for var in matching_vars if var in subset_components]
             
             # Return the first matching variable (or the most appropriate one)
@@ -1820,7 +1862,16 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
             # Evaluate the condition
             try:
                 result = evaluator.visit(tree.body)
-                return bool(result)
+                
+                # Determine if we should return boolean or actual value based on expression structure
+                # If the top-level expression is a boolean operation, comparison, etc., return boolean
+                # If it's a simple value expression (like standalone CLASSIFIER(U)), return the actual value
+                if _is_boolean_expression(tree.body):
+                    return bool(result)
+                else:
+                    # For standalone value expressions, return the actual value
+                    return result
+                        
             except Exception as e:
                 logger.error(f"Error evaluating condition '{condition_str}': {e}")
                 return False
@@ -2129,6 +2180,23 @@ def _evaluate_classifier_navigation(match, context: RowContext, current_idx: int
 def _handle_first_last_classifier_navigation(nav_func: str, classifier_var: Optional[str], steps: int, context: RowContext) -> Any:
     """Handle FIRST/LAST CLASSIFIER navigation."""
     try:
+        # Check if we're in FINAL semantics mode
+        # For FINAL semantics, LAST should return the absolute last classifier, not relative to current position
+        is_final_semantics = False
+        
+        # Try to detect FINAL semantics from evaluator or context
+        if hasattr(context, '_active_evaluator'):
+            evaluator = context._active_evaluator
+            # Check if evaluator is in MEASURES mode, which typically indicates FINAL semantics for LAST
+            if hasattr(evaluator, 'evaluation_mode') and evaluator.evaluation_mode == 'MEASURES':
+                is_final_semantics = True
+        
+        # Alternative: Check if context has semantics information
+        if hasattr(context, '_current_semantics'):
+            is_final_semantics = context._current_semantics == 'FINAL'
+            
+        logger.debug(f"[CLASSIFIER_NAV] {nav_func}(CLASSIFIER({classifier_var}), {steps}) - FINAL semantics: {is_final_semantics}")
+        
         if classifier_var and hasattr(context, 'subsets') and classifier_var in context.subsets:
             # Subset variable navigation
             component_vars = context.subsets[classifier_var]
@@ -2146,10 +2214,21 @@ def _handle_first_last_classifier_navigation(nav_func: str, classifier_var: Opti
                         return None
                     target_idx = all_indices[steps - 1] if steps > 0 else all_indices[0]
                 else:  # LAST
-                    if steps > len(all_indices):
-                        return None
-                    target_idx = all_indices[-steps] if steps > 0 else all_indices[-1]
+                    if is_final_semantics:
+                        # FINAL semantics: always return classifier from the absolute last row
+                        target_idx = all_indices[-1] if all_indices else None
+                        if target_idx is None:
+                            return None
+                    else:
+                        # RUNNING semantics: relative to current position
+                        if not hasattr(context, 'current_idx'):
+                            return None
+                        current_idx = context.current_idx
+                        target_idx = current_idx - steps
+                        if target_idx < 0 or target_idx not in all_indices:
+                            return None
                 
+                logger.debug(f"[CLASSIFIER_NAV] Subset navigation target_idx: {target_idx}")
                 return _get_classifier_at_index(target_idx, classifier_var, context)
         else:
             # General CLASSIFIER navigation
@@ -2166,10 +2245,23 @@ def _handle_first_last_classifier_navigation(nav_func: str, classifier_var: Opti
                         return None
                     target_idx = all_indices[steps - 1] if steps > 0 else all_indices[0]
                 else:  # LAST
-                    if steps > len(all_indices):
-                        return None
-                    target_idx = all_indices[-steps] if steps > 0 else all_indices[-1]
+                    if is_final_semantics:
+                        # FINAL semantics: always return classifier from the absolute last row in the match
+                        target_idx = all_indices[-1] if all_indices else None
+                        if target_idx is None:
+                            return None
+                        logger.debug(f"[CLASSIFIER_NAV] FINAL LAST: using absolute last index {target_idx}")
+                    else:
+                        # RUNNING semantics: relative to current position
+                        if not hasattr(context, 'current_idx'):
+                            return None
+                        current_idx = context.current_idx
+                        target_idx = current_idx - steps
+                        if target_idx < 0:
+                            return None
+                        logger.debug(f"[CLASSIFIER_NAV] RUNNING LAST: using relative index {target_idx} (current={current_idx} - steps={steps})")
                 
+                logger.debug(f"[CLASSIFIER_NAV] General navigation target_idx: {target_idx}")
                 return _get_classifier_at_index(target_idx, None, context)
         
         return None
@@ -2219,10 +2311,18 @@ def _get_classifier_at_index(row_idx: int, subset_var: Optional[str], context: R
             subset_components = context.subsets[subset_var]
             matching_vars = [var for var in matching_vars if var in subset_components]
             if matching_vars:
-                return subset_var  # Return subset name
+                # Return the actual component variable, not the subset name
+                result_var = matching_vars[0]
+                if hasattr(context, 'defined_variables') and context.defined_variables:
+                    if result_var.lower() in [v.lower() for v in context.defined_variables]:
+                        return result_var
+                    else:
+                        return result_var.upper()
+                else:
+                    return result_var.upper()
         
         if matching_vars:
-            # Apply case sensitivity rules
+            # Apply case sensitivity rules for classifier
             result_var = matching_vars[0]
             if hasattr(context, 'defined_variables') and context.defined_variables:
                 if result_var.lower() in [v.lower() for v in context.defined_variables]:
@@ -2396,113 +2496,6 @@ def _evaluate_ast_navigation(expr: str, context: RowContext, current_idx: int, c
         
     except Exception as e:
         logger.debug(f"[NESTED_NAV] AST evaluation failed: {e}")
-        return None
-        
-        # Handle RUNNING/FINAL semantic modifiers with navigation functions
-        # Pattern: PREV(RUNNING LAST(value)) -> PREV(value) with RUNNING semantics
-        running_pattern = r'(PREV|NEXT)\s*\(\s*RUNNING\s+(LAST|FIRST)\s*\(\s*([^)]+)\s*\)\s*(?:,\s*(\d+))?\s*\)'
-        running_match = re.match(running_pattern, processed_expr, re.IGNORECASE)
-        
-        if running_match:
-            outer_func = running_match.group(1).upper()  # PREV or NEXT
-            inner_func = running_match.group(2).upper()  # LAST or FIRST
-            column_ref = running_match.group(3)  # value
-            steps = int(running_match.group(4)) if running_match.group(4) else 1
-            
-            logger.debug(f"Processing {outer_func}(RUNNING {inner_func}({column_ref}))")
-            
-            # For RUNNING semantics, we need to:
-            # 1. First get the RUNNING LAST/FIRST value at current position
-            # 2. Then apply PREV/NEXT to that result
-            
-            if inner_func == "LAST":
-                # RUNNING LAST(value): Get the last value among matched rows up to current position
-                # This should be current row's value for simple cases
-                if current_idx >= 0 and current_idx < len(context.rows):
-                    running_value = context.rows[current_idx].get(column_ref.strip())
-                    logger.debug(f"RUNNING LAST({column_ref}) at index {current_idx}: {running_value}")
-                    
-                    # Now apply PREV/NEXT to this position
-                    if outer_func == "PREV":
-                        target_idx = current_idx - steps
-                    else:  # NEXT
-                        target_idx = current_idx + steps
-                    
-                    # Check bounds and get value
-                    if target_idx >= 0 and target_idx < len(context.rows):
-                        result = context.rows[target_idx].get(column_ref.strip())
-                        logger.debug(f"{outer_func}(RUNNING LAST({column_ref})) -> target_idx={target_idx}, result={result}")
-                        return result
-                    else:
-                        logger.debug(f"{outer_func}(RUNNING LAST({column_ref})) -> target_idx={target_idx} out of bounds")
-                        return None
-                else:
-                    return None
-            elif inner_func == "FIRST":
-                # RUNNING FIRST(value): Similar logic for FIRST
-                if current_idx >= 0 and current_idx < len(context.rows):
-                    # For RUNNING FIRST, we would need to find the first value in the current match sequence
-                    # For simplicity, use current row's value (this may need refinement)
-                    running_value = context.rows[current_idx].get(column_ref.strip())
-                    
-                    # Apply PREV/NEXT
-                    if outer_func == "PREV":
-                        target_idx = current_idx - steps
-                    else:  # NEXT
-                        target_idx = current_idx + steps
-                    
-                    if target_idx >= 0 and target_idx < len(context.rows):
-                        result = context.rows[target_idx].get(column_ref.strip())
-                        return result
-                    else:
-                        return None
-                else:
-                    return None
-        
-        # Handle FINAL semantic modifiers similarly
-        final_pattern = r'(PREV|NEXT)\s*\(\s*FINAL\s+(LAST|FIRST)\s*\(\s*([^)]+)\s*\)\s*(?:,\s*(\d+))?\s*\)'
-        final_match = re.match(final_pattern, processed_expr, re.IGNORECASE)
-        
-        if final_match:
-            # Similar processing for FINAL semantics
-            outer_func = final_match.group(1).upper()
-            inner_func = final_match.group(2).upper()
-            column_ref = final_match.group(3)
-            steps = int(final_match.group(4)) if final_match.group(4) else 1
-            
-            if current_idx >= 0 and current_idx < len(context.rows):
-                if outer_func == "PREV":
-                    target_idx = current_idx - steps
-                else:  # NEXT
-                    target_idx = current_idx + steps
-                
-                if target_idx >= 0 and target_idx < len(context.rows):
-                    result = context.rows[target_idx].get(column_ref.strip())
-                    return result
-                else:
-                    return None
-            else:
-                return None
-        
-        # If no special SQL constructs, try to parse as Python AST
-        tree = ast.parse(processed_expr, mode='eval')
-        
-        # Create a new evaluator for this expression with recursion depth check
-        max_recursion_depth = 10  # Define max recursion depth at function level
-        if recursion_depth >= max_recursion_depth:
-            logger.warning(f"Maximum recursion depth {max_recursion_depth} reached for expression: '{expr}', returning None")
-            return None
-            
-        evaluator = ConditionEvaluator(context, evaluation_mode='MEASURES', recursion_depth=recursion_depth + 1)
-        
-        # Evaluate the parsed expression
-        result = evaluator.visit(tree.body)
-        
-        logger.debug(f"Nested navigation evaluation: '{expr}' -> {result}")
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error evaluating nested navigation '{expr}': {e}")
         return None
 
 
@@ -2679,3 +2672,40 @@ def _sql_to_python_condition(condition: str) -> str:
         condition = condition.replace(placeholder, original_string)
     
     return condition
+
+def _is_boolean_expression(node):
+    """
+    Determine if an AST node represents a boolean expression that should return True/False
+    vs a value expression that should return the actual value.
+    
+    Args:
+        node: AST node to analyze
+        
+    Returns:
+        True if the expression should return a boolean, False if it should return actual value
+    """
+    if isinstance(node, (ast.Compare, ast.BoolOp, ast.UnaryOp)):
+        # Comparison operations (=, <, >, IN, etc.), boolean operations (AND, OR), 
+        # or unary operations (NOT) should return boolean
+        return True
+    elif isinstance(node, ast.IfExp):
+        # Conditional expressions (CASE WHEN) should return boolean if both branches are boolean
+        return _is_boolean_expression(node.body) and _is_boolean_expression(node.orelse)
+    elif isinstance(node, ast.Call):
+        # Function calls - need to check the function name
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            # Navigation functions and CLASSIFIER should return actual values
+            if func_name in ('CLASSIFIER', 'PREV', 'NEXT', 'FIRST', 'LAST'):
+                return False
+            # Boolean functions should return boolean
+            elif func_name in ('EXISTS', 'IS_NULL', 'IS_NOT_NULL'):
+                return True
+        # Default for unknown functions: return boolean for safety
+        return True
+    elif isinstance(node, (ast.Name, ast.Attribute, ast.Constant)):
+        # Simple values should return their actual value
+        return False
+    else:
+        # For unknown node types, default to boolean for safety
+        return True

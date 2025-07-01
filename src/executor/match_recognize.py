@@ -59,10 +59,14 @@ def _create_dataframe_with_preserved_types(results: List[Dict[str, Any]]) -> pd.
     # Determine appropriate dtype for each column
     for col, values in column_data.items():
         has_none = any(v is None for v in values)
+        has_bool = any(isinstance(v, bool) for v in values)
         non_none_values = [v for v in values if v is not None]
         
         if has_none:
             # If column has None values, use object dtype to preserve them
+            column_dtypes[col] = 'object'
+        elif has_bool:
+            # If column has boolean values, use object dtype to preserve them
             column_dtypes[col] = 'object'
         elif non_none_values:
             # Try to infer the best dtype for non-None values
