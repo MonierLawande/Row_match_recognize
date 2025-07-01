@@ -1381,9 +1381,9 @@ class NFABuilder:
             self.metadata["variables_with_quantifiers"] = vars_with_quantifiers
         
         # Check for alternation (|) - important for pattern compilation strategy
-        has_alternation = any(t.type == PatternTokenType.ALTERNATION for t in tokens)
-        if has_alternation:
-            self.metadata["has_alternation"] = True
+        has_alternations = any(t.type == PatternTokenType.ALTERNATION for t in tokens)
+        if has_alternations:
+            self.metadata["has_alternations"] = True
         
         # Check for pattern structures that allow empty matches
         allows_empty = False
