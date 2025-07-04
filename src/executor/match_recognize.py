@@ -1101,6 +1101,37 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         if '_sort_key' in result_df.columns:
                             result_df = result_df.drop('_sort_key', axis=1)
                 
+                # Apply outer ORDER BY clause if present (for ONE ROW PER MATCH mode)
+                if ast.order_by_clause and ast.order_by_clause.sort_items:
+                    logger.debug(f"Applying outer ORDER BY clause: {ast.order_by_clause}")
+                    logger.debug(f"Available result columns: {list(result_df.columns)}")
+                    outer_sort_columns = []
+                    for sort_item in ast.order_by_clause.sort_items:
+                        column = sort_item.column
+                        logger.debug(f"Checking outer ORDER BY column: '{column}'")
+                        if column in result_df.columns:
+                            outer_sort_columns.append(column)
+                            logger.debug(f"Found column '{column}' in result, adding to sort columns")
+                        else:
+                            logger.warning(f"Outer ORDER BY column '{column}' not found in result columns: {list(result_df.columns)}")
+                    
+                    if outer_sort_columns:
+                        # Determine sort order (ascending vs descending)
+                        ascending_list = []
+                        for sort_item in ast.order_by_clause.sort_items:
+                            if sort_item.column in outer_sort_columns:
+                                ascending_list.append(sort_item.ordering.upper() == 'ASC')
+                        
+                        logger.debug(f"Sorting final result by outer ORDER BY: columns={outer_sort_columns}, ascending={ascending_list}")
+                        logger.debug(f"Before sorting: categories={list(result_df['category'])}")
+                        result_df = result_df.sort_values(by=outer_sort_columns, ascending=ascending_list)
+                        result_df.reset_index(drop=True, inplace=True)
+                        logger.debug(f"After sorting: categories={list(result_df['category'])}")
+                    else:
+                        logger.warning("No valid outer ORDER BY columns found")
+                else:
+                    logger.debug("No outer ORDER BY clause found")
+                
                 metrics["result_processing_time"] = time.time() - processing_start
                 metrics["total_time"] = time.time() - start_time
                 return result_df[ordered_cols]
@@ -1505,6 +1536,37 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 # Remove temporary sorting columns
                 if '_original_row_idx' in result_df.columns:
                     result_df = result_df.drop('_original_row_idx', axis=1)
+                
+                # Apply outer ORDER BY clause if present
+                if ast.order_by_clause and ast.order_by_clause.sort_items:
+                    logger.debug(f"Applying outer ORDER BY clause: {ast.order_by_clause}")
+                    logger.debug(f"Available result columns: {list(result_df.columns)}")
+                    outer_sort_columns = []
+                    for sort_item in ast.order_by_clause.sort_items:
+                        column = sort_item.column
+                        logger.debug(f"Checking outer ORDER BY column: '{column}'")
+                        if column in result_df.columns:
+                            outer_sort_columns.append(column)
+                            logger.debug(f"Found column '{column}' in result, adding to sort columns")
+                        else:
+                            logger.warning(f"Outer ORDER BY column '{column}' not found in result columns: {list(result_df.columns)}")
+                    
+                    if outer_sort_columns:
+                        # Determine sort order (ascending vs descending)
+                        ascending_list = []
+                        for sort_item in ast.order_by_clause.sort_items:
+                            if sort_item.column in outer_sort_columns:
+                                ascending_list.append(sort_item.ordering.upper() == 'ASC')
+                        
+                        logger.debug(f"Sorting final result by outer ORDER BY: columns={outer_sort_columns}, ascending={ascending_list}")
+                        logger.debug(f"Before sorting: categories={list(result_df['category'])}")
+                        result_df = result_df.sort_values(by=outer_sort_columns, ascending=ascending_list)
+                        result_df.reset_index(drop=True, inplace=True)
+                        logger.debug(f"After sorting: categories={list(result_df['category'])}")
+                    else:
+                        logger.warning("No valid outer ORDER BY columns found")
+                else:
+                    logger.debug("No outer ORDER BY clause found")
                 
                 metrics["result_processing_time"] = time.time() - processing_start
                 metrics["total_time"] = time.time() - start_time

@@ -666,6 +666,7 @@ class FullQueryAST(ASTNode):
     select_clause: Optional[SelectClause]
     from_clause: Optional[FromClause]
     match_recognize: Optional[MatchRecognizeClause]
+    order_by_clause: Optional[OrderByClause] = None
     metadata: Dict = field(default_factory=dict)
 
     def __repr__(self):
@@ -673,4 +674,5 @@ class FullQueryAST(ASTNode):
                 f"  select_clause={self.select_clause},\n"
                 f"  from_clause={self.from_clause},\n"
                 f"  match_recognize={self.match_recognize},\n"
+                f"  order_by_clause={self.order_by_clause},\n"
                 f"  metadata={self.metadata}\n)")

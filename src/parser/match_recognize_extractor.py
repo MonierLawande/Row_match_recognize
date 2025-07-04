@@ -1010,6 +1010,7 @@ class FullQueryExtractor(TrinoParserVisitor):
         self.select_clause = None
         self.from_clause = None
         self.match_recognize = None
+        self.order_by_clause = None
 
     def visitParse(self, ctx: TrinoParser.ParseContext):
         return self.visitChildren(ctx)
@@ -1029,6 +1030,36 @@ class FullQueryExtractor(TrinoParserVisitor):
             logger.debug(f"Extracted FROM clause: {self.from_clause}")
         else:
             logger.warning("No FROM clause found via regex.")
+            
+        # Parse outer ORDER BY clause
+        order_by_match = re.search(r'(?i)\)\s*ORDER\s+BY\s+([^;]+)', full_text)
+        if order_by_match:
+            order_by_text = order_by_match.group(1).strip()
+            logger.debug(f"Found outer ORDER BY clause: {order_by_text}")
+            # Parse the ORDER BY clause
+            sort_items = []
+            columns = [col.strip() for col in order_by_text.split(',')]
+            for col in columns:
+                # Handle ASC/DESC and column references like m.category
+                col_match = re.match(r'(.+?)\s+(ASC|DESC)$', col, re.IGNORECASE)
+                if col_match:
+                    column_name = col_match.group(1).strip()
+                    ordering = col_match.group(2).upper()
+                else:
+                    column_name = col.strip()
+                    ordering = "ASC"
+                
+                # Remove table alias prefix (e.g., m.category -> category)
+                if '.' in column_name:
+                    column_name = column_name.split('.')[-1]
+                    
+                sort_items.append(SortItem(column_name, ordering))
+                
+            self.order_by_clause = OrderByClause(sort_items)
+            logger.debug(f"Extracted outer ORDER BY clause: {self.order_by_clause}")
+        else:
+            logger.debug("No outer ORDER BY clause found.")
+            
         self.match_recognize = self.find_pattern_recognition(ctx)
         if self.match_recognize:
             extractor = MatchRecognizeExtractor()
@@ -1037,7 +1068,7 @@ class FullQueryExtractor(TrinoParserVisitor):
             logger.debug("Extracted MATCH_RECOGNIZE clause via recursive search.")
         else:
             logger.debug("No MATCH_RECOGNIZE clause found.")
-        return FullQueryAST(self.select_clause, self.from_clause, self.match_recognize)
+        return FullQueryAST(self.select_clause, self.from_clause, self.match_recognize, self.order_by_clause)
 
     def find_pattern_recognition(self, ctx):
         if not hasattr(ctx, "getChildren"):
@@ -1085,8 +1116,12 @@ def parse_full_query(query: str, dialect='default') -> FullQueryAST:
     parser.addErrorListener(CustomErrorListener())
     tree = parser.parse()
     extractor = FullQueryExtractor(query)
-    extractor.visit(tree)
-    return FullQueryAST(extractor.select_clause, extractor.from_clause, extractor.match_recognize)
+    result = extractor.visit(tree)
+    # Use the result from visitSingleStatement which includes the order_by_clause
+    if result:
+        return result
+    # Fallback to the previous behavior if visit doesn't return anything
+    return FullQueryAST(extractor.select_clause, extractor.from_clause, extractor.match_recognize, extractor.order_by_clause)
 
 
 def _preprocess_query_for_parser(query: str) -> str:
