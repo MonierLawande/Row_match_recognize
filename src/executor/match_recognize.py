@@ -593,14 +593,15 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     # For ALL ROWS mode, apply SQL:2016 default semantics
                     expr_upper = expr.upper().strip()
                     
-                    # Navigation functions default to FINAL semantics per SQL:2016
+                    # Navigation functions in ALL ROWS PER MATCH default to RUNNING semantics
+                    # when no explicit RUNNING/FINAL is specified (SQL:2016 compliance)
                     if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        measure_semantics[alias] = "FINAL"
-                        logger.debug(f"Navigation function: FINAL semantics for measure {alias}: {expr}")
+                        measure_semantics[alias] = "RUNNING"
+                        logger.debug(f"Navigation function: RUNNING semantics for measure {alias}: {expr}")
                     elif re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        # Expressions containing navigation functions also use FINAL per SQL:2016
-                        measure_semantics[alias] = "FINAL" 
-                        logger.debug(f"Expression with navigation function: FINAL semantics for measure {alias}: {expr}")
+                        # Expressions containing navigation functions also use RUNNING by default
+                        measure_semantics[alias] = "RUNNING" 
+                        logger.debug(f"Expression with navigation function: RUNNING semantics for measure {alias}: {expr}")
                     elif explicit_semantics_found:
                         # In mixed semantics queries, implicit measures default to FINAL per SQL:2016
                         measure_semantics[alias] = "FINAL"
@@ -671,7 +672,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     subsets=subset_dict,
                     original_pattern=pattern_text,
                     defined_variables=list(define.keys()),
-                    define_conditions=define
+                    define_conditions=define,
+                    partition_columns=partition_by,
+                    order_columns=order_by
                 )
             else:
                 # Cache miss - compile pattern and cache the result
@@ -705,7 +708,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     subsets=subset_dict,
                     original_pattern=pattern_text,
                     defined_variables=list(define.keys()),
-                    define_conditions=define
+                    define_conditions=define,
+                    partition_columns=partition_by,
+                    order_columns=order_by
                 )
                 
         except Exception as e:
@@ -862,89 +867,16 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             
             # Handle ONE ROW PER MATCH mode
             if rows_per_match == RowsPerMatch.ONE_ROW:
-                # Create a list to hold the final result rows
-                final_results = []
-                
-                # Process each match
-                for match in all_matches:
-                    match_num = match.get("match_number")
-                    
-                    # Handle empty match case
-                    if match.get("is_empty", False) or (match["start"] > match["end"]):
-                        if match["start"] < len(all_rows):
-                            empty_row = _process_empty_match(match["start"], all_rows, measures, match_num, partition_by)
-                            if empty_row:
-                                final_results.append(empty_row)
-                        continue
-                    
-                    # Create a new result row
-                    result_row = {}
-                    
-                    # Determine which columns we need based on SELECT clause
-                    needed_data_columns = set()
-                    is_select_star = False
-                    
-                    if ast.select_clause and ast.select_clause.items:
-                        # Check if this is a SELECT * query
-                        is_select_star = any(item.expression == '*' for item in ast.select_clause.items)
-                        
-                        if is_select_star:
-                            # For SELECT *, include all original data columns
-                            if match["start"] < len(all_rows):
-                                needed_data_columns.update(all_rows[match["start"]].keys())
-                        else:
-                            # Get all measure expressions (not just aliases)
-                            measure_expressions = set(measures.values()) if measures else set()
-                            
-                            for item in ast.select_clause.items:
-                                expression = item.expression.split('.')[-1] if '.' in item.expression else item.expression
-                                # Only include data columns that are not measures or special functions
-                                if (expression not in measures and 
-                                    expression not in measure_expressions and 
-                                    expression not in ['MATCH_NUMBER()', 'CLASSIFIER()']):
-                                    needed_data_columns.add(expression)
-                    else:
-                        # Fallback: include partition columns if no SELECT clause
-                        needed_data_columns.update(partition_by)
-                    
-                    # Add only the needed data columns from original rows
-                    if match["start"] < len(all_rows):
-                        start_row = all_rows[match["start"]]
-                        for col in needed_data_columns:
-                            if col in start_row:
-                                result_row[col] = start_row[col]
-                    
-                    # Create context for measure evaluation
-                    context = RowContext()
-                    context.rows = all_rows
-                    context.variables = match.get("variables", {})
-                    context.match_number = match_num
-                    context.current_idx = match["end"]  # Use the last row for FINAL semantics
-                    context.subsets = subset_dict.copy() if subset_dict else {}
-                    
-                    # Set pattern_variables for PERMUTE patterns
-                    if isinstance(pattern_text, str) and 'PERMUTE' in pattern_text:
-                        permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', pattern_text, re.IGNORECASE)
-                        if permute_match:
-                            context.pattern_variables = [v.strip() for v in permute_match.group(1).split(',')]
-                    elif hasattr(mr_clause.pattern, 'metadata'):
-                        context.pattern_variables = mr_clause.pattern.metadata.get('base_variables', [])
-                    
-                    # Create evaluator and process measures
-                    evaluator = MeasureEvaluator(context, final=True)
-                    for alias, expr in measures.items():
-                        try:
-                            semantics = measure_semantics.get(alias, "FINAL")
-                            result_row[alias] = evaluator.evaluate(expr, semantics)
-                            logger.debug(f"Setting {alias} to {result_row[alias]} from evaluator")
-                        except Exception as e:
-                            logger.warning(f"Error evaluating measure {alias}: {e}")
-                            result_row[alias] = None
-                    
-                    final_results.append(result_row)
-                
-                # Create DataFrame with the final results
-                result_df = pd.DataFrame(final_results)
+                # For ONE ROW PER MATCH, use the results from the matcher
+                # The matcher already produces one result per match with correct measures
+                if results:
+                    result_df = pd.DataFrame(results)
+                else:
+                    # Handle empty results case
+                    columns = _get_empty_result_columns(ast, partition_by, measures)
+                    metrics["result_processing_time"] = time.time() - processing_start
+                    metrics["total_time"] = time.time() - start_time
+                    return pd.DataFrame(columns=columns)
                 
                 # Handle empty result case
                 if result_df.empty:
@@ -1045,10 +977,23 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         
                         for item in ast.select_clause.items:
                             expression = item.expression.split('.')[-1] if '.' in item.expression else item.expression
-                            alias = item.alias if item.alias else expression
                             
-                            # Track the mapping for renaming
-                            if item.alias and expression != alias:
+                            # Handle CAST expressions properly - extract the alias if present
+                            if item.alias:
+                                # If there's an explicit alias, use it as the final column name
+                                alias = item.alias
+                                # For CAST expressions, the underlying column should still be the alias
+                                # since that's what will be in the result DataFrame from the matcher
+                                underlying_column = item.alias
+                            else:
+                                # No explicit alias, so the column name is the expression itself
+                                # For CAST expressions without alias, this might be complex, but typically
+                                # CAST expressions should have an alias in MATCH_RECOGNIZE
+                                alias = expression
+                                underlying_column = expression
+                            
+                            # Track the mapping for renaming (if needed)
+                            if item.alias and expression != alias and not expression.upper().startswith('CAST('):
                                 column_alias_map[expression] = alias
                             
                             # Add to select columns (use alias when available)
@@ -1075,6 +1020,24 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     ordered_cols.extend(partition_by)  # Partition columns first
                     if mr_clause.measures:
                         ordered_cols.extend([m.alias for m in mr_clause.measures.measures if m.alias])
+                
+                # Ensure ALL measure columns are present in result_df (even if they weren't calculated)
+                for alias in measures.keys():
+                    if alias not in result_df.columns:
+                        # Add missing measure column with default values (None or 0)
+                        logger.warning(f"Adding missing measure column '{alias}' with default values")
+                        
+                        # Use appropriate default based on the measure expression
+                        measure_expr = measures[alias].lower()
+                        if 'count' in measure_expr:
+                            default_value = 0  # COUNT defaults to 0
+                        elif 'sum' in measure_expr or 'coalesce' in measure_expr:
+                            default_value = 0  # SUM and COALESCE defaults to 0
+                        else:
+                            default_value = None  # Other measures default to None
+                        
+                        result_df[alias] = [default_value] * len(result_df)
+                        logger.info(f"Added measure column '{alias}' with default value {default_value}")
                 
                 # Only keep columns that exist in the result
                 ordered_cols = [col for col in ordered_cols if col in result_df.columns]
@@ -1318,6 +1281,30 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         logger.debug(f"  Measure '{alias}' exists with values: {result_df[alias].head(3).tolist()}")
                     else:
                         logger.debug(f"  Measure '{alias}' is MISSING from result DataFrame")
+                
+                # Ensure ALL measure columns are present (even if they weren't calculated)
+                for alias in measures.keys():
+                    if alias not in result_df.columns:
+                        # Add missing measure column with default values (None or 0)
+                        logger.warning(f"Adding missing measure column '{alias}' with default values")
+                        
+                        # Try to find values in the raw results first
+                        values = []
+                        for i, row in enumerate(sorted_results):
+                            if alias in row and row[alias] is not None:
+                                values.append(row[alias])
+                            else:
+                                # Use appropriate default based on the measure expression
+                                measure_expr = measures[alias].expression.lower()
+                                if 'count' in measure_expr:
+                                    values.append(0)  # COUNT defaults to 0
+                                elif 'sum' in measure_expr or 'coalesce' in measure_expr:
+                                    values.append(0)  # SUM and COALESCE defaults to 0
+                                else:
+                                    values.append(None)  # Other measures default to None
+                        
+                        result_df[alias] = values
+                        logger.info(f"  Added measure column '{alias}' with {len(values)} values")
                 
                 # Ensure measure columns are properly preserved
                 for alias in measures.keys():

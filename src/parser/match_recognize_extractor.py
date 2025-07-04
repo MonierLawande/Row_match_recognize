@@ -150,14 +150,53 @@ def parse_select_clause(full_text: str) -> SelectClause:
     items = []
     for item in items_raw:
         item = post_process_text(item)
-        alias_match = re.search(r'(?i)^(.+?)\s+AS\s+(.+)$', item)
-        if alias_match:
-            expr = post_process_text(alias_match.group(1))
-            alias = post_process_text(alias_match.group(2))
+        
+        # Find the last occurrence of ' AS ' that's not inside parentheses
+        expr, alias = extract_expression_and_alias(item)
+        if alias:
             items.append(SelectItem(expr, alias))
         else:
             items.append(SelectItem(item))
     return SelectClause(items)
+
+
+def extract_expression_and_alias(item: str) -> tuple:
+    """
+    Extract expression and alias from a SELECT item, handling nested parentheses correctly.
+    Returns (expression, alias) tuple where alias is None if no alias found.
+    """
+    # Find all occurrences of ' AS ' (case insensitive)
+    as_pattern = re.compile(r'\s+AS\s+', re.IGNORECASE)
+    matches = list(as_pattern.finditer(item))
+    
+    if not matches:
+        return item, None
+    
+    # Check each match from right to left to find the outermost alias
+    for match in reversed(matches):
+        potential_expr = item[:match.start()].strip()
+        potential_alias = item[match.end():].strip()
+        
+        # Check if this AS is at the top level (not inside parentheses)
+        if is_top_level_as(item, match.start()):
+            return potential_expr, potential_alias
+    
+    # If no top-level AS found, treat as no alias
+    return item, None
+
+
+def is_top_level_as(text: str, as_position: int) -> bool:
+    """
+    Check if the AS at the given position is at the top level (not inside parentheses).
+    """
+    paren_level = 0
+    for i, char in enumerate(text[:as_position]):
+        if char == '(':
+            paren_level += 1
+        elif char == ')':
+            paren_level -= 1
+    
+    return paren_level == 0
 
 
 class MatchRecognizeExtractor(TrinoParserVisitor):

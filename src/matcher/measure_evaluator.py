@@ -1429,8 +1429,12 @@ class MeasureEvaluator:
                 
                 # Collect all row indices from all matched variables
                 all_indices = []
-                for var_name in self.context.variables:
-                    var_indices = self.context.variables[var_name]
+                
+                # Use full variables if available for FIRST/LAST navigation
+                variables_to_use = getattr(self.context, '_full_match_variables', None) or self.context.variables
+                
+                for var_name in variables_to_use:
+                    var_indices = variables_to_use[var_name]
                     all_indices.extend(var_indices)
                 
                 # Sort indices to ensure correct order and remove duplicates
@@ -1440,10 +1444,16 @@ class MeasureEvaluator:
                 # For navigation functions like FIRST(value), LAST(value),
                 # the behavior differs based on RUNNING vs FINAL semantics:
                 
-                # For RUNNING semantics, always filter indices to only include rows up to current position
-                # For FINAL semantics, use complete match indices
+                # For RUNNING semantics with FIRST function:
+                # - FIRST(value) should only consider rows up to current position
+                # - FIRST(value, N) with offset should use full match if available, since it's positional navigation
                 if is_running:
-                    all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
+                    if func_name == 'FIRST' and offset > 0:
+                        # For FIRST with offset, allow access to full match for positional navigation
+                        pass  # Keep all_indices as is (full match)
+                    else:
+                        # For FIRST without offset or LAST, filter to current position
+                        all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
                 
                 if func_name == 'FIRST':
                     # SQL:2016 LOGICAL NAVIGATION: FIRST(value, N) 

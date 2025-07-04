@@ -722,7 +722,9 @@ class EnhancedMatcher:
                  subsets: Optional[Dict[str, List[str]]] = None,
                  original_pattern: Optional[str] = None,
                  defined_variables: Optional[Set[str]] = None,
-                 define_conditions: Optional[Dict[str, str]] = None):
+                 define_conditions: Optional[Dict[str, str]] = None,
+                 partition_columns: Optional[List[str]] = None,
+                 order_columns: Optional[List[str]] = None):
         """
         Initialize the enhanced matcher with comprehensive validation and configuration.
         
@@ -736,6 +738,8 @@ class EnhancedMatcher:
             original_pattern: Original pattern text for debugging and optimization
             defined_variables: Set of variables explicitly defined in DEFINE clause
             define_conditions: Actual DEFINE condition expressions
+            partition_columns: List of partition column names from PARTITION BY clause
+            order_columns: List of order column names from ORDER BY clause
             
         Raises:
             ValueError: If DFA is invalid or configuration is inconsistent
@@ -759,6 +763,8 @@ class EnhancedMatcher:
         self.original_pattern = original_pattern
         self.defined_variables = set(defined_variables) if defined_variables else set()
         self.define_conditions = define_conditions or {}
+        self.partition_columns = partition_columns or []
+        self.order_columns = order_columns or []
         
         # Performance tracking
         self.timing = defaultdict(float)
@@ -2794,7 +2800,12 @@ class EnhancedMatcher:
 
         # Add partition columns if available
         start_row = rows[match["start"]]
-        for col in ['department', 'region']:  # Common partition columns
+        for col in self.partition_columns:
+            if col in start_row:
+                result[col] = start_row[col]
+        
+        # Add order columns if available (for proper column ordering in ONE ROW PER MATCH)
+        for col in self.order_columns:
             if col in start_row:
                 result[col] = start_row[col]
         
@@ -3200,6 +3211,8 @@ class EnhancedMatcher:
                                 running_variables[var_name] = running_indices
                         
                         running_context.variables = running_variables
+                        # Store full variables for forward navigation (NEXT operations)
+                        running_context._full_match_variables = full_variables
                         logger.debug(f"DEBUG: Row {idx} - Full variables: {full_variables}, Running variables: {running_variables}")
                         
                         # Create evaluator with running context

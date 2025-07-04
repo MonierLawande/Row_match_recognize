@@ -2298,8 +2298,12 @@ def _get_classifier_at_index(row_idx: int, subset_var: Optional[str], context: R
         
         # Find which variable(s) this row belongs to
         matching_vars = []
-        if hasattr(context, 'variables'):
-            for var_name, indices in context.variables.items():
+        
+        # Use full variables for forward navigation if available
+        variables_to_search = getattr(context, '_full_match_variables', None) or getattr(context, 'variables', {})
+        
+        if variables_to_search:
+            for var_name, indices in variables_to_search.items():
                 if row_idx in indices:
                     matching_vars.append(var_name)
         
