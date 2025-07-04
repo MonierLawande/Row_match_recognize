@@ -168,8 +168,12 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
         if subsets and var_name in subsets:
             components = subsets[var_name]
             
-            # For subset variables, use the first component that has assignments
-            # This follows the SQL standard where subset variables reference the first matching component
+            # CRITICAL FIX: For subset variables, SQL:2016 standard specifies returning the value 
+            # from the LAST matching variable in the subset (not first).
+            # This is essential for PERMUTE patterns with subset variables.
+            last_component_value = None
+            last_component_idx = -1
+            
             for component in components:
                 if component in var_assignments and var_assignments[component]:
                     var_indices = var_assignments[component]
@@ -181,16 +185,17 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
                             continue  # Try next component
                         var_indices = valid_indices
                     
-                    if var_indices and var_indices[0] < len(all_rows):
-                        value = all_rows[var_indices[0]].get(col_name)
-                        if cache is not None:
-                            cache[cache_key] = value
-                        return True, value
+                    if var_indices:
+                        # Use the LAST index for this component (SQL:2016 standard)
+                        component_idx = max(var_indices)
+                        if component_idx < len(all_rows) and component_idx > last_component_idx:
+                            last_component_idx = component_idx
+                            last_component_value = all_rows[component_idx].get(col_name)
             
-            # No valid component found
+            # Return the value from the component with the highest (last) index
             if cache is not None:
-                cache[cache_key] = None
-            return True, None
+                cache[cache_key] = last_component_value
+            return True, last_component_value
         
         # Direct variable lookup
         var_indices = var_assignments.get(var_name, [])
