@@ -147,7 +147,7 @@ class ProductionAggregateEvaluator:
         'ARRAY_AGG', 'STRING_AGG', 'MAX_BY', 'MIN_BY', 'COUNT_IF',
         'SUM_IF', 'AVG_IF', 'BOOL_AND', 'BOOL_OR', 'LISTAGG',
         'FIRST_VALUE', 'LAST_VALUE', 'COUNT_DISTINCT',
-        'APPROX_DISTINCT', 'APPROX_PERCENTILE', 'GEOMETRIC_MEAN', 'HARMONIC_MEAN'
+        'APPROX_DISTINCT', 'APPROX_PERCENTILE', 'PERCENTILE_APPROX', 'GEOMETRIC_MEAN', 'HARMONIC_MEAN'
     }
     
     # Mathematical functions that can wrap aggregates
@@ -170,7 +170,7 @@ class ProductionAggregateEvaluator:
     # Functions that support multiple arguments
     MULTI_ARG_FUNCTIONS = {
         'MAX_BY': 2, 'MIN_BY': 2, 'STRING_AGG': 2, 'COUNT_IF': 1, 'SUM_IF': 2, 'AVG_IF': 2,
-        'APPROX_PERCENTILE': 2
+        'APPROX_PERCENTILE': 2, 'PERCENTILE_APPROX': 2
     }
     
     # Functions that support DISTINCT modifier
@@ -353,7 +353,7 @@ class ProductionAggregateEvaluator:
                         result = self._evaluate_listagg(arguments, is_running, filter_condition)
                     elif func_name in ("FIRST_VALUE", "LAST_VALUE"):
                         result = self._evaluate_window_functions(func_name, arguments, is_running, filter_condition)
-                    elif func_name in ("APPROX_DISTINCT", "APPROX_PERCENTILE"):
+                    elif func_name in ("APPROX_DISTINCT", "APPROX_PERCENTILE", "PERCENTILE_APPROX"):
                         result = self._evaluate_approximate_functions(func_name, arguments, is_running, filter_condition)
                     elif func_name in ("GEOMETRIC_MEAN", "HARMONIC_MEAN"):
                         result = self._evaluate_statistical_means(func_name, arguments, is_running, filter_condition)
@@ -464,19 +464,41 @@ class ProductionAggregateEvaluator:
             logger.debug(f"Found FILTER clause: {filter_condition}")
         
         # Now parse the main aggregate function
-        # Enhanced pattern to handle complex arguments including nested functions
-        pattern = r'([A-Z_]+)\s*\(\s*(.*)\s*\)$'
-        match = re.match(pattern, clean_expr, re.IGNORECASE)
+        # Enhanced pattern to handle window functions with OVER clauses
+        # First try to match window function syntax: FUNCTION(args) OVER (...)
+        window_pattern = r'([A-Z_]+)\s*\(\s*(.*?)\s*\)\s+OVER\s*\(\s*(.*?)\s*\)$'
+        window_match = re.match(window_pattern, clean_expr, re.IGNORECASE)
+        
+        if window_match:
+            # Handle window function
+            func_name = window_match.group(1).upper()
+            args_str = window_match.group(2).strip()
+            over_clause = window_match.group(3).strip()
+            
+            # Parse arguments and add the OVER clause to the arguments for processing
+            arguments = self._parse_function_arguments(args_str) if args_str else []
+            
+            # Add the OVER clause as part of the first argument for window function processing
+            if arguments:
+                arguments[0] = f"{arguments[0]} OVER ({over_clause})"
+            else:
+                arguments = [f"column OVER ({over_clause})"]  # fallback
+                
+            match = window_match
+        else:
+            # Fall back to regular function pattern
+            pattern = r'([A-Z_]+)\s*\(\s*(.*)\s*\)$'
+            match = re.match(pattern, clean_expr, re.IGNORECASE)
+            
+            if match:
+                func_name = match.group(1).upper()
+                args_str = match.group(2).strip()
+                # Parse arguments (handling nested parentheses)
+                arguments = self._parse_function_arguments(args_str) if args_str else []
         
         if not match:
             logger.debug(f"Failed to parse aggregate function: {expr} (cleaned: {clean_expr})")
             return None
-        
-        func_name = match.group(1).upper()
-        args_str = match.group(2).strip()
-        
-        # Parse arguments (handling nested parentheses)
-        arguments = self._parse_function_arguments(args_str) if args_str else []
         
         result = {
             'function': func_name,
@@ -752,7 +774,7 @@ class ProductionAggregateEvaluator:
             return self._evaluate_listagg(arguments, is_running, filter_condition)
         elif func_name in ("FIRST_VALUE", "LAST_VALUE"):
             return self._evaluate_window_functions(func_name, arguments, is_running, filter_condition)
-        elif func_name in ("APPROX_DISTINCT", "APPROX_PERCENTILE"):
+        elif func_name in ("APPROX_DISTINCT", "APPROX_PERCENTILE", "PERCENTILE_APPROX"):
             return self._evaluate_approximate_functions(func_name, arguments, is_running, filter_condition)
         elif func_name in ("GEOMETRIC_MEAN", "HARMONIC_MEAN"):
             return self._evaluate_statistical_means(func_name, arguments, is_running, filter_condition)
@@ -1647,7 +1669,7 @@ class ProductionAggregateEvaluator:
         return converted
 
     def _evaluate_approximate_functions(self, func_name: str, arguments: List[str], is_running: bool, filter_condition: str = None) -> Any:
-        """Evaluate approximate aggregation functions (APPROX_DISTINCT, APPROX_PERCENTILE)."""
+        """Evaluate approximate aggregation functions (APPROX_DISTINCT, APPROX_PERCENTILE, PERCENTILE_APPROX)."""
         if func_name == "APPROX_DISTINCT":
             if len(arguments) != 1:
                 raise AggregateArgumentError(f"APPROX_DISTINCT requires exactly 1 argument, got {len(arguments)}")
@@ -1663,9 +1685,9 @@ class ProductionAggregateEvaluator:
             
             return len(unique_values)
             
-        elif func_name == "APPROX_PERCENTILE":
+        elif func_name in ("APPROX_PERCENTILE", "PERCENTILE_APPROX"):
             if len(arguments) != 2:
-                raise AggregateArgumentError(f"APPROX_PERCENTILE requires exactly 2 arguments, got {len(arguments)}")
+                raise AggregateArgumentError(f"{func_name} requires exactly 2 arguments, got {len(arguments)}")
             
             # Get numeric values
             values = self._get_numeric_values(arguments[0], is_running)
@@ -1756,6 +1778,81 @@ class ProductionAggregateEvaluator:
         
         else:
             raise AggregateValidationError(f"Unsupported statistical mean function: {func_name}")
+    
+    def _evaluate_window_functions(self, func_name: str, arguments: List[str], is_running: bool, filter_condition: str = None) -> Any:
+        """
+        Evaluate window functions like FIRST_VALUE and LAST_VALUE.
+        
+        In MATCH_RECOGNIZE context, window functions with OVER clauses work within the current match context.
+        For RUNNING aggregates, they only see values up to the current row.
+        
+        Args:
+            func_name: The window function name (FIRST_VALUE, LAST_VALUE)
+            arguments: Function arguments
+            is_running: Whether this is a RUNNING aggregate
+            filter_condition: Optional FILTER WHERE condition
+            
+        Returns:
+            The result of the window function evaluation
+        """
+        if not arguments:
+            return None
+        
+        # Extract the main expression (ignoring OVER clauses for now)
+        expression = arguments[0]
+        
+        # Parse OVER clause if present in the expression
+        over_match = re.search(r'\s+OVER\s*\(\s*ORDER\s+BY\s+([^)]+)\s*\)', expression, re.IGNORECASE)
+        if over_match:
+            # Extract the ORDER BY column and determine sort direction
+            order_clause = over_match.group(1).strip()
+            is_desc = "DESC" in order_clause.upper()
+            order_column = re.sub(r'\s+(ASC|DESC)\s*$', '', order_clause, flags=re.IGNORECASE).strip()
+            
+            # Remove the OVER clause from the main expression
+            main_expression = re.sub(r'\s+OVER\s*\([^)]+\)', '', expression, flags=re.IGNORECASE).strip()
+            
+            # Get the values for both the main expression and order column
+            main_values = self._get_expression_values(main_expression, is_running)
+            order_values = self._get_expression_values(order_column, is_running)
+            
+            if not main_values or not order_values or len(main_values) != len(order_values):
+                return None
+            
+            # Create pairs and sort by order column
+            paired_values = list(zip(main_values, order_values))
+            
+            try:
+                if func_name == "FIRST_VALUE":
+                    # Sort and get the first value (minimum for ASC, maximum for DESC)
+                    if is_desc:
+                        sorted_pairs = sorted(paired_values, key=lambda x: x[1] if x[1] is not None else float('-inf'), reverse=True)
+                    else:
+                        sorted_pairs = sorted(paired_values, key=lambda x: x[1] if x[1] is not None else float('inf'))
+                    return sorted_pairs[0][0] if sorted_pairs else None
+                    
+                elif func_name == "LAST_VALUE":
+                    # Sort and get the last value (maximum for ASC, minimum for DESC)
+                    if is_desc:
+                        sorted_pairs = sorted(paired_values, key=lambda x: x[1] if x[1] is not None else float('-inf'), reverse=True)
+                    else:
+                        sorted_pairs = sorted(paired_values, key=lambda x: x[1] if x[1] is not None else float('inf'))
+                    return sorted_pairs[-1][0] if sorted_pairs else None
+                    
+            except (TypeError, IndexError):
+                return None
+        else:
+            # No OVER clause - treat as simple FIRST/LAST value
+            values = self._get_expression_values(expression, is_running)
+            if not values:
+                return None
+                
+            if func_name == "FIRST_VALUE":
+                return values[0] if values else None
+            elif func_name == "LAST_VALUE":
+                return values[-1] if values else None
+        
+        return None
     
     def _evaluate_mathematical_functions(self, func_name: str, arguments: List[str], is_running: bool, filter_condition: str = None) -> float:
         """
