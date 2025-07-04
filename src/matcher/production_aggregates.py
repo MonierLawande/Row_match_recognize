@@ -1297,6 +1297,39 @@ class ProductionAggregateEvaluator:
             var_name = classifier_match.group(1)
             return self._evaluate_classifier(var_name)
         
+        # Handle mathematical utility functions (both uppercase and lowercase)
+        isfinite_match = re.match(r'isfinite\s*\(\s*(.+?)\s*\)', expr, re.IGNORECASE)
+        if isfinite_match:
+            inner_expr = isfinite_match.group(1)
+            value = self._evaluate_single_expression(inner_expr)
+            if value is None:
+                return False
+            try:
+                import math
+                return math.isfinite(float(value))
+            except (ValueError, TypeError):
+                return False
+        
+        # Handle other mathematical functions (isnan, isinf, isreal) - case insensitive
+        math_func_match = re.match(r'(isnan|isinf|isreal)\s*\(\s*(.+?)\s*\)', expr, re.IGNORECASE)
+        if math_func_match:
+            func_name = math_func_match.group(1).lower()
+            inner_expr = math_func_match.group(2)
+            value = self._evaluate_single_expression(inner_expr)
+            if value is None:
+                return func_name == 'isnan'  # NULL is considered NaN-like
+            try:
+                import math
+                float_val = float(value)
+                if func_name == 'isnan':
+                    return math.isnan(float_val)
+                elif func_name == 'isinf':
+                    return math.isinf(float_val)
+                elif func_name == 'isreal':
+                    return not (math.isnan(float_val) or math.isinf(float_val))
+            except (ValueError, TypeError):
+                return False
+        
         # Handle variable.column references
         var_col_match = re.match(r'^([A-Z_][A-Z0-9_]*)\.([A-Z_][A-Z0-9_]*)$', expr, re.IGNORECASE)
         if var_col_match:
@@ -1539,7 +1572,8 @@ class ProductionAggregateEvaluator:
         
         # Convert SQL functions to uppercase for consistency with MATH_FUNCTIONS
         sql_functions = ['concat', 'substr', 'substring', 'trim', 'ltrim', 'rtrim', 
-                        'upper', 'lower', 'length', 'replace', 'left', 'right']
+                        'upper', 'lower', 'length', 'replace', 'left', 'right',
+                        'isfinite', 'isnan', 'isinf', 'isreal']
         
         for func in sql_functions:
             # Use word boundaries to avoid partial matches
@@ -1560,81 +1594,80 @@ class ProductionAggregateEvaluator:
         """
         Convert SQL CASE WHEN expressions to Python conditional expressions.
         
-        Converts:
-        - CASE WHEN condition THEN value ELSE default END -> (value if condition else default)
-        - CASE WHEN cond1 THEN val1 WHEN cond2 THEN val2 ELSE default END -> (val1 if cond1 else (val2 if cond2 else default))
+        Supports:
+        - Simple CASE: CASE WHEN condition THEN value ELSE default END
+        - Multiple WHEN: CASE WHEN cond1 THEN val1 WHEN cond2 THEN val2 ELSE default END
+        - Nested CASE expressions
+        - NULL handling
         """
         import re
         
-        # Pattern to match CASE WHEN expressions
-        case_pattern = r'CASE\s+(?:WHEN\s+([^T]+?)\s+THEN\s+([^W\s]+?)(?:\s+WHEN\s+([^T]+?)\s+THEN\s+([^W\s]+?))*)?(?:\s+ELSE\s+([^E]+?))?\s+END'
+        if 'CASE' not in expr.upper():
+            return expr
         
-        def case_replacer(match_obj):
-            full_match = match_obj.group(0)
-            logger.debug(f"Converting CASE expression: {full_match}")
+        logger.debug(f"Converting CASE expression: {expr}")
+        
+        # Handle nested CASE expressions by processing from inside out
+        result = expr
+        max_iterations = 10  # Prevent infinite loops
+        iteration = 0
+        
+        while 'CASE' in result.upper() and iteration < max_iterations:
+            iteration += 1
             
-            # Find all WHEN clauses using a more robust approach
-            when_pattern = r'WHEN\s+(.+?)\s+THEN\s+(.+?)(?=\s+(?:WHEN|ELSE|END))'
-            when_matches = list(re.finditer(when_pattern, full_match, re.IGNORECASE))
+            # Find the innermost CASE expression (no nested CASE inside)
+            # Pattern to match a complete CASE expression
+            case_pattern = r'CASE\s+((?:WHEN\s+.+?\s+THEN\s+.+?(?=\s+(?:WHEN|ELSE|END))\s*)+)(?:ELSE\s+(.+?))?\s+END'
             
-            # Find ELSE clause
-            else_pattern = r'ELSE\s+(.+?)(?=\s+END)'
-            else_match = re.search(else_pattern, full_match, re.IGNORECASE)
-            else_value = else_match.group(1).strip() if else_match else "None"
+            matches = list(re.finditer(case_pattern, result, re.IGNORECASE | re.DOTALL))
+            if not matches:
+                break
+                
+            # Process the first match
+            match = matches[0]
+            full_case = match.group(0)
+            when_clauses = match.group(1)
+            else_clause = match.group(2) if match.group(2) else "None"
             
-            # Convert SQL NULL to Python None
-            if else_value.upper() == "NULL":
-                else_value = "None"
+            # Parse individual WHEN clauses
+            when_pattern = r'WHEN\s+(.+?)\s+THEN\s+(.+?)(?=\s+(?:WHEN|ELSE|$)|$)'
+            when_matches = list(re.finditer(when_pattern, when_clauses, re.IGNORECASE | re.DOTALL))
             
             if not when_matches:
-                logger.warning(f"No WHEN clauses found in CASE expression: {full_match}")
-                return full_match
+                logger.warning(f"No valid WHEN clauses found in: {when_clauses}")
+                break
             
-            # Build nested Python conditional expression
-            result = else_value
+            # Build Python conditional expression from right to left
+            python_expr = else_clause.strip()
+            
+            # Handle NULL in else clause
+            if python_expr.upper() == "NULL":
+                python_expr = "None"
+            
+            # Process WHEN clauses in reverse order
             for when_match in reversed(when_matches):
                 condition = when_match.group(1).strip()
                 value = when_match.group(2).strip()
                 
-                # Convert SQL NULL to Python None
+                # Handle NULL values
                 if value.upper() == "NULL":
                     value = "None"
                 
-                # Convert SQL operators to Python
+                # Convert SQL operators in condition to Python
                 condition = self._convert_sql_operators_to_python(condition)
                 
-                result = f"({value} if {condition} else {result})"
+                # Build conditional expression
+                python_expr = f"({value} if {condition} else {python_expr})"
             
-            logger.debug(f"Converted CASE to: {result}")
-            return result
+            # Replace the CASE expression with the Python conditional
+            result = result.replace(full_case, python_expr)
+            logger.debug(f"CASE iteration {iteration}: {full_case} -> {python_expr}")
         
-        # Apply the conversion
-        converted = re.sub(case_pattern, case_replacer, expr, flags=re.IGNORECASE | re.DOTALL)
+        if iteration >= max_iterations:
+            logger.warning(f"Maximum CASE conversion iterations reached for: {expr}")
         
-        # If no CASE expressions were found, try a simpler pattern for nested cases
-        if converted == expr and 'CASE' in expr.upper():
-            # Simple pattern for basic CASE WHEN ... THEN ... ELSE ... END
-            simple_pattern = r'CASE\s+WHEN\s+(.+?)\s+THEN\s+(.+?)\s+ELSE\s+(.+?)\s+END'
-            simple_match = re.search(simple_pattern, expr, re.IGNORECASE | re.DOTALL)
-            if simple_match:
-                condition = simple_match.group(1).strip()
-                then_value = simple_match.group(2).strip()
-                else_value = simple_match.group(3).strip()
-                
-                # Convert SQL NULL to Python None
-                if then_value.upper() == "NULL":
-                    then_value = "None"
-                if else_value.upper() == "NULL":
-                    else_value = "None"
-                
-                # Convert SQL operators to Python
-                condition = self._convert_sql_operators_to_python(condition)
-                
-                result = f"({then_value} if {condition} else {else_value})"
-                converted = expr.replace(simple_match.group(0), result)
-                logger.debug(f"Simple CASE conversion: {expr} -> {converted}")
-        
-        return converted
+        logger.debug(f"Final CASE conversion: {expr} -> {result}")
+        return result
     
     def _convert_sql_operators_to_python(self, condition: str) -> str:
         """Convert SQL operators to Python equivalents."""
@@ -1655,7 +1688,7 @@ class ProductionAggregateEvaluator:
         
         # Convert SQL operators to Python
         conversions = [
-            (r'(?<!=)\s*=\s*(?!=)', ' == '),  # SQL equality to Python equality (not already ==)
+            (r'(?<![!=<>])\s*=\s*(?![=])', ' == '),  # SQL equality to Python equality (not already part of !=, <=, >=, ==)
             (r'\s*<>\s*', ' != '),      # SQL not equal to Python not equal
             (r'\s*%\s*', ' % '),        # Modulo (already Python compatible)
             (r'\bAND\b', 'and'),        # SQL AND to Python and

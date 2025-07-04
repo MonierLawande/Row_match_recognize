@@ -129,7 +129,9 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
     logger.debug(f"Evaluating pattern variable reference: {expr}, current_idx={current_idx}, is_running={is_running}, is_permute={is_permute}")
     
     # Use cache if provided (but cache key should include current_idx, is_running, and is_permute for proper caching)
-    cache_key = f"{expr}_{current_idx}_{is_running}_{is_permute}" if is_running or is_permute else expr
+    # CRITICAL FIX: For ALL ROWS PER MATCH mode with FINAL semantics, we need row-specific caching
+    # because A.value should return different values for different rows
+    cache_key = f"{expr}_{current_idx}_{is_running}_{is_permute}"
     if cache is not None and cache_key in cache:
         logger.debug(f"Cache hit for {cache_key}")
         return True, cache[cache_key]
@@ -209,11 +211,24 @@ def evaluate_pattern_variable_reference(expr: str, var_assignments: Dict[str, Li
                 return True, None
             var_indices = valid_indices
         
-        if var_indices and var_indices[0] < len(all_rows):
-            value = all_rows[var_indices[0]].get(col_name)
-            if cache is not None:
-                cache[cache_key] = value
-            return True, value
+        if var_indices:
+            # CRITICAL FIX: For FINAL semantics in ALL ROWS PER MATCH mode, 
+            # return the value from the current row if it's among the variable's indices
+            target_idx = None
+            if not is_running and current_idx is not None and current_idx in var_indices:
+                # FINAL semantics: Use current row if it matches this variable
+                target_idx = current_idx
+                logger.debug(f"FINAL semantics: Using current row {current_idx} for {var_name}.{col_name}")
+            else:
+                # RUNNING semantics or FINAL without current row: Use first matched index
+                target_idx = var_indices[0]
+                logger.debug(f"Using first index {target_idx} for {var_name}.{col_name}")
+            
+            if target_idx < len(all_rows):
+                value = all_rows[target_idx].get(col_name)
+                if cache is not None:
+                    cache[cache_key] = value
+                return True, value
         
         if cache is not None:
             cache[cache_key] = None

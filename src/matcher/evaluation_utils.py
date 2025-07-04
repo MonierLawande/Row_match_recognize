@@ -513,6 +513,12 @@ MATH_FUNCTIONS = {
     'CAST': cast_function,
     'TRY_CAST': try_cast_function,
     
+    # Math utility functions for finite checks
+    'ISFINITE': lambda x: math.isfinite(float(x)) if x is not None else False,
+    'ISNAN': lambda x: math.isnan(float(x)) if x is not None else False,
+    'ISINF': lambda x: math.isinf(float(x)) if x is not None else False,
+    'ISREAL': lambda x: not (math.isnan(float(x)) or math.isinf(float(x))) if x is not None else False,
+    
     # Date/time functions
     'NOW': lambda: datetime.datetime.now(),
     'CURRENT_DATE': lambda: datetime.date.today(),
