@@ -3,13 +3,18 @@
 Production-ready measure evaluator for SQL:2016 row pattern matching.
 
 This module implements comprehensive measure evaluation with full support for:
-- SQL:2016 navigation functions (FIRST, LAST, PREV, NEXT)
+- SQL:2016 navigation functions using centralized navigation engine (FIRST, LAST, PREV, NEXT)
 - RUNNING vs FINAL semantics with proper offset handling
 - Pattern variable references and subset variables
 - Production aggregate functions (SUM, COUNT, MIN, MAX, AVG, etc.)
 - Type preservation and Trino compatibility
 - Advanced error handling and validation
 - Performance optimization with caching
+
+Navigation Functions:
+- All navigation function implementations have been moved to the centralized 
+  src.matcher.navigation_functions engine for better maintainability.
+- This module now uses the centralized engine for all navigation operations.
 
 Features:
 - Thread-safe evaluation with proper context management
@@ -21,7 +26,7 @@ Features:
 Refactored to eliminate duplication and improve maintainability.
 
 Author: Pattern Matching Engine Team
-Version: 3.0.0
+Version: 4.0.0
 """
 
 from collections import defaultdict
@@ -43,6 +48,7 @@ from src.matcher.evaluation_utils import (
     preserve_data_type, MATH_FUNCTIONS, evaluate_math_function,
     get_evaluation_metrics, cast_function, try_cast_function
 )
+from src.matcher.navigation_functions import NavigationFunctionEngine, NavigationFunction, NavigationMode
 from src.utils.logging_config import get_logger, PerformanceTimer
 
 # Module logger with enhanced configuration
@@ -57,11 +63,6 @@ class EvaluationMode(Enum):
     """Enumeration of evaluation modes for measure expressions."""
     RUNNING = "RUNNING"
     FINAL = "FINAL"
-
-class NavigationDirection(Enum):
-    """Enumeration of navigation directions."""
-    FORWARD = "FORWARD"
-    BACKWARD = "BACKWARD"
 
 @dataclass
 class EvaluationContext:
@@ -78,10 +79,6 @@ class MeasureEvaluationError(Exception):
 
 class ClassifierError(MeasureEvaluationError):
     """Error in CLASSIFIER function evaluation."""
-    pass
-
-class NavigationError(MeasureEvaluationError):
-    """Error in navigation function evaluation."""
     pass
 
 class AggregateError(MeasureEvaluationError):
@@ -276,6 +273,9 @@ class MeasureEvaluator:
         self.context = context
         self.final = final
         self.original_expr = None
+        
+        # Initialize navigation engine
+        self.navigation_engine = NavigationFunctionEngine()
         
         # Production-ready caching with LRU policy
         self._classifier_cache = {}
@@ -887,7 +887,17 @@ class MeasureEvaluator:
         is_nested_nav = re.match(nested_nav_pattern, expr, re.IGNORECASE) is not None
         
         if is_simple_nav or is_nested_nav:
-            return self._evaluate_navigation(expr, is_running)
+            # Use centralized navigation engine directly
+            try:
+                from src.matcher.navigation_functions import NavigationSemantics
+                semantics = NavigationSemantics.RUNNING if is_running else NavigationSemantics.FINAL
+                result = self.navigation_engine.evaluate_navigation_expression(
+                    expr, self.context, semantics=semantics
+                )
+                return result.value if hasattr(result, 'value') and result.success else result
+            except Exception as e:
+                logger.error(f"Navigation evaluation error: {e}")
+                return None
         
         # Try AST-based evaluation for complex expressions (arithmetic, etc.)
         try:
@@ -1257,294 +1267,6 @@ class MeasureEvaluator:
             Formatted classifier output (NULL for None)
         """
         return value if value is not None else "NULL"
-
-    
-
-        
-    def _evaluate_navigation(self, expr: str, is_running: bool) -> Any:
-        """
-        Handle navigation functions like FIRST, LAST, PREV, NEXT with proper semantics.
-        
-        This enhanced implementation supports:
-        1. Simple navigation functions (FIRST(A.price), LAST(B.quantity))
-        2. Nested navigation functions (PREV(FIRST(A.price)), NEXT(LAST(B.quantity)))
-        3. Navigation with offsets (FIRST(A.price, 3), PREV(price, 2))
-        4. Combinations with proper semantics handling
-        
-        Args:
-            expr: The navigation expression (e.g., "LAST(A.value)")
-            is_running: Whether to use RUNNING semantics
-            
-        Returns:
-            The result of the navigation function
-        """
-        # Check for nested navigation pattern first
-        # Updated pattern to recognize RUNNING/FINAL semantic modifiers with navigation functions
-        nested_pattern = r'(FIRST|LAST|NEXT|PREV)\s*\(\s*((?:(?:RUNNING|FINAL)\s+)?(?:FIRST|LAST|NEXT|PREV|CLASSIFIER)[^)]*\))\s*(?:,\s*(\d+))?\s*\)'
-        nested_match = re.match(nested_pattern, expr, re.IGNORECASE)
-        
-        if nested_match:
-            # For nested navigation, delegate to specialized function
-            # This will also respect RUNNING semantics by using current_idx
-            from src.matcher.condition_evaluator import evaluate_nested_navigation
-            
-            current_idx = self.context.current_idx
-            
-            # Set semantics information in context for classifier navigation
-            original_semantics = getattr(self.context, '_current_semantics', None)
-            try:
-                if is_running:
-                    # When using RUNNING semantics, we only consider rows up to the current position
-                    # This affects nested navigation functions
-                    self.context._current_semantics = 'RUNNING'
-                    return evaluate_nested_navigation(expr, self.context, current_idx, None)
-                else:
-                    # With FINAL semantics, we consider all rows in the match
-                    self.context._current_semantics = 'FINAL'
-                    return evaluate_nested_navigation(expr, self.context, current_idx, None)
-            finally:
-                # Restore original semantics
-                if original_semantics is not None:
-                    self.context._current_semantics = original_semantics
-                elif hasattr(self.context, '_current_semantics'):
-                    delattr(self.context, '_current_semantics')
-        
-        # Cache key for memoization - include running semantics in the key
-        cache_key = (expr, is_running, self.context.current_idx)
-        if hasattr(self, '_var_ref_cache') and cache_key in self._var_ref_cache:
-            return self._var_ref_cache[cache_key]
-        
-        # Extract function name and arguments for simple navigation
-        match = re.match(r'(FIRST|LAST|PREV|NEXT)\s*\(\s*(.+?)\s*\)', expr, re.IGNORECASE)
-        if not match:
-            return None
-            
-        func_name = match.group(1).upper()
-        args_str = match.group(2)
-        
-        # Parse arguments
-        args = [arg.strip() for arg in args_str.split(',')]
-        if not args:
-            return None
-        
-        result = None
-        
-        # Check if we have variable.field reference (like A.value) or simple field reference (like value)
-        var_field_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args[0])
-        
-        if var_field_match:
-            # Handle variable.field references (like A.value)
-            var_name = var_field_match.group(1)
-            field_name = var_field_match.group(2)
-            
-            # For PREV/NEXT, we navigate relative to current position
-            if func_name in ('PREV', 'NEXT'):
-                # Get steps (default is 1)
-                steps = 1
-                if len(args) > 1:
-                    try:
-                        steps = int(args[1])
-                    except ValueError:
-                        pass
-                
-                if func_name == 'PREV':
-                    prev_idx = self.context.current_idx - steps
-                    if prev_idx >= 0 and prev_idx < len(self.context.rows):
-                        raw_value = self.context.rows[prev_idx].get(field_name)
-                        # Preserve data type for Trino compatibility
-                        if raw_value is not None and self.context.current_idx < len(self.context.rows):
-                            current_value = self.context.rows[self.context.current_idx].get(field_name)
-                            result = self._preserve_data_type(current_value, raw_value)
-                        else:
-                            result = raw_value
-                    # Note: if prev_idx < 0, result remains None (boundary condition)
-                
-                elif func_name == 'NEXT':
-                    next_idx = self.context.current_idx + steps
-                    if next_idx >= 0 and next_idx < len(self.context.rows):
-                        raw_value = self.context.rows[next_idx].get(field_name)
-                        # Preserve data type for Trino compatibility
-                        if raw_value is not None and self.context.current_idx < len(self.context.rows):
-                            current_value = self.context.rows[self.context.current_idx].get(field_name)
-                            result = self._preserve_data_type(current_value, raw_value)
-                        else:
-                            result = raw_value
-                    # Note: if next_idx >= len(rows), result remains None (boundary condition)                # For FIRST/LAST with variable prefix, we use variable-specific logic
-            elif func_name in ('FIRST', 'LAST'):
-                # Get occurrence (default is 0)
-                occurrence = 0
-                if len(args) > 1:
-                    try:
-                        occurrence = int(args[1])
-                    except ValueError:
-                        pass
-                
-                # Leverage the enhanced RowContext methods with semantics support
-                if func_name == 'FIRST':
-                    semantics = 'RUNNING' if is_running else 'FINAL'
-                    row = self.context.first(var_name, occurrence, semantics)
-                    if row and field_name in row:
-                        result = row.get(field_name)
-                    else:
-                        result = None
-                        
-                elif func_name == 'LAST':
-                    semantics = 'RUNNING' if is_running else 'FINAL'
-                    row = self.context.last(var_name, occurrence, semantics)
-                    if row and field_name in row:
-                        result = row.get(field_name)
-                    else:
-                        result = None
-        
-        else:
-            # Handle simple field references (no variable prefix) for all functions
-            field_name = args[0]
-            
-            # For PREV/NEXT, we navigate relative to current position
-            if func_name in ('PREV', 'NEXT'):
-                # Get steps (default is 1)
-                steps = 1
-                if len(args) > 1:
-                    try:
-                        steps = int(args[1])
-                    except ValueError:
-                        pass
-                
-                if func_name == 'PREV':
-                    prev_idx = self.context.current_idx - steps
-                    if prev_idx >= 0 and prev_idx < len(self.context.rows):
-                        result = get_column_value_with_type_preservation(self.context.rows[prev_idx], field_name)
-                    else:
-                        result = None
-                
-                elif func_name == 'NEXT':
-                    next_idx = self.context.current_idx + steps
-                    if next_idx >= 0 and next_idx < len(self.context.rows):
-                        result = get_column_value_with_type_preservation(self.context.rows[next_idx], field_name)
-                    else:
-                        result = None
-            
-            # Handle FIRST/LAST with simple field references (no variable prefix)
-            elif func_name in ('FIRST', 'LAST'):
-                field_name = args[0]
-                
-                # Get offset/occurrence: SQL:2016 standard interpretation:
-                # FIRST(value) = 1st value (default offset 0 = first item)
-                # FIRST(value, N) = value at 0-based offset N from start  
-                # LAST(value) = last value (default offset 0 = last item)
-                # LAST(value, N) = value at 0-based offset N from end
-                offset = 0  # Default to 0-based offset (first/last item)
-                if len(args) > 1:
-                    try:
-                        offset = int(args[1])
-                        if offset < 0:
-                            offset = 0  # Ensure non-negative offset (0-based)
-                    except ValueError:
-                        offset = 0
-                
-                # Collect all row indices from all matched variables
-                all_indices = []
-                
-                # Use full variables if available for FIRST/LAST navigation
-                variables_to_use = getattr(self.context, '_full_match_variables', None) or self.context.variables
-                
-                for var_name in variables_to_use:
-                    var_indices = variables_to_use[var_name]
-                    all_indices.extend(var_indices)
-                
-                # Sort indices to ensure correct order and remove duplicates
-                all_indices = sorted(set(all_indices))
-                
-                # CRITICAL FIX FOR RUNNING/FINAL SEMANTICS:
-                # For navigation functions like FIRST(value), LAST(value),
-                # the behavior differs based on RUNNING vs FINAL semantics:
-                
-                # For RUNNING semantics with FIRST function:
-                # - FIRST(value) should only consider rows up to current position
-                # - FIRST(value, N) with offset should use full match if available, since it's positional navigation
-                if is_running:
-                    if func_name == 'FIRST' and offset > 0:
-                        # For FIRST with offset, allow access to full match for positional navigation
-                        pass  # Keep all_indices as is (full match)
-                    else:
-                        # For FIRST without offset or LAST, filter to current position
-                        all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
-                
-                if func_name == 'FIRST':
-                    # SQL:2016 LOGICAL NAVIGATION: FIRST(value, N) 
-                    # Find first occurrence in match, then navigate forward N MORE occurrences
-                    # Default N=0 means stay at first occurrence
-                    
-                    if all_indices:
-                        target_position = 0 + offset  # Start from first (index 0), add offset
-                        if target_position < len(all_indices):
-                            logical_idx = all_indices[target_position]
-                            logger.debug(f"FIRST({field_name}, {offset}): all_indices={all_indices}, target_position={target_position}, logical_idx={logical_idx}, current_idx={self.context.current_idx}, is_running={is_running}")
-                        else:
-                            logical_idx = None
-                            logger.debug(f"FIRST({field_name}, {offset}): target_position {target_position} out of bounds for {len(all_indices)} indices")
-                    else:
-                        logical_idx = None
-                        logger.debug(f"FIRST({field_name}, {offset}): no indices available")
-                            
-                elif func_name == 'LAST':
-                    # SQL:2016 LOGICAL NAVIGATION: LAST(value, N)
-                    # Find last occurrence in match, then navigate backward N MORE occurrences
-                    # Default N=0 means stay at last occurrence
-                    
-                    # CRITICAL FIX FOR RUNNING SEMANTICS:
-                    # For RUNNING LAST(value) with offset=0, this should return the current row's value
-                    # For RUNNING LAST(value, N) with offset>0, this should return the value N positions back from current
-                    # For FINAL LAST(value) with offset=0, this should return the final row's value
-                    # For FINAL LAST(value, N) with offset>0, this should return the value N positions back from final
-                    
-                    if all_indices:
-                        if is_running:
-                            if offset == 0:
-                                # RUNNING LAST(value): Return last value among matched rows up to current position
-                                # all_indices is already filtered to include only rows <= current_idx
-                                logical_idx = all_indices[-1]  # Last index in the filtered list
-                                logger.debug(f"RUNNING LAST({field_name}): using last index from filtered list: logical_idx={logical_idx}, all_indices={all_indices}")
-                            else:
-                                # RUNNING LAST(value, N): Go backward N positions from last position in filtered indices
-                                last_position = len(all_indices) - 1
-                                target_position = last_position - offset
-                                if target_position >= 0:
-                                    logical_idx = all_indices[target_position]
-                                    logger.debug(f"RUNNING LAST({field_name}, {offset}): all_indices={all_indices}, target_position={target_position}, logical_idx={logical_idx}")
-                                else:
-                                    logical_idx = None
-                                    logger.debug(f"RUNNING LAST({field_name}, {offset}): target_position {target_position} out of bounds for filtered indices")
-                        else:
-                            # FINAL semantics: Navigate from final position
-                            last_position = len(all_indices) - 1
-                            target_position = last_position - offset  # Start from last, subtract offset
-                            if target_position >= 0:
-                                logical_idx = all_indices[target_position]
-                                logger.debug(f"FINAL LAST({field_name}, {offset}): all_indices={all_indices}, target_position={target_position}, logical_idx={logical_idx}, is_running={is_running}")
-                            else:
-                                logical_idx = None
-                    else:
-                        logical_idx = None
-                
-                # Get the value if we found a valid logical position
-                if logical_idx is not None and logical_idx < len(self.context.rows):
-                    # Use the row context's enhanced direct access with optimized caching
-                    raw_value = self.context.rows[logical_idx].get(field_name)
-                    # Preserve data type for Trino compatibility
-                    if raw_value is not None and self.context.current_idx < len(self.context.rows):
-                        current_value = self.context.rows[self.context.current_idx].get(field_name)
-                        result = self._preserve_data_type(current_value, raw_value)
-                    else:
-                        result = raw_value
-                else:
-                    result = None
-        
-        # Cache the result
-        if hasattr(self, '_var_ref_cache'):
-            self._var_ref_cache[cache_key] = result
-        return result
-
 
     def _get_var_indices(self, var: str) -> List[int]:
         """

@@ -593,15 +593,16 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     # For ALL ROWS mode, apply SQL:2016 default semantics
                     expr_upper = expr.upper().strip()
                     
-                    # Navigation functions in ALL ROWS PER MATCH default to RUNNING semantics
+                    # Navigation functions in ALL ROWS PER MATCH default to FINAL semantics
                     # when no explicit RUNNING/FINAL is specified (SQL:2016 compliance)
+                    # Navigation functions should always operate on full match scope
                     if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        measure_semantics[alias] = "RUNNING"
-                        logger.debug(f"Navigation function: RUNNING semantics for measure {alias}: {expr}")
+                        measure_semantics[alias] = "FINAL"
+                        logger.debug(f"Navigation function: FINAL semantics for measure {alias}: {expr}")
                     elif re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        # Expressions containing navigation functions also use RUNNING by default
-                        measure_semantics[alias] = "RUNNING" 
-                        logger.debug(f"Expression with navigation function: RUNNING semantics for measure {alias}: {expr}")
+                        # Expressions containing navigation functions also use FINAL by default
+                        measure_semantics[alias] = "FINAL" 
+                        logger.debug(f"Expression with navigation function: FINAL semantics for measure {alias}: {expr}")
                     elif explicit_semantics_found:
                         # In mixed semantics queries, implicit measures default to FINAL per SQL:2016
                         measure_semantics[alias] = "FINAL"

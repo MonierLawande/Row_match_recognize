@@ -9,7 +9,6 @@ Features:
 - Common mathematical and utility functions
 - Shared type conversion and preservation utilities
 - Table prefix validation and security functions
-- Navigation function helpers
 - Null handling and SQL semantics
 - Thread-safe operations with proper validation
 
@@ -40,8 +39,8 @@ MAX_RECURSION_DEPTH = 50      # Prevent infinite recursion
 
 class EvaluationMode(Enum):
     """Enumeration of evaluation modes."""
-    DEFINE = "DEFINE"      # Physical navigation for pattern definitions
-    MEASURES = "MEASURES"  # Logical navigation for measures
+    DEFINE = "DEFINE"      # Evaluation for pattern definitions
+    MEASURES = "MEASURES"  # Evaluation for measures
 
 class ValidationError(Exception):
     """Base class for validation errors."""

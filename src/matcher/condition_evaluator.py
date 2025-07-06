@@ -4,16 +4,21 @@ Production-ready condition evaluator for SQL:2016 row pattern matching.
 
 This module implements comprehensive condition evaluation with full support for:
 - SQL:2016 pattern matching semantics
-- Enhanced navigation functions (FIRST, LAST, PREV, NEXT)
+- Navigation functions using centralized navigation engine (FIRST, LAST, PREV, NEXT)
 - Pattern variable references and subset variables
 - Mathematical and utility functions
 - Advanced error handling and validation
 - Performance optimization with caching
 
+Navigation Functions:
+- All navigation function implementations have been moved to the centralized 
+  src.matcher.navigation_functions engine for better maintainability.
+- This module now delegates navigation calls to the centralized engine.
+
 Refactored to eliminate duplication and improve maintainability.
 
 Author: Pattern Matching Engine Team
-Version: 2.0.0
+Version: 3.0.0
 """
 
 import ast
@@ -31,6 +36,7 @@ from src.matcher.evaluation_utils import (
     is_null, safe_compare, is_table_prefix, MATH_FUNCTIONS, 
     evaluate_math_function, get_evaluation_metrics
 )
+from src.matcher.navigation_functions import get_navigation_engine
 from src.utils.logging_config import get_logger, PerformanceTimer
 
 # Module logger
@@ -38,18 +44,6 @@ logger = get_logger(__name__)
 
 # Define the type for condition functions
 ConditionFn = Callable[[Dict[str, Any], RowContext], bool]
-
-# Enhanced Navigation Function Info for better structured parsing
-@dataclass
-class NavigationFunctionInfo:
-    """Information about a navigation function call."""
-    function_type: str  # PREV, NEXT, FIRST, LAST
-    variable: Optional[str]
-    column: Optional[str]
-    offset: int
-    is_nested: bool
-    inner_functions: List['NavigationFunctionInfo']
-    raw_expression: str
 
 class ConditionEvaluator(ast.NodeVisitor):
     """
@@ -83,6 +77,10 @@ class ConditionEvaluator(ast.NodeVisitor):
         self.evaluation_mode = evaluation_mode
         self.recursion_depth = recursion_depth
         self.max_recursion_depth = 20  # Increased for complex patterns
+        
+        # Initialize navigation engine
+        from src.matcher.navigation_functions import get_navigation_engine
+        self.navigation_engine = get_navigation_engine()
         
         # Thread safety
         self._lock = threading.RLock()
@@ -424,14 +422,13 @@ class ConditionEvaluator(ast.NodeVisitor):
                     is_nested = True
         
         if is_nested:
-            # For nested navigation, convert to string representation and use evaluate_nested_navigation
+            # For nested navigation, use the centralized navigation engine
             navigation_expr = self._build_navigation_expr(node)
-            return evaluate_nested_navigation(
+            return self.navigation_engine.evaluate_navigation_expression(
                 navigation_expr, 
                 self.context, 
-                self.context.current_idx, 
-                getattr(self.context, 'current_var', None),
-                self.recursion_depth + 1
+                self.context.current_idx,
+                self.evaluation_mode
             )
         else:
             # Handle standard navigation function calls
@@ -462,10 +459,10 @@ class ConditionEvaluator(ast.NodeVisitor):
                     # Context-aware navigation: physical for DEFINE, logical for MEASURES
                     if self.evaluation_mode == 'DEFINE':
                         # Physical navigation: use direct row indexing
-                        return self.evaluate_physical_navigation(func_name, column, steps)
+                        return self._get_navigation_value(None, column, func_name, steps)
                     else:
                         # Logical navigation: use pattern match timeline
-                        return self.evaluate_navigation_function(func_name, column, steps)
+                        return self._get_navigation_value(None, column, func_name, steps)
                 else:
                     # Use variable-aware navigation for FIRST/LAST
                     return self._get_navigation_value(var_name, column, func_name, steps)
@@ -478,9 +475,9 @@ class ConditionEvaluator(ast.NodeVisitor):
                 if func_name in ("PREV", "NEXT"):
                     # Context-aware navigation: physical for DEFINE, logical for MEASURES
                     if self.evaluation_mode == 'DEFINE':
-                        return self.evaluate_physical_navigation(func_name, column, steps)
+                        return self._get_navigation_value(None, column, func_name, steps)
                     else:
-                        return self.evaluate_navigation_function(func_name, column, steps)
+                        return self._get_navigation_value(None, column, func_name, steps)
                 else:
                     return self._get_navigation_value(var_name, column, func_name, steps)
                     
@@ -491,9 +488,9 @@ class ConditionEvaluator(ast.NodeVisitor):
                 if func_name in ("PREV", "NEXT"):
                     # Context-aware navigation: physical for DEFINE, logical for MEASURES
                     if self.evaluation_mode == 'DEFINE':
-                        return self.evaluate_physical_navigation(func_name, column, steps)
+                        return self._get_navigation_value(None, column, func_name, steps)
                     else:
-                        return self.evaluate_navigation_function(func_name, column, steps)
+                        return self._get_navigation_value(None, column, func_name, steps)
                 else:
                     return self._get_navigation_value(None, column, func_name, steps)
                     
@@ -515,9 +512,9 @@ class ConditionEvaluator(ast.NodeVisitor):
                         column = str(evaluated_arg)
                         if func_name in ("PREV", "NEXT"):
                             if self.evaluation_mode == 'DEFINE':
-                                return self.evaluate_physical_navigation(func_name, column, steps)
+                                return self._get_navigation_value(None, column, func_name, steps)
                             else:
-                                return self.evaluate_navigation_function(func_name, column, steps)
+                                return self._get_navigation_value(None, column, func_name, steps)
                         else:
                             return self._get_navigation_value(None, column, func_name, steps)
                     else:
@@ -963,15 +960,7 @@ class ConditionEvaluator(ast.NodeVisitor):
 
     def _get_navigation_value(self, var_name, column, nav_type, steps=1):
         """
-        Enhanced production-grade navigation function with comprehensive improvements.
-        
-        Key improvements:
-        - Better context-aware navigation for DEFINE vs MEASURES modes
-        - Enhanced nested navigation support with recursion protection
-        - Improved bounds checking and partition boundary enforcement
-        - Advanced caching with invalidation strategies
-        - Superior error handling and recovery mechanisms
-        - Optimized algorithms for large datasets
+        Wrapper for centralized navigation engine.
         
         Args:
             var_name: Variable name or function name
@@ -982,314 +971,23 @@ class ConditionEvaluator(ast.NodeVisitor):
         Returns:
             The value at the navigated position or None if navigation is invalid
         """
-        start_time = time.time()
-        
-        logger.debug(f"[NAV_ENHANCED] _get_navigation_value: var_name={var_name}, column={column}, nav_type={nav_type}, steps={steps}")
-        logger.debug(f"[NAV_ENHANCED] Context state: current_idx={self.context.current_idx}, mode={self.evaluation_mode}")
-        
         try:
-            # Enhanced input validation
-            if steps < 0:
-                raise ValueError(f"Navigation steps must be non-negative: {steps}")
-            
-            if not isinstance(column, str) or not column.strip():
-                raise TypeError(f"Column name must be a non-empty string, got {type(column)}: '{column}'")
-            
-            # Initialize performance tracking
-            if hasattr(self.context, 'stats'):
-                self.context.stats["navigation_calls"] = self.context.stats.get("navigation_calls", 0) + 1
-                self.context.stats[f"{nav_type.lower()}_calls"] = self.context.stats.get(f"{nav_type.lower()}_calls", 0) + 1
-            
-            # Enhanced cache management with proper invalidation
-            if not hasattr(self.context, 'navigation_cache'):
-                self.context.navigation_cache = {}
-            
-            # Advanced cache key with more context factors
-            current_var = getattr(self.context, 'current_var', None)
-            evaluation_mode = self.evaluation_mode
-            partition_key = getattr(self.context, 'partition_key', None)
-            cache_key = (var_name, column, nav_type, steps, self.context.current_idx, 
-                        current_var, evaluation_mode, partition_key, 
-                        id(getattr(self.context, 'variables', {})))
-            
-            # Smart cache lookup with validity checking
-            if cache_key in self.context.navigation_cache:
-                cached_result = self.context.navigation_cache[cache_key]
-                if hasattr(self.context, 'stats'):
-                    self.context.stats["cache_hits"] = self.context.stats.get("cache_hits", 0) + 1
-                logger.debug(f"[NAV_ENHANCED] Cache hit: {cached_result}")
-                return cached_result
-            
-            if hasattr(self.context, 'stats'):
-                self.context.stats["cache_misses"] = self.context.stats.get("cache_misses", 0) + 1
-            
-            # Get enhanced context state
-            curr_idx = self.context.current_idx
-            is_permute = hasattr(self.context, 'pattern_metadata') and getattr(self.context, 'pattern_metadata', {}).get('permute', False)
-            
-            # Fast path validation with detailed logging
-            if curr_idx < 0 or curr_idx >= len(self.context.rows) or not self.context.rows:
-                logger.debug(f"[NAV_ENHANCED] Fast path exit: invalid curr_idx={curr_idx}, rows_len={len(self.context.rows) if self.context.rows else 0}")
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
-            # Enhanced subset variable support
-            if nav_type in ('FIRST', 'LAST') and hasattr(self.context, 'subsets') and var_name in self.context.subsets:
-                result = self._handle_subset_navigation(var_name, column, nav_type, steps, cache_key)
-                return result
-            
-            # Improved timeline construction with better algorithms
-            timeline = self._build_optimized_timeline()
-            
-            # Route to appropriate navigation handler
-            if nav_type in ('FIRST', 'LAST'):
-                result = self._handle_logical_navigation(var_name, column, nav_type, steps, timeline, cache_key)
-            elif nav_type in ('PREV', 'NEXT'):
-                # Context-aware navigation: different behavior for DEFINE vs MEASURES
-                if self.evaluation_mode == 'DEFINE':
-                    result = self._handle_physical_navigation_define(column, nav_type, steps, cache_key)
-                else:
-                    result = self._handle_logical_timeline_navigation(var_name, column, nav_type, steps, timeline, cache_key, current_var)
+            # Create navigation expression
+            if var_name:
+                expr = f"{nav_type}({var_name}.{column}{', ' + str(steps) if steps != 1 else ''})"
             else:
-                raise ValueError(f"Unknown navigation type: {nav_type}")
+                expr = f"{nav_type}({column}{', ' + str(steps) if steps != 1 else ''})"
             
-            # Cache the result with expiration tracking
-            self.context.navigation_cache[cache_key] = result
-            logger.debug(f"[NAV_ENHANCED] Returning result: {result}")
+            # Use the centralized navigation engine
+            result = self.navigation_engine.evaluate_navigation_expression(
+                expr, self.context, self.context.current_idx, self.evaluation_mode
+            )
+            
             return result
             
         except Exception as e:
-            logger.error(f"Error in enhanced navigation function: {e}")
-            # Set error flag for debugging
-            if hasattr(self.context, 'stats'):
-                self.context.stats["navigation_errors"] = self.context.stats.get("navigation_errors", 0) + 1
+            logger.error(f"Navigation function evaluation error: {e}")
             return None
-            
-        finally:
-            # Enhanced performance tracking
-            if hasattr(self.context, 'timing'):
-                navigation_time = time.time() - start_time
-                self.context.timing['navigation_total'] = self.context.timing.get('navigation_total', 0) + navigation_time
-                if navigation_time > 0.01:  # Log slow navigation calls
-                    logger.debug(f"[NAV_ENHANCED] Slow navigation call: {navigation_time:.3f}s for {nav_type}({var_name}.{column})")
-
-    def _handle_subset_navigation(self, var_name, column, nav_type, steps, cache_key):
-        """Handle navigation for subset variables with enhanced logic."""
-        logger.debug(f"[NAV_ENHANCED] Processing subset variable: {var_name}")
-        
-        component_vars = self.context.subsets[var_name]
-        all_indices = []
-        
-        # Collect indices from all component variables
-        for comp_var in component_vars:
-            if comp_var in self.context.variables:
-                all_indices.extend(self.context.variables[comp_var])
-        
-        if not all_indices:
-            self.context.navigation_cache[cache_key] = None
-            return None
-        
-        # Sort and deduplicate indices
-        all_indices = sorted(set(all_indices))
-        
-        # Apply steps parameter for subset navigation
-        if nav_type == 'FIRST':
-            if steps > len(all_indices):
-                idx = None
-            else:
-                idx = all_indices[steps - 1] if steps > 0 else all_indices[0]
-        else:  # LAST
-            if steps > len(all_indices):
-                idx = None
-            else:
-                idx = all_indices[-steps] if steps > 0 else all_indices[-1]
-        
-        if idx is None or not (0 <= idx < len(self.context.rows)):
-            self.context.navigation_cache[cache_key] = None
-            return None
-        
-        # Check partition boundaries
-        if self._check_partition_boundary(self.context.current_idx, idx):
-            result = self.context.rows[idx].get(column)
-            self.context.navigation_cache[cache_key] = result
-            return result
-        
-        self.context.navigation_cache[cache_key] = None
-        return None
-
-    def _build_optimized_timeline(self):
-        """Build an optimized timeline of variable assignments."""
-        # Use cached timeline if available and valid
-        if (hasattr(self.context, '_timeline') and 
-            hasattr(self.context, '_timeline_version') and
-            self.context._timeline_version == id(self.context.variables)):
-            return self.context._timeline
-        
-        logger.debug(f"[NAV_ENHANCED] Building optimized timeline from variables: {self.context.variables}")
-        
-        # Build timeline with improved algorithm
-        timeline = []
-        for var, indices in self.context.variables.items():
-            for idx in indices:
-                timeline.append((idx, var))
-        
-        # Sort by row index for consistent ordering
-        timeline.sort()
-        
-        # Cache with version tracking
-        self.context._timeline = timeline
-        self.context._timeline_version = id(self.context.variables)
-        
-        logger.debug(f"[NAV_ENHANCED] Built timeline with {len(timeline)} entries")
-        return timeline
-
-    def _handle_logical_navigation(self, var_name, column, nav_type, steps, timeline, cache_key):
-        """Handle FIRST/LAST navigation with enhanced logic."""
-        logger.debug(f"[NAV_ENHANCED] Logical navigation: {nav_type}({var_name}.{column})")
-        
-        if var_name is None:
-            # Navigate across all variables in the match
-            all_indices = []
-            for var, indices in self.context.variables.items():
-                all_indices.extend(indices)
-            
-            if not all_indices:
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
-            all_indices = sorted(set(all_indices))
-            idx = all_indices[0] if nav_type == 'FIRST' else all_indices[-1]
-            
-        elif var_name not in self.context.variables or not self.context.variables[var_name]:
-            logger.debug(f"[NAV_ENHANCED] Variable {var_name} not found or empty")
-            self.context.navigation_cache[cache_key] = None
-            return None
-        else:
-            # Navigate within specific variable
-            var_indices = sorted(set(self.context.variables[var_name]))
-            
-            if not var_indices:
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
-            # Apply steps parameter for logical navigation
-            if nav_type == 'FIRST':
-                if steps > len(var_indices):
-                    idx = None
-                else:
-                    idx = var_indices[steps - 1] if steps > 0 else var_indices[0]
-            else:  # LAST
-                if steps > len(var_indices):
-                    idx = None
-                else:
-                    idx = var_indices[-steps] if steps > 0 else var_indices[-1]
-        
-        if idx is None or not (0 <= idx < len(self.context.rows)):
-            self.context.navigation_cache[cache_key] = None
-            return None
-        
-        # Enhanced boundary checking
-        if self._check_partition_boundary(self.context.current_idx, idx):
-            result = self.context.rows[idx].get(column)
-            self.context.navigation_cache[cache_key] = result
-            return result
-        
-        self.context.navigation_cache[cache_key] = None
-        return None
-
-    def _handle_physical_navigation_define(self, column, nav_type, steps, cache_key):
-        """Handle PREV/NEXT navigation in DEFINE mode (physical navigation)."""
-        logger.debug(f"[NAV_ENHANCED] Physical navigation in DEFINE mode: {nav_type}({column}, {steps})")
-        
-        # For DEFINE mode, navigate through physical input sequence
-        curr_idx = self.context.current_idx
-        
-        if nav_type == 'PREV':
-            target_idx = curr_idx - steps
-        else:  # NEXT
-            target_idx = curr_idx + steps
-        
-        # Enhanced bounds checking
-        if target_idx < 0 or target_idx >= len(self.context.rows):
-            self.context.navigation_cache[cache_key] = None
-            return None
-        
-        # Check partition boundaries for physical navigation
-        if self._check_partition_boundary(curr_idx, target_idx):
-            result = self.context.rows[target_idx].get(column)
-            self.context.navigation_cache[cache_key] = result
-            return result
-        
-        self.context.navigation_cache[cache_key] = None
-        return None
-
-    def _handle_logical_timeline_navigation(self, var_name, column, nav_type, steps, timeline, cache_key, current_var):
-        """Handle PREV/NEXT navigation through pattern timeline."""
-        logger.debug(f"[NAV_ENHANCED] Timeline navigation: {nav_type}({column}, {steps}) for var={var_name}")
-        
-        if not timeline:
-            self.context.navigation_cache[cache_key] = None
-            return None
-        
-        # Find current position in timeline
-        curr_idx = self.context.current_idx
-        curr_pos = -1
-        
-        # Enhanced position finding with variable context
-        for i, (idx, var) in enumerate(timeline):
-            if idx == curr_idx and (current_var is None or var == current_var or var_name is None):
-                curr_pos = i
-                break
-        
-        if curr_pos < 0:
-            # Try alternative matching strategies
-            for i, (idx, var) in enumerate(timeline):
-                if idx == curr_idx:
-                    curr_pos = i
-                    break
-        
-        if curr_pos < 0:
-            self.context.navigation_cache[cache_key] = None
-            return None
-        
-        # Calculate target position
-        if nav_type == 'PREV':
-            target_pos = curr_pos - steps
-        else:  # NEXT
-            target_pos = curr_pos + steps
-        
-        # Bounds checking for timeline
-        if target_pos < 0 or target_pos >= len(timeline):
-            self.context.navigation_cache[cache_key] = None
-            return None
-        
-        target_idx, _ = timeline[target_pos]
-        
-        # Enhanced boundary checking
-        if self._check_partition_boundary(curr_idx, target_idx):
-            if 0 <= target_idx < len(self.context.rows):
-                result = self.context.rows[target_idx].get(column)
-                self.context.navigation_cache[cache_key] = result
-                return result
-        
-        self.context.navigation_cache[cache_key] = None
-        return None
-
-    def _check_partition_boundary(self, curr_idx, target_idx):
-        """Enhanced partition boundary checking."""
-        if not hasattr(self.context, 'partition_boundaries') or not self.context.partition_boundaries:
-            return True  # No partition boundaries defined
-        
-        try:
-            curr_partition = self.context.get_partition_for_row(curr_idx)
-            target_partition = self.context.get_partition_for_row(target_idx)
-            
-            return (curr_partition is not None and 
-                   target_partition is not None and 
-                   curr_partition == target_partition)
-        except Exception as e:
-            logger.warning(f"Error checking partition boundary: {e}")
-            return True  # Default to allowing navigation on error
 
     def _get_classifier(self, variable: Optional[str] = None) -> str:
         """Get the classifier (pattern variable name) for the current or specified position."""
@@ -1428,197 +1126,6 @@ class ConditionEvaluator(ast.NodeVisitor):
                 
         # Combine into navigation expression
         return f"{func_name}({', '.join(args)})"
-
-    def evaluate_physical_navigation(self, nav_type, column, steps=1):
-        """
-        Physical navigation for DEFINE conditions.
-        
-        This method implements the correct SQL:2016 semantics for navigation functions
-        in DEFINE conditions, where PREV/NEXT refer to the previous/next row in the
-        input sequence (ordered by ORDER BY), not in the pattern match.
-        
-        Args:
-            nav_type: Type of navigation ('PREV' or 'NEXT')
-            column: Column name to retrieve
-            steps: Number of steps to navigate (default: 1)
-            
-        Returns:
-            The value at the navigated position or None if navigation is invalid
-        """
-        # Debug logging
-        logger = get_logger(__name__)
-        logger.debug(f"PHYSICAL_NAV: {nav_type}({column}, {steps}) at current_idx={self.context.current_idx}")
-        
-        # Input validation
-        if steps < 0:
-            raise ValueError(f"Navigation steps must be non-negative: {steps}")
-            
-        if nav_type not in ('PREV', 'NEXT'):
-            raise ValueError(f"Invalid navigation type: {nav_type}")
-        
-        # Get current row index in the input sequence
-        curr_idx = self.context.current_idx
-        
-        # Bounds check for current index
-        if curr_idx < 0 or curr_idx >= len(self.context.rows):
-            logger.debug(f"PHYSICAL_NAV: curr_idx {curr_idx} out of bounds [0, {len(self.context.rows)})")
-            return None
-            
-        # Special case for steps=0 (return current row's value)
-        if steps == 0:
-            result = self.context.rows[curr_idx].get(column)
-            logger.debug(f"PHYSICAL_NAV: steps=0, returning current row value: {result}")
-            return result
-            
-        # Calculate target index based on navigation type
-        if nav_type == 'PREV':
-            target_idx = curr_idx - steps
-        else:  # NEXT
-            target_idx = curr_idx + steps
-            
-        logger.debug(f"PHYSICAL_NAV: target_idx={target_idx} (curr_idx={curr_idx}, nav={nav_type}, steps={steps})")
-            
-        # Check index bounds
-        if target_idx < 0 or target_idx >= len(self.context.rows):
-            logger.debug(f"PHYSICAL_NAV: target_idx {target_idx} out of bounds [0, {len(self.context.rows)})")
-            return None
-            
-        # Check partition boundaries if defined
-        # Physical navigation respects partition boundaries
-        if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-            current_partition = self.context.get_partition_for_row(curr_idx)
-            target_partition = self.context.get_partition_for_row(target_idx)
-            
-            if (current_partition is None or target_partition is None or
-                current_partition != target_partition):
-                logger.debug(f"PHYSICAL_NAV: partition boundary violation")
-                return None
-                
-        # Get the value from the target row
-        result = self.context.rows[target_idx].get(column)
-        logger.debug(f"PHYSICAL_NAV: returning value from row {target_idx}: {result}")
-        return result
-
-    def evaluate_navigation_function(self, nav_type, column, steps=1, var_name=None):
-        """
-        Context-aware navigation function that uses different strategies based on evaluation mode.
-        
-        DEFINE Mode (Physical Navigation):
-        - PREV/NEXT navigate through the input table rows in ORDER BY sequence
-        - Used for condition evaluation: B.price < PREV(price)
-        
-        MEASURES Mode (Logical Navigation):
-        - PREV/NEXT navigate through pattern match results
-        - Used for value extraction: FIRST(A.order_date)
-        
-        Args:
-            nav_type: Type of navigation ('PREV' or 'NEXT')
-            column: Column name to retrieve
-            steps: Number of steps to navigate (default: 1)
-            var_name: Optional variable name for context
-            
-        Returns:
-            The value at the navigated position or None if navigation is invalid
-        """
-        # Input validation
-        if steps < 0:
-            raise ValueError(f"Navigation steps must be non-negative: {steps}")
-            
-        if nav_type not in ('PREV', 'NEXT'):
-            raise ValueError(f"Invalid navigation type: {nav_type}")
-            
-        # Special case for steps=0 (return current row's value)
-        if steps == 0:
-            if 0 <= self.context.current_idx < len(self.context.rows):
-                return self.context.rows[self.context.current_idx].get(column)
-            return None
-        
-        # DEFINE Mode: Physical Navigation through input sequence
-        if self.evaluation_mode == 'DEFINE':
-            return self._physical_navigation(nav_type, column, steps)
-        
-        # MEASURES Mode: Logical Navigation through pattern matches
-        else:
-            return self._logical_navigation(nav_type, column, steps, var_name)
-    
-    def _physical_navigation(self, nav_type, column, steps):
-        """
-        Enhanced physical navigation for DEFINE conditions with production-ready optimizations.
-        
-        This implementation provides:
-        - Direct integration with optimized context navigation methods
-        - Consistent behavior across all pattern types
-        - Advanced error handling and boundary validation
-        - Performance optimization with early exits
-        - Enhanced null handling for proper SQL semantics
-        
-        Args:
-            nav_type: Navigation type ('PREV' or 'NEXT')
-            column: Column name to retrieve
-            steps: Number of steps to navigate
-            
-        Returns:
-            The value at the navigated position or None if navigation is invalid
-        """
-        start_time = time.time()
-        
-        try:
-            # Use advanced navigation methods from context
-            if nav_type == 'PREV':
-                row = self.context.prev(steps)
-            else:  # NEXT
-                row = self.context.next(steps)
-                
-            # Get column value with proper null handling
-            result = None if row is None else row.get(column)
-            
-            # Track specific navigation type metrics
-            if hasattr(self.context, 'stats'):
-                metric_key = f"{nav_type.lower()}_navigation_calls"
-                self.context.stats[metric_key] = self.context.stats.get(metric_key, 0) + 1
-            
-            return result
-            
-        except Exception as e:
-            # Enhanced error handling with logging
-            logger = get_logger(__name__)
-            logger.error(f"Error in physical navigation ({nav_type}): {str(e)}")
-            
-            # Track errors
-            if hasattr(self.context, 'stats'):
-                self.context.stats["navigation_errors"] = self.context.stats.get("navigation_errors", 0) + 1
-                
-            # Set context error flag for pattern matching to handle
-            self.context._navigation_context_error = True
-            
-            # Return None for proper SQL NULL comparison semantics
-            return None
-            
-        finally:
-            # Track performance metrics
-            if hasattr(self.context, 'timing'):
-                navigation_time = time.time() - start_time
-                self.context.timing['physical_navigation'] = self.context.timing.get('physical_navigation', 0) + navigation_time
-    
-    def _logical_navigation(self, nav_type, column, steps, var_name=None):
-        """
-        Logical navigation for MEASURES expressions.
-        Navigate through pattern match timeline.
-        """
-        # This uses the existing complex logic for pattern timeline navigation
-        return self._get_navigation_value(var_name, column, nav_type, steps)
-            
-        # Check partition boundaries if defined
-        if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-            current_partition = self.context.get_partition_for_row(target_idx)
-            target_partition = self.context.get_partition_for_row(target_idx)
-            
-            if (current_partition is None or target_partition is None or
-                current_partition != target_partition):
-                return None
-                
-        # Get the value from the target row
-        return self.context.rows[target_idx].get(column)
 
     def visit_Constant(self, node: ast.Constant):
         """Handle all constant types (numbers, strings, booleans, None)"""
@@ -1814,15 +1321,8 @@ class ConditionEvaluator(ast.NodeVisitor):
             return None
 
 
-# External function imports that are referenced but defined elsewhere
-def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str] = None, recursion_depth: int = 0) -> Any:
-    """
-    Placeholder for nested navigation evaluation.
-    This function should be implemented in a separate module to handle complex nested navigation.
-    """
-    # This is a placeholder - the actual implementation should be in a separate module
-    logger.warning(f"evaluate_nested_navigation called but not implemented: {expr}")
-    return None
+# Note: All navigation function evaluation is now handled by the centralized
+# navigation engine in src.matcher.navigation_functions
 
 
 def compile_condition(condition_str, evaluation_mode='DEFINE'):

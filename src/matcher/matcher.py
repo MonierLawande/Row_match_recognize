@@ -1421,19 +1421,8 @@ class EnhancedMatcher:
         
         def _has_navigation_functions(self, condition_str: str) -> bool:
             """Check if a condition contains navigation functions."""
-            import re
-            navigation_patterns = [
-                r'\bPREV\s*\(',
-                r'\bNEXT\s*\(',
-                r'\bFIRST\s*\(',
-                r'\bLAST\s*\(',
-                r'\bCLASSIFIER\s*\('
-            ]
-            
-            for pattern in navigation_patterns:
-                if re.search(pattern, condition_str, re.IGNORECASE):
-                    return True
-            return False
+            from src.matcher.navigation_functions import has_navigation_functions
+            return has_navigation_functions(condition_str)
         
         def _validate_constraints(self, state: BacktrackingState, rows: List[Dict[str, Any]], 
                                 context: RowContext) -> bool:
