@@ -1437,6 +1437,11 @@ def _sql_to_python_condition(condition_str: str) -> str:
     python_condition = re.sub(r'\bOR\b', ' or ', python_condition, flags=re.IGNORECASE)  
     python_condition = re.sub(r'\bNOT\b', ' not ', python_condition, flags=re.IGNORECASE)
     
+    # CRITICAL FIX: Handle string literal quote consistency - ensure we use double quotes to avoid conflicts
+    # Convert single-quoted string literals to double-quoted ones to avoid syntax issues
+    # This prevents syntax errors when the condition is embedded in Python eval() calls
+    python_condition = re.sub(r"'([^']*)'", r'"\1"', python_condition)
+    
     return python_condition
 
 
