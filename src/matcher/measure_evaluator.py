@@ -892,7 +892,7 @@ class MeasureEvaluator:
                 from src.matcher.navigation_functions import NavigationSemantics
                 semantics = NavigationSemantics.RUNNING if is_running else NavigationSemantics.FINAL
                 result = self.navigation_engine.evaluate_navigation_expression(
-                    expr, self.context, semantics=semantics
+                    expr, self.context, self.context.current_idx, semantics=semantics
                 )
                 return result.value if hasattr(result, 'value') and result.success else result
             except Exception as e:
