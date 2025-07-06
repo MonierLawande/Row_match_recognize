@@ -1419,6 +1419,12 @@ def _sql_to_python_condition(condition_str: str) -> str:
     # Handle SQL CASE statements - support multiple WHEN clauses
     python_condition = _convert_case_expression(python_condition)
     
+    # Handle SQL IN and NOT IN predicates - convert to Python syntax
+    # Convert "column IN ('a', 'b', 'c')" to "column in ('a', 'b', 'c')"
+    # Convert "column NOT IN ('a', 'b', 'c')" to "column not in ('a', 'b', 'c')"
+    python_condition = re.sub(r'\bNOT\s+IN\b', ' not in ', python_condition, flags=re.IGNORECASE)
+    python_condition = re.sub(r'\bIN\b', ' in ', python_condition, flags=re.IGNORECASE)
+    
     # Replace SQL inequality operators first (more specific patterns)
     python_condition = re.sub(r'\s*<>\s*', ' != ', python_condition)
     python_condition = re.sub(r'(?<![<>=!])\s*!=\s*', ' != ', python_condition)  # Don't match if already part of another operator
