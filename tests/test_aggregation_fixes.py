@@ -324,8 +324,8 @@ class TestAggregationFixes:
         expected = pd.DataFrame({
             'id': list(range(1, 11)),
             'median_approx': [10, 15, 20, 25, 30, 35, 40, 45, 50, 55],  # Running medians
-            'q1_approx': [10, 10, 15, 17.5, 20, 22.5, 25, 27.5, 30, 32.5],  # Q1
-            'q3_approx': [10, 20, 25, 32.5, 40, 47.5, 55, 62.5, 70, 77.5]   # Q3
+            'q1_approx': [10, 12.5, 15, 17.5, 20, 22.5, 25, 27.5, 30, 32.5],  # Q1 (corrected)
+            'q3_approx': [10, 17.5, 25, 32.5, 40, 47.5, 55, 62.5, 70, 77.5]   # Q3 (corrected)
         })
         
         self.assert_dataframe_equals(result, expected, "Percentile function syntax test failed")
