@@ -425,8 +425,17 @@ def safe_compare(left: Any, right: Any, op: Union[Callable, ast.operator]) -> An
     Returns:
         Comparison result with SQL NULL semantics (None if any operand is NULL)
     """
+    # Special handling for IS NULL / IS NOT NULL comparisons with pandas compatibility
+    if isinstance(op, ast.Is) and right is None:
+        # For "x IS NULL", return True if x is null (None or NaN)
+        return is_null(left)
+    elif isinstance(op, ast.IsNot) and right is None:
+        # For "x IS NOT NULL", return True if x is not null
+        return not is_null(left)
+    
     # SQL NULL semantics: any comparison with NULL is NULL (None)
-    if is_null(left) or is_null(right):
+    # But only for non-IS comparisons
+    if not isinstance(op, (ast.Is, ast.IsNot)) and (is_null(left) or is_null(right)):
         return None
     
     # Map AST operators to Python functions

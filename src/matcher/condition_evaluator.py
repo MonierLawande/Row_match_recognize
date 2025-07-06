@@ -26,6 +26,7 @@ import operator
 import re
 import time
 import threading
+import pandas as pd
 from typing import Dict, Any, Optional, Callable, List, Union, Tuple, Set
 from dataclasses import dataclass
 
@@ -356,12 +357,12 @@ class ConditionEvaluator(ast.NodeVisitor):
             func_name = node.func.id.upper()
             
             # Handle null checking helper function
-            if func_name == "_IS_NULL":
+            if func_name == "__IS_NULL":
                 args = [self.visit(arg) for arg in node.args]
                 if len(args) == 1:
                     return is_null(args[0])
                 else:
-                    raise ValueError("_is_null function requires exactly one argument")
+                    raise ValueError("__is_null function requires exactly one argument")
             
             # Handle mathematical and utility functions using shared utilities
             if func_name in MATH_FUNCTIONS:
@@ -422,28 +423,18 @@ class ConditionEvaluator(ast.NodeVisitor):
                     is_nested = True
         
         if is_nested:
-            # For nested navigation, use the centralized navigation engine
+            # For nested navigation, use the centralized nested navigation evaluator
             navigation_expr = self._build_navigation_expr(node)
             
-            # Convert evaluation mode to NavigationMode
-            from .navigation_functions import NavigationMode
-            if self.evaluation_mode == 'DEFINE':
-                mode = NavigationMode.PHYSICAL
-            else:  # MEASURES
-                mode = NavigationMode.LOGICAL
-            
-            result = self.navigation_engine.evaluate_navigation_expression(
+            # Use the new centralized nested navigation function
+            from .navigation_functions import evaluate_nested_navigation
+            result = evaluate_nested_navigation(
                 navigation_expr, 
                 self.context, 
-                self.context.current_idx,
-                mode
+                self.context.current_idx
             )
             
-            # Extract the value from NavigationResult for nested calls
-            if result and result.success:
-                return result.value
-            else:
-                return None
+            return result
         else:
             # Handle standard navigation function calls
             if len(node.args) == 0:
@@ -1400,19 +1391,19 @@ def _sql_to_python_condition(condition_str: str) -> str:
     # Basic SQL to Python conversions
     python_condition = condition_str
     
-    # Handle SQL NULL comparisons first
-    python_condition = re.sub(r'\bIS\s+NULL\b', ' is None', python_condition, flags=re.IGNORECASE)
-    python_condition = re.sub(r'\bIS\s+NOT\s+NULL\b', ' is not None', python_condition, flags=re.IGNORECASE)
+    # Handle SQL NULL comparisons first - convert to function calls
+    # For pandas compatibility, we need to handle both None and NaN
+    # Convert IS NULL to a special function call that checks for both None and NaN
+    python_condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NOT\s+NULL\b', r'not __is_null(\1)', python_condition, flags=re.IGNORECASE)
+    python_condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NULL\b', r'__is_null(\1)', python_condition, flags=re.IGNORECASE)
     
     # Handle SQL BETWEEN first (before AND/OR replacement)
     # value BETWEEN a AND b -> (value >= a and value <= b)
     between_pattern = r'(\w+(?:\.\w+)?)\s+BETWEEN\s+(\d+(?:\.\d+)?)\s+AND\s+(\d+(?:\.\d+)?)'
     python_condition = re.sub(between_pattern, r'(\1 >= \2 and \1 <= \3)', python_condition, flags=re.IGNORECASE)
     
-    # Handle SQL CASE statements (simplified)
-    # CASE WHEN condition THEN value ELSE value END -> (value if condition else value)
-    case_pattern = r'CASE\s+WHEN\s+(.*?)\s+THEN\s+(.*?)\s+ELSE\s+(.*?)\s+END'
-    python_condition = re.sub(case_pattern, r'(\2 if \1 else \3)', python_condition, flags=re.IGNORECASE)
+    # Handle SQL CASE statements - support multiple WHEN clauses
+    python_condition = _convert_case_expression(python_condition)
     
     # Replace SQL inequality operators first (more specific patterns)
     python_condition = re.sub(r'\s*<>\s*', ' != ', python_condition)
@@ -1516,3 +1507,107 @@ def _is_boolean_expression(node: ast.AST) -> bool:
     
     # For unknown node types, default to boolean for safety
     return True
+
+def _convert_case_expression(condition_str: str) -> str:
+    """
+    Convert SQL CASE expressions to Python syntax with support for multiple WHEN clauses.
+    
+    Handles both simple and complex CASE expressions:
+    - CASE WHEN condition THEN value ELSE value END
+    - CASE WHEN condition1 THEN value1 WHEN condition2 THEN value2 ELSE value3 END
+    
+    Args:
+        condition_str: SQL condition string that may contain CASE expressions
+        
+    Returns:
+        Python-compatible condition string
+    """
+    # Pattern to match CASE expressions with multiple WHEN clauses
+    case_pattern = r'CASE\s+(.*?)\s+END'
+    
+    def convert_single_case(match):
+        case_body = match.group(1).strip()
+        
+        # Split the case body into WHEN/THEN pairs and ELSE clause
+        parts = []
+        current_part = ""
+        in_when = False
+        paren_count = 0
+        
+        tokens = case_body.split()
+        i = 0
+        
+        while i < len(tokens):
+            token = tokens[i].upper()
+            
+            if token == 'WHEN':
+                if current_part.strip():
+                    parts.append(current_part.strip())
+                current_part = ""
+                in_when = True
+                i += 1
+                continue
+            elif token == 'THEN':
+                if in_when:
+                    # Find the condition (everything between WHEN and THEN)
+                    condition_tokens = []
+                    j = i + 1
+                    while j < len(tokens) and tokens[j].upper() != 'WHEN' and tokens[j].upper() != 'ELSE':
+                        condition_tokens.append(tokens[j])
+                        j += 1
+                    
+                    condition = " ".join(condition_tokens) if condition_tokens else ""
+                    parts.append(f"WHEN {current_part} THEN {condition}")
+                    current_part = ""
+                    in_when = False
+                    i = j - 1
+                i += 1
+                continue
+            elif token == 'ELSE':
+                if current_part.strip():
+                    parts.append(current_part.strip())
+                # Get everything after ELSE
+                else_tokens = tokens[i + 1:]
+                parts.append(f"ELSE {' '.join(else_tokens)}")
+                break
+            else:
+                current_part += " " + tokens[i]
+                i += 1
+        
+        if current_part.strip():
+            parts.append(current_part.strip())
+        
+        # Now convert the parts to Python syntax
+        if len(parts) == 0:
+            return "None"
+        
+        # Build the Python expression from right to left
+        result = None
+        
+        # Find the ELSE clause first
+        else_value = "None"
+        when_clauses = []
+        
+        for part in parts:
+            if part.startswith('ELSE '):
+                else_value = part[5:].strip()
+            elif part.startswith('WHEN '):
+                # Parse "WHEN condition THEN value"
+                when_part = part[5:].strip()  # Remove "WHEN "
+                if ' THEN ' in when_part:
+                    condition, value = when_part.split(' THEN ', 1)
+                    when_clauses.append((condition.strip(), value.strip()))
+        
+        # Build the nested conditional expression
+        if not when_clauses:
+            return else_value
+        
+        # Build from right to left: (value1 if condition1 else (value2 if condition2 else else_value))
+        result = else_value
+        for condition, value in reversed(when_clauses):
+            result = f"({value} if {condition} else {result})"
+        
+        return result
+    
+    # Apply the conversion to all CASE expressions in the string
+    return re.sub(case_pattern, convert_single_case, condition_str, flags=re.IGNORECASE | re.DOTALL)

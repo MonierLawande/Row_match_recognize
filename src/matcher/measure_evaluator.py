@@ -48,7 +48,7 @@ from src.matcher.evaluation_utils import (
     preserve_data_type, MATH_FUNCTIONS, evaluate_math_function,
     get_evaluation_metrics, cast_function, try_cast_function
 )
-from src.matcher.navigation_functions import NavigationFunctionEngine, NavigationFunction, NavigationMode
+from src.matcher.navigation_functions import NavigationFunctionEngine, NavigationFunction, NavigationMode, evaluate_nested_navigation
 from src.utils.logging_config import get_logger, PerformanceTimer
 
 # Module logger with enhanced configuration

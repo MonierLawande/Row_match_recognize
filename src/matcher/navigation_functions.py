@@ -1223,7 +1223,7 @@ class NavigationFunctionEngine:
                     var_name = None
                     col_name = column_ref
                 
-                # First evaluate the inner FIRST/LAST to get the base row index
+                # First evaluate the inner FIRST/LAST to get the target value
                 inner_request = NavigationRequest(
                     function=NavigationFunction.FIRST if inner_func == 'FIRST' else NavigationFunction.LAST,
                     context=context,
@@ -1234,24 +1234,79 @@ class NavigationFunctionEngine:
                     mode=NavigationMode.LOGICAL
                 )
                 
-                inner_result = self._find_strategy(NavigationFunction.FIRST if inner_func == 'FIRST' else NavigationFunction.LAST, NavigationMode.LOGICAL)
-                if not inner_result:
+                inner_strategy = self._find_strategy(NavigationFunction.FIRST if inner_func == 'FIRST' else NavigationFunction.LAST, NavigationMode.LOGICAL)
+                if not inner_strategy:
                     return None
-                inner_result = inner_result.navigate(inner_request)
-                if not inner_result.success or inner_result.target_idx is None:
+                inner_result = inner_strategy.navigate(inner_request)
+                if not inner_result.success or inner_result.value is None:
                     return None
                 
-                # Now apply the outer PREV/NEXT from the inner result's target index
-                target_base_idx = inner_result.target_idx
+                # For nested navigation like PREV(RUNNING LAST(value)), 
+                # we need to find where this value came from and then navigate from there
+                target_value = inner_result.value
+                target_row_idx = None
                 
+                # Strategy: Find the row index where the inner function found this value
+                # For RUNNING LAST(value), we need to find the last occurrence of this value
+                # up to the current position
+                
+                if var_name and var_name in context.variables:
+                    var_indices = list(context.variables[var_name])
+                    
+                    # Apply RUNNING semantics filtering for the search
+                    if inner_func == 'LAST':
+                        # Filter indices to only those up to current position for RUNNING semantics
+                        filtered_indices = [idx for idx in var_indices if idx <= current_idx]
+                        if filtered_indices:
+                            # Find the last index with the target value
+                            for idx in reversed(sorted(filtered_indices)):
+                                if idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
+                                    target_row_idx = idx
+                                    break
+                    else:  # FIRST
+                        # Find the first index with the target value
+                        for idx in sorted(var_indices):
+                            if idx <= current_idx and idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
+                                target_row_idx = idx
+                                break
+                else:
+                    # No variable specified - search all rows up to current position
+                    search_range = range(current_idx + 1)  # Include current position
+                    
+                    if inner_func == 'LAST':
+                        # Search in reverse order to find last occurrence
+                        for idx in reversed(list(search_range)):
+                            if idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
+                                target_row_idx = idx
+                                break
+                    else:  # FIRST  
+                        # Search in forward order to find first occurrence
+                        for idx in search_range:
+                            if idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
+                                target_row_idx = idx
+                                break
+                
+                if target_row_idx is None:
+                    logger.debug(f"[NESTED_NAV] Could not find source row for value {target_value}")
+                    return None
+                
+                logger.debug(f"[NESTED_NAV] Found source row {target_row_idx} for value {target_value}")
+                
+                # Now apply the outer PREV/NEXT from the target row index
                 if outer_func == 'PREV':
-                    final_idx = target_base_idx - steps
+                    final_idx = target_row_idx - steps
                 else:  # NEXT
-                    final_idx = target_base_idx + steps
+                    final_idx = target_row_idx + steps
+                
+                logger.debug(f"[NESTED_NAV] Applying {outer_func}({steps}): {target_row_idx} -> {final_idx}")
                 
                 # Check bounds and get the final value
                 if 0 <= final_idx < len(context.rows):
-                    return context.rows[final_idx].get(col_name)
+                    final_value = context.rows[final_idx].get(col_name)
+                    logger.debug(f"[NESTED_NAV] Final result: {final_value}")
+                    return final_value
+                else:
+                    logger.debug(f"[NESTED_NAV] Final index {final_idx} out of bounds")
                 
                 return None
             
@@ -1468,6 +1523,29 @@ def has_navigation_functions(expression: str) -> bool:
     
     return False
 
+def evaluate_nested_navigation(expression: str, context: RowContext, current_idx: int = 0) -> Any:
+    """
+    Module-level function to evaluate nested navigation expressions.
+    
+    This function provides a convenient interface for evaluating complex nested 
+    navigation patterns like PREV(FIRST(A.value), 3) or NEXT(LAST(B.price), 2).
+    
+    Args:
+        expression: The navigation expression to evaluate
+        context: Row context for evaluation  
+        current_idx: Current row index (default: 0)
+        
+    Returns:
+        The evaluated result or None if evaluation fails
+        
+    Examples:
+        >>> evaluate_nested_navigation("PREV(FIRST(A.value), 3)", context, 5)
+        >>> evaluate_nested_navigation("NEXT(LAST(B.price), 2)", context, 10)
+        >>> evaluate_nested_navigation("FIRST(CLASSIFIER(A), 1)", context, 0)
+    """
+    engine = get_navigation_engine()
+    return engine.evaluate_nested_navigation(expression, context, current_idx)
+
 # Export the main classes and functions
 __all__ = [
     'NavigationFunction',
@@ -1482,6 +1560,7 @@ __all__ = [
     'get_navigation_engine',
     'reset_navigation_engine',
     'evaluate_navigation_function',
+    'evaluate_nested_navigation',
     'detect_navigation_functions',
     'has_navigation_functions',
     'analyze_navigation_complexity'
