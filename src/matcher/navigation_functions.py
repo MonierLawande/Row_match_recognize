@@ -558,11 +558,8 @@ class LogicalNavigationStrategy(NavigationStrategy):
             return NavigationResult(value=None, success=True, execution_time=time.time() - start_time)
         
         # Apply RUNNING semantics filtering if needed
-        # For FIRST/LAST functions, RUNNING semantics should not limit the available rows in subset navigation
-        # FIRST/LAST should always see the full match scope, RUNNING only affects evaluation timing
-        # For PREV/NEXT functions, apply RUNNING semantics filtering when in RUNNING mode
-        if (request.function in {NavigationFunction.PREV, NavigationFunction.NEXT} and
-            request.semantics == NavigationSemantics.RUNNING):
+        # For RUNNING semantics, filter to only include rows up to current position
+        if request.semantics == NavigationSemantics.RUNNING:
             all_indices = [idx for idx in all_indices if idx <= request.context.current_idx]
         
         all_indices = sorted(set(all_indices))
@@ -605,11 +602,8 @@ class LogicalNavigationStrategy(NavigationStrategy):
             return NavigationResult(value=None, success=True, execution_time=time.time() - start_time)
         
         # Apply RUNNING semantics filtering if needed
-        # For FIRST/LAST functions, RUNNING semantics should not limit the available rows in global navigation
-        # FIRST/LAST should always see the full match scope, RUNNING only affects evaluation timing
-        # For PREV/NEXT functions, apply RUNNING semantics filtering when in RUNNING mode
-        if (request.function in {NavigationFunction.PREV, NavigationFunction.NEXT} and
-            request.semantics == NavigationSemantics.RUNNING):
+        # For RUNNING semantics, filter to only include rows up to current position
+        if request.semantics == NavigationSemantics.RUNNING:
             all_indices = [idx for idx in all_indices if idx <= request.context.current_idx]
         
         all_indices = sorted(set(all_indices))
@@ -849,6 +843,51 @@ class NavigationFunctionEngine:
             nav_request = self._parse_navigation_expression(expression, context, current_idx, mode, semantics)
             
             if not nav_request:
+                # Check if this is a complex arithmetic expression with navigation functions
+                # Only treat as arithmetic if it contains actual arithmetic operators (+, -, *, /)
+                # Don't treat nested navigation functions like PREV(RUNNING LAST(value)) as arithmetic
+                has_arithmetic = any(op in expression for op in ['+', '-', '*', '/'])
+                has_parentheses = '(' in expression and ')' in expression
+                
+                if has_arithmetic and has_parentheses:
+                    logger.debug(f"Complex arithmetic expression detected, delegating to condition evaluator: {expression}")
+                    # For complex expressions, delegate to the condition evaluator
+                    from .condition_evaluator import ConditionEvaluator
+                    evaluator = ConditionEvaluator(context, evaluation_mode='MEASURES')
+                    
+                    try:
+                        import ast
+                        tree = ast.parse(expression, mode='eval')
+                        result = evaluator.visit(tree.body)
+                        
+                        return NavigationResult(
+                            value=result,
+                            success=True,
+                            execution_time=time.time() - start_time
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to evaluate complex expression '{expression}': {e}")
+                        return NavigationResult(
+                            value=None,
+                            success=False,
+                            error=str(e),
+                            execution_time=time.time() - start_time
+                        )
+                
+                # Try nested navigation as a fallback for simple nested functions
+                logger.debug(f"Regular parsing failed, trying nested navigation for: {expression}")
+                nested_result = self.evaluate_nested_navigation(expression, context, current_idx)
+                
+                if nested_result is not None:
+                    # Cache the successful nested result
+                    self.cache.put(cache_key, nested_result)
+                    return NavigationResult(
+                        value=nested_result,
+                        success=True,
+                        cache_hit=False,
+                        execution_time=time.time() - start_time
+                    )
+                
                 return NavigationResult(
                     value=None,
                     success=False,
@@ -1204,7 +1243,130 @@ class NavigationFunctionEngine:
             
             # Enhanced pattern matching for different nested navigation types
             
-            # Pattern 1: Nested PREV/NEXT with FIRST/LAST
+            # Pattern 1: Nested PREV/NEXT with RUNNING/FINAL FIRST/LAST
+            # Handles: PREV(RUNNING LAST(value)), NEXT(FINAL FIRST(A.value), 2), etc.
+            nested_semantics_pattern = r'(PREV|NEXT)\s*\(\s*(RUNNING|FINAL)?\s*(FIRST|LAST)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\)\s*(?:,\s*(\d+))?\s*\)'
+            nested_semantics_match = re.match(nested_semantics_pattern, expr, re.IGNORECASE)
+            
+            if nested_semantics_match:
+                outer_func = nested_semantics_match.group(1).upper()  # PREV or NEXT
+                semantics_keyword = nested_semantics_match.group(2)   # RUNNING or FINAL (optional)
+                inner_func = nested_semantics_match.group(3).upper()  # FIRST or LAST
+                column_ref = nested_semantics_match.group(4)          # A.value or just column
+                steps = int(nested_semantics_match.group(5)) if nested_semantics_match.group(5) else 1
+                
+                # Determine semantics
+                inner_semantics = NavigationSemantics.FINAL  # Default
+                if semantics_keyword:
+                    if semantics_keyword.upper() == 'RUNNING':
+                        inner_semantics = NavigationSemantics.RUNNING
+                    elif semantics_keyword.upper() == 'FINAL':
+                        inner_semantics = NavigationSemantics.FINAL
+                
+                logger.debug(f"[NESTED_NAV] Nested semantics pattern: {outer_func}({semantics_keyword} {inner_func}({column_ref}), {steps})")
+                
+                # Parse column reference
+                if '.' in column_ref:
+                    var_name, col_name = column_ref.split('.', 1)
+                else:
+                    var_name = None
+                    col_name = column_ref
+                
+                # First evaluate the inner FIRST/LAST with proper semantics to get the target value
+                inner_request = NavigationRequest(
+                    function=NavigationFunction.FIRST if inner_func == 'FIRST' else NavigationFunction.LAST,
+                    context=context,
+                    current_idx=current_idx,
+                    column=col_name,
+                    variable=var_name,
+                    steps=0,  # Get the first/last occurrence
+                    mode=NavigationMode.LOGICAL,
+                    semantics=inner_semantics  # Use the parsed semantics
+                )
+                
+                inner_strategy = self._find_strategy(NavigationFunction.FIRST if inner_func == 'FIRST' else NavigationFunction.LAST, NavigationMode.LOGICAL)
+                if not inner_strategy:
+                    return None
+                inner_result = inner_strategy.navigate(inner_request)
+                if not inner_result.success or inner_result.value is None:
+                    return None
+                
+                # For nested navigation like PREV(RUNNING LAST(value)), 
+                # we need to find where this value came from and then navigate from there
+                target_value = inner_result.value
+                target_row_idx = None
+                
+                # Strategy: Find the row index where the inner function found this value
+                # For RUNNING LAST(value), we need to find the last occurrence of this value
+                # up to the current position
+                
+                if var_name and var_name in context.variables:
+                    var_indices = list(context.variables[var_name])
+                    
+                    # Apply semantics filtering for the search
+                    if inner_semantics == NavigationSemantics.RUNNING:
+                        # Filter indices to only those up to current position for RUNNING semantics
+                        filtered_indices = [idx for idx in var_indices if idx <= current_idx]
+                    else:  # FINAL semantics
+                        # For FINAL semantics, consider all variable occurrences in the match
+                        filtered_indices = var_indices
+                    
+                    if filtered_indices:
+                        if inner_func == 'LAST':
+                            # Find the last index with the target value
+                            for idx in reversed(sorted(filtered_indices)):
+                                if idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
+                                    target_row_idx = idx
+                                    break
+                        else:  # FIRST
+                            # Find the first index with the target value
+                            for idx in sorted(filtered_indices):
+                                if idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
+                                    target_row_idx = idx
+                                    break
+                else:
+                    # No variable specified - search all rows based on semantics
+                    if inner_semantics == NavigationSemantics.RUNNING:
+                        search_range = range(current_idx + 1)  # Include current position for RUNNING
+                    else:  # FINAL semantics
+                        search_range = range(len(context.rows))  # All rows for FINAL
+                    
+                    if inner_func == 'LAST':
+                        # Search in reverse order to find last occurrence
+                        for idx in reversed(list(search_range)):
+                            if idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
+                                target_row_idx = idx
+                                break
+                    else:  # FIRST  
+                        # Search in forward order to find first occurrence
+                        for idx in search_range:
+                            if idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
+                                target_row_idx = idx
+                                break
+                
+                if target_row_idx is None:
+                    logger.debug(f"[NESTED_NAV] Could not find source row for value {target_value}")
+                    return None
+                
+                logger.debug(f"[NESTED_NAV] Found source row {target_row_idx} for value {target_value}")
+                
+                # Now apply the outer PREV/NEXT from the target row index
+                if outer_func == 'PREV':
+                    final_idx = target_row_idx - steps
+                else:  # NEXT
+                    final_idx = target_row_idx + steps
+                
+                # Boundary check
+                if final_idx < 0 or final_idx >= len(context.rows):
+                    logger.debug(f"[NESTED_NAV] Final index {final_idx} out of bounds")
+                    return None
+                
+                # Return the value from the final row
+                final_value = context.rows[final_idx].get(col_name)
+                logger.debug(f"[NESTED_NAV] Final result: {final_value} from row {final_idx}")
+                return final_value
+            
+            # Pattern 2: Nested PREV/NEXT with FIRST/LAST (without explicit semantics)
             nested_pattern = r'(PREV|NEXT)\s*\(\s*(FIRST|LAST)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-ZaZ0-9_]*)?)\s*\)\s*(?:,\s*(\d+))?\s*\)'
             nested_match = re.match(nested_pattern, expr, re.IGNORECASE)
             
@@ -1213,6 +1375,9 @@ class NavigationFunctionEngine:
                 inner_func = nested_match.group(2).upper()  # FIRST or LAST
                 column_ref = nested_match.group(3)          # A.value or just column
                 steps = int(nested_match.group(4)) if nested_match.group(4) else 1
+                
+                # For nested patterns without explicit semantics, default to RUNNING
+                inner_semantics = NavigationSemantics.RUNNING
                 
                 logger.debug(f"[NESTED_NAV] Nested pattern: {outer_func}({inner_func}({column_ref}), {steps})")
                 
@@ -1246,45 +1411,40 @@ class NavigationFunctionEngine:
                 target_value = inner_result.value
                 target_row_idx = None
                 
-                # Strategy: Find the row index where the inner function found this value
-                # For RUNNING LAST(value), we need to find the last occurrence of this value
-                # up to the current position
+                # Strategy: For PREV(RUNNING LAST(value)), we should find the source row 
+                # where RUNNING LAST found the value and then apply PREV from there
                 
                 if var_name and var_name in context.variables:
                     var_indices = list(context.variables[var_name])
                     
-                    # Apply RUNNING semantics filtering for the search
-                    if inner_func == 'LAST':
-                        # Filter indices to only those up to current position for RUNNING semantics
+                    # Apply semantics filtering for the search
+                    if inner_semantics == NavigationSemantics.RUNNING:
+                        # For RUNNING semantics, only consider indices up to current position
                         filtered_indices = [idx for idx in var_indices if idx <= current_idx]
-                        if filtered_indices:
-                            # Find the last index with the target value
-                            for idx in reversed(sorted(filtered_indices)):
-                                if idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
-                                    target_row_idx = idx
-                                    break
-                    else:  # FIRST
-                        # Find the first index with the target value
-                        for idx in sorted(var_indices):
-                            if idx <= current_idx and idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
-                                target_row_idx = idx
-                                break
+                    else:  # FINAL semantics
+                        # For FINAL semantics, consider all variable occurrences in the match
+                        filtered_indices = var_indices
+                    
+                    if filtered_indices:
+                        if inner_func == 'LAST':
+                            # Find the last (rightmost) index in the filtered set
+                            target_row_idx = max(filtered_indices)
+                        else:  # FIRST
+                            # Find the first (leftmost) index in the filtered set
+                            target_row_idx = min(filtered_indices)
                 else:
-                    # No variable specified - search all rows up to current position
-                    search_range = range(current_idx + 1)  # Include current position
+                    # No variable specified - search all rows based on semantics
+                    if inner_semantics == NavigationSemantics.RUNNING:
+                        search_range = range(current_idx + 1)  # Include current position for RUNNING
+                    else:  # FINAL semantics
+                        search_range = range(len(context.rows))  # All rows for FINAL
                     
                     if inner_func == 'LAST':
-                        # Search in reverse order to find last occurrence
-                        for idx in reversed(list(search_range)):
-                            if idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
-                                target_row_idx = idx
-                                break
+                        # For LAST, get the rightmost position in the range
+                        target_row_idx = max(search_range) if search_range else None
                     else:  # FIRST  
-                        # Search in forward order to find first occurrence
-                        for idx in search_range:
-                            if idx < len(context.rows) and context.rows[idx].get(col_name) == target_value:
-                                target_row_idx = idx
-                                break
+                        # For FIRST, get the leftmost position in the range
+                        target_row_idx = min(search_range) if search_range else None
                 
                 if target_row_idx is None:
                     logger.debug(f"[NESTED_NAV] Could not find source row for value {target_value}")

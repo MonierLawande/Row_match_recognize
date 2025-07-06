@@ -997,12 +997,26 @@ class ConditionEvaluator(ast.NodeVisitor):
             else:
                 expr = f"{nav_type}({column}{', ' + str(steps) if steps != 1 else ''})"
             
-            # Convert evaluation mode to NavigationMode
+            # Determine navigation mode based on function type and evaluation context
             from .navigation_functions import NavigationMode
-            if self.evaluation_mode == 'DEFINE':
-                mode = NavigationMode.PHYSICAL
-            else:  # MEASURES
+            
+            # CRITICAL FIX: For FIRST/LAST functions with pattern variables, always use logical navigation
+            # For PREV/NEXT, use physical navigation in DEFINE mode, logical in MEASURES mode
+            if nav_type in ('FIRST', 'LAST') and var_name:
+                # FIRST/LAST with pattern variables always use logical navigation
                 mode = NavigationMode.LOGICAL
+            elif nav_type in ('PREV', 'NEXT'):
+                # PREV/NEXT use mode based on evaluation context
+                if self.evaluation_mode == 'DEFINE':
+                    mode = NavigationMode.PHYSICAL
+                else:  # MEASURES
+                    mode = NavigationMode.LOGICAL
+            else:
+                # Default fallback
+                if self.evaluation_mode == 'DEFINE':
+                    mode = NavigationMode.PHYSICAL
+                else:  # MEASURES
+                    mode = NavigationMode.LOGICAL
             
             # Use the centralized navigation engine
             result = self.navigation_engine.evaluate_navigation_expression(
