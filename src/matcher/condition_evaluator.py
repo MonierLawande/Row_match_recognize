@@ -1343,6 +1343,10 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
         # Convert SQL syntax to Python syntax
         python_condition = _sql_to_python_condition(condition_str)
         
+        # CRITICAL FIX: Clean up multiline conditions for Python parsing
+        # Remove line breaks and normalize whitespace that can cause syntax errors
+        python_condition = ' '.join(python_condition.split())
+        
         # Debug logging
         if "AND" in condition_str.upper():
             logger.debug(f"[CONDITION_DEBUG] Original: '{condition_str}' -> Python: '{python_condition}'")
@@ -1377,8 +1381,9 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
                 
         return evaluate_condition
     except SyntaxError as e:
-        # Log the error and return a function that always returns False
-        logger.error(f"Syntax error in condition '{condition_str}': {e}")
+        # Log the error with the converted Python condition for better debugging
+        logger.error(f"Syntax error in converted Python condition '{python_condition}': {e}")
+        logger.error(f"Original SQL condition was: '{condition_str}'")
         return lambda row, ctx: False
     except Exception as e:
         # Log the error and return a function that always returns False
@@ -1441,6 +1446,10 @@ def _sql_to_python_condition(condition_str: str) -> str:
     # Convert single-quoted string literals to double-quoted ones to avoid syntax issues
     # This prevents syntax errors when the condition is embedded in Python eval() calls
     python_condition = re.sub(r"'([^']*)'", r'"\1"', python_condition)
+    
+    # ADDITIONAL FIX: Clean up any remaining whitespace issues that could cause parsing errors
+    # Normalize whitespace around operators and keywords
+    python_condition = re.sub(r'\s+', ' ', python_condition).strip()
     
     return python_condition
 
