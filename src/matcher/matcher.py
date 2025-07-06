@@ -1407,9 +1407,9 @@ class EnhancedMatcher:
                 print(f"DEBUG: Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, row={s.row_index}")
             
             successors.sort(key=lambda s: (
-                not self.dfa.states[s.state_id].is_accept,
-                get_combination_priority(s),
-                s.path[-1][2] if s.path else ''
+                not self.dfa.states[s.state_id].is_accept,  # Accepting states first (False < True)
+                get_combination_priority(s),               # Lower priority values first (0 < 1)
+                s.path[-1][2] if s.path else ''            # Alphabetical order as tiebreaker
             ))
             
             print(f"DEBUG: After sorting, successors order:")
