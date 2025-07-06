@@ -889,12 +889,22 @@ class MeasureEvaluator:
         if is_simple_nav or is_nested_nav:
             # Use centralized navigation engine directly
             try:
-                from src.matcher.navigation_functions import NavigationSemantics
+                from src.matcher.navigation_functions import NavigationSemantics, NavigationResult
                 semantics = NavigationSemantics.RUNNING if is_running else NavigationSemantics.FINAL
                 result = self.navigation_engine.evaluate_navigation_expression(
                     expr, self.context, self.context.current_idx, semantics=semantics
                 )
-                return result.value if hasattr(result, 'value') and result.success else result
+                
+                # Properly extract value from NavigationResult
+                if isinstance(result, NavigationResult):
+                    if result.success:
+                        return result.value
+                    else:
+                        logger.warning(f"Navigation function failed: {result.error}")
+                        return None
+                else:
+                    # Direct result
+                    return result
             except Exception as e:
                 logger.error(f"Navigation evaluation error: {e}")
                 return None

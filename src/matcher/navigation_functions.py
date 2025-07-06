@@ -902,7 +902,7 @@ class NavigationFunctionEngine:
                 func_name = match.group(1).upper()
                 variable = match.group(2)
                 column = match.group(3)
-                steps_or_offset = int(match.group(4)) if match.group(4) else 1
+                steps_or_offset = int(match.group(4)) if match.group(4) else None
                 
                 function = self._function_registry.get(func_name)
                 if not function:
@@ -911,9 +911,10 @@ class NavigationFunctionEngine:
                 # For FIRST/LAST, the number is an offset; for PREV/NEXT, it's steps
                 if function in {NavigationFunction.FIRST, NavigationFunction.LAST}:
                     steps = 1
-                    offset = steps_or_offset - 1 if steps_or_offset > 0 else 0
+                    # Default offset for FIRST/LAST is 0 (first/last element)
+                    offset = steps_or_offset if steps_or_offset is not None else 0
                 else:
-                    steps = steps_or_offset
+                    steps = steps_or_offset if steps_or_offset is not None else 1
                     offset = 0
                 
                 return NavigationRequest(
