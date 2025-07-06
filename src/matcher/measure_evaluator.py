@@ -878,33 +878,61 @@ class MeasureEvaluator:
         # Strategy: Look for expressions that are ONLY navigation functions (no operators after)
         complete_nav_pattern = r'^(FIRST|LAST|PREV|NEXT)\s*\(.*\)\s*$'
         nested_nav_pattern = r'^(FIRST|LAST|PREV|NEXT)\s*\(\s*(FIRST|LAST|PREV|NEXT)\s*\([^)]*\)\s*,\s*[^)]*\)\s*$'
+        running_nav_pattern = r'^RUNNING\s+(FIRST|LAST|PREV|NEXT)\s*\(.*\)\s*$'
         has_operators_pattern = r'.*\)\s*[=<>!]+.*|.*\)\s+(AND|OR|NOT)\s+.*'
         
         # Check if expression is a simple navigation function (not a complex boolean expression)
         matches_nav = re.match(complete_nav_pattern, expr, re.IGNORECASE) is not None
+        matches_running_nav = re.match(running_nav_pattern, expr, re.IGNORECASE) is not None
         has_operators = re.match(has_operators_pattern, expr, re.IGNORECASE) is not None
         is_simple_nav = matches_nav and not has_operators
         is_nested_nav = re.match(nested_nav_pattern, expr, re.IGNORECASE) is not None
+        is_running_nav = matches_running_nav and not has_operators
         
-        if is_simple_nav or is_nested_nav:
+        if is_simple_nav or is_nested_nav or is_running_nav:
             # Use centralized navigation engine directly
             try:
-                from src.matcher.navigation_functions import NavigationSemantics, NavigationResult
-                semantics = NavigationSemantics.RUNNING if is_running else NavigationSemantics.FINAL
+                from src.matcher.navigation_functions import NavigationMode, NavigationSemantics
+                
+                # For RUNNING navigation expressions like "RUNNING LAST(B.value)", 
+                # we need to parse out the navigation function and use RUNNING semantics
+                nav_expr = expr
+                force_running = is_running
+                
+                if is_running_nav:
+                    # Extract the navigation function part from "RUNNING LAST(B.value)"
+                    running_match = re.match(r'^RUNNING\s+(.*)\s*$', expr, re.IGNORECASE)
+                    if running_match:
+                        nav_expr = running_match.group(1).strip()
+                        force_running = True  # Force RUNNING semantics for this navigation
+                        logger.debug(f"[RUNNING_NAV] Detected RUNNING navigation: '{expr}' -> '{nav_expr}' with RUNNING semantics")
+                    else:
+                        logger.warning(f"[RUNNING_NAV] Failed to parse RUNNING expression: '{expr}'")
+                
+                # Determine semantics based on context
+                semantics = NavigationSemantics.RUNNING if force_running else NavigationSemantics.FINAL
+                mode = NavigationMode.LOGICAL  # Always use logical mode for MEASURES
+                
+                logger.debug(f"[NAV_CALL] Calling navigation engine with: expr='{nav_expr}', semantics={semantics}, current_idx={self.context.current_idx}")
+                logger.debug(f"[NAV_CALL] Context variables: {self.context.variables}")
+                
                 result = self.navigation_engine.evaluate_navigation_expression(
-                    expr, self.context, self.context.current_idx, semantics=semantics
+                    nav_expr, self.context, self.context.current_idx, mode, semantics=semantics
                 )
                 
-                # Properly extract value from NavigationResult
-                if isinstance(result, NavigationResult):
-                    if result.success:
-                        return result.value
-                    else:
-                        logger.warning(f"Navigation function failed: {result.error}")
-                        return None
-                else:
+                logger.debug(f"[NAV_RESULT] Navigation result for '{expr}': {result}")
+                
+                # Extract result properly
+                if result and hasattr(result, 'success') and result.success:
+                    logger.debug(f"[NAV_SUCCESS] Navigation successful, returning value: {result.value}")
+                    return result.value
+                elif result and not hasattr(result, 'success'):
                     # Direct result
+                    logger.debug(f"[NAV_DIRECT] Direct navigation result: {result}")
                     return result
+                else:
+                    logger.warning(f"[NAV_FAILED] Navigation function failed for expression: {expr}")
+                    return None
             except Exception as e:
                 logger.error(f"Navigation evaluation error: {e}")
                 return None

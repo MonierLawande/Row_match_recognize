@@ -424,12 +424,26 @@ class ConditionEvaluator(ast.NodeVisitor):
         if is_nested:
             # For nested navigation, use the centralized navigation engine
             navigation_expr = self._build_navigation_expr(node)
-            return self.navigation_engine.evaluate_navigation_expression(
+            
+            # Convert evaluation mode to NavigationMode
+            from .navigation_functions import NavigationMode
+            if self.evaluation_mode == 'DEFINE':
+                mode = NavigationMode.PHYSICAL
+            else:  # MEASURES
+                mode = NavigationMode.LOGICAL
+            
+            result = self.navigation_engine.evaluate_navigation_expression(
                 navigation_expr, 
                 self.context, 
                 self.context.current_idx,
-                self.evaluation_mode
+                mode
             )
+            
+            # Extract the value from NavigationResult for nested calls
+            if result and result.success:
+                return result.value
+            else:
+                return None
         else:
             # Handle standard navigation function calls
             if len(node.args) == 0:
@@ -708,6 +722,7 @@ class ConditionEvaluator(ast.NodeVisitor):
     def visit_BinOp(self, node: ast.BinOp):
         """Handle binary operations (addition, subtraction, multiplication, etc.)"""
         import operator
+        from .navigation_functions import NavigationResult
         
         # Map AST operators to Python operators
         op_map = {
@@ -732,6 +747,19 @@ class ConditionEvaluator(ast.NodeVisitor):
             
             if op is None:
                 raise ValueError(f"Unsupported binary operator: {type(node.op).__name__}")
+            
+            # Extract values from NavigationResult objects
+            if isinstance(left, NavigationResult):
+                if not left.success:
+                    logger.warning(f"Left operand navigation failed: {left.error}")
+                    return None
+                left = left.value
+            
+            if isinstance(right, NavigationResult):
+                if not right.success:
+                    logger.warning(f"Right operand navigation failed: {right.error}")
+                    return None
+                right = right.value
             
             # Handle None values - if either operand is None, result is None (SQL semantics)
             if left is None or right is None:
@@ -978,12 +1006,23 @@ class ConditionEvaluator(ast.NodeVisitor):
             else:
                 expr = f"{nav_type}({column}{', ' + str(steps) if steps != 1 else ''})"
             
+            # Convert evaluation mode to NavigationMode
+            from .navigation_functions import NavigationMode
+            if self.evaluation_mode == 'DEFINE':
+                mode = NavigationMode.PHYSICAL
+            else:  # MEASURES
+                mode = NavigationMode.LOGICAL
+            
             # Use the centralized navigation engine
             result = self.navigation_engine.evaluate_navigation_expression(
-                expr, self.context, self.context.current_idx, self.evaluation_mode
+                expr, self.context, self.context.current_idx, mode
             )
             
-            return result
+            # Extract the value from NavigationResult
+            if result and result.success:
+                return result.value
+            else:
+                return None
             
         except Exception as e:
             logger.error(f"Navigation function evaluation error: {e}")
@@ -1024,55 +1063,6 @@ class ConditionEvaluator(ast.NodeVisitor):
         # If no variable found, return empty string
         return ""
     
-    def _get_direct_classifier_at_index(self, row_idx: int, subset_var: Optional[str] = None) -> str:
-        """
-        Get the classifier value directly at a specific row index without recursion.
-        
-        Args:
-            row_idx: The row index to get the classifier for
-            subset_var: Optional subset variable name
-            
-        Returns:
-            The classifier value at the specified index
-        """
-        logger.debug(f"[CLASSIFIER_DEBUG] _get_direct_classifier_at_index(row_idx={row_idx}, subset_var={subset_var})")
-        
-        if subset_var:
-            # For subset variables, return the actual component variable name that matches
-            if subset_var in self.context.subsets:
-                component_vars = self.context.subsets[subset_var]
-                for comp_var in component_vars:
-                    if comp_var in self.context.variables and row_idx in self.context.variables[comp_var]:
-                        logger.debug(f"[CLASSIFIER_DEBUG] Found subset component {comp_var} for row {row_idx}")
-                        return comp_var  # Return the actual component variable, not the subset name
-            logger.debug(f"[CLASSIFIER_DEBUG] No subset component found for row {row_idx}, returning empty string")
-            return ""
-        
-        # Check which variable this row belongs to
-        logger.debug(f"[CLASSIFIER_DEBUG] Context variables: {self.context.variables}")
-        
-        if hasattr(self, '_row_var_index') and row_idx in self._row_var_index:
-            variables = self._row_var_index[row_idx]
-            logger.debug(f"[CLASSIFIER_DEBUG] Found in _row_var_index: {variables}")
-            if len(variables) == 1:
-                result = next(iter(variables))
-                logger.debug(f"[CLASSIFIER_DEBUG] Single variable: {result}")
-                return result
-            elif len(variables) > 1:
-                # Multiple variables - return the first one alphabetically for consistency
-                result = min(variables)
-                logger.debug(f"[CLASSIFIER_DEBUG] Multiple variables, returning: {result}")
-                return result
-        
-        # Fallback to searching through all variables
-        for var_name, indices in self.context.variables.items():
-            if row_idx in indices:
-                logger.debug(f"[CLASSIFIER_DEBUG] Found row {row_idx} in variable {var_name}")
-                return var_name
-        
-        logger.debug(f"[CLASSIFIER_DEBUG] No variable found for row {row_idx}, returning empty string")
-        return ""
-
     def _build_navigation_expr(self, node):
         """
         Convert an AST navigation function call to a string representation.
@@ -1348,6 +1338,10 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
         # Convert SQL syntax to Python syntax
         python_condition = _sql_to_python_condition(condition_str)
         
+        # Debug logging
+        if "AND" in condition_str.upper():
+            logger.debug(f"[CONDITION_DEBUG] Original: '{condition_str}' -> Python: '{python_condition}'")
+        
         # Parse the condition
         tree = ast.parse(python_condition, mode='eval')
         
@@ -1406,25 +1400,30 @@ def _sql_to_python_condition(condition_str: str) -> str:
     # Basic SQL to Python conversions
     python_condition = condition_str
     
-    # Replace SQL equality operator
-    python_condition = re.sub(r'\s*=\s*', ' == ', python_condition)
+    # Handle SQL NULL comparisons first
+    python_condition = re.sub(r'\bIS\s+NULL\b', ' is None', python_condition, flags=re.IGNORECASE)
+    python_condition = re.sub(r'\bIS\s+NOT\s+NULL\b', ' is not None', python_condition, flags=re.IGNORECASE)
     
-    # Replace SQL inequality operators
-    python_condition = re.sub(r'\s*<>\s*', ' != ', python_condition)
-    python_condition = re.sub(r'\s*!=\s*', ' != ', python_condition)
+    # Handle SQL BETWEEN first (before AND/OR replacement)
+    # value BETWEEN a AND b -> (value >= a and value <= b)
+    between_pattern = r'(\w+(?:\.\w+)?)\s+BETWEEN\s+(\d+(?:\.\d+)?)\s+AND\s+(\d+(?:\.\d+)?)'
+    python_condition = re.sub(between_pattern, r'(\1 >= \2 and \1 <= \3)', python_condition, flags=re.IGNORECASE)
     
     # Handle SQL CASE statements (simplified)
     # CASE WHEN condition THEN value ELSE value END -> (value if condition else value)
     case_pattern = r'CASE\s+WHEN\s+(.*?)\s+THEN\s+(.*?)\s+ELSE\s+(.*?)\s+END'
     python_condition = re.sub(case_pattern, r'(\2 if \1 else \3)', python_condition, flags=re.IGNORECASE)
     
-    # Handle SQL NULL comparisons
-    python_condition = re.sub(r'\bIS\s+NULL\b', ' is None', python_condition, flags=re.IGNORECASE)
-    python_condition = re.sub(r'\bIS\s+NOT\s+NULL\b', ' is not None', python_condition, flags=re.IGNORECASE)
+    # Replace SQL inequality operators first (more specific patterns)
+    python_condition = re.sub(r'\s*<>\s*', ' != ', python_condition)
+    python_condition = re.sub(r'(?<![<>=!])\s*!=\s*', ' != ', python_condition)  # Don't match if already part of another operator
     
-    # Handle SQL AND/OR
+    # Replace SQL equality operator (be careful not to affect >=, <=, !=, <>)
+    python_condition = re.sub(r'(?<![<>=!])\s*=\s*(?![=])', ' == ', python_condition)
+    
+    # Handle SQL AND/OR - ensure we don't break existing 'and' keywords
     python_condition = re.sub(r'\bAND\b', ' and ', python_condition, flags=re.IGNORECASE)
-    python_condition = re.sub(r'\bOR\b', ' or ', python_condition, flags=re.IGNORECASE)
+    python_condition = re.sub(r'\bOR\b', ' or ', python_condition, flags=re.IGNORECASE)  
     python_condition = re.sub(r'\bNOT\b', ' not ', python_condition, flags=re.IGNORECASE)
     
     return python_condition

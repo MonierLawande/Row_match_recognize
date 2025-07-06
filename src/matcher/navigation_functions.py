@@ -275,7 +275,10 @@ class LogicalNavigationStrategy(NavigationStrategy):
         try:
             logger.debug(f"[LOGICAL_NAV] {request.function.value}({request.variable}.{request.column}, {request.steps})")
             
-            if request.function in {NavigationFunction.FIRST, NavigationFunction.LAST}:
+            # Special handling for CLASSIFIER column in other navigation functions
+            if request.column == 'CLASSIFIER' and request.function != NavigationFunction.CLASSIFIER:
+                return self._handle_classifier_column_navigation(request)
+            elif request.function in {NavigationFunction.FIRST, NavigationFunction.LAST}:
                 return self._handle_first_last_navigation(request)
             elif request.function in {NavigationFunction.PREV, NavigationFunction.NEXT}:
                 return self._handle_prev_next_navigation(request)
@@ -308,39 +311,58 @@ class LogicalNavigationStrategy(NavigationStrategy):
             return self._handle_subset_navigation(request, start_time)
         
         # Handle regular variables
-        if request.variable and request.variable in request.context.variables:
-            var_indices = request.context.variables[request.variable]
-            
-            # For FIRST/LAST functions, RUNNING semantics should not limit the available rows
-            # FIRST/LAST should always see the full match scope, RUNNING only affects evaluation timing
-            # For PREV/NEXT functions, apply RUNNING semantics filtering when in RUNNING mode  
-            if (request.function in {NavigationFunction.PREV, NavigationFunction.NEXT} and
-                request.semantics == NavigationSemantics.RUNNING):
-                var_indices = [idx for idx in var_indices if idx <= request.context.current_idx]
-            
-            if not var_indices:
-                return NavigationResult(value=None, success=True, execution_time=time.time() - start_time)
-            
-            var_indices = sorted(set(var_indices))
-            
-            # Apply offset
-            if request.function == NavigationFunction.FIRST:
-                target_idx = var_indices[request.offset] if request.offset < len(var_indices) else None
-            else:  # LAST
-                reverse_offset = len(var_indices) - 1 - request.offset
-                target_idx = var_indices[reverse_offset] if reverse_offset >= 0 else None
-            
-            if target_idx is None:
-                return NavigationResult(value=None, success=True, execution_time=time.time() - start_time)
-            
-            # Get the value
-            value = request.context.rows[target_idx].get(request.column) if request.column else None
-            
-            return NavigationResult(
-                value=value,
-                success=True,
-                execution_time=time.time() - start_time
-            )
+        if request.variable:
+            if request.variable in request.context.variables:
+                var_indices = request.context.variables[request.variable]
+                original_indices = list(var_indices)  # Keep original for debugging
+                
+                # CRITICAL FIX: Apply RUNNING semantics filtering for ALL navigation functions when in RUNNING mode
+                # This is essential for expressions like "RUNNING LAST(B.value)" where we want the last B value
+                # up to the current position, not the absolute last B value in the match
+                if (hasattr(request, 'semantics') and request.semantics == NavigationSemantics.RUNNING) or \
+                   (hasattr(request.context, 'is_running_evaluation') and request.context.is_running_evaluation):
+                    original_count = len(var_indices)
+                    var_indices = [idx for idx in var_indices if idx <= request.context.current_idx]
+                    logger.debug(f"[RUNNING_FILTER] {request.function.value}({request.variable}.{request.column}): "
+                               f"original_indices={original_indices}, current_idx={request.context.current_idx}, "
+                               f"filtered from {original_count} to {len(var_indices)} indices: {var_indices}")
+                
+                if not var_indices:
+                    logger.debug(f"[RUNNING_FILTER] No valid indices for {request.variable} at current_idx={request.context.current_idx}, returning None")
+                    return NavigationResult(value=None, success=True, execution_time=time.time() - start_time)
+                
+                var_indices = sorted(set(var_indices))
+                
+                # Apply offset
+                if request.function == NavigationFunction.FIRST:
+                    target_idx = var_indices[request.offset] if request.offset < len(var_indices) else None
+                else:  # LAST
+                    reverse_offset = len(var_indices) - 1 - request.offset
+                    target_idx = var_indices[reverse_offset] if reverse_offset >= 0 else None
+                
+                if target_idx is None:
+                    return NavigationResult(value=None, success=True, execution_time=time.time() - start_time)
+                
+                # Get the value
+                value = request.context.rows[target_idx].get(request.column) if request.column else None
+                
+                return NavigationResult(
+                    value=value,
+                    success=True,
+                    execution_time=time.time() - start_time
+                )
+            else:
+                # CRITICAL FIX: When a specific variable is requested but doesn't exist in current context,
+                # return None immediately for RUNNING semantics (don't fall back to global navigation)
+                if (hasattr(request, 'semantics') and request.semantics == NavigationSemantics.RUNNING) or \
+                   (hasattr(request.context, 'is_running_evaluation') and request.context.is_running_evaluation):
+                    logger.debug(f"[RUNNING_FILTER] Variable {request.variable} not found in current context at current_idx={request.context.current_idx}, returning None")
+                    return NavigationResult(value=None, success=True, execution_time=time.time() - start_time)
+                
+                # For FINAL semantics, fall back to global navigation only if variable doesn't exist
+                # This should be rare and might indicate an error in the query
+                logger.debug(f"[FINAL_FALLBACK] Variable {request.variable} not found, falling back to global navigation")
+                return self._handle_global_navigation(request, start_time)
         
         # Handle case where variable is None (navigate across all variables)
         return self._handle_global_navigation(request, start_time)
@@ -351,6 +373,13 @@ class LogicalNavigationStrategy(NavigationStrategy):
         
         # Build timeline for navigation
         timeline = self._build_navigation_timeline(request.context)
+        
+        # Apply RUNNING semantics filtering for PREV/NEXT navigation
+        if (hasattr(request, 'semantics') and request.semantics == NavigationSemantics.RUNNING) or \
+           (hasattr(request.context, 'is_running_evaluation') and request.context.is_running_evaluation):
+            original_timeline_count = len(timeline)
+            timeline = [(idx, var) for idx, var in timeline if idx <= request.context.current_idx]
+            logger.debug(f"[RUNNING_FILTER] PREV/NEXT timeline: filtered from {original_timeline_count} to {len(timeline)} entries up to current_idx={request.context.current_idx}")
         
         if not timeline:
             return NavigationResult(value=None, success=True, execution_time=time.time() - start_time)
@@ -414,6 +443,108 @@ class LogicalNavigationStrategy(NavigationStrategy):
             execution_time=time.time() - start_time
         )
     
+    def _handle_classifier_column_navigation(self, request: NavigationRequest) -> NavigationResult:
+        """Handle navigation functions like NEXT(CLASSIFIER()), LAST(CLASSIFIER())."""
+        start_time = time.time()
+        
+        try:
+            # Helper function to get classifier at a specific index
+            def get_classifier_at_index(idx):
+                if idx < 0 or idx >= len(request.context.rows):
+                    return None
+                
+                # Find which variable this row is assigned to
+                for var, indices in request.context.variables.items():
+                    if idx in indices:
+                        # Apply case sensitivity rules if available
+                        if hasattr(request.context, '_apply_case_sensitivity_rule'):
+                            return request.context._apply_case_sensitivity_rule(var)
+                        return var
+                return None
+            
+            current_idx = request.context.current_idx
+            
+            if request.function == NavigationFunction.PREV:
+                target_idx = current_idx - request.steps
+                classifier = get_classifier_at_index(target_idx)
+                return NavigationResult(
+                    value=classifier,
+                    success=True,
+                    execution_time=time.time() - start_time
+                )
+            
+            elif request.function == NavigationFunction.NEXT:
+                target_idx = current_idx + request.steps
+                classifier = get_classifier_at_index(target_idx)
+                return NavigationResult(
+                    value=classifier,
+                    success=True,
+                    execution_time=time.time() - start_time
+                )
+            
+            elif request.function == NavigationFunction.FIRST:
+                # Get first classifier in the match
+                all_indices = []
+                for var, indices in request.context.variables.items():
+                    all_indices.extend(indices)
+                
+                if all_indices:
+                    all_indices = sorted(set(all_indices))
+                    target_idx = all_indices[request.offset] if request.offset < len(all_indices) else None
+                    if target_idx is not None:
+                        classifier = get_classifier_at_index(target_idx)
+                        return NavigationResult(
+                            value=classifier,
+                            success=True,
+                            execution_time=time.time() - start_time
+                        )
+                
+                return NavigationResult(
+                    value=None,
+                    success=True,
+                    execution_time=time.time() - start_time
+                )
+            
+            elif request.function == NavigationFunction.LAST:
+                # Get last classifier in the match
+                all_indices = []
+                for var, indices in request.context.variables.items():
+                    all_indices.extend(indices)
+                
+                if all_indices:
+                    all_indices = sorted(set(all_indices))
+                    reverse_offset = len(all_indices) - 1 - request.offset
+                    target_idx = all_indices[reverse_offset] if reverse_offset >= 0 else None
+                    if target_idx is not None:
+                        classifier = get_classifier_at_index(target_idx)
+                        return NavigationResult(
+                            value=classifier,
+                            success=True,
+                            execution_time=time.time() - start_time
+                        )
+                
+                return NavigationResult(
+                    value=None,
+                    success=True,
+                    execution_time=time.time() - start_time
+                )
+            
+            else:
+                return NavigationResult(
+                    value=None,
+                    success=False,
+                    error=f"Unsupported function for CLASSIFIER column: {request.function.value}",
+                    execution_time=time.time() - start_time
+                )
+                
+        except Exception as e:
+            return NavigationResult(
+                value=None,
+                success=False,
+                error=str(e),
+                execution_time=time.time() - start_time
+            )
+
     def _handle_subset_navigation(self, request: NavigationRequest, start_time: float) -> NavigationResult:
         """Handle navigation for subset variables."""
         subset_components = request.context.subsets[request.variable]
@@ -894,7 +1025,39 @@ class NavigationFunctionEngine:
             # Clean the expression
             expr = expression.strip()
             
-            # Simple navigation pattern: FUNCTION(variable.column, steps)
+            # Pattern 1: Navigation functions with CLASSIFIER() as argument
+            # Examples: NEXT(CLASSIFIER()), LAST(CLASSIFIER()), PREV(CLASSIFIER())
+            classifier_nav_pattern = r'(FIRST|LAST|PREV|NEXT)\s*\(\s*CLASSIFIER\s*\(\s*\)\s*(?:,\s*(\d+))?\s*\)'
+            classifier_match = re.match(classifier_nav_pattern, expr, re.IGNORECASE)
+            if classifier_match:
+                func_name = classifier_match.group(1).upper()
+                steps_or_offset = int(classifier_match.group(2)) if classifier_match.group(2) else None
+                
+                function = self._function_registry.get(func_name)
+                if not function:
+                    return None
+                
+                # For FIRST/LAST, the number is an offset; for PREV/NEXT, it's steps
+                if function in {NavigationFunction.FIRST, NavigationFunction.LAST}:
+                    steps = 1
+                    offset = steps_or_offset if steps_or_offset is not None else 0
+                else:
+                    steps = steps_or_offset if steps_or_offset is not None else 1
+                    offset = 0
+                
+                return NavigationRequest(
+                    function=function,
+                    context=context,
+                    current_idx=current_idx,
+                    column='CLASSIFIER',  # Special column name for CLASSIFIER functions
+                    variable=None,
+                    steps=steps,
+                    offset=offset,
+                    mode=mode,
+                    semantics=semantics
+                )
+            
+            # Pattern 2: Simple navigation pattern: FUNCTION(variable.column, steps)
             simple_pattern = r'(FIRST|LAST|PREV|NEXT|CLASSIFIER)\s*\(\s*(?:([A-Za-z_][A-Za-z0-9_]*?)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*(\d+))?\s*\)'
             
             match = re.match(simple_pattern, expr, re.IGNORECASE)
@@ -929,7 +1092,7 @@ class NavigationFunctionEngine:
                     semantics=semantics
                 )
             
-            # Pattern for CLASSIFIER() without arguments
+            # Pattern 3: CLASSIFIER() without arguments
             classifier_pattern = r'CLASSIFIER\s*\(\s*\)'
             if re.match(classifier_pattern, expr, re.IGNORECASE):
                 return NavigationRequest(
@@ -940,7 +1103,48 @@ class NavigationFunctionEngine:
                     semantics=semantics
                 )
             
-            # TODO: Add support for nested navigation expressions
+            # Pattern 4: Handle expressions with RUNNING/FINAL keywords
+            # Examples: "RUNNING LAST(value)", "FINAL FIRST(A.price)"
+            running_pattern = r'(RUNNING|FINAL)\s+(FIRST|LAST|PREV|NEXT)\s*\(\s*(?:([A-Za-z_][A-Za-z0-9_]*?)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*(\d+))?\s*\)'
+            running_match = re.match(running_pattern, expr, re.IGNORECASE)
+            if running_match:
+                semantics_keyword = running_match.group(1).upper()
+                func_name = running_match.group(2).upper()
+                variable = running_match.group(3)
+                column = running_match.group(4)
+                steps_or_offset = int(running_match.group(5)) if running_match.group(5) else None
+                
+                function = self._function_registry.get(func_name)
+                if not function:
+                    return None
+                
+                # Override semantics based on keyword
+                if semantics_keyword == 'RUNNING':
+                    semantics = NavigationSemantics.RUNNING
+                else:  # FINAL
+                    semantics = NavigationSemantics.FINAL
+                
+                # For FIRST/LAST, the number is an offset; for PREV/NEXT, it's steps
+                if function in {NavigationFunction.FIRST, NavigationFunction.LAST}:
+                    steps = 1
+                    offset = steps_or_offset if steps_or_offset is not None else 0
+                else:
+                    steps = steps_or_offset if steps_or_offset is not None else 1
+                    offset = 0
+                
+                return NavigationRequest(
+                    function=function,
+                    context=context,
+                    current_idx=current_idx,
+                    column=column,
+                    variable=variable,
+                    steps=steps,
+                    offset=offset,
+                    mode=mode,
+                    semantics=semantics
+                )
+            
+            # TODO: Add support for more complex nested navigation expressions
             logger.debug(f"Could not parse navigation expression: {expr}")
             return None
             
