@@ -1000,11 +1000,19 @@ class ConditionEvaluator(ast.NodeVisitor):
             # Determine navigation mode based on function type and evaluation context
             from .navigation_functions import NavigationMode
             
-            # CRITICAL FIX: For FIRST/LAST functions with pattern variables, always use logical navigation
-            # For PREV/NEXT, use physical navigation in DEFINE mode, logical in MEASURES mode
-            if nav_type in ('FIRST', 'LAST') and var_name:
-                # FIRST/LAST with pattern variables always use logical navigation
-                mode = NavigationMode.LOGICAL
+            # PRODUCTION-READY FIX: Comprehensive navigation mode selection
+            # Key principle: MEASURES mode needs logical navigation with RUNNING semantics for aggregation support
+            if nav_type in ('FIRST', 'LAST'):
+                # FIRST/LAST functions in MEASURES mode need logical navigation with RUNNING semantics
+                # This enables proper handling of expressions like LAST(value, 0) to return current row's value
+                if self.evaluation_mode == 'MEASURES':
+                    mode = NavigationMode.LOGICAL
+                elif var_name:
+                    # FIRST/LAST with pattern variables always use logical navigation
+                    mode = NavigationMode.LOGICAL
+                else:
+                    # DEFINE mode without pattern variables can use physical navigation
+                    mode = NavigationMode.PHYSICAL
             elif nav_type in ('PREV', 'NEXT'):
                 # PREV/NEXT use mode based on evaluation context
                 if self.evaluation_mode == 'DEFINE':
@@ -1012,13 +1020,14 @@ class ConditionEvaluator(ast.NodeVisitor):
                 else:  # MEASURES
                     mode = NavigationMode.LOGICAL
             else:
-                # Default fallback
+                # Default fallback based on evaluation mode
                 if self.evaluation_mode == 'DEFINE':
                     mode = NavigationMode.PHYSICAL
                 else:  # MEASURES
                     mode = NavigationMode.LOGICAL
             
-            # Use the centralized navigation engine
+            # Use the centralized navigation engine with proper mode selection
+            # The default semantics (RUNNING) from the navigation engine are appropriate for MEASURES mode
             result = self.navigation_engine.evaluate_navigation_expression(
                 expr, self.context, self.context.current_idx, mode
             )

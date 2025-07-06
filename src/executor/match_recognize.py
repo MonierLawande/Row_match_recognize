@@ -593,14 +593,27 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     # For ALL ROWS mode, apply SQL:2016 default semantics
                     expr_upper = expr.upper().strip()
                     
-                    # Navigation functions in ALL ROWS PER MATCH default to FINAL semantics
-                    # when no explicit RUNNING/FINAL is specified (SQL:2016 compliance)
-                    # Navigation functions should always operate on full match scope
-                    if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
+                    # PRODUCTION-READY FIX: Navigation function semantics for ALL ROWS PER MATCH
+                    # SQL:2016 compliance: FIRST/LAST with offset=0 default to RUNNING semantics
+                    # to provide the "running first/last" behavior expected in measure evaluation
+                    if re.match(r'^(FIRST|LAST)\s*\(\s*\w+\s*,\s*0\s*\)', expr_upper):
+                        # FIRST(col, 0) and LAST(col, 0) use RUNNING semantics (current row value)
+                        measure_semantics[alias] = "RUNNING"
+                        logger.debug(f"Navigation function with offset 0: RUNNING semantics for measure {alias}: {expr}")
+                    elif re.match(r'^(FIRST|LAST)\s*\(\s*\w+\s*\)', expr_upper):
+                        # FIRST(col) and LAST(col) without offset default to RUNNING for consistency  
+                        measure_semantics[alias] = "RUNNING"
+                        logger.debug(f"Navigation function without offset: RUNNING semantics for measure {alias}: {expr}")
+                    elif re.match(r'^(PREV|NEXT)\s*\(', expr_upper):
+                        # PREV/NEXT functions default to FINAL semantics (fixed scope navigation)
                         measure_semantics[alias] = "FINAL"
-                        logger.debug(f"Navigation function: FINAL semantics for measure {alias}: {expr}")
+                        logger.debug(f"PREV/NEXT navigation function: FINAL semantics for measure {alias}: {expr}")
+                    elif re.search(r'\b(FIRST|LAST)\s*\(\s*\w+\s*(,\s*0)?\s*\)', expr_upper):
+                        # Expressions containing FIRST/LAST with offset=0 or no offset use RUNNING
+                        measure_semantics[alias] = "RUNNING" 
+                        logger.debug(f"Expression with FIRST/LAST (running): RUNNING semantics for measure {alias}: {expr}")
                     elif re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        # Expressions containing navigation functions also use FINAL by default
+                        # Expressions containing other navigation functions use FINAL by default
                         measure_semantics[alias] = "FINAL" 
                         logger.debug(f"Expression with navigation function: FINAL semantics for measure {alias}: {expr}")
                     elif explicit_semantics_found:
