@@ -1412,28 +1412,30 @@ class EnhancedMatcher:
                     print(f"DEBUG: No matching combination found for vars {current_vars}")
                     return 999  # No matching combination found
                 else:
-                    # PRODUCTION FIX: Use deterministic alphabetical priority for non-PERMUTE patterns
-                    # Always prioritize A before B for simple alternations like (A | B)*
+                    # PRODUCTION FIX: Two-tier priority system for deterministic alternation selection
+                    # Tier 1: Variables in alternations (A | B) get low priority numbers (0, 1, ...)
+                    # Tier 2: Variables outside alternations (X, Y, Z) get high priority numbers (100+)
                     last_var = state.path[-1][2] if state.path else ''
                     if last_var:
-                        # Use alternation order if available, otherwise alphabetical offset (A=0, B=1, etc.)
                         if last_var in self.parent.alternation_order:
+                            # Variables in alternations: use their parsed order (0, 1, 2, ...)
                             priority = self.parent.alternation_order[last_var]
-                            print(f"DEBUG: Using alternation priority {priority} for variable {last_var}")
+                            #print(f"DEBUG: Using alternation priority {priority} for variable {last_var}")
                             return priority
                         else:
-                            # Use deterministic alphabetical offset: A=0, B=1, C=2, etc.
-                            alphabetical_priority = ord(last_var[0]) - ord('A')
-                            print(f"DEBUG: Using alphabetical priority {alphabetical_priority} for variable {last_var}")
+                            # Variables outside alternations: assign higher priority values to deprioritize them
+                            # This ensures alternation variables (A, B) are always preferred over pattern variables (X)
+                            alphabetical_priority = 100 + (ord(last_var[0]) - ord('A'))
+                            #print(f"DEBUG: Using pattern priority {alphabetical_priority} for variable {last_var}")
                             return alphabetical_priority
                     else:
                         print(f"DEBUG: No variable found, using fallback priority 999")
                         return 999
             
             # Sort before returning to ensure proper exploration order
-            print(f"DEBUG: Before sorting, {len(successors)} successors found")
-            for i, s in enumerate(successors):
-                print(f"DEBUG: Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, row={s.row_index}")
+            #print(f"DEBUG: Before sorting, {len(successors)} successors found")
+            #for i, s in enumerate(successors):
+            #    print(f"DEBUG: Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, row={s.row_index}")
             
             successors.sort(key=lambda s: (
                 not self.dfa.states[s.state_id].is_accept,  # Accepting states first (False < True)
@@ -1441,10 +1443,10 @@ class EnhancedMatcher:
                 s.path[-1][2] if s.path else ''            # Alphabetical order as tiebreaker
             ))
             
-            print(f"DEBUG: After sorting, successors order:")
-            for i, s in enumerate(successors):
-                priority = get_combination_priority(s)
-                print(f"DEBUG: Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, priority={priority}")
+            #print(f"DEBUG: After sorting, successors order:")
+            #for i, s in enumerate(successors):
+            #    priority = get_combination_priority(s)
+            #    print(f"DEBUG: Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, priority={priority}")
             
             return successors
         
@@ -1710,17 +1712,17 @@ class EnhancedMatcher:
         """Find a single match using optimized transitions with backtracking support."""
         match_start_time = time.time()
         
-        print(f"DEBUG: _find_single_match called with start_idx={start_idx}")
+        #print(f"DEBUG: _find_single_match called with start_idx={start_idx}")
         
         # PRODUCTION FIX: Special handling for PERMUTE patterns with alternations
         # These patterns require testing all combinations in lexicographical order
         has_permute_alternations = (hasattr(self.dfa, 'metadata') and 
             self.dfa.metadata.get('has_permute', False) and 
             self._has_alternations_in_permute())
-        print(f"DEBUG: has_permute_alternations: {has_permute_alternations}")
+        #print(f"DEBUG: has_permute_alternations: {has_permute_alternations}")
         
         if has_permute_alternations:
-            print("DEBUG: PERMUTE pattern with alternations detected - using specialized handler")
+            #print("DEBUG: PERMUTE pattern with alternations detected - using specialized handler")
             match = self._handle_permute_with_alternations(rows, start_idx, context, config)
             if match:
                 self.timing["find_match"] += time.time() - match_start_time
@@ -1728,10 +1730,10 @@ class EnhancedMatcher:
 
         # Check if backtracking is needed for this pattern
         needs_backtracking = self._needs_backtracking(rows, start_idx, context)
-        print(f"DEBUG: _needs_backtracking returned: {needs_backtracking}")
+        #print(f"DEBUG: _needs_backtracking returned: {needs_backtracking}")
         
         if needs_backtracking:
-            print("DEBUG: Using backtracking matcher for complex pattern")
+            #print("DEBUG: Using backtracking matcher for complex pattern")
             self.backtracking_stats['patterns_requiring_backtracking'] += 1
             
             backtracking_matcher = self._get_backtracking_matcher()
@@ -1757,10 +1759,10 @@ class EnhancedMatcher:
         # PRODUCTION FIX: Special handling for complex back-reference patterns
         # These patterns require constraint satisfaction and backtracking
         has_complex_back_refs = self._has_complex_back_references()
-        print(f"DEBUG: has_complex_back_references: {has_complex_back_refs}")
+        #print(f"DEBUG: has_complex_back_references: {has_complex_back_refs}")
         
         if has_complex_back_refs:
-            print("DEBUG: Complex back-reference pattern detected - using constraint-based handler")
+            #print("DEBUG: Complex back-reference pattern detected - using constraint-based handler")
             match = self._handle_complex_back_references(rows, start_idx, context, config)
             if match:
                 self.timing["find_match"] += time.time() - match_start_time
@@ -1959,7 +1961,7 @@ class EnhancedMatcher:
             
             # Choose the best transition from valid ones with enhanced back reference support
             if valid_transitions:
-                print(f"DEBUG: Found {len(valid_transitions)} valid transitions: {[v[0] for v in valid_transitions]}")
+                #print(f"DEBUG: Found {len(valid_transitions)} valid transitions: {[v[0] for v in valid_transitions]}")
                 
                 # PRODUCTION FIX: Implement proper transition selection for back references
                 # For patterns with back references, we need to select transitions that enable
@@ -1992,7 +1994,7 @@ class EnhancedMatcher:
                     else:
                         categorized_transitions['dependent'].append((var, target, is_excluded))
                 
-                print(f"DEBUG: Categorized transitions: {categorized_transitions}")
+                #print(f"DEBUG: Categorized transitions: {categorized_transitions}")
                 
                 # Try transitions in order of priority for back reference satisfaction:
                 # PRODUCTION FIX: Prioritize variables that lead to accepting states
@@ -2003,25 +2005,29 @@ class EnhancedMatcher:
                 
                 for category in ['accepting', 'prerequisite', 'dependent', 'simple']:
                     if categorized_transitions[category]:
-                        print(f"DEBUG: Processing category '{category}' with {len(categorized_transitions[category])} transitions")
+                        #print(f"DEBUG: Processing category '{category}' with {len(categorized_transitions[category])} transitions")
                         # PRODUCTION FIX: Within each category, prefer transitions that advance the state,
                         # then use alternation order (left-to-right) instead of alphabetical order
                         def transition_sort_key(x):
                             var_name = x[0]
                             state_advance = x[1] == state  # False is preferred (state change)
-                            # PRODUCTION FIX: Ensure deterministic alternation selection
-                            # For simple alternations like (A | B)*, always use consistent alphabetical ordering
-                            # This prevents non-deterministic behavior that causes test failures
                             
-                            # Use alternation order if available, otherwise alphabetical offset (A=0, B=1, etc.)
+                            # PRODUCTION FIX: Two-tier priority system for deterministic alternation selection
+                            # Tier 1: Variables in alternations (A | B) get low priority numbers (0, 1, ...)
+                            # Tier 2: Variables outside alternations (X, Y, Z) get high priority numbers (100+)
+                            
                             if var_name in self.alternation_order:
+                                # Variables in alternations: use their parsed order (0, 1, 2, ...)
                                 alphabetical_priority = self.alternation_order[var_name]
                             else:
-                                # Use deterministic alphabetical offset: A=0, B=1, C=2, etc.
-                                alphabetical_priority = ord(var_name[0]) - ord('A') if var_name and var_name[0].isalpha() else 999
+                                # Variables outside alternations: assign higher priority values to deprioritize them
+                                # This ensures alternation variables (A, B) are always preferred over pattern variables (X)
+                                alphabetical_priority = 100 + (ord(var_name[0]) - ord('A') if var_name and var_name[0].isalpha() else 99)
+                            
+                            #print(f"DEBUG: Using {'alternation' if var_name in self.alternation_order else 'pattern'} priority {alphabetical_priority} for variable {var_name}")
                             
                             # Sort by: (state_advance, alphabetical_priority, var_name)
-                            # This ensures A always comes before B regardless of other factors
+                            # This ensures alternation variables come before non-alternation variables
                             return (state_advance, alphabetical_priority, var_name)
                         
                         sorted_transitions = sorted(
@@ -2029,7 +2035,7 @@ class EnhancedMatcher:
                             key=transition_sort_key
                         )
                         best_transition = sorted_transitions[0]
-                        print(f"DEBUG: Selected {category} transition: {best_transition[0]} -> state {best_transition[1]} (alternation priority: {self.alternation_order.get(best_transition[0], 'N/A')})")
+                        #print(f"DEBUG: Selected {category} transition: {best_transition[0]} -> state {best_transition[1]} (alternation priority: {self.alternation_order.get(best_transition[0], 'N/A')})")
                         break
                 
                 if best_transition:
