@@ -466,9 +466,9 @@ class TestAggregationFixes:
         # Expected: Safe handling of edge cases
         expected = pd.DataFrame({
             'id': [1, 2, 3, 4, 5],
-            'safe_division': [5.0, 5.0, 6.25, 6.25, 7.0],  # Division by zero handled
+            'safe_division': [5.0, 5.0, 6.25, 6.25, 7.5],  # Division by zero handled: avg([5.0, 7.5, 10.0]) = 7.5
             'sum_extreme': [1e10, 0, 1e-10, 1e-10, 1e-10],  # Infinite values handled
-            'count_finite': [1, 1, 2, 2, 2]                 # Only finite values counted
+            'count_finite': [1, 2, 3, 3, 3]                 # Only finite values counted: -1e10 is finite
         })
         
         self.assert_dataframe_equals(result, expected, "Aggregation edge cases test failed")
