@@ -972,7 +972,9 @@ class EnhancedMatcher:
             # Pattern for simple cross-references like "B.value" (not navigation functions)
             back_ref_pattern = r'\b([A-Z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)'
             
-            for var, condition in self.define_conditions.items():
+            # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
+            for var in sorted(self.define_conditions.keys()):
+                condition = self.define_conditions[var]
                 if not condition or not isinstance(condition, str):
                     continue
                 
@@ -1073,7 +1075,9 @@ class EnhancedMatcher:
                     try:
                         # Count how many other variables depend on this variable
                         dependents = 0
-                        for other_var, deps in dependencies.items():
+                        # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
+                        for other_var in sorted(dependencies.keys()):
+                            deps = dependencies[other_var]
                             if var in deps and other_var != var:
                                 dependents += 1
                         # Lower number = higher priority (0 = highest)
@@ -1094,8 +1098,9 @@ class EnhancedMatcher:
                 for var in variables_sorted[:5]:  # Limit debug output to prevent spam
                     try:
                         deps = dependencies.get(var, set())
-                        dependents = [other_var for other_var, other_deps in dependencies.items() 
-                                    if var in other_deps and other_var != var]
+                        # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
+                        dependents = [other_var for other_var in sorted(dependencies.keys()) 
+                                    if var in dependencies[other_var] and other_var != var]
                         logger.debug(f"  {var}: depends on {deps}, referenced by {dependents}")
                     except Exception as e:
                         logger.warning(f"Error logging dependency info for {var}: {e}")
@@ -1118,19 +1123,20 @@ class EnhancedMatcher:
         if not order_map and pattern:
             # Extract all pattern variables and sort them dependency-aware
             var_pattern = r'\b([A-Z][A-Z0-9_]*)\b'
-            all_vars = set(re.findall(var_pattern, pattern))
+            # PRODUCTION FIX: Use sorted list to ensure deterministic ordering
+            all_vars_set = set(re.findall(var_pattern, pattern))
             # Remove common keywords that aren't pattern variables
-            all_vars.discard('MATCH_RECOGNIZE')
-            all_vars.discard('PATTERN')
-            all_vars.discard('DEFINE')
-            all_vars.discard('MEASURES')
+            keywords_to_remove = {'MATCH_RECOGNIZE', 'PATTERN', 'DEFINE', 'MEASURES'}
+            all_vars = [var for var in sorted(all_vars_set) if var not in keywords_to_remove]
             
             # Apply dependency-aware sorting for default ordering only if there are cross-dependencies
             if has_cross_dependencies:
                 def dependency_priority(var):
                     try:
                         dependents = 0
-                        for other_var, deps in dependencies.items():
+                        # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
+                        for other_var in sorted(dependencies.keys()):
+                            deps = dependencies[other_var]
                             if var in deps and other_var != var:
                                 dependents += 1
                         return -dependents
@@ -1149,8 +1155,9 @@ class EnhancedMatcher:
                 for var in sorted_vars[:5]:  # Limit debug output
                     try:
                         deps = dependencies.get(var, set())
-                        dependents = [other_var for other_var, other_deps in dependencies.items() 
-                                    if var in other_deps and other_var != var]
+                        # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
+                        dependents = [other_var for other_var in sorted(dependencies.keys()) 
+                                    if var in dependencies[other_var] and other_var != var]
                         logger.debug(f"  {var}: depends on {deps}, referenced by {dependents}")
                     except Exception as e:
                         logger.warning(f"Error logging default dependency info for {var}: {e}")
@@ -1229,8 +1236,15 @@ class EnhancedMatcher:
         
         # Build simplified transition index with deterministic ordering
         for i, state in enumerate(self.dfa.states):
-            # Use simple left-to-right transition order instead of complex priority sorting
-            for trans in state.transitions:
+            # PRODUCTION FIX: Sort transitions deterministically for consistent behavior
+            # Sort by: 1) priority, 2) variable name, 3) target state
+            sorted_transitions = sorted(state.transitions, key=lambda t: (
+                t.priority if hasattr(t, 'priority') else 0,
+                t.variable or "",
+                t.target
+            ))
+            
+            for trans in sorted_transitions:
                 # Store the full transition object to preserve metadata
                 index[i].append((trans.variable, trans.target, trans.condition, trans))
         
@@ -1287,9 +1301,11 @@ class EnhancedMatcher:
         
         # Count inter-variable references
         reference_count = 0
-        for var, condition in self.define_conditions.items():
+        # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
+        for var in sorted(self.define_conditions.keys()):
+            condition = self.define_conditions[var]
             # Simple check for variable references in conditions
-            for other_var in self.define_conditions.keys():
+            for other_var in sorted(self.define_conditions.keys()):
                 if other_var != var and other_var in condition:
                     reference_count += 1
         
@@ -1454,7 +1470,17 @@ class EnhancedMatcher:
             transitions = self.transition_index[state.state_id]
             logger.debug(f"Found {len(transitions)} transitions from state {state.state_id} at row {state.row_index}")
             
-            for var, target_state, condition, transition in transitions:
+            # PRODUCTION FIX: Sort transitions by alternation order to ensure deterministic processing
+            # This ensures that transitions are processed in A, B, C... order for consistent results
+            def get_transition_priority(trans_tuple):
+                var, target_state, condition, transition = trans_tuple
+                if hasattr(self.parent, 'alternation_order') and var in self.parent.alternation_order:
+                    return (self.parent.alternation_order[var], var)
+                return (999, var)  # Unknown variables get lower priority, sorted by name
+            
+            sorted_transitions = sorted(transitions, key=get_transition_priority)
+            
+            for var, target_state, condition, transition in sorted_transitions:
                 try:
                     context.current_var = var
                     
@@ -1470,7 +1496,8 @@ class EnhancedMatcher:
                         logger.debug(f"  Transition {var} -> {target_state}: deferred complex condition")
                     else:
                         # Check condition with caching for simple conditions
-                        cache_key = (var, state.row_index, id(current_row))
+                        # PRODUCTION FIX: Use deterministic cache key without object ID
+                        cache_key = (var, state.row_index, tuple(sorted(current_row.items())))
                         if cache_key in self._condition_cache:
                             condition_result = self._condition_cache[cache_key]
                         else:
@@ -1512,20 +1539,29 @@ class EnhancedMatcher:
                 finally:
                     context.current_var = None
             
-            # PRODUCTION FIX: Simplified successor sorting with left-to-right alternation order
-            def get_simple_priority(state):
-                """Get simplified priority based on alternation order."""
+            # PRODUCTION FIX: Comprehensive successor sorting for 100% deterministic behavior
+            def get_comprehensive_priority(state):
+                """Get comprehensive priority based on multiple deterministic factors."""
                 # Get the last variable in the path for priority calculation
                 last_var = state.path[-1][2] if state.path else ''
+                
+                # Primary priority: alternation order (A=0, B=1, etc.)
+                alternation_priority = 999
                 if last_var and hasattr(self.parent, 'alternation_order'):
-                    return self.parent.alternation_order.get(last_var, 999)
-                return 999
+                    alternation_priority = self.parent.alternation_order.get(last_var, 999)
+                
+                # Secondary priority: alphabetical order for tiebreaking
+                var_alpha_priority = last_var if last_var else 'zzz'
+                
+                # Tertiary priority: target state ID for consistency
+                target_state_priority = state.state_id
+                
+                return (alternation_priority, var_alpha_priority, target_state_priority)
             
-            # Sort with simplified logic for predictable behavior
+            # Sort with comprehensive deterministic logic
             successors.sort(key=lambda s: (
                 not self.dfa.states[s.state_id].is_accept,  # Accepting states first
-                get_simple_priority(s),                     # Simple alternation order
-                s.path[-1][2] if s.path else ''            # Variable name as tiebreaker
+                get_comprehensive_priority(s)              # Then by comprehensive priority
             ))
             
             return successors

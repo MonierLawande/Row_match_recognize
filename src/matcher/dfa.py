@@ -1322,7 +1322,8 @@ class DFABuilder:
         groups = defaultdict(list)
         seen_transitions = set()
         
-        for state_idx in nfa_states:
+        # PRODUCTION FIX: Sort NFA states for deterministic iteration order
+        for state_idx in sorted(nfa_states):
             state = self.nfa.states[state_idx]
             
             for trans in state.transitions:
@@ -1334,6 +1335,10 @@ class DFABuilder:
                     groups[trans.variable].append(trans)
                 else:
                     self._cache_hits += 1
+        
+        # Sort transitions within each group for deterministic behavior
+        for variable, trans_list in groups.items():
+            trans_list.sort(key=lambda t: (t.priority if hasattr(t, 'priority') else 0, t.target, t.variable or ""))
         
         return dict(groups)
 
@@ -1391,7 +1396,7 @@ class DFABuilder:
         is_anchor = False
         anchor_type = None
         
-        for state_idx in nfa_states:
+        for state_idx in sorted(nfa_states):
             state = self.nfa.states[state_idx]
             
             if state.variable:
@@ -1707,7 +1712,7 @@ class DFABuilder:
             raise ValueError("Cannot create DFA state from empty NFA state set")
         
         # Validate NFA state indices
-        for state_idx in nfa_states:
+        for state_idx in sorted(nfa_states):
             if not (0 <= state_idx < len(self.nfa.states)):
                 raise ValueError(f"Invalid NFA state index: {state_idx}")
         
@@ -1739,7 +1744,7 @@ class DFABuilder:
         anchor_states = []
         permute_data_merged = {}
         
-        for nfa_state_idx in nfa_states:
+        for nfa_state_idx in sorted(nfa_states):
             nfa_state = self.nfa.states[nfa_state_idx]
 
             # Collect variables
@@ -1814,7 +1819,7 @@ class DFABuilder:
         """
         transitions: Dict[Optional[str], List[Transition]] = defaultdict(list)
         
-        for state_idx in nfa_states:
+        for state_idx in sorted(nfa_states):
             nfa_state = self.nfa.states[state_idx]
             
             for trans in nfa_state.transitions:
@@ -1829,7 +1834,7 @@ class DFABuilder:
         """Group NFA transitions by variable for optimization, preserving priorities."""
         transitions: Dict[str, List[Transition]] = {}
         
-        for state_idx in nfa_states:
+        for state_idx in sorted(nfa_states):
             for trans in self.nfa.states[state_idx].transitions:
                 if trans.variable not in transitions:
                     transitions[trans.variable] = []
@@ -2072,7 +2077,7 @@ class DFABuilder:
         
         # Strategy: Check if any NFA state in this DFA state can reach accept
         # through a path that only involves optional quantifiers
-        for state_idx in nfa_states:
+        for state_idx in sorted(nfa_states):
             if self._can_reach_accept_through_optionals(state_idx, optional_suffix_tokens, visited=set()):
                 logger.debug(f"Found optional path to accept from NFA state {state_idx}")
                 return True

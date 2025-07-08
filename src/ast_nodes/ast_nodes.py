@@ -595,7 +595,9 @@ class PatternClause:
                 
             # SQL MATCH_RECOGNIZE Standard: Variables without DEFINE conditions default to TRUE
             # This is valid behavior - pattern variables without explicit conditions should always match
-            print(f"Pattern variables {undefined_pattern_vars} have no DEFINE conditions - defaulting to TRUE (always match)")
+            # PRODUCTION FIX: Sort variables for deterministic logging and behavior
+            sorted_undefined_vars = sorted(undefined_pattern_vars)
+            print(f"Pattern variables {sorted_undefined_vars} have no DEFINE conditions - defaulting to TRUE (always match)")
             # Don't raise an error - this is valid SQL behavior
 
         self.metadata = {
