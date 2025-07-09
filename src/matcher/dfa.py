@@ -1153,9 +1153,23 @@ class DFABuilder:
         # Create initial state
         initial_state_set = frozenset(self._epsilon_closure([self.nfa.start]))
         is_anchor, anchor_type = self._extract_anchor_info(initial_state_set)
+        
+        # CRITICAL FIX: Check if initial state should be accepting (same logic as other states)
+        is_accept_initial = self.nfa.accept in initial_state_set
+        
+        # Check for optional suffix patterns for initial state too
+        if not is_accept_initial and hasattr(self.nfa, 'metadata'):
+            nfa_metadata = self.nfa.metadata
+            if nfa_metadata.get('has_optional_suffix', False):
+                # Check if any state in initial set can reach accept through epsilon-only paths
+                for nfa_state_id in initial_state_set:
+                    if self._can_reach_accept_through_optional(nfa_state_id):
+                        is_accept_initial = True
+                        break
+        
         initial_dfa_state = DFAState(
             nfa_states=initial_state_set,
-            is_accept=self.nfa.accept in initial_state_set,
+            is_accept=is_accept_initial,
             state_id=len(dfa_states),
             is_anchor=is_anchor,
             anchor_type=anchor_type
@@ -1192,9 +1206,26 @@ class DFABuilder:
                     # Get or create target state
                     if target_state_set not in state_map:
                         is_anchor, anchor_type = self._extract_anchor_info(target_state_set)
+                        
+                        # CRITICAL FIX: Check if this state should be accepting
+                        # A DFA state is accepting if:
+                        # 1. It contains the NFA accept state, OR
+                        # 2. It can reach the accept state through optional quantifiers (epsilon transitions)
+                        is_accept_state = self.nfa.accept in target_state_set
+                        
+                        # Check for optional suffix patterns - if we can reach accept through epsilon transitions
+                        if not is_accept_state and hasattr(self.nfa, 'metadata'):
+                            nfa_metadata = self.nfa.metadata
+                            if nfa_metadata.get('has_optional_suffix', False):
+                                # Check if any state in this set can reach accept through epsilon-only paths
+                                for nfa_state_id in target_state_set:
+                                    if self._can_reach_accept_through_optional(nfa_state_id):
+                                        is_accept_state = True
+                                        break
+                        
                         target_dfa_state = DFAState(
                             nfa_states=target_state_set,
-                            is_accept=self.nfa.accept in target_state_set,
+                            is_accept=is_accept_state,
                             state_id=len(dfa_states),
                             is_anchor=is_anchor,
                             anchor_type=anchor_type
@@ -1205,12 +1236,33 @@ class DFABuilder:
 
                     target_idx = state_map[target_state_set]
 
-                    # Create combined condition with FIXED alternation priority
+                    # CRITICAL FIX for PERMUTE patterns: Don't combine conditions for PERMUTE
+                    # Check if this is a PERMUTE pattern
+                    is_permute = hasattr(self.nfa, 'metadata') and self.nfa.metadata.get('has_permute', False)
+                    
                     if len(transitions) == 1:
                         condition = transitions[0].condition
                         priority = getattr(transitions[0], 'priority', 0)
+                        
+                        # Add single transition
+                        current_dfa_state.add_transition(
+                            condition=condition,
+                            target=target_idx,
+                            variable=variable,
+                            priority=priority
+                        )
+                    elif is_permute:
+                        # PERMUTE patterns: Each transition should be separate, not combined
+                        # Add individual transitions for each condition
+                        for transition in transitions:
+                            current_dfa_state.add_transition(
+                                condition=transition.condition,
+                                target=target_idx,
+                                variable=variable,
+                                priority=getattr(transition, 'priority', 0)
+                            )
                     else:
-                        # CRITICAL FIX: Sort by priority to ensure deterministic alternation behavior
+                        # Regular alternation: Sort by priority to ensure deterministic behavior
                         # Lower priority number = higher precedence (A comes before B in (A | B))
                         transitions.sort(key=lambda t: getattr(t, 'priority', 0))
                         conditions = [t.condition for t in transitions]
@@ -1227,21 +1279,26 @@ class DFABuilder:
 
                         condition = combined_condition
                         priority = min(getattr(t, 'priority', 0) for t in transitions)
+                        
+                        # Add combined transition
+                        current_dfa_state.add_transition(
+                            condition=condition,
+                            target=target_idx,
+                            variable=variable,
+                            priority=priority
+                        )
 
-                    # Add transition
-                    current_dfa_state.add_transition(
-                        condition=condition,
-                        target=target_idx,
-                        variable=variable,
-                        priority=priority
-                    )
-
-        # Create final DFA
+        # Create final DFA with inherited metadata
+        final_metadata = {}
+        if hasattr(self.nfa, 'metadata') and self.nfa.metadata:
+            final_metadata.update(self.nfa.metadata)
+        final_metadata.update({'alternation_priority_fixed': True})
+        
         return DFA(
             start=0,
             states=dfa_states,
             exclusion_ranges=getattr(self.nfa, 'exclusion_ranges', []),
-            metadata={'alternation_priority_fixed': True}
+            metadata=final_metadata
         )
 
     def _assess_construction_risk(self) -> float:
@@ -1678,3 +1735,65 @@ class DFABuilder:
                     anchor_type = getattr(nfa_state, 'anchor_type', None)
                     return True, anchor_type
         return False, None
+    
+    def _can_reach_accept_through_optional(self, nfa_state_id: int) -> bool:
+        """
+        Check if an NFA state can reach the accept state through epsilon transitions only.
+        This is used to determine if DFA states should be accepting when optional quantifiers
+        (like D?) are present after required patterns (like A B+ C+).
+        
+        Args:
+            nfa_state_id: The NFA state ID to check
+            
+        Returns:
+            bool: True if this state can reach accept through optional paths only
+        """
+        if nfa_state_id == self.nfa.accept:
+            return True
+            
+        # Use BFS to check if we can reach accept through epsilon transitions only
+        visited = set()
+        queue = deque([nfa_state_id])
+        
+        while queue:
+            current_state_id = queue.popleft()
+            if current_state_id in visited:
+                continue
+            visited.add(current_state_id)
+            
+            if current_state_id == self.nfa.accept:
+                return True
+                
+            # Only follow epsilon transitions (no consuming transitions)
+            if current_state_id < len(self.nfa.states):
+                nfa_state = self.nfa.states[current_state_id]
+                for epsilon_target in nfa_state.epsilon:
+                    if epsilon_target not in visited:
+                        queue.append(epsilon_target)
+        
+        # If direct epsilon reachability fails, check if this state represents completion
+        # of the required pattern prefix and remaining tokens are optional
+        if hasattr(self.nfa, 'metadata'):
+            metadata = self.nfa.metadata
+            if metadata.get('has_optional_suffix', False):
+                # Check if this state is at the end of the required prefix
+                # For patterns like "A B+ C+ D?", state after C+ should be accepting
+                # because D? is optional
+                
+                # Get optional suffix tokens
+                optional_tokens = metadata.get('optional_suffix_tokens', [])
+                if optional_tokens:
+                    # Check if all transitions from this state are for optional variables
+                    if current_state_id < len(self.nfa.states):
+                        nfa_state = self.nfa.states[current_state_id]
+                        if hasattr(nfa_state, 'transitions'):
+                            # Check if any transition leads to a state that can epsilon-reach accept
+                            for transition in nfa_state.transitions:
+                                target_state_id = transition.target
+                                # Check if target can reach accept via epsilon (recursive)
+                                if target_state_id < len(self.nfa.states):
+                                    target_state = self.nfa.states[target_state_id]
+                                    if target_state.epsilon and self.nfa.accept in target_state.epsilon:
+                                        return True
+        
+        return False
