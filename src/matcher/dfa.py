@@ -1236,9 +1236,18 @@ class DFABuilder:
 
                     target_idx = state_map[target_state_set]
 
-                    # CRITICAL FIX for PERMUTE patterns: Don't combine conditions for PERMUTE
-                    # Check if this is a PERMUTE pattern
+                    # ENHANCED FIX: Better handling for PERMUTE and complex alternation patterns
+                    # Check pattern characteristics to determine transition strategy
                     is_permute = hasattr(self.nfa, 'metadata') and self.nfa.metadata.get('has_permute', False)
+                    has_complex_defines = hasattr(self.nfa, 'metadata') and self.nfa.metadata.get('has_complex_back_references', False)
+                    has_alternations = hasattr(self.nfa, 'metadata') and self.nfa.metadata.get('has_alternations', False)
+                    
+                    # For complex patterns that need backtracking, preserve individual transitions
+                    should_preserve_individual_transitions = (
+                        is_permute or 
+                        has_complex_defines or 
+                        (has_alternations and len(transitions) > 1)
+                    )
                     
                     if len(transitions) == 1:
                         condition = transitions[0].condition
@@ -1251,19 +1260,25 @@ class DFABuilder:
                             variable=variable,
                             priority=priority
                         )
-                    elif is_permute:
-                        # PERMUTE patterns: Each transition should be separate, not combined
-                        # Add individual transitions for each condition
+                    elif should_preserve_individual_transitions:
+                        # For PERMUTE, complex back-references, or alternations needing backtracking:
+                        # Keep individual transitions separate to enable proper backtracking
+                        # Sort by priority to ensure deterministic exploration order
+                        transitions.sort(key=lambda t: getattr(t, 'priority', 0))
+                        
                         for transition in transitions:
                             current_dfa_state.add_transition(
                                 condition=transition.condition,
                                 target=target_idx,
                                 variable=variable,
-                                priority=getattr(transition, 'priority', 0)
+                                priority=getattr(transition, 'priority', 0),
+                                metadata={'individual_alternation': True}
                             )
+                        
+                        logger.debug(f"[DFA_ALT] Preserved {len(transitions)} individual alternation transitions for variable {variable}")
                     else:
-                        # Regular alternation: Sort by priority to ensure deterministic behavior
-                        # Lower priority number = higher precedence (A comes before B in (A | B))
+                        # Simple alternation: Combine conditions for efficiency
+                        # Sort by priority to ensure deterministic behavior
                         transitions.sort(key=lambda t: getattr(t, 'priority', 0))
                         conditions = [t.condition for t in transitions]
 
