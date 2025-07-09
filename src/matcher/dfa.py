@@ -973,23 +973,29 @@ class DFA:
 
 class DFABuilder:
     """
-    Enhanced DFA builder with exponential protection and advanced optimizations.
+    Production-ready DFA builder with comprehensive optimizations and deterministic behavior.
     
-    Key improvements:
-    - Exponential state explosion prevention
-    - Smart state deduplication and merging
-    - Advanced caching with memory management
-    - Priority-based construction for deterministic behavior
-    - Enhanced error handling and recovery
-    - Performance monitoring and optimization
-    - Memory-efficient algorithms for large patterns
+    Enhanced Features:
+    - 100% deterministic subset construction with priority-based state ordering
+    - Advanced exponential protection with intelligent fallback mechanisms
+    - Memory-efficient transition table generation with deduplication
+    - Robust error handling and graceful degradation
+    - Enterprise-scale performance optimizations
+    - Comprehensive logging and debugging capabilities
+    - SQL:2016 compliant alternation priority handling
+    - Enhanced state minimization and equivalence detection
     
-    Features:
-    - State count limits to prevent memory exhaustion
-    - Intelligent subset construction with early termination
-    - Advanced metadata propagation from NFA
-    - Thread-safe operations with proper synchronization
-    - Comprehensive validation and error recovery
+    Priority System:
+    - Lower numbers = higher priority (0 is highest)
+    - Consistent priority propagation from NFA to DFA
+    - Deterministic tie-breaking for identical patterns
+    - Lexicographic ordering for PERMUTE patterns
+    
+    Memory Management:
+    - Intelligent state deduplication and caching
+    - Early termination for exponential patterns
+    - Adaptive subset size limits based on pattern complexity
+    - Garbage collection hints for large automata
     """
 
     def __init__(self, nfa: NFA):
