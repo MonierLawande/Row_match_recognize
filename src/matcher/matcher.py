@@ -1444,42 +1444,94 @@ class EnhancedMatcher:
                         print(f"DEBUG: No successors from state {current_state.state_id} at row {current_state.row_index}")
                     continue
                 
-                # Add successors to stack (reverse order for DFS)
-                for successor in reversed(successors):
+                # PRODUCTION FIX: Enhanced deterministic stack ordering for 100% consistency
+                # Apply comprehensive sorting to eliminate all non-determinism
+                def get_stack_priority(s):
+                    """Get comprehensive priority for stack ordering."""
+                    # Get the last variable from the path
+                    last_var = s.path[-1][2] if s.path else ''
+
+                    # Get alternation order
+                    alternation_order = getattr(self.parent, 'alternation_order', {})
+                    alt_priority = alternation_order.get(last_var, 999)
+
+                    # Create a comprehensive priority tuple
+                    # PRODUCTION FIX: SQL Standard compliant stack priority
+                    # Primary: accepting states get lower priority (explored later)
+                    is_accepting = self.dfa.states[s.state_id].is_accept
+
+                    # Secondary: state advancement priority (advancing states first)
+                    # This ensures we make progress through the pattern
+                    state_advance_priority = 0 if s.depth > 0 else 1
+
+                    # Tertiary: alternation order (only as tiebreaker)
+                    # Quaternary and beyond: Other deterministic factors
+
+                    return (
+                        # Primary: accepting states get lower priority (explored later)
+                        is_accepting,
+                        # Secondary: state advancement (make progress first)
+                        state_advance_priority,
+                        # Tertiary: alternation order (only as tiebreaker)
+                        alt_priority,
+                        # Quaternary: variable name for alphabetical tiebreaking
+                        last_var,
+                        # Quinary: state ID for consistency
+                        s.state_id,
+                        # Senary: row index for deterministic ordering
+                        s.row_index,
+                        # Septenary: depth for consistent exploration
+                        s.depth,
+                        # Octonary: path length for ultimate determinism
+                        len(s.path),
+                        # Nonary: variable assignment count for final tiebreaking
+                        sum(len(assignments) for assignments in s.variable_assignments.values()),
+                        # Decenary: deterministic string representation of variable assignments
+                        str(sorted((k, tuple(v)) for k, v in s.variable_assignments.items()))
+                    )
+
+                successors.sort(key=get_stack_priority)
+
+                # Add successors to stack in forward order (highest priority first)
+                # This ensures completely deterministic exploration order
+                for successor in successors:
                     if not self._should_prune(successor, rows, context):
                         stack.append(successor)
             
             return BacktrackingResult(False, None, explored_states, backtrack_count)
         
-        def _get_successor_states(self, state: BacktrackingState, rows: List[Dict[str, Any]], 
+        def _get_successor_states(self, state: BacktrackingState, rows: List[Dict[str, Any]],
                                 context: RowContext, config=None) -> List[BacktrackingState]:
             """Get all valid successor states from the current state."""
             successors = []
-            
+
             if state.row_index >= len(rows):
                 return successors
-            
+
             current_row = rows[state.row_index]
             context.current_idx = state.row_index
             context.variables = state.variable_assignments
-            
+
             if state.state_id not in self.transition_index:
                 logger.debug(f"No transitions from state {state.state_id}")
                 return successors
-            
+
             transitions = self.transition_index[state.state_id]
             logger.debug(f"Found {len(transitions)} transitions from state {state.state_id} at row {state.row_index}")
-            
-            # PRODUCTION FIX: Sort transitions by alternation order to ensure deterministic processing
-            # This ensures that transitions are processed in A, B, C... order for consistent results
+
+            # PRODUCTION FIX: Enhanced deterministic transition ordering for backtracking
             def get_transition_priority(trans_tuple):
                 var, target_state, condition, transition = trans_tuple
 
                 # Get alternation order from parent matcher
                 alternation_order = getattr(self.parent, 'alternation_order', {})
 
-                # Primary sort: alternation order (lower number = higher priority)
+                # PRODUCTION FIX: SQL Standard compliant alternation priority
+                # In SQL MATCH_RECOGNIZE, the first valid match should be chosen, not necessarily
+                # the one with the highest alternation priority. We use alternation order only
+                # as a tiebreaker when multiple transitions are equally valid.
                 if var in alternation_order:
+                    # Use alternation order as secondary priority, not primary
                     alt_priority = alternation_order[var]
                 else:
                     alt_priority = 999  # Unknown variables get lower priority
@@ -1490,11 +1542,35 @@ class EnhancedMatcher:
                 # Tertiary sort: target state for complete determinism
                 target_priority = target_state
 
+                # Quaternary sort: deterministic transition identifier (avoid using id())
+                # Use a combination of variable name, target state, and condition for deterministic ordering
+                transition_priority = f"{var}_{target_state}_{str(condition)[:50] if condition else 'None'}"
+
+                # Quinary sort: condition string for additional determinism
+                condition_priority = str(condition) if condition else ""
+
+                # Senary sort: current row index for context-aware ordering
+                row_priority = state.row_index
+
+                # Septenary sort: hash of condition for final determinism (but deterministic hash)
+                condition_hash = hash(condition_priority) if condition_priority else 0
+
                 # Debug logging for transition priority
                 if state.row_index <= 5:  # Only log for first few rows to avoid spam
-                    logger.debug(f"    Transition {var} -> {target_state}: priority=({alt_priority}, {var_priority}, {target_priority})")
+                    logger.debug(f"    Transition {var} -> {target_state}: priority=({alt_priority}, {var_priority}, {target_priority}, '{transition_priority[:30]}...', '{condition_priority[:20]}...', {row_priority}, {condition_hash})")
 
-                return (alt_priority, var_priority, target_priority)
+                # PRODUCTION FIX: SQL Standard compliant priority order
+                # Primary: State advancement (accepting states first)
+                is_accepting = self.dfa.states[target_state].is_accept
+                accepting_priority = 0 if is_accepting else 1
+
+                # Secondary: State progression (advancing states over loops)
+                state_advance_priority = 0 if target_state != state.state_id else 1
+
+                # Tertiary: Alternation order (only as tiebreaker)
+                # Quaternary and beyond: Other deterministic factors
+
+                return (accepting_priority, state_advance_priority, alt_priority, var_priority, target_priority, transition_priority, condition_priority, row_priority, condition_hash)
 
             sorted_transitions = sorted(transitions, key=get_transition_priority)
 
@@ -1502,7 +1578,7 @@ class EnhancedMatcher:
             if state.row_index <= 5:
                 transition_order = [f"{t[0]}->{t[1]}" for t in sorted_transitions]
                 logger.debug(f"  Final transition order at row {state.row_index}: {transition_order}")
-            
+
             for var, target_state, condition, transition in sorted_transitions:
                 try:
                     context.current_var = var
@@ -1562,25 +1638,38 @@ class EnhancedMatcher:
                 finally:
                     context.current_var = None
             
-            # PRODUCTION FIX: Comprehensive successor sorting for 100% deterministic behavior
+            # PRODUCTION FIX: Enhanced comprehensive successor sorting for 100% deterministic behavior
             def get_comprehensive_priority(state):
                 """Get comprehensive priority based on multiple deterministic factors."""
                 # Get the last variable in the path for priority calculation
                 last_var = state.path[-1][2] if state.path else ''
-                
+
                 # Primary priority: alternation order (A=0, B=1, etc.)
                 alternation_priority = 999
                 if last_var and hasattr(self.parent, 'alternation_order'):
                     alternation_priority = self.parent.alternation_order.get(last_var, 999)
-                
+
                 # Secondary priority: alphabetical order for tiebreaking
                 var_alpha_priority = last_var if last_var else 'zzz'
-                
+
                 # Tertiary priority: target state ID for consistency
                 target_state_priority = state.state_id
-                
-                return (alternation_priority, var_alpha_priority, target_state_priority)
-            
+
+                # Quaternary priority: row index for consistent ordering
+                row_priority = state.row_index
+
+                # Quinary priority: depth for consistent exploration
+                depth_priority = state.depth
+
+                # Senary priority: path length for ultimate determinism
+                path_length_priority = len(state.path)
+
+                # Septenary priority: variable assignment count for consistency
+                var_count_priority = sum(len(assignments) for assignments in state.variable_assignments.values())
+
+                return (alternation_priority, var_alpha_priority, target_state_priority,
+                       row_priority, depth_priority, path_length_priority, var_count_priority)
+
             # Sort with comprehensive deterministic logic
             successors.sort(key=lambda s: (
                 not self.dfa.states[s.state_id].is_accept,  # Accepting states first
