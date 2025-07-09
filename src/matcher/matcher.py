@@ -1468,17 +1468,45 @@ class EnhancedMatcher:
                 return successors
             
             transitions = self.transition_index[state.state_id]
-            logger.debug(f"Found {len(transitions)} transitions from state {state.state_id} at row {state.row_index}")
             
-            # PRODUCTION FIX: Sort transitions by alternation order to ensure deterministic processing
-            # This ensures that transitions are processed in A, B, C... order for consistent results
-            def get_transition_priority(trans_tuple):
+            # ENHANCED: Special handling for alternation patterns with complex back-references
+            # When we have individual alternation transitions (preserved from DFA construction),
+            # we need to explore all alternatives to find combinations that satisfy DEFINE conditions
+            has_individual_alternations = any(
+                hasattr(transition, 'metadata') and 
+                transition.metadata.get('individual_alternation', False)
+                for _, _, _, transition in transitions
+            )
+            
+            # Check if this pattern requires alternation exploration for back-references
+            needs_alternation_exploration = (
+                has_individual_alternations and
+                hasattr(self, 'define_conditions') and
+                any(self._has_navigation_functions(cond) for cond in self.define_conditions.values())
+            )
+            
+            logger.debug(f"Found {len(transitions)} transitions from state {state.state_id} at row {state.row_index}")
+            logger.debug(f"Has individual alternations: {has_individual_alternations}")
+            logger.debug(f"Needs alternation exploration: {needs_alternation_exploration}")
+            
+            # PRODUCTION FIX: Enhanced transition sorting for complex patterns
+            def get_enhanced_transition_priority(trans_tuple):
                 var, target_state, condition, transition = trans_tuple
+                
+                # For patterns needing alternation exploration, use different logic
+                if needs_alternation_exploration:
+                    # When exploring alternations for back-references, we want to try
+                    # variables in dependency order - variables that other variables depend on first
+                    if hasattr(self.parent, '_get_variable_dependency_priority'):
+                        dep_priority = self.parent._get_variable_dependency_priority(var)
+                        return (dep_priority, var)
+                
+                # Standard alternation order logic
                 if hasattr(self.parent, 'alternation_order') and var in self.parent.alternation_order:
                     return (self.parent.alternation_order[var], var)
                 return (999, var)  # Unknown variables get lower priority, sorted by name
             
-            sorted_transitions = sorted(transitions, key=get_transition_priority)
+            sorted_transitions = sorted(transitions, key=get_enhanced_transition_priority)
             
             for var, target_state, condition, transition in sorted_transitions:
                 try:
