@@ -1474,11 +1474,34 @@ class EnhancedMatcher:
             # This ensures that transitions are processed in A, B, C... order for consistent results
             def get_transition_priority(trans_tuple):
                 var, target_state, condition, transition = trans_tuple
-                if hasattr(self.parent, 'alternation_order') and var in self.parent.alternation_order:
-                    return (self.parent.alternation_order[var], var)
-                return (999, var)  # Unknown variables get lower priority, sorted by name
-            
+
+                # Get alternation order from parent matcher
+                alternation_order = getattr(self.parent, 'alternation_order', {})
+
+                # Primary sort: alternation order (lower number = higher priority)
+                if var in alternation_order:
+                    alt_priority = alternation_order[var]
+                else:
+                    alt_priority = 999  # Unknown variables get lower priority
+
+                # Secondary sort: variable name for deterministic tiebreaking
+                var_priority = var if var else "zzz"
+
+                # Tertiary sort: target state for complete determinism
+                target_priority = target_state
+
+                # Debug logging for transition priority
+                if state.row_index <= 5:  # Only log for first few rows to avoid spam
+                    logger.debug(f"    Transition {var} -> {target_state}: priority=({alt_priority}, {var_priority}, {target_priority})")
+
+                return (alt_priority, var_priority, target_priority)
+
             sorted_transitions = sorted(transitions, key=get_transition_priority)
+
+            # Debug log the final transition order
+            if state.row_index <= 5:
+                transition_order = [f"{t[0]}->{t[1]}" for t in sorted_transitions]
+                logger.debug(f"  Final transition order at row {state.row_index}: {transition_order}")
             
             for var, target_state, condition, transition in sorted_transitions:
                 try:

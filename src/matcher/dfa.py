@@ -1337,10 +1337,13 @@ class DFABuilder:
                     self._cache_hits += 1
         
         # Sort transitions within each group for deterministic behavior
-        for variable, trans_list in groups.items():
+        # PRODUCTION FIX: Sort dictionary items for deterministic iteration order
+        for _, trans_list in sorted(groups.items(), key=lambda x: x[0] or ""):
             trans_list.sort(key=lambda t: (t.priority if hasattr(t, 'priority') else 0, t.target, t.variable or ""))
-        
-        return dict(groups)
+
+        # PRODUCTION FIX: Return OrderedDict to maintain deterministic order
+        from collections import OrderedDict
+        return OrderedDict(sorted(groups.items(), key=lambda x: x[0] or ""))
 
     def _compute_target_set_enhanced(self, transitions: List[Transition]) -> Set[int]:
         """Enhanced target set computation with deduplication."""
@@ -1636,7 +1639,8 @@ class DFABuilder:
                     var_transitions = self._group_transitions(current_set)
 
                     # Process each variable's transitions
-                    for var, transitions in var_transitions.items():
+                    # PRODUCTION FIX: Sort dictionary items for deterministic iteration order
+                    for var, transitions in sorted(var_transitions.items(), key=lambda x: x[0] or ""):
                         try:
                             target_set = self._compute_target_set(transitions)
                             
@@ -1827,24 +1831,13 @@ class DFABuilder:
                 transitions[variable].append(trans)
         
         # Sort transitions within each group by priority
-        for var, trans_list in transitions.items():
+        # PRODUCTION FIX: Sort dictionary items for deterministic iteration order
+        for _, trans_list in sorted(transitions.items(), key=lambda x: x[0] or ""):
             trans_list.sort(key=lambda t: (t.priority, t.target))
-        
-        return dict(transitions)
-        """Group NFA transitions by variable for optimization, preserving priorities."""
-        transitions: Dict[str, List[Transition]] = {}
-        
-        for state_idx in sorted(nfa_states):
-            for trans in self.nfa.states[state_idx].transitions:
-                if trans.variable not in transitions:
-                    transitions[trans.variable] = []
-                transitions[trans.variable].append(trans)
-        
-        # Sort transitions within each variable group by priority (lower = higher priority)
-        for var, trans_list in transitions.items():
-            trans_list.sort(key=lambda t: t.priority)
-                
-        return transitions
+
+        # PRODUCTION FIX: Return OrderedDict to maintain deterministic order
+        from collections import OrderedDict
+        return OrderedDict(sorted(transitions.items(), key=lambda x: x[0] or ""))
 
     def _compute_target_set(self, transitions: List[Transition]) -> FrozenSet[int]:
         """
