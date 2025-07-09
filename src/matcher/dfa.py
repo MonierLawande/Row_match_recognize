@@ -1301,49 +1301,104 @@ class DFABuilder:
         return frozenset(reduced_states)
 
     def _safe_epsilon_closure(self, state_set: Set[int]) -> List[int]:
-        """Compute epsilon closure with safety limits."""
+        """
+        Compute epsilon closure with enhanced safety limits and optimization.
+
+        PRODUCTION FIX: Optimized epsilon closure algorithm for complex patterns
+        with better performance and deterministic behavior.
+        """
         try:
-            # Use NFA's epsilon closure but with limits
+            # Check cache first for performance
+            state_key = frozenset(state_set)
+            if hasattr(self, '_epsilon_cache') and state_key in self._epsilon_cache:
+                self._cache_hits += 1
+                return self._epsilon_cache[state_key]
+
+            # Initialize cache if not exists
+            if not hasattr(self, '_epsilon_cache'):
+                self._epsilon_cache = {}
+
+            # Use optimized epsilon closure with limits
             result = self.nfa.epsilon_closure(list(state_set))
-            
-            # Apply size limit
+
+            # Apply size limit with smart reduction
             if len(result) > self.MAX_SUBSET_SIZE:
-                logger.warning(f"[DFA_ENHANCED] Large epsilon closure: {len(result)}, reducing")
-                result = result[:self.MAX_SUBSET_SIZE]
-            
+                logger.warning(f"[DFA_ENHANCED] Large epsilon closure: {len(result)}, applying smart reduction")
+                # Smart reduction: prefer states with variables and accepting states
+                prioritized_states = []
+                other_states = []
+
+                for state_idx in result:
+                    state = self.nfa.states[state_idx]
+                    if state.variable or state.is_accept:
+                        prioritized_states.append(state_idx)
+                    else:
+                        other_states.append(state_idx)
+
+                # Take prioritized states first, then fill with others
+                result = prioritized_states[:self.MAX_SUBSET_SIZE]
+                remaining_slots = self.MAX_SUBSET_SIZE - len(result)
+                if remaining_slots > 0:
+                    result.extend(other_states[:remaining_slots])
+
+            # Cache the result for performance
+            self._epsilon_cache[state_key] = result
+            self._cache_misses += 1
+
             return result
-            
+
         except Exception as e:
             logger.error(f"[DFA_ENHANCED] Error in epsilon closure: {e}")
             return list(state_set)  # Fallback to original set
 
     def _group_transitions_enhanced(self, nfa_states: FrozenSet[int]) -> Dict[Optional[str], List[Transition]]:
-        """Enhanced transition grouping with deduplication."""
+        """
+        Enhanced transition grouping with deduplication and alternation priority preservation.
+
+        PRODUCTION FIX: Improved grouping logic for Java reference compliance.
+        """
         groups = defaultdict(list)
         seen_transitions = set()
-        
+
         # PRODUCTION FIX: Sort NFA states for deterministic iteration order
         for state_idx in sorted(nfa_states):
             state = self.nfa.states[state_idx]
-            
+
             for trans in state.transitions:
                 # Create unique key for deduplication
                 trans_key = (trans.variable, trans.target, id(trans.condition))
-                
+
                 if trans_key not in seen_transitions:
                     seen_transitions.add(trans_key)
                     groups[trans.variable].append(trans)
                 else:
                     self._cache_hits += 1
-        
-        # Sort transitions within each group for deterministic behavior
-        # PRODUCTION FIX: Sort dictionary items for deterministic iteration order
-        for _, trans_list in sorted(groups.items(), key=lambda x: x[0] or ""):
-            trans_list.sort(key=lambda t: (t.priority if hasattr(t, 'priority') else 0, t.target, t.variable or ""))
+
+        # PRODUCTION FIX: Sort transitions within each group for deterministic behavior
+        # Preserve alternation priority information from NFA metadata
+        alternation_order = {}
+        if hasattr(self.nfa, 'metadata') and 'alternation_order' in self.nfa.metadata:
+            alternation_order = self.nfa.metadata['alternation_order']
+
+        # Sort dictionary items for deterministic iteration order with alternation priority
+        for var_name, trans_list in sorted(groups.items(), key=lambda x: x[0] or ""):
+            # Sort transitions by priority, preserving alternation order
+            alt_priority = alternation_order.get(var_name, 999) if var_name else 999
+            trans_list.sort(key=lambda t: (
+                alt_priority,  # Alternation priority first
+                t.priority if hasattr(t, 'priority') else 0,  # Then transition priority
+                t.target,  # Then target state
+                t.variable or ""  # Finally variable name
+            ))
 
         # PRODUCTION FIX: Return OrderedDict to maintain deterministic order
         from collections import OrderedDict
-        return OrderedDict(sorted(groups.items(), key=lambda x: x[0] or ""))
+        # Sort by alternation order for deterministic processing
+        sorted_items = sorted(groups.items(), key=lambda x: (
+            alternation_order.get(x[0], 999) if x[0] else 999,  # Alternation priority
+            x[0] or ""  # Variable name as tiebreaker
+        ))
+        return OrderedDict(sorted_items)
 
     def _compute_target_set_enhanced(self, transitions: List[Transition]) -> Set[int]:
         """Enhanced target set computation with deduplication."""
@@ -1489,8 +1544,8 @@ class DFABuilder:
         return metadata
 
     def _create_final_enhanced_metadata(self) -> Dict[str, Any]:
-        """Create final DFA metadata with construction metrics."""
-        return {
+        """Create final DFA metadata with construction metrics and alternation order preservation."""
+        metadata = {
             'construction_time': time.time() - self._build_start_time,
             'iterations': self._iteration_count,
             'states_created': self._states_created,
@@ -1502,8 +1557,18 @@ class DFABuilder:
             'max_states_limit': self.MAX_DFA_STATES,
             'max_subset_limit': self.MAX_SUBSET_SIZE,
             'optimized': True,
+            'alternation_priority_preserved': True,  # Mark that we preserve alternation order
             **dict(self.nfa.metadata)  # Include NFA metadata
         }
+
+        # PRODUCTION FIX: Ensure alternation order is properly preserved
+        # This is critical for Java reference compliance
+        if hasattr(self.nfa, 'metadata') and self.nfa.metadata:
+            if 'alternation_order' in self.nfa.metadata:
+                metadata['alternation_order'] = self.nfa.metadata['alternation_order']
+                logger.debug(f"[DFA_ENHANCED] Preserved alternation order: {metadata['alternation_order']}")
+
+        return metadata
 
     def _apply_post_construction_optimizations(self, dfa: DFA):
         """Apply optimizations after DFA construction."""

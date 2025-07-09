@@ -1583,27 +1583,50 @@ class EnhancedMatcher:
                 try:
                     context.current_var = var
                     
-                    # For variables with complex back-reference conditions (like X in our test),
-                    # defer condition evaluation until we have a complete match
-                    has_complex_condition = (hasattr(self, 'define_conditions') and 
-                                           var in self.define_conditions and
-                                           self._has_navigation_functions(self.define_conditions[var]))
-                    
-                    if has_complex_condition:
-                        # For complex conditions, always allow the transition but mark for later validation
+                    # PRODUCTION FIX: Java reference compliant condition evaluation
+                    # Distinguish between simple conditions (evaluate immediately) and
+                    # complex back-reference conditions (defer until complete match)
+
+                    # Check if this is a complex back-reference condition that depends on future assignments
+                    has_complex_back_reference = (hasattr(self, 'define_conditions') and
+                                                var in self.define_conditions and
+                                                self._has_complex_back_references(self.define_conditions[var]))
+
+                    if has_complex_back_reference:
+                        # For complex back-reference conditions (like X), defer evaluation
+                        # until we have a complete match to satisfy constraint dependencies
                         condition_result = True
-                        logger.debug(f"  Transition {var} -> {target_state}: deferred complex condition")
+                        logger.debug(f"  Transition {var} -> {target_state}: deferred complex back-reference condition")
                     else:
-                        # Check condition with caching for simple conditions
-                        # PRODUCTION FIX: Use deterministic cache key without object ID
+                        # For simple conditions (like B.value < PREV(B.value)), evaluate immediately
+                        # Check condition with caching for performance
                         cache_key = (var, state.row_index, tuple(sorted(current_row.items())))
                         if cache_key in self._condition_cache:
                             condition_result = self._condition_cache[cache_key]
+                            logger.debug(f"  Transition {var} -> {target_state}: cached condition={condition_result}")
                         else:
-                            condition_result = condition(current_row, context)
-                            self._condition_cache[cache_key] = condition_result
-                        
-                        logger.debug(f"  Transition {var} -> {target_state}: condition={condition_result}")
+                            try:
+                                # Clear any previous navigation context error flag
+                                if hasattr(context, '_navigation_context_error'):
+                                    delattr(context, '_navigation_context_error')
+
+                                condition_result = condition(current_row, context)
+
+                                # Handle navigation context errors properly
+                                # PREV() returning None on row 0 is normal SQL behavior, not an error
+                                if not condition_result and hasattr(context, '_navigation_context_error'):
+                                    logger.debug(f"  Transition {var}: condition failed due to navigation context unavailability")
+                                    # Remove the error flag - this is normal boundary behavior
+                                    delattr(context, '_navigation_context_error')
+                                    # condition_result remains False, which is correct
+
+                                self._condition_cache[cache_key] = condition_result
+                                logger.debug(f"  Transition {var} -> {target_state}: evaluated condition={condition_result}")
+
+                            except Exception as e:
+                                logger.debug(f"  Transition {var}: condition evaluation error: {e}")
+                                condition_result = False
+                                self._condition_cache[cache_key] = condition_result
                     
                     if not condition_result:
                         continue
@@ -1621,9 +1644,9 @@ class EnhancedMatcher:
                     
                     # Update path
                     new_state.path.append((state.state_id, state.row_index, var))
-                    
-                    # For variables with complex conditions, mark them for validation
-                    if has_complex_condition:
+
+                    # For variables with complex back-reference conditions, mark them for validation
+                    if has_complex_back_reference:
                         if not hasattr(new_state, 'deferred_validations'):
                             new_state.deferred_validations = []
                         new_state.deferred_validations.append((var, state.row_index))
@@ -1682,6 +1705,33 @@ class EnhancedMatcher:
             """Check if a condition contains navigation functions."""
             from src.matcher.navigation_functions import has_navigation_functions
             return has_navigation_functions(condition_str)
+
+        def _has_complex_back_references(self, condition_str: str) -> bool:
+            """
+            Check if a condition contains complex back-references that depend on
+            future variable assignments (like LAST, FIRST with complex expressions).
+
+            These conditions need to be deferred until we have a complete match.
+            """
+            if not condition_str:
+                return False
+
+            # Complex back-reference patterns that require deferred evaluation
+            complex_patterns = [
+                'LAST(',      # LAST(A.value) depends on final A assignments
+                'FIRST(',     # FIRST(A.value) depends on final A assignments
+                'PREV(LAST',  # PREV(LAST(A.value), N) - complex nested navigation
+                'PREV(FIRST', # PREV(FIRST(A.value), N) - complex nested navigation
+            ]
+
+            # Check if condition contains complex back-reference patterns
+            condition_upper = condition_str.upper()
+            for pattern in complex_patterns:
+                if pattern in condition_upper:
+                    logger.debug(f"Found complex back-reference pattern '{pattern}' in condition: {condition_str}")
+                    return True
+
+            return False
         
         def _validate_constraints(self, state: BacktrackingState, rows: List[Dict[str, Any]], 
                                 context: RowContext) -> bool:
@@ -2178,10 +2228,19 @@ class EnhancedMatcher:
                     
                     logger.debug(f"    Condition {'passed' if result else 'failed'} for {var}")
                     logger.debug(f"    DEBUG: condition result={result}, type={type(result)}")
-                    
+
+                    # PRODUCTION FIX: Enhanced debugging for alternation priority issues
+                    if var in ['A', 'B', 'C']:  # Debug alternation patterns
+                        logger.debug(f"    ALTERNATION DEBUG: var={var}, result={result}, row_idx={current_idx}, row_value={row.get('value', 'N/A')}")
+                        if var in self.define_conditions:
+                            logger.debug(f"    DEFINE condition for {var}: {self.define_conditions[var]}")
+                        else:
+                            logger.debug(f"    No DEFINE condition for {var} - defaults to TRUE")
+
                     if result:
                         # Store this as a valid transition
                         valid_transitions.append((var, target, is_excluded))
+                        logger.debug(f"    Added valid transition: {var} -> state {target}")
                         
                 except Exception as e:
                     # PRODUCTION FIX: Deterministic error handling
@@ -2203,29 +2262,40 @@ class EnhancedMatcher:
                 # For patterns with back references, we need to select transitions that enable
                 # future back reference satisfaction
                 
-                # PRODUCTION FIX: Fully deterministic transition selection with multiple tiebreakers
-                def simple_transition_sort_key(x):
+                # PRODUCTION FIX: Java reference compliant transition selection
+                # Key insight: Java reference implementation prioritizes variables by alternation order
+                # when multiple variables can satisfy their DEFINE conditions
+                def java_reference_compliant_sort_key(x):
                     var_name = x[0]
                     target_state = x[1]
-                    
+
                     # Prefer accepting states first
                     is_accepting = self.dfa.states[target_state].is_accept
                     accepting_priority = 0 if is_accepting else 1
-                    
-                    # Use simple alternation order
+
+                    # CRITICAL FIX: Apply alternation priority as PRIMARY sort key
+                    # This ensures that B (priority 0) is chosen over A (priority 2) when both can match
                     alternation_priority = self.alternation_order.get(var_name, 999)
-                    
-                    # Prefer state advances over loops
+
+                    # Prefer state advances over loops (secondary priority)
                     state_advance = target_state != state
                     state_advance_priority = 0 if state_advance else 1
-                    
+
                     # Add deterministic tiebreakers to prevent non-determinism
-                    # Sort by: (accepting, state_advance, alternation_priority, target_state, var_name)
-                    return (accepting_priority, state_advance_priority, alternation_priority, target_state, var_name)
-                
-                # Sort all transitions using simplified logic
-                sorted_transitions = sorted(valid_transitions, key=simple_transition_sort_key)
+                    # Sort by: (accepting, alternation_priority, state_advance, target_state, var_name)
+                    return (accepting_priority, alternation_priority, state_advance_priority, target_state, var_name)
+
+                # Sort all transitions using Java reference compliant logic
+                # The key insight: alternation_priority is the PRIMARY sort key after accepting states
+                sorted_transitions = sorted(valid_transitions, key=java_reference_compliant_sort_key)
                 best_transition = sorted_transitions[0] if sorted_transitions else None
+
+                # Enhanced debugging for alternation priority issues
+                if len(valid_transitions) > 1:
+                    logger.debug(f"  Multiple valid transitions: {[(v[0], self.alternation_order.get(v[0], 999)) for v in valid_transitions]}")
+                    logger.debug(f"  Selected transition: {best_transition[0]} (priority {self.alternation_order.get(best_transition[0], 999)})")
+                else:
+                    logger.debug(f"  Selected transition: {best_transition[0] if best_transition else None}")
                 
                 if best_transition:
                     matched_var, next_state, is_excluded_match = best_transition
