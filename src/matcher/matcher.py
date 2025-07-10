@@ -953,53 +953,6 @@ class EnhancedMatcher:
             logger.error(f"Configuration validation failed: {e}")
             raise ValueError(f"Matcher configuration invalid: {e}") from e
     
-    def _extract_dependency_graph(self) -> Dict[str, Set[str]]:
-        """
-        Extract variable dependency graph from DEFINE conditions.
-        Returns dict mapping variable -> set of variables it depends on.
-        
-        Only considers cross-variable dependencies (X depends on B), 
-        not self-references (B depends on B) or navigation functions.
-        """
-        dependencies = {}
-        
-        # Safety check: only extract dependencies if define_conditions is available
-        if not hasattr(self, 'define_conditions') or not self.define_conditions:
-            return dependencies
-        
-        try:
-            import re
-            # Pattern for simple cross-references like "B.value" (not navigation functions)
-            back_ref_pattern = r'\b([A-Z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)'
-            
-            # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
-            for var in sorted(self.define_conditions.keys()):
-                condition = self.define_conditions[var]
-                if not condition or not isinstance(condition, str):
-                    continue
-                
-                # Skip conditions with navigation functions as they create complex dependencies
-                nav_functions = ['PREV', 'NEXT', 'FIRST', 'LAST', 'RUNNING']
-                if any(func in condition.upper() for func in nav_functions):
-                    dependencies[var] = set()  # No simple cross-variable dependencies
-                    continue
-                    
-                referenced_vars = set()
-                matches = re.findall(back_ref_pattern, condition)
-                
-                for var_name, column in matches:
-                    # Only count cross-variable dependencies (not self-references)
-                    if var_name != var:
-                        referenced_vars.add(var_name)
-                
-                dependencies[var] = referenced_vars
-                
-        except Exception as e:
-            logger.warning(f"Error extracting dependency graph: {e}")
-            dependencies = {}
-        
-        return dependencies
-
     def _parse_alternation_order(self, pattern: str) -> Dict[str, int]:
         """
         Parse the pattern to determine the order of variables in alternations.
@@ -1018,42 +971,32 @@ class EnhancedMatcher:
         if not pattern:
             return {}
         
-        # PRODUCTION FIX: Simplified alternation order parsing
         # Check if we have PERMUTE alternation combinations from DFA metadata
         if (hasattr(self.dfa, 'metadata') and 
             'alternation_combinations' in self.dfa.metadata and
             self.dfa.metadata.get('has_permute') and 
             self.dfa.metadata.get('has_alternations')):
             
-            logger.debug("Using simplified DFA metadata for PERMUTE alternation order")
+            logger.debug("Using DFA metadata for PERMUTE alternation order")
             combinations = self.dfa.metadata['alternation_combinations']
             order_map = {}
             
-            # Simple left-to-right priority assignment
-            # Process combinations in order, assign incremental priorities
+            # Assign priorities based on lexicographical order of combinations
+            # The first combination gets the highest priority (lowest numbers)
             for combo_idx, combination in enumerate(combinations):
                 for var_idx, var in enumerate(combination):
                     if var not in order_map:
-                        # Simple priority: just use the variable's position across all combinations
-                        priority = combo_idx * len(combination) + var_idx
+                        # Priority = combination_index * 100 + variable_position_in_combination
+                        # This ensures (A,C) gets priority 0,1 and (B,C) gets 100,101
+                        priority = combo_idx * 100 + var_idx
                         order_map[var] = priority
-                        logger.debug(f"  Variable '{var}' assigned simple priority {priority}")
+                        logger.debug(f"  Variable '{var}' assigned priority {priority} (combo {combo_idx}, pos {var_idx})")
             
-            logger.debug(f"Simplified PERMUTE alternation order: {order_map}")
+            logger.debug(f"PERMUTE alternation order: {order_map}")
             return order_map
             
         order_map = {}
         order_counter = 0
-        
-        # Get dependency information for smart alternation ordering (with safety check)
-        try:
-            dependencies = self._extract_dependency_graph()
-        except Exception as e:
-            logger.warning(f"Error getting dependencies, using simple ordering: {e}")
-            dependencies = {}
-        
-        # Only apply dependency-aware ordering if there are actual cross-variable dependencies
-        has_cross_dependencies = any(deps for deps in dependencies.values())
         
         # Simple regex to find alternation groups like (A | B | C)
         import re
@@ -1067,109 +1010,13 @@ class EnhancedMatcher:
             # Split by | and extract variable names
             variables = [var.strip() for var in alternation_group.split('|')]
             
-            # CONDITIONAL DEPENDENCY-AWARE SORTING: Only apply when there are cross-variable dependencies
-            if has_cross_dependencies:
-                # If any other variable depends on variables in this alternation,
-                # prioritize the dependency targets to ensure they are matched first
-                def dependency_priority(var):
-                    try:
-                        # Count how many other variables depend on this variable
-                        dependents = 0
-                        # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
-                        for other_var in sorted(dependencies.keys()):
-                            deps = dependencies[other_var]
-                            if var in deps and other_var != var:
-                                dependents += 1
-                        # Lower number = higher priority (0 = highest)
-                        # Negate to prioritize variables with more dependents
-                        return -dependents
-                    except Exception as e:
-                        logger.warning(f"Error calculating dependency priority for {var}: {e}")
-                        return 0
-                
-                # Sort variables by dependency priority first, then alphabetically for stability
-                try:
-                    variables_sorted = sorted(variables, key=lambda v: (dependency_priority(v), v))
-                except Exception as e:
-                    logger.warning(f"Error sorting variables by dependency, using original order: {e}")
-                    variables_sorted = variables
-                
-                logger.debug(f"Alternation group: {variables} -> dependency-sorted: {variables_sorted}")
-                for var in variables_sorted[:5]:  # Limit debug output to prevent spam
-                    try:
-                        deps = dependencies.get(var, set())
-                        # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
-                        dependents = [other_var for other_var in sorted(dependencies.keys()) 
-                                    if var in dependencies[other_var] and other_var != var]
-                        logger.debug(f"  {var}: depends on {deps}, referenced by {dependents}")
-                    except Exception as e:
-                        logger.warning(f"Error logging dependency info for {var}: {e}")
-                        break
-            else:
-                # No cross-dependencies: use simple left-to-right order (pattern order)
-                variables_sorted = variables
-                logger.debug(f"Alternation group: {variables} -> using original order (no cross-dependencies)")
-            
             # Assign order priority to each variable (lower number = higher priority)
-            for i, var in enumerate(variables_sorted):
+            for i, var in enumerate(variables):
                 if var and var not in order_map:
                     order_map[var] = order_counter + i
             
             # Increment counter for the next alternation group
-            order_counter += len(variables_sorted)
-        
-        # PRODUCTION FIX: For deterministic behavior, always ensure dependency-aware ordering
-        # If no explicit alternation order was found, provide default dependency-aware ordering
-        if not order_map and pattern:
-            # Extract all pattern variables and sort them dependency-aware
-            var_pattern = r'\b([A-Z][A-Z0-9_]*)\b'
-            # PRODUCTION FIX: Use sorted list to ensure deterministic ordering
-            all_vars_set = set(re.findall(var_pattern, pattern))
-            # Remove common keywords that aren't pattern variables
-            keywords_to_remove = {'MATCH_RECOGNIZE', 'PATTERN', 'DEFINE', 'MEASURES'}
-            all_vars = [var for var in sorted(all_vars_set) if var not in keywords_to_remove]
-            
-            # Apply dependency-aware sorting for default ordering only if there are cross-dependencies
-            if has_cross_dependencies:
-                def dependency_priority(var):
-                    try:
-                        dependents = 0
-                        # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
-                        for other_var in sorted(dependencies.keys()):
-                            deps = dependencies[other_var]
-                            if var in deps and other_var != var:
-                                dependents += 1
-                        return -dependents
-                    except Exception as e:
-                        logger.warning(f"Error calculating default dependency priority for {var}: {e}")
-                        return 0
-                
-                # Sort by dependency priority first, then alphabetically
-                try:
-                    sorted_vars = sorted(all_vars, key=lambda v: (dependency_priority(v), v))
-                except Exception as e:
-                    logger.warning(f"Error sorting variables by dependency for defaults, using alphabetical: {e}")
-                    sorted_vars = sorted(all_vars)
-                
-                logger.debug(f"Default variable ordering: dependency-aware sorted: {sorted_vars}")
-                for var in sorted_vars[:5]:  # Limit debug output
-                    try:
-                        deps = dependencies.get(var, set())
-                        # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
-                        dependents = [other_var for other_var in sorted(dependencies.keys()) 
-                                    if var in dependencies[other_var] and other_var != var]
-                        logger.debug(f"  {var}: depends on {deps}, referenced by {dependents}")
-                    except Exception as e:
-                        logger.warning(f"Error logging default dependency info for {var}: {e}")
-                        break
-            else:
-                # No cross-dependencies: use simple alphabetical order
-                sorted_vars = sorted(all_vars)
-                logger.debug(f"Default variable ordering: alphabetical (no cross-dependencies): {sorted_vars}")
-            
-            # Assign priorities
-            for i, var in enumerate(sorted_vars):
-                order_map[var] = i
+            order_counter += len(variables)
         
         return order_map
     
@@ -1234,16 +1081,10 @@ class EnhancedMatcher:
                 elif state.anchor_type == PatternTokenType.ANCHOR_END and state.is_accept:
                     anchor_end_accepting_states.add(i)
         
-        # Build simplified transition index with deterministic ordering
+        # Build normal transition index with priority support and full transition objects
         for i, state in enumerate(self.dfa.states):
-            # PRODUCTION FIX: Sort transitions deterministically for consistent behavior
-            # Sort by: 1) priority, 2) variable name, 3) target state
-            sorted_transitions = sorted(state.transitions, key=lambda t: (
-                t.priority if hasattr(t, 'priority') else 0,
-                t.variable or "",
-                t.target
-            ))
-            
+            # Sort transitions by priority (lower is higher priority)
+            sorted_transitions = sorted(state.transitions, key=lambda t: t.priority)
             for trans in sorted_transitions:
                 # Store the full transition object to preserve metadata
                 index[i].append((trans.variable, trans.target, trans.condition, trans))
@@ -1301,11 +1142,9 @@ class EnhancedMatcher:
         
         # Count inter-variable references
         reference_count = 0
-        # PRODUCTION FIX: Sort dictionary keys for deterministic iteration
-        for var in sorted(self.define_conditions.keys()):
-            condition = self.define_conditions[var]
+        for var, condition in self.define_conditions.items():
             # Simple check for variable references in conditions
-            for other_var in sorted(self.define_conditions.keys()):
+            for other_var in self.define_conditions.keys():
                 if other_var != var and other_var in condition:
                     reference_count += 1
         
@@ -1468,47 +1307,9 @@ class EnhancedMatcher:
                 return successors
             
             transitions = self.transition_index[state.state_id]
-            
-            # ENHANCED: Special handling for alternation patterns with complex back-references
-            # When we have individual alternation transitions (preserved from DFA construction),
-            # we need to explore all alternatives to find combinations that satisfy DEFINE conditions
-            has_individual_alternations = any(
-                hasattr(transition, 'metadata') and 
-                transition.metadata.get('individual_alternation', False)
-                for _, _, _, transition in transitions
-            )
-            
-            # Check if this pattern requires alternation exploration for back-references
-            needs_alternation_exploration = (
-                has_individual_alternations and
-                hasattr(self, 'define_conditions') and
-                any(self._has_navigation_functions(cond) for cond in self.define_conditions.values())
-            )
-            
             logger.debug(f"Found {len(transitions)} transitions from state {state.state_id} at row {state.row_index}")
-            logger.debug(f"Has individual alternations: {has_individual_alternations}")
-            logger.debug(f"Needs alternation exploration: {needs_alternation_exploration}")
             
-            # PRODUCTION FIX: Enhanced transition sorting for complex patterns
-            def get_enhanced_transition_priority(trans_tuple):
-                var, target_state, condition, transition = trans_tuple
-                
-                # For patterns needing alternation exploration, use different logic
-                if needs_alternation_exploration:
-                    # When exploring alternations for back-references, we want to try
-                    # variables in dependency order - variables that other variables depend on first
-                    if hasattr(self.parent, '_get_variable_dependency_priority'):
-                        dep_priority = self.parent._get_variable_dependency_priority(var)
-                        return (dep_priority, var)
-                
-                # Standard alternation order logic
-                if hasattr(self.parent, 'alternation_order') and var in self.parent.alternation_order:
-                    return (self.parent.alternation_order[var], var)
-                return (999, var)  # Unknown variables get lower priority, sorted by name
-            
-            sorted_transitions = sorted(transitions, key=get_enhanced_transition_priority)
-            
-            for var, target_state, condition, transition in sorted_transitions:
+            for var, target_state, condition, transition in transitions:
                 try:
                     context.current_var = var
                     
@@ -1524,8 +1325,7 @@ class EnhancedMatcher:
                         logger.debug(f"  Transition {var} -> {target_state}: deferred complex condition")
                     else:
                         # Check condition with caching for simple conditions
-                        # PRODUCTION FIX: Use deterministic cache key without object ID
-                        cache_key = (var, state.row_index, tuple(sorted(current_row.items())))
+                        cache_key = (var, state.row_index, id(current_row))
                         if cache_key in self._condition_cache:
                             condition_result = self._condition_cache[cache_key]
                         else:
@@ -1567,37 +1367,73 @@ class EnhancedMatcher:
                 finally:
                     context.current_var = None
             
-            # PRODUCTION FIX: Comprehensive successor sorting for 100% deterministic behavior
-            def get_comprehensive_priority(state):
-                """Get comprehensive priority based on multiple deterministic factors."""
-                # Get the last variable in the path for priority calculation
-                last_var = state.path[-1][2] if state.path else ''
-                
-                # Primary priority: alternation order (A=0, B=1, etc.)
-                alternation_priority = 999
-                if last_var and hasattr(self.parent, 'alternation_order'):
-                    alternation_priority = self.parent.alternation_order.get(last_var, 999)
-                
-                # Secondary priority: alphabetical order for tiebreaking
-                var_alpha_priority = last_var if last_var else 'zzz'
-                
-                # Tertiary priority: target state ID for consistency
-                target_state_priority = state.state_id
-                
-                return (alternation_priority, var_alpha_priority, target_state_priority)
+            # Sort successors by priority using alternation combination order for PERMUTE patterns
+            def get_combination_priority(state):
+                """Get priority based on alternation combination order for PERMUTE patterns."""
+                if ('alternation_combinations' in self.dfa.metadata and 
+                    hasattr(self.dfa, 'metadata') and self.dfa.metadata.get('has_permute', False)):
+                    
+                    # For PERMUTE with alternations, we need to prioritize based on combination order
+                    combinations = self.dfa.metadata['alternation_combinations']
+                    current_vars = set(state.variable_assignments.keys())
+                    if state.path:
+                        current_vars.add(state.path[-1][2])
+                    
+                    print(f"DEBUG: Checking priority for vars {current_vars} against combinations {combinations}")
+                    
+                    # Find which combination this state belongs to
+                    for i, combination in enumerate(combinations):
+                        if current_vars.issubset(set(combination)):
+                            print(f"DEBUG: Found exact subset match for combination {i}: {combination}")
+                            return i
+                    
+                    # Fallback to checking partial matches
+                    for i, combination in enumerate(combinations):
+                        if current_vars & set(combination):
+                            print(f"DEBUG: Found partial match for combination {i}: {combination}")
+                            return i
+                    
+                    print(f"DEBUG: No matching combination found for vars {current_vars}")
+                    return 999  # No matching combination found
+                else:
+                    # Use individual variable priority for non-PERMUTE patterns
+                    var_priority = self.parent.alternation_order.get(state.path[-1][2] if state.path else '', 999)
+                    print(f"DEBUG: Using individual variable priority {var_priority} for non-PERMUTE")
+                    return var_priority
             
-            # Sort with comprehensive deterministic logic
+            # Sort before returning to ensure proper exploration order
+            print(f"DEBUG: Before sorting, {len(successors)} successors found")
+            for i, s in enumerate(successors):
+                print(f"DEBUG: Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, row={s.row_index}")
+            
             successors.sort(key=lambda s: (
-                not self.dfa.states[s.state_id].is_accept,  # Accepting states first
-                get_comprehensive_priority(s)              # Then by comprehensive priority
+                not self.dfa.states[s.state_id].is_accept,
+                get_combination_priority(s),
+                s.path[-1][2] if s.path else ''
             ))
+            
+            print(f"DEBUG: After sorting, successors order:")
+            for i, s in enumerate(successors):
+                priority = get_combination_priority(s)
+                print(f"DEBUG: Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, priority={priority}")
             
             return successors
         
         def _has_navigation_functions(self, condition_str: str) -> bool:
             """Check if a condition contains navigation functions."""
-            from src.matcher.navigation_functions import has_navigation_functions
-            return has_navigation_functions(condition_str)
+            import re
+            navigation_patterns = [
+                r'\bPREV\s*\(',
+                r'\bNEXT\s*\(',
+                r'\bFIRST\s*\(',
+                r'\bLAST\s*\(',
+                r'\bCLASSIFIER\s*\('
+            ]
+            
+            for pattern in navigation_patterns:
+                if re.search(pattern, condition_str, re.IGNORECASE):
+                    return True
+            return False
         
         def _validate_constraints(self, state: BacktrackingState, rows: List[Dict[str, Any]], 
                                 context: RowContext) -> bool:
@@ -1856,17 +1692,17 @@ class EnhancedMatcher:
         """Find a single match using optimized transitions with backtracking support."""
         match_start_time = time.time()
         
-        #print(f"DEBUG: _find_single_match called with start_idx={start_idx}")
+        print(f"DEBUG: _find_single_match called with start_idx={start_idx}")
         
         # PRODUCTION FIX: Special handling for PERMUTE patterns with alternations
         # These patterns require testing all combinations in lexicographical order
         has_permute_alternations = (hasattr(self.dfa, 'metadata') and 
             self.dfa.metadata.get('has_permute', False) and 
             self._has_alternations_in_permute())
-        #print(f"DEBUG: has_permute_alternations: {has_permute_alternations}")
+        print(f"DEBUG: has_permute_alternations: {has_permute_alternations}")
         
         if has_permute_alternations:
-            #print("DEBUG: PERMUTE pattern with alternations detected - using specialized handler")
+            print("DEBUG: PERMUTE pattern with alternations detected - using specialized handler")
             match = self._handle_permute_with_alternations(rows, start_idx, context, config)
             if match:
                 self.timing["find_match"] += time.time() - match_start_time
@@ -1874,10 +1710,10 @@ class EnhancedMatcher:
 
         # Check if backtracking is needed for this pattern
         needs_backtracking = self._needs_backtracking(rows, start_idx, context)
-        #print(f"DEBUG: _needs_backtracking returned: {needs_backtracking}")
+        print(f"DEBUG: _needs_backtracking returned: {needs_backtracking}")
         
         if needs_backtracking:
-            #print("DEBUG: Using backtracking matcher for complex pattern")
+            print("DEBUG: Using backtracking matcher for complex pattern")
             self.backtracking_stats['patterns_requiring_backtracking'] += 1
             
             backtracking_matcher = self._get_backtracking_matcher()
@@ -1903,10 +1739,10 @@ class EnhancedMatcher:
         # PRODUCTION FIX: Special handling for complex back-reference patterns
         # These patterns require constraint satisfaction and backtracking
         has_complex_back_refs = self._has_complex_back_references()
-        #print(f"DEBUG: has_complex_back_references: {has_complex_back_refs}")
+        print(f"DEBUG: has_complex_back_references: {has_complex_back_refs}")
         
         if has_complex_back_refs:
-            #print("DEBUG: Complex back-reference pattern detected - using constraint-based handler")
+            print("DEBUG: Complex back-reference pattern detected - using constraint-based handler")
             match = self._handle_complex_back_references(rows, start_idx, context, config)
             if match:
                 self.timing["find_match"] += time.time() - match_start_time
@@ -2020,11 +1856,9 @@ class EnhancedMatcher:
                 for i in range(start_idx, min(current_idx + 1, len(rows))):
                     row_data = {**rows[i], 'row_index': i}
                     
-                    # PRODUCTION FIX: Ensure deterministic variable assignment iteration
-                    # Find which variable this row was assigned to (sort for determinism)
+                    # Find which variable this row was assigned to
                     assigned_var = None
-                    for var in sorted(var_assignments.keys()):  # Sort variable names for determinism
-                        indices = var_assignments[var]
+                    for var, indices in var_assignments.items():
                         if i in indices:
                             assigned_var = var
                             break
@@ -2047,11 +1881,8 @@ class EnhancedMatcher:
             # Collect all valid transitions that match the current row
             valid_transitions = []
             
-            # PRODUCTION FIX: Ensure deterministic transition evaluation order
-            # Sort transitions by variable name for consistent behavior across runs
-            sorted_trans_index = sorted(trans_index, key=lambda x: (x[0], x[1]))  # Sort by (variable, target_state)
-            
-            for var, target, condition, transition in sorted_trans_index:
+            # Try all transitions and collect those that match the condition
+            for var, target, condition, transition in trans_index:
                 logger.debug(f"  Evaluating condition for var: {var}")
                 try:
                     # Check if this is an excluded variable using transition metadata
@@ -2100,48 +1931,92 @@ class EnhancedMatcher:
                         valid_transitions.append((var, target, is_excluded))
                         
                 except Exception as e:
-                    # PRODUCTION FIX: Deterministic error handling
-                    # Log error consistently and continue deterministically
-                    logger.debug(f"  Condition evaluation error for {var}: {str(e)}")
+                    logger.error(f"  Error evaluating condition for {var}: {str(e)}")
+                    logger.debug("Exception details:", exc_info=True)
                     continue
                 finally:
-                    # PRODUCTION FIX: Always clear context deterministically
+                    # Clear the current variable after evaluation
+                    logger.debug(f"  [DEBUG] Clearing context.current_var (was {getattr(context, 'current_var', 'None')})")
                     context.current_var = None
-                    # Clear any navigation error flags deterministically
-                    if hasattr(context, '_navigation_context_error'):
-                        delattr(context, '_navigation_context_error')
             
             # Choose the best transition from valid ones with enhanced back reference support
             if valid_transitions:
-                #print(f"DEBUG: Found {len(valid_transitions)} valid transitions: {[v[0] for v in valid_transitions]}")
+                print(f"DEBUG: Found {len(valid_transitions)} valid transitions: {[v[0] for v in valid_transitions]}")
                 
                 # PRODUCTION FIX: Implement proper transition selection for back references
                 # For patterns with back references, we need to select transitions that enable
                 # future back reference satisfaction
                 
-                # PRODUCTION FIX: Fully deterministic transition selection with multiple tiebreakers
-                def simple_transition_sort_key(x):
-                    var_name = x[0]
-                    target_state = x[1]
-                    
-                    # Prefer accepting states first
-                    is_accepting = self.dfa.states[target_state].is_accept
-                    accepting_priority = 0 if is_accepting else 1
-                    
-                    # Use simple alternation order
-                    alternation_priority = self.alternation_order.get(var_name, 999)
-                    
-                    # Prefer state advances over loops
-                    state_advance = target_state != state
-                    state_advance_priority = 0 if state_advance else 1
-                    
-                    # Add deterministic tiebreakers to prevent non-determinism
-                    # Sort by: (accepting, state_advance, alternation_priority, target_state, var_name)
-                    return (accepting_priority, state_advance_priority, alternation_priority, target_state, var_name)
+                best_transition = None
                 
-                # Sort all transitions using simplified logic
-                sorted_transitions = sorted(valid_transitions, key=simple_transition_sort_key)
-                best_transition = sorted_transitions[0] if sorted_transitions else None
+                # Enhanced transition prioritization for back reference patterns
+                categorized_transitions = {
+                    'accepting': [],           # Transitions to accepting states
+                    'prerequisite': [],        # Variables referenced in other DEFINE conditions
+                    'simple': [],             # Variables with simple conditions
+                    'dependent': []           # Variables with back reference conditions
+                }
+                
+                # Categorize transitions by their back reference requirements
+                for var, target, is_excluded in valid_transitions:
+                    is_accepting = self.dfa.states[target].is_accept
+                    has_back_reference = self._variable_has_back_reference(var)
+                    is_prerequisite = self._variable_is_back_reference_prerequisite(var)
+                    
+                    logger.debug(f"  Transition {var}: accepting={is_accepting}, has_back_ref={has_back_reference}, is_prerequisite={is_prerequisite}")
+                    
+                    if is_accepting:
+                        categorized_transitions['accepting'].append((var, target, is_excluded))
+                    elif is_prerequisite:
+                        categorized_transitions['prerequisite'].append((var, target, is_excluded))
+                    elif not has_back_reference:
+                        categorized_transitions['simple'].append((var, target, is_excluded))
+                    else:
+                        categorized_transitions['dependent'].append((var, target, is_excluded))
+                
+                print(f"DEBUG: Categorized transitions: {categorized_transitions}")
+                
+                # Try transitions in order of priority for back reference satisfaction:
+                # PRODUCTION FIX: Prioritize variables that lead to accepting states
+                # 1. Accepting states (complete the match)
+                # 2. Prerequisites (variables referenced by others)
+                # 3. Dependent variables with satisfied back references
+                # 4. Simple variables (no back references)
+                
+                for category in ['accepting', 'prerequisite', 'dependent', 'simple']:
+                    if categorized_transitions[category]:
+                        print(f"DEBUG: Processing category '{category}' with {len(categorized_transitions[category])} transitions")
+                        # PRODUCTION FIX: Within each category, prefer transitions that advance the state,
+                        # then use alternation order (left-to-right) instead of alphabetical order
+                        def transition_sort_key(x):
+                            var_name = x[0]
+                            state_advance = x[1] == state  # False is preferred (state change)
+                            # Use alternation order if available, otherwise fall back to alphabetical
+                            alternation_priority = self.alternation_order.get(var_name, 999)
+                            
+                            # Check if this is a PERMUTE pattern - use stricter alphabetical ordering
+                            if (self.original_pattern and 'PERMUTE' in self.original_pattern and 
+                                '|' in self.original_pattern):
+                                # For any PERMUTE pattern with alternations, use strict alphabetical order
+                                # This ensures A < B < C < D in all cases
+                                alphabetical_priority = ord(var_name[0]) if var_name else 999
+                                print(f"DEBUG: PERMUTE pattern: {var_name} gets alphabetical priority {alphabetical_priority}")
+                                return (state_advance, alphabetical_priority, var_name)
+                            
+                            # For non-PERMUTE patterns, use standard logic
+                            if alternation_priority == 999:  # No specific alternation priority assigned
+                                alphabetical_priority = ord(var_name[0]) if var_name else 999
+                                return (state_advance, alphabetical_priority, var_name)
+                            
+                            return (state_advance, alternation_priority, var_name)
+                        
+                        sorted_transitions = sorted(
+                            categorized_transitions[category],
+                            key=transition_sort_key
+                        )
+                        best_transition = sorted_transitions[0]
+                        print(f"DEBUG: Selected {category} transition: {best_transition[0]} -> state {best_transition[1]} (alternation priority: {self.alternation_order.get(best_transition[0], 'N/A')})")
+                        break
                 
                 if best_transition:
                     matched_var, next_state, is_excluded_match = best_transition
@@ -2763,13 +2638,14 @@ class EnhancedMatcher:
 
     def _calculate_transition_priority(self, current_state: int, target_state: int, variable: str) -> int:
         """
-        Calculate simplified transition priority for predictable matching behavior.
+        Calculate priority for a transition to help choose the best one when multiple are valid.
         Lower numbers = higher priority.
         
-        Simplified priority order:
+        Priority order:
         1. Transitions to accepting states (complete the match)
-        2. Transitions that advance to different states (make progress)
-        3. Loop transitions (lowest priority)
+        2. Variables that are referenced in DEFINE conditions (needed for back refs)
+        3. Transitions that make progress (move to different, non-looping state)  
+        4. Transitions that loop back to same or previous states
         
         Args:
             current_state: Current DFA state
@@ -2782,13 +2658,21 @@ class EnhancedMatcher:
         # Priority 1: Transitions to accepting states (highest priority)
         if self.dfa.states[target_state].is_accept:
             return 1
+        
+        # Priority 2: Variables that are referenced in other DEFINE conditions
+        # This helps ensure back references can be satisfied
+        if hasattr(self, 'define_conditions') and self.define_conditions:
+            for defined_var, condition in self.define_conditions.items():
+                if defined_var != variable and variable in condition:
+                    # This variable is referenced by another DEFINE condition
+                    return 2
             
-        # Priority 2: Forward progress (different state, not looping)
+        # Priority 3: Forward progress (different state, not looping)
         if target_state != current_state:
-            return 2
+            return 3
             
-        # Priority 3: Looping transitions (lowest priority)
-        return 3
+        # Priority 4: Looping transitions (lowest priority)
+        return 4
     
     def _process_empty_match(self, start_idx: int, rows: List[Dict[str, Any]], measures: Dict[str, str], match_number: int) -> Dict[str, Any]:
         """
@@ -4452,20 +4336,12 @@ class EnhancedMatcher:
             trans_index = self.transition_index[state]
             valid_transitions = []
             
-            # Test each possible transition with deterministic ordering
-            # PRODUCTION FIX: Sort transitions by variable name for deterministic evaluation
-            sorted_trans_index = sorted(trans_index, key=lambda x: x[0])  # Sort by variable name
-            
-            for var_name, target, condition, transition in sorted_trans_index:
-                try:
-                    context.current_var = var_name
-                    if condition(row, context):
-                        valid_transitions.append((var_name, target, False))
-                except Exception as e:
-                    # Handle condition evaluation errors gracefully
-                    logger.debug(f"Condition evaluation failed for {var_name}: {e}")
-                finally:
-                    context.current_var = None
+            # Test each possible transition
+            for var_name, target, condition, transition in trans_index:
+                context.current_var = var_name
+                if condition(row, context):
+                    valid_transitions.append((var_name, target, False))
+                context.current_var = None
             
             if not valid_transitions:
                 break
@@ -4473,20 +4349,6 @@ class EnhancedMatcher:
             # Use the same transition selection logic as the main matcher
             best_transition = self._select_best_transition(valid_transitions, state)
             if not best_transition:
-                # No valid transitions found - check if we're in an accepting state
-                if self.dfa.states[state].is_accept and var_assignments:
-                    # We're in an accepting state with variable assignments - create match
-                    logger.debug(f"Reached accepting state {state} with assignments {var_assignments}")
-                    return {
-                        "start": self._get_match_start(var_assignments),
-                        "end": current_idx - 1,  # Last matched row
-                        "variables": var_assignments.copy(),
-                        "state": state,
-                        "is_empty": False,
-                        "excluded_vars": set(),
-                        "excluded_rows": [],
-                        "has_empty_alternation": False
-                    }
                 break
             
             var_name, next_state, _ = best_transition
@@ -4530,33 +4392,45 @@ class EnhancedMatcher:
     def _select_best_transition(self, valid_transitions: List[Tuple[str, int, bool]], 
                               current_state: int) -> Optional[Tuple[str, int, bool]]:
         """
-        Select the best transition using simplified left-to-right alternation logic.
-        Production-ready with predictable behavior and easy debugging.
+        Select the best transition using the same logic as the main matcher.
+        This is a simplified version for the constraint solver.
         """
         if not valid_transitions:
             return None
             
-        # PRODUCTION FIX: Fully deterministic transition selection
-        # Use simple left-to-right alternation order with complete deterministic tiebreakers
-        def simple_sort_key(transition):
-            var, target, is_excluded = transition
-            
-            # Prefer transitions that advance to accepting states
-            is_accepting = self.dfa.states[target].is_accept
-            accepting_priority = 0 if is_accepting else 1
-            
-            # Use simple alternation order
-            alternation_priority = self.alternation_order.get(var, 999)
-            
-            # Prefer state advances over loops
-            state_advance_priority = 0 if target != current_state else 1
-            
-            # Add multiple deterministic tiebreakers to prevent any non-determinism
-            return (accepting_priority, state_advance_priority, alternation_priority, target, var, is_excluded)
+        # Categorize transitions
+        categorized = {
+            'accepting': [],
+            'prerequisite': [],
+            'dependent': [],
+            'simple': []
+        }
         
-        # Sort and return the best transition
-        sorted_transitions = sorted(valid_transitions, key=simple_sort_key)
-        return sorted_transitions[0]
+        for var, target, is_excluded in valid_transitions:
+            is_accepting = self.dfa.states[target].is_accept
+            has_back_ref = self._variable_has_back_reference(var)
+            is_prerequisite = self._variable_is_back_reference_prerequisite(var)
+            
+            if is_accepting:
+                categorized['accepting'].append((var, target, is_excluded))
+            elif is_prerequisite:
+                categorized['prerequisite'].append((var, target, is_excluded))
+            elif not has_back_ref:
+                categorized['simple'].append((var, target, is_excluded))
+            else:
+                categorized['dependent'].append((var, target, is_excluded))
+        
+        # Select best category with transitions
+        for category in ['accepting', 'prerequisite', 'dependent', 'simple']:
+            if categorized[category]:
+                # Sort by alternation priority
+                sorted_transitions = sorted(
+                    categorized[category],
+                    key=lambda x: (x[1] == current_state, self.alternation_order.get(x[0], 999), x[0])
+                )
+                return sorted_transitions[0]
+                
+        return None
 
     def _validate_match_results(self, results: List[MatchResult]) -> None:
         """Validate matching results for consistency."""

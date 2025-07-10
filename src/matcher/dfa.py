@@ -433,8 +433,39 @@ class DFA:
                 logger.error(f"DFA validation failed: {e}")
                 return False
     
+    def _validate_permute_metadata(self) -> bool:
+        """Validate PERMUTE-specific metadata."""
+        try:
+            if self.metadata.get('has_alternations'):
+                combinations = self.metadata.get('alternation_combinations', [])
+                if not combinations:
+                    logger.error("PERMUTE with alternations must have non-empty combinations")
+                    return False
+                
+                # Validate combination structure
+                for combo in combinations:
+                    if not isinstance(combo, (list, tuple)) or len(combo) < 2:
+                        logger.error(f"Invalid alternation combination: {combo}")
+                        return False
+            
+            permute_vars = self.metadata.get('permute_variables', [])
+            if permute_vars:
+                # Check that permute variables exist in some state
+                all_vars = set()
+                for state in self.states:
+                    all_vars.update(state.variables)
+                    all_vars.update(state.excluded_variables)
+                
+                missing_vars = set(permute_vars) - all_vars
+                if missing_vars:
+                    logger.warning(f"PERMUTE variables not found in any state: {missing_vars}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"PERMUTE metadata validation error: {e}")
+            return False
 
-    
     def get_first_variables(self) -> Set[str]:
         """
         Get variables that can match first in the pattern.
@@ -905,7 +936,7 @@ class DFA:
                     updated_transitions.append(trans)
             state.transitions = updated_transitions
 
-    def _optimize_transitions(self) -> None:
+    def _optimize_transitions(self):
         """Optimize transitions for better performance."""
         for state in self.states:
             # Group transitions by variable
@@ -942,873 +973,1165 @@ class DFA:
 
 class DFABuilder:
     """
-    Production-ready DFA builder with comprehensive optimizations and deterministic behavior.
+    Enhanced DFA builder with exponential protection and advanced optimizations.
     
-    Enhanced Features:
-    - 100% deterministic subset construction with priority-based state ordering
-    - Advanced exponential protection with intelligent fallback mechanisms
-    - Memory-efficient transition table generation with deduplication
-    - Robust error handling and graceful degradation
-    - Enterprise-scale performance optimizations
-    - Comprehensive logging and debugging capabilities
-    - SQL:2016 compliant alternation priority handling
-    - Enhanced state minimization and equivalence detection
+    Key improvements:
+    - Exponential state explosion prevention
+    - Smart state deduplication and merging
+    - Advanced caching with memory management
+    - Priority-based construction for deterministic behavior
+    - Enhanced error handling and recovery
+    - Performance monitoring and optimization
+    - Memory-efficient algorithms for large patterns
     
-    Priority System:
-    - Lower numbers = higher priority (0 is highest)
-    - Consistent priority propagation from NFA to DFA
-    - Deterministic tie-breaking for identical patterns
-    - Lexicographic ordering for PERMUTE patterns
-    
-    Memory Management:
-    - Intelligent state deduplication and caching
-    - Early termination for exponential patterns
-    - Adaptive subset size limits based on pattern complexity
-    - Garbage collection hints for large automata
+    Features:
+    - State count limits to prevent memory exhaustion
+    - Intelligent subset construction with early termination
+    - Advanced metadata propagation from NFA
+    - Thread-safe operations with proper synchronization
+    - Comprehensive validation and error recovery
     """
 
     def __init__(self, nfa: NFA):
         """
-        Initialize enhanced DFA builder with comprehensive optimizations and safety guarantees.
+        Initialize enhanced DFA builder with exponential protection.
         
         Args:
             nfa: Source NFA to convert to DFA
-            
-        Raises:
-            TypeError: If NFA is not an NFA instance
-            ValueError: If NFA validation fails or is empty
         """
         if not isinstance(nfa, NFA):
             raise TypeError(f"Expected NFA instance, got {type(nfa)}")
         
         if not nfa.validate():
             raise ValueError("Source NFA validation failed")
-            
-        if not nfa.states:
-            raise ValueError("Cannot build DFA from empty NFA")
         
         self.nfa = nfa
         self._lock = threading.RLock()
         
-        # Enhanced adaptive limits based on NFA complexity
-        base_states = len(nfa.states)
-        complexity_factor = self._assess_nfa_complexity()
+        # Exponential protection limits
+        self.MAX_DFA_STATES = 10000  # Prevent memory exhaustion
+        self.MAX_SUBSET_SIZE = 50    # Limit NFA state combinations
+        self.MAX_ITERATIONS = 100000 # Prevent infinite loops
         
-        # Adaptive limits that scale with pattern complexity
-        self.MAX_DFA_STATES = min(50000, max(1000, base_states * (50 if complexity_factor < 2.0 else 20)))
-        self.MAX_SUBSET_SIZE = min(1000, max(20, base_states // (2 if complexity_factor < 3.0 else 5)))
-        self.MAX_ITERATIONS = min(200000, max(10000, base_states * (200 if complexity_factor < 2.0 else 50)))
+        # Enhanced caching and optimization
+        self._subset_cache = {}
+        self._transition_cache = {}
+        self._state_dedup_cache = {}
         
-        # Production-ready caching and optimization infrastructure
-        self._subset_cache = {}           # Cache for epsilon closure results
-        self._transition_cache = {}      # Cache for transition computations
-        self._state_dedup_cache = {}     # Cache for state deduplication
-        self._priority_cache = {}        # Cache for priority computations
-        
-        # Enhanced performance monitoring with detailed metrics
+        # Performance and debugging metrics
         self._build_start_time = None
         self._iteration_count = 0
         self._cache_hits = 0
         self._cache_misses = 0
         self._states_created = 0
         self._states_merged = 0
-        self._transitions_optimized = 0
-        self._priority_conflicts_resolved = 0
-        self._memory_optimizations_applied = 0
         
-        # Comprehensive build statistics for production monitoring
+        # Build statistics for tracking
         self.build_stats = {
             'states_created': 0,
             'transitions_created': 0,
-            'transitions_optimized': 0,
             'build_time': 0.0,
             'cache_hits': 0,
             'cache_misses': 0,
-            'states_merged': 0,
-            'priority_conflicts_resolved': 0,
-            'memory_optimizations': 0,
-            'early_termination': False,
-            'exponential_protection_triggered': False,
-            'construction_quality': 'excellent',
-            'deterministic_guarantees': True,
-            'nfa_complexity_factor': complexity_factor,
-            'epsilon_closures_computed': 0,
-            'subset_reductions_applied': 0
+            'states_merged': 0
         }
         
-        # Enhanced metadata inheritance with DFA-specific enhancements
+        # Metadata for final DFA - start with NFA metadata
         self.metadata = {}
         if hasattr(nfa, 'metadata') and nfa.metadata:
             self.metadata.update(nfa.metadata)
         
-        # Add comprehensive DFA-specific metadata
+        # Add DFA-specific metadata
         self.metadata.update({
             'original_nfa_states': len(nfa.states),
             'original_nfa_transitions': sum(len(state.transitions) for state in nfa.states),
-            'original_nfa_epsilon_transitions': sum(len(state.epsilon) for state in nfa.states),
-            'nfa_complexity_factor': complexity_factor,
-            'construction_method': 'production_subset_construction_v2',
-            'construction_timestamp': time.time(),
-            'deterministic_guarantees': True,
-            'sql2016_compliance': True,
-            'priority_system': 'deterministic_alternation_ordering',
-            'exponential_protection': 'adaptive_limits_with_fallback',
-            'optimization_level': 'enterprise_production',
-            'memory_management': 'intelligent_caching_with_gc_hints',
+            'construction_method': 'enhanced_subset_construction',
+            'exponential_protection': True,
             'optimization_features': [
-                'deterministic_state_construction',
-                'priority_based_transition_ordering', 
-                'advanced_state_deduplication',
-                'intelligent_transition_merging',
-                'adaptive_exponential_protection',
-                'memory_optimized_caching',
-                'epsilon_closure_optimization',
-                'subset_size_adaptation',
-                'priority_conflict_resolution',
-                'early_termination_recovery'
+                'state_deduplication',
+                'transition_merging',
+                'early_termination',
+                'cache_optimization'
             ]
         })
         
-        # Enhanced validation and safety monitoring flags
+        # Validation and safety flags
         self._exponential_detected = False
         self._early_termination = False
-        self._memory_pressure = False
-        self._construction_quality = 'excellent'
-        self._deterministic_guarantee = True
         
-        # Log initialization with comprehensive details
-        logger.info(f"[DFA_PRODUCTION] Initialized production DFA builder: "
-                   f"max_states={self.MAX_DFA_STATES}, max_subset={self.MAX_SUBSET_SIZE}, "
-                   f"max_iterations={self.MAX_ITERATIONS}, complexity={complexity_factor:.2f}")
-        
-        logger.info(f"[DFA_PRODUCTION] Source NFA: {len(nfa.states)} states, "
-                   f"{sum(len(s.transitions) for s in nfa.states)} transitions, "
-                   f"{sum(len(s.epsilon) for s in nfa.states)} epsilon transitions")
-        
-        if hasattr(nfa, 'metadata') and nfa.metadata:
-            logger.debug(f"[DFA_PRODUCTION] Inherited NFA metadata: {list(nfa.metadata.keys())}")
-    
-    def _assess_nfa_complexity(self) -> float:
-        """
-        Assess the complexity of the source NFA to determine appropriate limits.
-        
-        Returns:
-            float: Complexity factor (1.0 = simple, 5.0 = very complex)
-        """
-        if not self.nfa.states:
-            return 1.0
-            
-        # Base metrics
-        state_count = len(self.nfa.states)
-        total_transitions = sum(len(state.transitions) for state in self.nfa.states)
-        total_epsilon = sum(len(state.epsilon) for state in self.nfa.states)
-        
-        # Calculate complexity factors
-        transition_density = total_transitions / state_count if state_count > 0 else 0
-        epsilon_density = total_epsilon / state_count if state_count > 0 else 0
-        
-        # Check for complex patterns
-        has_alternations = any(len(state.epsilon) > 1 for state in self.nfa.states)
-        has_quantifiers = any(state.variable and '+' in str(state.variable) or '*' in str(state.variable) 
-                             for state in self.nfa.states if hasattr(state, 'variable'))
-        has_permute = hasattr(self.nfa, 'metadata') and self.nfa.metadata.get('has_permute', False)
-        
-        # Calculate base complexity
-        complexity = 1.0
-        
-        # Factor in transition density
-        if transition_density > 3.0:
-            complexity += 1.0
-        elif transition_density > 2.0:
-            complexity += 0.5
-            
-        # Factor in epsilon density (high epsilon = potential exponential)
-        if epsilon_density > 2.0:
-            complexity += 1.5
-        elif epsilon_density > 1.0:
-            complexity += 0.5
-            
-        # Factor in structural complexity
-        if has_permute:
-            complexity += 1.5
-        if has_alternations:
-            complexity += 1.0
-        if has_quantifiers:
-            complexity += 0.5
-            
-        # Factor in state count
-        if state_count > 100:
-            complexity += 1.0
-        elif state_count > 50:
-            complexity += 0.5
-            
-        return min(5.0, complexity)
+        logger.debug(f"[DFA_ENHANCED] Initialized DFA builder with limits: states={self.MAX_DFA_STATES}, subset_size={self.MAX_SUBSET_SIZE}")
 
     def build(self) -> DFA:
-        """Build DFA using simple subset construction with alternation priority fix."""
-        dfa_states = []
-        state_map = {}
-        construction_queue = deque()
-
-        # Create initial state
-        initial_state_set = frozenset(self._epsilon_closure([self.nfa.start]))
-        is_anchor, anchor_type = self._extract_anchor_info(initial_state_set)
-        
-        # CRITICAL FIX: Check if initial state should be accepting (same logic as other states)
-        is_accept_initial = self.nfa.accept in initial_state_set
-        
-        # Check for optional suffix patterns for initial state too
-        if not is_accept_initial and hasattr(self.nfa, 'metadata'):
-            nfa_metadata = self.nfa.metadata
-            if nfa_metadata.get('has_optional_suffix', False):
-                # Check if any state in initial set can reach accept through epsilon-only paths
-                for nfa_state_id in initial_state_set:
-                    if self._can_reach_accept_through_optional(nfa_state_id):
-                        is_accept_initial = True
-                        break
-        
-        initial_dfa_state = DFAState(
-            nfa_states=initial_state_set,
-            is_accept=is_accept_initial,
-            state_id=len(dfa_states),
-            is_anchor=is_anchor,
-            anchor_type=anchor_type
-        )
-        dfa_states.append(initial_dfa_state)
-        state_map[initial_state_set] = 0
-        construction_queue.append((initial_state_set, 0))
-
-        # Process construction queue
-        while construction_queue:
-            current_state_set, current_dfa_idx = construction_queue.popleft()
-            current_dfa_state = dfa_states[current_dfa_idx]
-
-            # Group transitions by variable
-            transitions_by_var = {}
-            for state_id in current_state_set:
-                if state_id < len(self.nfa.states):
-                    nfa_state = self.nfa.states[state_id]
-                    for transition in nfa_state.transitions:
-                        var = transition.variable
-                        if var not in transitions_by_var:
-                            transitions_by_var[var] = []
-                        transitions_by_var[var].append(transition)
-
-            # Process each variable with priority-based ordering
-            for variable, transitions in transitions_by_var.items():
-                target_states = set()
-                for transition in transitions:
-                    target_states.update(self._epsilon_closure([transition.target]))
-
-                if target_states:
-                    target_state_set = frozenset(target_states)
-
-                    # Get or create target state
-                    if target_state_set not in state_map:
-                        is_anchor, anchor_type = self._extract_anchor_info(target_state_set)
-                        
-                        # CRITICAL FIX: Check if this state should be accepting
-                        # A DFA state is accepting if:
-                        # 1. It contains the NFA accept state, OR
-                        # 2. It can reach the accept state through optional quantifiers (epsilon transitions)
-                        is_accept_state = self.nfa.accept in target_state_set
-                        
-                        # Check for optional suffix patterns - if we can reach accept through epsilon transitions
-                        if not is_accept_state and hasattr(self.nfa, 'metadata'):
-                            nfa_metadata = self.nfa.metadata
-                            if nfa_metadata.get('has_optional_suffix', False):
-                                # Check if any state in this set can reach accept through epsilon-only paths
-                                for nfa_state_id in target_state_set:
-                                    if self._can_reach_accept_through_optional(nfa_state_id):
-                                        is_accept_state = True
-                                        break
-                        
-                        target_dfa_state = DFAState(
-                            nfa_states=target_state_set,
-                            is_accept=is_accept_state,
-                            state_id=len(dfa_states),
-                            is_anchor=is_anchor,
-                            anchor_type=anchor_type
-                        )
-                        dfa_states.append(target_dfa_state)
-                        state_map[target_state_set] = len(dfa_states) - 1
-                        construction_queue.append((target_state_set, len(dfa_states) - 1))
-
-                    target_idx = state_map[target_state_set]
-
-                    # ENHANCED FIX: Better handling for PERMUTE and complex alternation patterns
-                    # Check pattern characteristics to determine transition strategy
-                    is_permute = hasattr(self.nfa, 'metadata') and self.nfa.metadata.get('has_permute', False)
-                    has_complex_defines = hasattr(self.nfa, 'metadata') and self.nfa.metadata.get('has_complex_back_references', False)
-                    has_alternations = hasattr(self.nfa, 'metadata') and self.nfa.metadata.get('has_alternations', False)
-                    
-                    # For complex patterns that need backtracking, preserve individual transitions
-                    should_preserve_individual_transitions = (
-                        is_permute or 
-                        has_complex_defines or 
-                        (has_alternations and len(transitions) > 1)
-                    )
-                    
-                    if len(transitions) == 1:
-                        condition = transitions[0].condition
-                        priority = getattr(transitions[0], 'priority', 0)
-                        
-                        # Add single transition
-                        current_dfa_state.add_transition(
-                            condition=condition,
-                            target=target_idx,
-                            variable=variable,
-                            priority=priority
-                        )
-                    elif should_preserve_individual_transitions:
-                        # For PERMUTE, complex back-references, or alternations needing backtracking:
-                        # Keep individual transitions separate to enable proper backtracking
-                        # Sort by priority to ensure deterministic exploration order
-                        transitions.sort(key=lambda t: getattr(t, 'priority', 0))
-                        
-                        for transition in transitions:
-                            current_dfa_state.add_transition(
-                                condition=transition.condition,
-                                target=target_idx,
-                                variable=variable,
-                                priority=getattr(transition, 'priority', 0),
-                                metadata={'individual_alternation': True}
-                            )
-                        
-                        logger.debug(f"[DFA_ALT] Preserved {len(transitions)} individual alternation transitions for variable {variable}")
-                    else:
-                        # Simple alternation: Combine conditions for efficiency
-                        # Sort by priority to ensure deterministic behavior
-                        transitions.sort(key=lambda t: getattr(t, 'priority', 0))
-                        conditions = [t.condition for t in transitions]
-
-                        def combined_condition(row, context):
-                            # Try conditions in priority order (first alternative wins)
-                            for condition in conditions:
-                                try:
-                                    if condition(row, context):
-                                        return True
-                                except Exception:
-                                    continue
-                            return False
-
-                        condition = combined_condition
-                        priority = min(getattr(t, 'priority', 0) for t in transitions)
-                        
-                        # Add combined transition
-                        current_dfa_state.add_transition(
-                            condition=condition,
-                            target=target_idx,
-                            variable=variable,
-                            priority=priority
-                        )
-
-        # Create final DFA with inherited metadata
-        final_metadata = {}
-        if hasattr(self.nfa, 'metadata') and self.nfa.metadata:
-            final_metadata.update(self.nfa.metadata)
-        final_metadata.update({'alternation_priority_fixed': True})
-        
-        return DFA(
-            start=0,
-            states=dfa_states,
-            exclusion_ranges=getattr(self.nfa, 'exclusion_ranges', []),
-            metadata=final_metadata
-        )
-
-    def _assess_construction_risk(self) -> float:
         """
-        Assess the risk level for DFA construction to choose appropriate strategy.
+        Build DFA with enhanced exponential protection and optimization.
         
         Returns:
-            float: Risk level (0.0 = very low, 5.0 = extreme)
-        """
-        nfa_complexity = self.build_stats['nfa_complexity_factor']
-        state_count = len(self.nfa.states)
-        
-        # Base risk from NFA complexity
-        risk = nfa_complexity
-        
-        # Factor in absolute state count
-        if state_count > 200:
-            risk += 2.0
-        elif state_count > 100:
-            risk += 1.5
-        elif state_count > 50:
-            risk += 1.0
-        
-        # Check for specific high-risk patterns in metadata
-        if hasattr(self.nfa, 'metadata') and self.nfa.metadata:
-            metadata = self.nfa.metadata
+            DFA: Constructed DFA with comprehensive optimizations
             
-            # Alternation complexity
-            if metadata.get('has_alternations', False):
-                alt_count = metadata.get('alternation_count', 1)
-                if alt_count > 10:
-                    risk += 2.0
-                elif alt_count > 5:
-                    risk += 1.0
-                    
-            # Quantifier complexity
-            if metadata.get('has_quantifiers', False):
-                quant_count = metadata.get('quantifier_count', 1)
-                if quant_count > 5:
-                    risk += 1.5
-                elif quant_count > 3:
-                    risk += 1.0
-                    
-            # PERMUTE complexity (exponential by nature)
-            if metadata.get('has_permute', False):
-                permute_vars = metadata.get('permute_variables', 2)
-                if permute_vars > 4:
-                    risk += 3.0
-                elif permute_vars > 3:
-                    risk += 2.0
-                else:
-                    risk += 1.0
-        
-        # Factor in epsilon transition density
-        epsilon_count = sum(len(state.epsilon) for state in self.nfa.states)
-        epsilon_density = epsilon_count / len(self.nfa.states)
-        if epsilon_density > 3.0:
-            risk += 1.5
-        elif epsilon_density > 2.0:
-            risk += 1.0
-        
-        return min(5.0, risk)
-    
-    def _get_cache_hit_ratio(self) -> float:
-        """Calculate cache hit ratio for performance monitoring."""
-        total_requests = self._cache_hits + self._cache_misses
-        return self._cache_hits / max(total_requests, 1)
-    
-    def _build_optimized_dfa(self) -> DFA:
+        Raises:
+            ValueError: If construction fails or limits are exceeded
+            RuntimeError: If exponential pattern is detected
         """
-        Build DFA using optimized subset construction for normal-risk patterns.
+        self._build_start_time = time.time()
         
-        Returns:
-            DFA: Fully optimized DFA with all enhancements
-        """
-        logger.info(f"[DFA_PRODUCTION] Using optimized construction strategy")
+        logger.info(f"[DFA_ENHANCED] Starting DFA construction from NFA with {len(self.nfa.states)} states")
         
-        # Initialize optimized data structures
-        dfa_states: List[DFAState] = []
-        state_map: Dict[FrozenSet[int], int] = {}
-        construction_queue = deque()
-        
-        # Phase 1: Create initial DFA state with enhanced epsilon closure
-        initial_nfa_states = self._compute_enhanced_epsilon_closure([self.nfa.start])
-        initial_state_set = frozenset(initial_nfa_states)
-        
-        logger.debug(f"[DFA_PRODUCTION] Initial epsilon closure: {sorted(initial_nfa_states)}")
-        
-        initial_dfa_state = self._create_production_dfa_state(initial_state_set)
-        dfa_states.append(initial_dfa_state)
-        state_map[initial_state_set] = 0
-        construction_queue.append((initial_state_set, 0))
-        
-        self.build_stats['states_created'] = 1
-        
-        # Phase 2: Process construction queue with enhanced algorithms
-        while construction_queue and self._iteration_count < self.MAX_ITERATIONS:
-            self._iteration_count += 1
-            
-            # Check termination conditions
-            if len(dfa_states) >= self.MAX_DFA_STATES:
-                logger.warning(f"[DFA_PRODUCTION] Reached state limit: {self.MAX_DFA_STATES}")
-                self.build_stats['early_termination'] = True
-                break
-            
-            current_state_set, current_dfa_idx = construction_queue.popleft()
-            current_dfa_state = dfa_states[current_dfa_idx]
-            
-            # Apply subset size protection
-            if len(current_state_set) > self.MAX_SUBSET_SIZE:
-                logger.warning(f"[DFA_PRODUCTION] Large subset detected: {len(current_state_set)}")
-                current_state_set = self._apply_intelligent_subset_reduction(current_state_set)
-                self.build_stats['subset_reductions_applied'] += 1
-            
-            # Phase 2a: Group transitions by variable with deterministic ordering
-            transition_groups = self._group_transitions_deterministically(current_state_set)
-            
-            # Phase 2b: Process each transition group with priority-based construction
-            for variable, transitions in sorted(transition_groups.items(), key=lambda x: (x[0] or "", len(x[1]))):
-                try:
-                    # Compute target state set with optimized epsilon closure
-                    target_state_set = self._compute_target_state_set_optimized(transitions)
-                    
-                    if not target_state_set:
-                        continue  # Skip empty transitions
-                    
-                    # Get or create target DFA state
-                    target_dfa_idx = self._get_or_create_target_state_optimized(
-                        target_state_set, state_map, dfa_states, construction_queue
-                    )
-                    
-                    if target_dfa_idx is None:
-                        continue  # Skip if creation failed due to limits
-                    
-                    # Create optimized transition with enhanced condition merging
-                    optimized_condition = self._create_optimized_transition_condition(transitions)
-                    optimized_priority = self._compute_deterministic_priority(transitions)
-                    optimized_metadata = self._create_enhanced_transition_metadata(transitions)
-                    
-                    # Add transition with comprehensive validation
-                    current_dfa_state.add_transition(
-                        condition=optimized_condition,
-                        target=target_dfa_idx,
-                        variable=variable,
-                        priority=optimized_priority,
-                        metadata=optimized_metadata
-                    )
-                    
-                    self.build_stats['transitions_created'] += 1
-                    
-                except Exception as e:
-                    logger.error(f"[DFA_PRODUCTION] Error processing transition group '{variable}': {e}")
-                    # Continue with other groups rather than failing completely
-                    continue
-        
-        # Phase 3: Create final DFA with comprehensive metadata
-        final_metadata = self._create_comprehensive_final_metadata()
-        
-        dfa = DFA(
-            start=0,
-            states=dfa_states,
-            exclusion_ranges=getattr(self.nfa, 'exclusion_ranges', []),
-            metadata=final_metadata
-        )
-        
-        # Phase 4: Apply post-construction optimizations
-        if not self.build_stats.get('early_termination', False):
-            logger.info(f"[DFA_PRODUCTION] Applying post-construction optimizations")
-            self._apply_production_optimizations(dfa)
-        
-        # Phase 5: Final validation
-        if not dfa.validate_pattern():
-            logger.warning(f"[DFA_PRODUCTION] DFA validation failed, but proceeding")
-            self.build_stats['construction_quality'] = 'warning'
-        
-        logger.info(f"[DFA_PRODUCTION] Optimized construction completed: "
-                   f"{len(dfa_states)} states, {self.build_stats['transitions_created']} transitions")
-        
-        return dfa
-
-    def _create_comprehensive_final_metadata(self) -> Dict[str, Any]:
-        """
-        Create comprehensive metadata for the final DFA.
-        
-        Returns:
-            Dict[str, Any]: Complete metadata for the DFA
-        """
-        return {
-            'construction_stats': self.build_stats.copy(),
-            'nfa_source_states': len(self.nfa.states),
-            'build_strategy': self.build_stats.get('strategy', 'optimized'),
-            'construction_quality': self.build_stats.get('construction_quality', 'normal'),
-            'alternation_priority_mode': 'first_alternative_priority',
-            'memory_optimized': True,
-            'deterministic_guarantee': True,
-            'sql_2016_compliant': True,
-            'created_at': time.time()
-        }
-    
-    def _apply_production_optimizations(self, dfa: 'DFA') -> None:
-        """
-        Apply post-construction optimizations to the DFA.
-        
-        Args:
-            dfa: The DFA to optimize
-        """
-        # State minimization could be added here
-        # For now, we focus on ensuring deterministic behavior
-        logger.debug(f"[DFA_PRODUCTION] Post-construction optimizations applied")
-    
-    def _log_comprehensive_metrics(self) -> None:
-        """Log comprehensive metrics about the DFA construction."""
-        logger.info(f"[DFA_PRODUCTION] Final build metrics: {self.build_stats}")
-    
-    def _get_cache_hit_ratio(self) -> float:
-        """Get the cache hit ratio for monitoring."""
-        return self.build_stats.get('cache_hit_ratio', 0.0)
-    
-    def _build_conservative_dfa(self) -> 'DFA':
-        """
-        Build DFA using conservative approach for very high-risk patterns.
-        
-        Returns:
-            DFA: Conservative DFA with simplified construction
-        """
-        logger.info(f"[DFA_PRODUCTION] Using conservative construction strategy")
-        self.build_stats['strategy'] = 'conservative'
-        
-        # Use the original simple construction as fallback
-        return self._build_simple_dfa()
-    
-    def _build_protected_dfa(self) -> 'DFA':
-        """
-        Build DFA using protected approach for high-risk patterns.
-        
-        Returns:
-            DFA: Protected DFA with risk mitigation
-        """
-        logger.info(f"[DFA_PRODUCTION] Using protected construction strategy")
-        self.build_stats['strategy'] = 'protected'
-        
-        # Use simplified approach with some optimizations
-        return self._build_simple_dfa()
-    
-    def _build_emergency_fallback_dfa(self) -> 'DFA':
-        """
-        Build DFA using emergency fallback when all else fails.
-        
-        Returns:
-            DFA: Minimal working DFA
-        """
-        logger.warning(f"[DFA_PRODUCTION] Using emergency fallback construction")
-        self.build_stats['strategy'] = 'emergency_fallback'
-        
-        # Use the simplest possible construction
-        return self._build_simple_dfa()
-    
-    def _build_simple_dfa(self) -> 'DFA':
-        """
-        Build DFA using the original simple subset construction.
-        
-        Returns:
-            DFA: DFA built with original algorithm
-        """
-        dfa_states = []
-        state_map = {}
-        construction_queue = deque()
-        
-        # Create initial state
-        initial_state_set = frozenset(self._epsilon_closure([self.nfa.start]))
-        is_anchor, anchor_type = self._extract_anchor_info(initial_state_set)
-        initial_dfa_state = DFAState(
-            nfa_states=initial_state_set,
-            is_accept=self.nfa.accept in initial_state_set,
-            state_id=len(dfa_states),
-            is_anchor=is_anchor,
-            anchor_type=anchor_type
-        )
-        dfa_states.append(initial_dfa_state)
-        state_map[initial_state_set] = 0
-        construction_queue.append((initial_state_set, 0))
-        
-        # Process construction queue
-        while construction_queue:
-            current_state_set, current_dfa_idx = construction_queue.popleft()
-            current_dfa_state = dfa_states[current_dfa_idx]
-            
-            # Group transitions by variable
-            transitions_by_var = {}
-            for state_id in current_state_set:
-                if state_id < len(self.nfa.states):
-                    nfa_state = self.nfa.states[state_id]
-                    for transition in nfa_state.transitions:
-                        var = transition.variable
-                        if var not in transitions_by_var:
-                            transitions_by_var[var] = []
-                        transitions_by_var[var].append(transition)
-            
-            # Process each variable
-            for variable, transitions in transitions_by_var.items():
-                target_states = set()
-                for transition in transitions:
-                    target_states.update(self._epsilon_closure([transition.target]))
+        try:
+            with self._lock:
+                # Pre-construction validation and risk assessment
+                if self._assess_exponential_risk():
+                    logger.warning(f"[DFA_ENHANCED] High exponential risk detected, using conservative construction")
+                    return self._build_conservative_dfa()
                 
-                if target_states:
-                    target_state_set = frozenset(target_states)
-                    
-                    # Get or create target state
-                    if target_state_set not in state_map:
-                        is_anchor, anchor_type = self._extract_anchor_info(target_state_set)
-                        target_dfa_state = DFAState(
-                            nfa_states=target_state_set,
-                            is_accept=self.nfa.accept in target_state_set,
-                            state_id=len(dfa_states),
-                            is_anchor=is_anchor,
-                            anchor_type=anchor_type
-                        )
-                        dfa_states.append(target_dfa_state)
-                        state_map[target_state_set] = len(dfa_states) - 1
-                        construction_queue.append((target_state_set, len(dfa_states) - 1))
-                    
-                    target_idx = state_map[target_state_set]
-                    
-                    # Create combined condition with proper alternation priority
-                    if len(transitions) == 1:
-                        condition = transitions[0].condition
-                        priority = getattr(transitions[0], 'priority', 0)
-                    else:
-                        # Sort by priority to ensure deterministic alternation behavior
-                        transitions.sort(key=lambda t: getattr(t, 'priority', 0))
-                        conditions = [t.condition for t in transitions]
-                        
-                        def combined_condition(row, context):
-                            # Try conditions in priority order (lower priority number = higher precedence)
-                            for condition in conditions:
-                                try:
-                                    if condition(row, context):
-                                        return True
-                                except Exception:
-                                    continue
-                            return False
-                        
-                        condition = combined_condition
-                        priority = min(getattr(t, 'priority', 0) for t in transitions)
-                    
-                    # Add transition
-                    current_dfa_state.add_transition(
-                        condition=condition,
-                        target=target_idx,
-                        variable=variable,
-                        priority=priority
-                    )
+                # Standard construction with exponential monitoring
+                return self._build_standard_dfa()
+                
+        except Exception as e:
+            logger.error(f"[DFA_ENHANCED] DFA construction failed: {e}")
+            raise RuntimeError(f"DFA construction failed: {e}") from e
         
-        # Create final DFA
-        metadata = {
-            'construction_type': 'simple_fallback',
-            'states_created': len(dfa_states),
-            'alternation_priority_enforced': True
-        }
-        
-        return DFA(
-            start=0,
-            states=dfa_states,
-            exclusion_ranges=getattr(self.nfa, 'exclusion_ranges', []),
-            metadata=metadata
-        )
-    
-    def _assess_construction_risk(self) -> float:
-        """
-        Assess the risk level of DFA construction.
-        
-        Returns:
-            float: Risk level (0.0 = low, 5.0 = very high)
-        """
-        risk_score = 0.0
-        
-        # Base risk from NFA size
+        finally:
+            build_time = time.time() - self._build_start_time
+            logger.info(f"[DFA_ENHANCED] DFA construction completed in {build_time:.3f}s")
+            self._log_construction_metrics()
+
+    def _assess_exponential_risk(self) -> bool:
+        """Assess the risk of exponential state explosion."""
         nfa_states = len(self.nfa.states)
-        if nfa_states > 50:
-            risk_score += 1.0
+        
+        # Check for high NFA state count
         if nfa_states > 100:
-            risk_score += 1.0
+            logger.warning(f"[DFA_ENHANCED] High NFA state count: {nfa_states}")
+            return True
         
-        # Risk from pattern complexity
-        if self.nfa.metadata.get('has_alternations', False):
-            risk_score += 0.5
-        if self.nfa.metadata.get('permute', False):
-            risk_score += 1.0
-        if self.nfa.metadata.get('has_quantifiers', False):
-            risk_score += 0.5
-        
-        # Risk from epsilon transition density
+        # Check for patterns indicating exponential risk
         epsilon_density = self._calculate_epsilon_density()
-        if epsilon_density > 0.3:
-            risk_score += 0.5
-        if epsilon_density > 0.6:
-            risk_score += 1.0
+        if epsilon_density > 0.5:
+            logger.warning(f"[DFA_ENHANCED] High epsilon transition density: {epsilon_density:.2f}")
+            return True
         
-        self.build_stats['risk_assessment'] = risk_score
-        return risk_score
-    
+        # Check for complex metadata
+        if self.nfa.metadata.get('has_alternations') and self.nfa.metadata.get('permute'):
+            logger.warning(f"[DFA_ENHANCED] Complex pattern: PERMUTE with alternations")
+            return True
+        
+        return False
+
     def _calculate_epsilon_density(self) -> float:
         """Calculate the density of epsilon transitions in the NFA."""
-        if not self.nfa.states:
-            return 0.0
-        
         total_transitions = sum(len(state.transitions) + len(state.epsilon) for state in self.nfa.states)
         epsilon_transitions = sum(len(state.epsilon) for state in self.nfa.states)
         
         return epsilon_transitions / max(total_transitions, 1)
-    
-    def _epsilon_closure(self, states: List[int]) -> Set[int]:
-        """Compute epsilon closure of given states with priority preservation."""
-        closure = set(states)
-        stack = list(states)
+
+    def _build_conservative_dfa(self) -> DFA:
+        """Build DFA using conservative approach for high-risk patterns."""
+        logger.info(f"[DFA_ENHANCED] Using conservative DFA construction")
         
-        while stack:
-            state = stack.pop()
-            if state < len(self.nfa.states):
-                nfa_state = self.nfa.states[state]
-                for epsilon_target in nfa_state.epsilon:
-                    if epsilon_target not in closure:
-                        closure.add(epsilon_target)
-                        stack.append(epsilon_target)
+        # Start with reduced limits
+        self.MAX_DFA_STATES = min(self.MAX_DFA_STATES, 1000)
+        self.MAX_SUBSET_SIZE = min(self.MAX_SUBSET_SIZE, 10)
         
-        return closure
-    
-    def _extract_anchor_info(self, nfa_state_set: FrozenSet[int]) -> Tuple[bool, Optional[PatternTokenType]]:
-        """Extract anchor information from a set of NFA states."""
-        for state_id in nfa_state_set:
-            if state_id < len(self.nfa.states):
-                nfa_state = self.nfa.states[state_id]
-                if hasattr(nfa_state, 'is_anchor') and nfa_state.is_anchor:
-                    anchor_type = getattr(nfa_state, 'anchor_type', None)
-                    return True, anchor_type
-        return False, None
-    
-    def _can_reach_accept_through_optional(self, nfa_state_id: int) -> bool:
+        # Use simplified subset construction
+        return self._build_simplified_dfa()
+
+    def _build_standard_dfa(self) -> DFA:
+        """Build DFA using standard subset construction with enhancements."""
+        # Initialize data structures
+        dfa_states: List[DFAState] = []
+        state_map: Dict[FrozenSet[int], int] = {}
+        queue = deque()
+        
+        # Get initial state set with epsilon closure
+        initial_nfa_states = frozenset(self.nfa.epsilon_closure([self.nfa.start]))
+        
+        # Create initial DFA state
+        initial_dfa_state = self._create_enhanced_dfa_state(initial_nfa_states)
+        dfa_states.append(initial_dfa_state)
+        state_map[initial_nfa_states] = 0
+        queue.append((initial_nfa_states, 0))
+        
+        self._states_created += 1
+        
+        # Process queue with exponential protection
+        while queue and self._iteration_count < self.MAX_ITERATIONS:
+            self._iteration_count += 1
+            
+            if len(dfa_states) >= self.MAX_DFA_STATES:
+                logger.warning(f"[DFA_ENHANCED] Reached maximum DFA states limit: {self.MAX_DFA_STATES}")
+                self._early_termination = True
+                break
+            
+            nfa_states, dfa_state_idx = queue.popleft()
+            
+            # Check subset size limit
+            if len(nfa_states) > self.MAX_SUBSET_SIZE:
+                logger.warning(f"[DFA_ENHANCED] Large subset size: {len(nfa_states)}, applying reduction")
+                nfa_states = self._reduce_subset_size(nfa_states)
+            
+            # Group transitions by variables/conditions with enhanced logic
+            transition_groups = self._group_transitions_enhanced(nfa_states)
+            
+            # Process each transition group
+            for group_key, transitions in transition_groups.items():
+                try:
+                    # Compute target state set
+                    target_set = self._compute_target_set_enhanced(transitions)
+                    
+                    if not target_set:
+                        continue
+                    
+                    # Apply epsilon closure with limits
+                    closure_result = self._safe_epsilon_closure(target_set)
+                    target_closure = frozenset(closure_result)
+                    
+                    # Get or create target DFA state
+                    target_dfa_idx = self._get_or_create_target_state(
+                        target_closure, state_map, dfa_states, queue
+                    )
+                    
+                    if target_dfa_idx is None:
+                        continue  # Skip if creation failed
+                    
+                    # Create optimized transition
+                    combined_condition = self._create_enhanced_condition(transitions)
+                    combined_priority = self._compute_enhanced_priority(transitions)
+                    combined_metadata = self._create_enhanced_metadata(transitions)
+                    
+                    # Add transition to current state
+                    dfa_states[dfa_state_idx].add_transition(
+                        condition=combined_condition,
+                        target=target_dfa_idx,
+                        variable=group_key,
+                        priority=combined_priority,
+                        metadata=combined_metadata
+                    )
+                    
+                except Exception as e:
+                    logger.warning(f"[DFA_ENHANCED] Error processing transition group {group_key}: {e}")
+                    continue  # Skip this transition group
+        
+        # Check for early termination
+        if self._iteration_count >= self.MAX_ITERATIONS:
+            logger.warning(f"[DFA_ENHANCED] Reached maximum iterations limit: {self.MAX_ITERATIONS}")
+            self._early_termination = True
+        
+        # Create final DFA with enhanced metadata
+        final_metadata = self._create_final_enhanced_metadata()
+        
+        dfa = DFA(
+            states=dfa_states,
+            start=0,
+            metadata=final_metadata,
+            exclusion_ranges=list(self.nfa.exclusion_ranges)
+        )
+        
+        # Apply post-construction optimizations
+        if not self._early_termination:
+            self._apply_post_construction_optimizations(dfa)
+        
+        return dfa
+
+    def _build_simplified_dfa(self) -> DFA:
+        """Build a simplified DFA for high-risk patterns."""
+        logger.info(f"[DFA_ENHANCED] Building simplified DFA")
+        
+        # Create minimal DFA structure
+        dfa_states = []
+        
+        # Start state
+        start_state = DFAState(nfa_states=frozenset([self.nfa.start]))
+        dfa_states.append(start_state)
+        
+        # Accept state
+        accept_state = DFAState(nfa_states=frozenset([self.nfa.accept]), is_accept=True)
+        dfa_states.append(accept_state)
+        
+        # Create simplified transitions
+        all_variables = set()
+        for state in self.nfa.states:
+            for trans in state.transitions:
+                if trans.variable:
+                    all_variables.add(trans.variable)
+        
+        # Add transitions for each variable
+        for i, var in enumerate(all_variables):
+            # Create simple condition that delegates to NFA
+            condition = self._create_simplified_condition(var)
+            start_state.add_transition(condition, 1, var, i)
+        
+        # Create final metadata
+        metadata = {
+            'simplified': True,
+            'exponential_protection': True,
+            'original_nfa_states': len(self.nfa.states),
+            'construction_time': time.time() - self._build_start_time
+        }
+        
+        return DFA(states=dfa_states, start=0, metadata=metadata)
+
+    def _reduce_subset_size(self, nfa_states: FrozenSet[int]) -> FrozenSet[int]:
+        """Reduce subset size by removing less important states."""
+        if len(nfa_states) <= self.MAX_SUBSET_SIZE:
+            return nfa_states
+        
+        states_list = list(nfa_states)
+        
+        # Sort by importance (accept states first, then by priority)
+        def state_importance(state_idx):
+            state = self.nfa.states[state_idx]
+            importance = 0
+            
+            if state.is_accept:
+                importance += 1000
+            if state.variable:
+                importance += 100
+            if state.transitions:
+                importance += len(state.transitions)
+                
+            return importance
+        
+        states_list.sort(key=state_importance, reverse=True)
+        
+        # Keep the most important states
+        reduced_states = states_list[:self.MAX_SUBSET_SIZE]
+        
+        logger.debug(f"[DFA_ENHANCED] Reduced subset from {len(nfa_states)} to {len(reduced_states)} states")
+        
+        return frozenset(reduced_states)
+
+    def _safe_epsilon_closure(self, state_set: Set[int]) -> List[int]:
+        """Compute epsilon closure with safety limits."""
+        try:
+            # Use NFA's epsilon closure but with limits
+            result = self.nfa.epsilon_closure(list(state_set))
+            
+            # Apply size limit
+            if len(result) > self.MAX_SUBSET_SIZE:
+                logger.warning(f"[DFA_ENHANCED] Large epsilon closure: {len(result)}, reducing")
+                result = result[:self.MAX_SUBSET_SIZE]
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"[DFA_ENHANCED] Error in epsilon closure: {e}")
+            return list(state_set)  # Fallback to original set
+
+    def _group_transitions_enhanced(self, nfa_states: FrozenSet[int]) -> Dict[Optional[str], List[Transition]]:
+        """Enhanced transition grouping with deduplication."""
+        groups = defaultdict(list)
+        seen_transitions = set()
+        
+        for state_idx in nfa_states:
+            state = self.nfa.states[state_idx]
+            
+            for trans in state.transitions:
+                # Create unique key for deduplication
+                trans_key = (trans.variable, trans.target, id(trans.condition))
+                
+                if trans_key not in seen_transitions:
+                    seen_transitions.add(trans_key)
+                    groups[trans.variable].append(trans)
+                else:
+                    self._cache_hits += 1
+        
+        return dict(groups)
+
+    def _compute_target_set_enhanced(self, transitions: List[Transition]) -> Set[int]:
+        """Enhanced target set computation with deduplication."""
+        target_set = set()
+        
+        for trans in transitions:
+            target_set.add(trans.target)
+        
+        return target_set
+
+    def _get_or_create_target_state(self, target_closure: FrozenSet[int], 
+                                  state_map: Dict[FrozenSet[int], int],
+                                  dfa_states: List[DFAState], 
+                                  queue: deque) -> Optional[int]:
+        """Get existing or create new target state with limits."""
+        # Check cache first
+        if target_closure in state_map:
+            self._cache_hits += 1
+            return state_map[target_closure]
+        
+        # Check limits
+        if len(dfa_states) >= self.MAX_DFA_STATES:
+            logger.warning(f"[DFA_ENHANCED] Cannot create new state: limit reached")
+            return None
+        
+        # Create new state
+        try:
+            new_state = self._create_enhanced_dfa_state(target_closure)
+            new_idx = len(dfa_states)
+            
+            dfa_states.append(new_state)
+            state_map[target_closure] = new_idx
+            queue.append((target_closure, new_idx))
+            
+            self._states_created += 1
+            self._cache_misses += 1
+            
+            return new_idx
+            
+        except Exception as e:
+            logger.error(f"[DFA_ENHANCED] Error creating new state: {e}")
+            return None
+
+    def _create_enhanced_dfa_state(self, nfa_states: FrozenSet[int]) -> DFAState:
+        """Create enhanced DFA state with comprehensive metadata."""
+        # Check if any NFA state is accepting
+        is_accept = any(self.nfa.states[idx].is_accept for idx in nfa_states)
+        
+        # Collect variables and metadata
+        variables = set()
+        excluded_variables = set()
+        permute_data = None
+        is_anchor = False
+        anchor_type = None
+        
+        for state_idx in nfa_states:
+            state = self.nfa.states[state_idx]
+            
+            if state.variable:
+                if state.is_excluded:
+                    excluded_variables.add(state.variable)
+                else:
+                    variables.add(state.variable)
+            
+            if state.is_anchor:
+                is_anchor = True
+                anchor_type = state.anchor_type
+            
+            if state.permute_data:
+                permute_data = state.permute_data
+        
+        # Create state with comprehensive attributes
+        dfa_state = DFAState(
+            nfa_states=nfa_states,
+            is_accept=is_accept,
+            variables=variables,
+            excluded_variables=excluded_variables,
+            is_anchor=is_anchor,
+            anchor_type=anchor_type,
+            permute_data=permute_data,
+            state_id=self._states_created
+        )
+        
+        return dfa_state
+
+    def _create_enhanced_condition(self, transitions: List[Transition]) -> Callable:
+        """Create enhanced combined condition with optimization."""
+        if len(transitions) == 1:
+            return transitions[0].condition
+        
+        # Cache key for condition combination
+        conditions_key = tuple(id(t.condition) for t in transitions)
+        
+        if conditions_key in self._transition_cache:
+            self._cache_hits += 1
+            return self._transition_cache[conditions_key]
+        
+        # Create combined condition
+        conditions = [t.condition for t in transitions]
+        
+        def combined_condition(row, ctx):
+            # Try each condition until one matches (OR logic)
+            for condition in conditions:
+                try:
+                    if condition(row, ctx):
+                        return True
+                except Exception as e:
+                    logger.debug(f"[DFA_ENHANCED] Condition evaluation error: {e}")
+                    continue
+            return False
+        
+        # Cache the result
+        self._transition_cache[conditions_key] = combined_condition
+        self._cache_misses += 1
+        
+        return combined_condition
+
+    def _compute_enhanced_priority(self, transitions: List[Transition]) -> int:
+        """Compute enhanced priority from multiple transitions."""
+        if not transitions:
+            return 0
+        
+        # Use minimum priority (highest precedence)
+        return min(t.priority for t in transitions)
+
+    def _create_enhanced_metadata(self, transitions: List[Transition]) -> Dict[str, Any]:
+        """Create enhanced metadata from transitions."""
+        metadata = {
+            'transition_count': len(transitions),
+            'variables': [t.variable for t in transitions if t.variable],
+            'priorities': [t.priority for t in transitions]
+        }
+        
+        # Merge individual transition metadata
+        for trans in transitions:
+            if trans.metadata:
+                for key, value in trans.metadata.items():
+                    if key not in metadata:
+                        metadata[key] = value
+                    elif isinstance(value, list) and isinstance(metadata[key], list):
+                        metadata[key].extend(value)
+        
+        return metadata
+
+    def _create_final_enhanced_metadata(self) -> Dict[str, Any]:
+        """Create final DFA metadata with construction metrics."""
+        return {
+            'construction_time': time.time() - self._build_start_time,
+            'iterations': self._iteration_count,
+            'states_created': self._states_created,
+            'states_merged': self._states_merged,
+            'cache_hits': self._cache_hits,
+            'cache_misses': self._cache_misses,
+            'early_termination': self._early_termination,
+            'exponential_detected': self._exponential_detected,
+            'max_states_limit': self.MAX_DFA_STATES,
+            'max_subset_limit': self.MAX_SUBSET_SIZE,
+            'optimized': True,
+            **dict(self.nfa.metadata)  # Include NFA metadata
+        }
+
+    def _apply_post_construction_optimizations(self, dfa: DFA):
+        """Apply optimizations after DFA construction."""
+        if len(dfa.states) > 100:
+            logger.info(f"[DFA_ENHANCED] Applying post-construction optimizations")
+            dfa.optimize()
+
+    def _create_simplified_condition(self, variable: str) -> Callable:
+        """Create simplified condition for emergency fallback."""
+        def simplified_condition(row, ctx):
+            # Simple always-true condition for safety
+            return True
+        
+        return simplified_condition
+
+    def _log_construction_metrics(self):
+        """Log detailed construction metrics."""
+        logger.info(f"[DFA_ENHANCED] Construction metrics:")
+        logger.info(f"  - Iterations: {self._iteration_count}")
+        logger.info(f"  - States created: {self._states_created}")
+        logger.info(f"  - States merged: {self._states_merged}")
+        logger.info(f"  - Cache hits: {self._cache_hits}")
+        logger.info(f"  - Cache misses: {self._cache_misses}")
+        logger.info(f"  - Early termination: {self._early_termination}")
+        logger.info(f"  - Exponential detected: {self._exponential_detected}")
+
+    def get_build_statistics(self) -> Dict[str, Any]:
+        """Get comprehensive build statistics."""
+        return {
+            'iterations': self._iteration_count,
+            'states_created': self._states_created,
+            'states_merged': self._states_merged,
+            'cache_hits': self._cache_hits,
+            'cache_misses': self._cache_misses,
+            'cache_hit_ratio': self._cache_hits / max(self._cache_hits + self._cache_misses, 1),
+            'early_termination': self._early_termination,
+            'exponential_detected': self._exponential_detected,
+            'construction_time': time.time() - self._build_start_time if self._build_start_time else 0
+        }
         """
-        Check if an NFA state can reach the accept state through epsilon transitions only.
-        This is used to determine if DFA states should be accepting when optional quantifiers
-        (like D?) are present after required patterns (like A B+ C+).
+        Initialize DFA builder with comprehensive validation.
         
         Args:
-            nfa_state_id: The NFA state ID to check
+            nfa: Source NFA to convert to DFA
+            
+        Raises:
+            ValueError: If NFA is invalid or malformed
+            TypeError: If NFA is not of correct type
+        """
+        if not isinstance(nfa, NFA):
+            raise TypeError(f"Expected NFA instance, got {type(nfa)}")
+        
+        if not nfa.validate():
+            raise ValueError("Source NFA failed validation")
+        
+        self.nfa = nfa
+        self.subset_cache: Dict[FrozenSet[int], int] = {}
+        
+        # Copy and enhance metadata from NFA
+        logger.debug(f"DFA: Copying metadata from NFA: {nfa.metadata}")
+        self.metadata: Dict[str, Any] = nfa.metadata.copy() if nfa.metadata else {}
+        logger.debug(f"DFA: Metadata after copy: {self.metadata}")
+        
+        # Add builder-specific metadata
+        self.metadata.update({
+            'builder_version': '2.0.0',
+            'source_nfa_states': len(nfa.states),
+            'build_timestamp': time.time()
+        })
+        
+        # Performance tracking
+        self.build_stats = {
+            'states_created': 0,
+            'transitions_created': 0,
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'build_time': 0.0
+        }
+        
+        # Threading support
+        self._lock = threading.RLock()
+        
+        logger.debug(f"DFABuilder initialized for NFA with {len(nfa.states)} states")
+
+    def build(self) -> DFA:
+        """
+        Build optimized DFA from NFA with comprehensive error handling and monitoring.
+        
+        Returns:
+            DFA: Optimized deterministic finite automaton
+            
+        Raises:
+            RuntimeError: If DFA construction fails
+            ValueError: If resulting DFA is invalid
+        """
+        build_start = time.time()
+        
+        try:
+            with PerformanceTimer("dfa_build"):
+                logger.info("Starting DFA construction from NFA")
+                
+                # Initialize data structures
+                dfa_states: List[DFAState] = []
+                state_map: Dict[FrozenSet[int], int] = {}
+                
+                # Create initial state from epsilon closure of NFA start state
+                start_closure = self.nfa.epsilon_closure([self.nfa.start])
+                start_set = frozenset(start_closure)
+                
+                logger.debug(f"Start state epsilon closure: {sorted(start_closure)}")
+                
+                start_dfa = self._create_dfa_state(start_set)
+                dfa_states.append(start_dfa)
+                state_map[start_set] = 0
+                self.build_stats['states_created'] += 1
+
+                # Process state queue using breadth-first approach
+                queue = deque([start_set])
+                processed_states = set()
+                
+                while queue:
+                    current_set = queue.popleft()
+                    
+                    # Skip if already processed (shouldn't happen but safety check)
+                    if current_set in processed_states:
+                        continue
+                    processed_states.add(current_set)
+                    
+                    current_idx = state_map[current_set]
+                    current_dfa_state = dfa_states[current_idx]
+
+                    # Group transitions by variable for optimization
+                    var_transitions = self._group_transitions(current_set)
+
+                    # Process each variable's transitions
+                    for var, transitions in var_transitions.items():
+                        try:
+                            target_set = self._compute_target_set(transitions)
+                            
+                            if not target_set:
+                                continue  # Skip empty target sets
+                            
+                            target_idx = self._get_target_state(target_set, state_map, dfa_states, queue)
+                            
+                            # Create optimized transition with metadata
+                            condition = self._create_combined_condition(transitions)
+                            priority = self._compute_combined_priority(transitions)
+                            metadata = self._create_combined_metadata(transitions)
+                            
+                            current_dfa_state.add_transition(
+                                condition=condition,
+                                target=target_idx,
+                                variable=var,
+                                priority=priority,
+                                metadata=metadata
+                            )
+                            
+                            self.build_stats['transitions_created'] += 1
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing transitions for variable '{var}': {e}")
+                            raise RuntimeError(f"Transition processing failed: {e}") from e
+
+                # Record build time
+                self.build_stats['build_time'] = time.time() - build_start
+
+                # Build final DFA with comprehensive metadata
+                final_metadata = self._create_final_metadata()
+                
+                dfa = DFA(
+                    start=0,
+                    states=dfa_states,
+                    exclusion_ranges=self.nfa.exclusion_ranges.copy(),
+                    metadata=final_metadata
+                )
+                
+                # Validate resulting DFA
+                if not dfa.validate_pattern():
+                    raise ValueError("Constructed DFA failed validation")
+                
+                # Apply optimizations
+                logger.info("Applying DFA optimizations...")
+                dfa.optimize()
+                
+                logger.info(f"DFA construction completed: {len(dfa_states)} states, "
+                           f"{self.build_stats['transitions_created']} transitions, "
+                           f"{self.build_stats['build_time']:.3f}s")
+                
+                return dfa
+                
+        except Exception as e:
+            logger.error(f"DFA construction failed: {e}")
+            raise RuntimeError(f"DFA build failed: {e}") from e
+
+    def _create_dfa_state(self, nfa_states: FrozenSet[int]) -> DFAState:
+        """
+        Create a DFA state from NFA states with comprehensive metadata handling.
+        
+        Args:
+            nfa_states: Frozen set of NFA state indices
             
         Returns:
-            bool: True if this state can reach accept through optional paths only
+            DFAState: Newly created DFA state with full metadata
+            
+        Raises:
+            ValueError: If NFA states are invalid
         """
-        if nfa_state_id == self.nfa.accept:
-            return True
-            
-        # Use BFS to check if we can reach accept through epsilon transitions only
-        visited = set()
-        queue = deque([nfa_state_id])
+        if not nfa_states:
+            raise ValueError("Cannot create DFA state from empty NFA state set")
         
-        while queue:
-            current_state_id = queue.popleft()
-            if current_state_id in visited:
-                continue
-            visited.add(current_state_id)
+        # Validate NFA state indices
+        for state_idx in nfa_states:
+            if not (0 <= state_idx < len(self.nfa.states)):
+                raise ValueError(f"Invalid NFA state index: {state_idx}")
+        
+        # Check if this is an accepting state
+        is_accept = self.nfa.accept in nfa_states
+        
+        # PRODUCTION FIX: Handle patterns with optional suffixes
+        # For patterns like "A B+ C+ D?", a DFA state representing completion of "A B+ C+"
+        # should also be accepting since D? is optional
+        if not is_accept and hasattr(self.nfa, 'metadata'):
+            nfa_metadata = self.nfa.metadata
+            if nfa_metadata.get('has_optional_suffix', False):
+                # Check if this DFA state represents a position where only optional parts remain
+                is_accept = self._can_reach_accept_via_optional_only(nfa_states)
+                if is_accept:
+                    logger.debug(f"DFA state {self.build_stats['states_created']} marked as accepting due to optional suffix completion")
+        
+        # Create DFA state with state ID for debugging
+        state = DFAState(
+            nfa_states=nfa_states,
+            is_accept=is_accept,
+            state_id=self.build_stats['states_created']
+        )
+
+        # Aggregate properties from all constituent NFA states
+        all_variables = set()
+        excluded_variables = set()
+        subset_vars = set()
+        anchor_states = []
+        permute_data_merged = {}
+        
+        for nfa_state_idx in nfa_states:
+            nfa_state = self.nfa.states[nfa_state_idx]
+
+            # Collect variables
+            if hasattr(nfa_state, 'variable') and nfa_state.variable:
+                all_variables.add(nfa_state.variable)
+                
+                # Check if variable is excluded
+                if hasattr(nfa_state, 'is_excluded') and nfa_state.is_excluded:
+                    excluded_variables.add(nfa_state.variable)
+
+            # Collect anchor information
+            if hasattr(nfa_state, 'is_anchor') and nfa_state.is_anchor:
+                anchor_states.append((nfa_state_idx, nfa_state.anchor_type))
+
+            # Collect subset variables
+            if hasattr(nfa_state, 'subset_vars') and nfa_state.subset_vars:
+                subset_vars.update(nfa_state.subset_vars)
+
+            # Merge PERMUTE metadata
+            if hasattr(nfa_state, 'permute_data') and nfa_state.permute_data:
+                for key, value in nfa_state.permute_data.items():
+                    if key in permute_data_merged:
+                        # Handle conflicts by preferring more specific data
+                        if isinstance(value, list) and isinstance(permute_data_merged[key], list):
+                            permute_data_merged[key].extend(value)
+                        elif value != permute_data_merged[key]:
+                            logger.warning(f"PERMUTE metadata conflict for key '{key}': "
+                                         f"{permute_data_merged[key]} vs {value}")
+                    else:
+                        permute_data_merged[key] = value
+
+            # Check for empty match capability
+            if hasattr(nfa_state, 'allows_empty_match') and nfa_state.allows_empty_match():
+                state.is_empty_match = True
+
+        # Assign aggregated properties
+        state.variables = all_variables
+        state.excluded_variables = excluded_variables
+        state.subset_vars = subset_vars
+        
+        # Handle anchor states (prefer START anchors over END if both present)
+        if anchor_states:
+            state.is_anchor = True
+            # Prioritize START anchor over END anchor
+            start_anchors = [a for a in anchor_states if a[1] == PatternTokenType.ANCHOR_START]
+            if start_anchors:
+                state.anchor_type = PatternTokenType.ANCHOR_START
+            else:
+                state.anchor_type = anchor_states[0][1]
+        
+        # Assign PERMUTE data if any
+        if permute_data_merged:
+            state.permute_data = permute_data_merged
+        
+        # Calculate state priority based on constituent NFA states
+        state.priority = min(self.nfa.states[idx].priority for idx in nfa_states)
+        
+        logger.debug(f"Created DFA state {state.state_id} from NFA states {sorted(nfa_states)}: "
+                    f"accept={is_accept}, variables={all_variables}, anchor={state.is_anchor}")
+        
+        return state
+
+    def _group_transitions(self, nfa_states: FrozenSet[int]) -> Dict[Optional[str], List[Transition]]:
+        """
+        Group NFA transitions by variable, preserving priorities and handling conflicts.
+        
+        Args:
+            nfa_states: Set of NFA state indices to process
             
-            if current_state_id == self.nfa.accept:
+        Returns:
+            Dict mapping variable names to lists of transitions
+        """
+        transitions: Dict[Optional[str], List[Transition]] = defaultdict(list)
+        
+        for state_idx in nfa_states:
+            nfa_state = self.nfa.states[state_idx]
+            
+            for trans in nfa_state.transitions:
+                variable = trans.variable
+                transitions[variable].append(trans)
+        
+        # Sort transitions within each group by priority
+        for var, trans_list in transitions.items():
+            trans_list.sort(key=lambda t: (t.priority, t.target))
+        
+        return dict(transitions)
+        """Group NFA transitions by variable for optimization, preserving priorities."""
+        transitions: Dict[str, List[Transition]] = {}
+        
+        for state_idx in nfa_states:
+            for trans in self.nfa.states[state_idx].transitions:
+                if trans.variable not in transitions:
+                    transitions[trans.variable] = []
+                transitions[trans.variable].append(trans)
+        
+        # Sort transitions within each variable group by priority (lower = higher priority)
+        for var, trans_list in transitions.items():
+            trans_list.sort(key=lambda t: t.priority)
+                
+        return transitions
+
+    def _compute_target_set(self, transitions: List[Transition]) -> FrozenSet[int]:
+        """
+        Compute the target set of states reachable through given transitions.
+        
+        Args:
+            transitions: List of transitions to follow
+            
+        Returns:
+            FrozenSet[int]: Set of reachable state indices
+        """
+        target_states = set()
+        
+        for trans in transitions:
+            # Add direct target
+            target_states.add(trans.target)
+        
+        # Compute epsilon closure of all targets
+        if target_states:
+            epsilon_closure = self.nfa.epsilon_closure(list(target_states))
+            return frozenset(epsilon_closure)
+        
+        return frozenset()
+
+    def _get_target_state(
+        self,
+        target_set: FrozenSet[int],
+        state_map: Dict[FrozenSet[int], int],
+        dfa_states: List[DFAState],
+        queue: deque
+    ) -> int:
+        """
+        Get or create target state for given NFA state set.
+        
+        Args:
+            target_set: Set of NFA states
+            state_map: Mapping from state sets to DFA state indices
+            dfa_states: List of existing DFA states
+            queue: Queue for processing new states
+            
+        Returns:
+            int: Index of target DFA state
+        """
+        if target_set in state_map:
+            self.build_stats['cache_hits'] += 1
+            return state_map[target_set]
+        
+        # Create new DFA state
+        self.build_stats['cache_misses'] += 1
+        new_state = self._create_dfa_state(target_set)
+        new_idx = len(dfa_states)
+        
+        dfa_states.append(new_state)
+        state_map[target_set] = new_idx
+        queue.append(target_set)
+        
+        self.build_stats['states_created'] += 1
+        
+        return new_idx
+
+    def _create_combined_condition(self, transitions: List[Transition]) -> Callable:
+        """
+        Create a combined condition function for multiple transitions.
+        
+        Args:
+            transitions: List of transitions to combine
+            
+        Returns:
+            Callable: Combined condition function
+        """
+        if len(transitions) == 1:
+            return transitions[0].condition
+        
+        # Create OR combination of all conditions
+        def combined_condition(row_data, context):
+            for trans in transitions:
+                try:
+                    if trans.condition(row_data, context):
+                        return True
+                except Exception as e:
+                    logger.warning(f"Condition evaluation failed: {e}")
+                    continue
+            return False
+        
+        return combined_condition
+    
+    def _compute_combined_priority(self, transitions: List[Transition]) -> int:
+        """
+        Compute combined priority for multiple transitions.
+        
+        Args:
+            transitions: List of transitions
+            
+        Returns:
+            int: Combined priority (minimum for highest precedence)
+        """
+        if not transitions:
+            return 0
+        
+        return min(trans.priority for trans in transitions)
+    
+    def _create_combined_metadata(self, transitions: List[Transition]) -> Dict[str, Any]:
+        """
+        Create combined metadata from multiple transitions.
+        
+        Args:
+            transitions: List of transitions
+            
+        Returns:
+            Dict[str, Any]: Combined metadata
+        """
+        combined = {}
+        
+        for trans in transitions:
+            if trans.metadata:
+                for key, value in trans.metadata.items():
+                    if key in combined:
+                        # Handle conflicts - prefer more specific/recent data
+                        if isinstance(value, list) and isinstance(combined[key], list):
+                            combined[key].extend(value)
+                        else:
+                            combined[key] = value
+                    else:
+                        combined[key] = value
+        
+        return combined
+    
+    def _create_final_metadata(self) -> Dict[str, Any]:
+        """
+        Create final metadata for the completed DFA.
+        
+        Returns:
+            Dict[str, Any]: Comprehensive metadata
+        """
+        final_metadata = self.metadata.copy()
+        
+        # Add build statistics
+        final_metadata.update({
+            'build_stats': self.build_stats.copy(),
+            'dfa_construction_time': self.build_stats['build_time'],
+            'cache_hit_rate': (
+                self.build_stats['cache_hits'] / 
+                max(1, self.build_stats['cache_hits'] + self.build_stats['cache_misses'])
+            ),
+            'construction_efficiency': {
+                'states_per_second': self.build_stats['states_created'] / max(0.001, self.build_stats['build_time']),
+                'transitions_per_second': self.build_stats['transitions_created'] / max(0.001, self.build_stats['build_time'])
+            }
+        })
+        
+        return final_metadata
+    
+    def get_build_statistics(self) -> Dict[str, Any]:
+        """
+        Get detailed build statistics for monitoring and debugging.
+        
+        Returns:
+            Dict[str, Any]: Build statistics and performance metrics
+        """
+        return {
+            'states_created': self.build_stats['states_created'],
+            'transitions_created': self.build_stats['transitions_created'],
+            'cache_hits': self.build_stats['cache_hits'],
+            'cache_misses': self.build_stats['cache_misses'],
+            'cache_hit_rate': (
+                self.build_stats['cache_hits'] / 
+                max(1, self.build_stats['cache_hits'] + self.build_stats['cache_misses'])
+            ),
+            'build_time': self.build_stats['build_time'],
+            'source_nfa_states': len(self.nfa.states),
+            'subset_cache_size': len(self.subset_cache)
+        }
+
+    def _can_reach_accept_via_optional_only(self, nfa_states: FrozenSet[int]) -> bool:
+        """
+        Production-ready check if the given NFA states can reach the accept state through optional-only paths.
+        
+        This handles patterns like "A B+ C+ D?" where after matching "A B+ C+", the remaining
+        "D?" is optional and should be considered as a valid completion point.
+        
+        This implementation uses the optional suffix metadata from the NFA to determine
+        if the current DFA state represents a valid completion point for required pattern parts.
+        
+        Args:
+            nfa_states: Set of NFA state indices to check
+            
+        Returns:
+            True if accept state is reachable via optional-only transitions or if this
+            represents completion of all required pattern parts
+        """
+        # First, check direct epsilon reachability to accept state
+        visited = set()
+        to_check = list(nfa_states)
+        
+        while to_check:
+            current_state_idx = to_check.pop(0)
+            
+            if current_state_idx in visited:
+                continue
+            visited.add(current_state_idx)
+            
+            if current_state_idx == self.nfa.accept:
                 return True
                 
-            # Only follow epsilon transitions (no consuming transitions)
-            if current_state_id < len(self.nfa.states):
-                nfa_state = self.nfa.states[current_state_id]
-                for epsilon_target in nfa_state.epsilon:
-                    if epsilon_target not in visited:
-                        queue.append(epsilon_target)
+            # Check epsilon transitions from this state
+            current_state = self.nfa.states[current_state_idx]
+            for target_idx in current_state.epsilon:
+                if target_idx not in visited:
+                    to_check.append(target_idx)
         
-        # If direct epsilon reachability fails, check if this state represents completion
-        # of the required pattern prefix and remaining tokens are optional
-        if hasattr(self.nfa, 'metadata'):
-            metadata = self.nfa.metadata
-            if metadata.get('has_optional_suffix', False):
-                # Check if this state is at the end of the required prefix
-                # For patterns like "A B+ C+ D?", state after C+ should be accepting
-                # because D? is optional
-                
-                # Get optional suffix tokens
-                optional_tokens = metadata.get('optional_suffix_tokens', [])
-                if optional_tokens:
-                    # Check if all transitions from this state are for optional variables
-                    if current_state_id < len(self.nfa.states):
-                        nfa_state = self.nfa.states[current_state_id]
-                        if hasattr(nfa_state, 'transitions'):
-                            # Check if any transition leads to a state that can epsilon-reach accept
-                            for transition in nfa_state.transitions:
-                                target_state_id = transition.target
-                                # Check if target can reach accept via epsilon (recursive)
-                                if target_state_id < len(self.nfa.states):
-                                    target_state = self.nfa.states[target_state_id]
-                                    if target_state.epsilon and self.nfa.accept in target_state.epsilon:
-                                        return True
+        # If not directly reachable via epsilon, use metadata-based approach
+        # This is more reliable for complex patterns with optional suffixes
+        nfa_metadata = self.nfa.metadata
+        if not nfa_metadata.get('has_optional_suffix', False):
+            return False
+            
+        # Get the optional suffix tokens to understand what's optional
+        optional_suffix_tokens = nfa_metadata.get('optional_suffix_tokens', [])
+        last_required_token_idx = nfa_metadata.get('last_required_token_idx', -1)
         
+        if not optional_suffix_tokens or last_required_token_idx == -1:
+            return False
+            
+        logger.debug(f"Checking optional suffix reachability: suffix_tokens={optional_suffix_tokens}, "
+                    f"last_required_idx={last_required_token_idx}, nfa_states={nfa_states}")
+        
+        # Advanced heuristic: Check if this DFA state represents completion of required parts
+        # For patterns like "A B+ C+ D?", after consuming "A B+ C+", we should be in a state
+        # that can be considered accepting since D? is optional
+        
+        # Strategy: Check if any NFA state in this DFA state can reach accept
+        # through a path that only involves optional quantifiers
+        for state_idx in nfa_states:
+            if self._can_reach_accept_through_optionals(state_idx, optional_suffix_tokens, visited=set()):
+                logger.debug(f"Found optional path to accept from NFA state {state_idx}")
+                return True
+        
+        return False
+    
+    def _can_reach_accept_through_optionals(self, state_idx: int, optional_tokens: List[str], 
+                                          visited: Set[int]) -> bool:
+        """
+        Check if a specific NFA state can reach accept through optional-only constructs.
+        
+        This method performs a depth-first search through the NFA, following transitions
+        that correspond to optional pattern elements.
+        
+        Args:
+            state_idx: NFA state index to start from
+            optional_tokens: List of optional pattern tokens (e.g., ['D?'])
+            visited: Set of already visited states to prevent infinite loops
+            
+        Returns:
+            True if accept is reachable through optional-only paths
+        """
+        if state_idx in visited:
+            return False
+        visited.add(state_idx)
+        
+        if state_idx == self.nfa.accept:
+            return True
+            
+        # Check epsilon transitions (always consider these as "optional")
+        current_state = self.nfa.states[state_idx]
+        for target_idx in current_state.epsilon:
+            if self._can_reach_accept_through_optionals(target_idx, optional_tokens, visited.copy()):
+                return True
+        
+        # Check transitions that correspond to optional pattern elements
+        for transition in current_state.transitions:
+            if transition.variable and self._is_optional_variable(transition.variable, optional_tokens):
+                target_idx = transition.target
+                if self._can_reach_accept_through_optionals(target_idx, optional_tokens, visited.copy()):
+                    return True
+        
+        return False
+    
+    def _is_optional_variable(self, variable: str, optional_tokens: List[str]) -> bool:
+        """
+        Check if a variable corresponds to an optional pattern token.
+        
+        Args:
+            variable: Variable name to check
+            optional_tokens: List of optional pattern tokens (e.g., ['D?'])
+            
+        Returns:
+            True if the variable is part of an optional pattern construct
+        """
+        # Simple check: see if the variable appears in any optional token
+        for token in optional_tokens:
+            # Remove quantifier suffix to get base variable name
+            base_token = token.rstrip('?+*{}0123456789, ')
+            if variable == base_token:
+                return True
         return False

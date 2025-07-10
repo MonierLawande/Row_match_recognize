@@ -880,9 +880,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 
             # SQL MATCH_RECOGNIZE Standard: Variables without DEFINE conditions default to TRUE
             # This is valid behavior - pattern variables without explicit conditions should always match
-            # PRODUCTION FIX: Sort variables for deterministic logging and behavior
-            sorted_undefined_vars = sorted(undefined_pattern_vars)
-            logger.debug(f"Pattern variables {sorted_undefined_vars} have no DEFINE conditions - defaulting to TRUE (always match)")
+            logger.debug(f"Pattern variables {undefined_pattern_vars} have no DEFINE conditions - defaulting to TRUE (always match)")
             # Don't raise an error - this is valid SQL behavior
 
     def validate_pattern_variables_defined(self, ctx):

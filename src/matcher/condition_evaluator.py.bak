@@ -1,0 +1,3388 @@
+# src/matcher/condition_evaluator.py
+
+import ast
+import operator
+import re
+import math
+import time
+import warnings
+from typing import Dict, Any, Optional, Callable, List, Union, Tuple, Set
+from dataclasses import dataclass
+from src.matcher.row_context import RowContext
+from src.utils.logging_config import get_logger, PerformanceTimer
+
+# Module logger
+logger = get_logger(__name__)
+
+# Define the type for condition functions
+ConditionFn = Callable[[Dict[str, Any], RowContext], bool]
+
+# Enhanced Navigation Function Info from k.py - for better structured parsing
+@dataclass
+class NavigationFunctionInfo:
+    """Information about a navigation function call."""
+    function_type: str  # PREV, NEXT, FIRST, LAST
+    variable: Optional[str]
+    column: Optional[str]
+    offset: int
+    is_nested: bool
+    inner_functions: List['NavigationFunctionInfo']
+    raw_expression: str
+
+class ConditionEvaluator(ast.NodeVisitor):
+    def __init__(self, context: RowContext, evaluation_mode='DEFINE'):
+        """
+        Initialize condition evaluator with context-aware navigation.
+        
+        Args:
+            context: RowContext for pattern matching
+            evaluation_mode: 'DEFINE' for physical navigation, 'MEASURES' for logical navigation
+        """
+        self.context = context
+        self.current_row = None
+        self.evaluation_mode = evaluation_mode  # 'DEFINE' or 'MEASURES'
+        # Extended mathematical and utility functions
+        self.math_functions = {
+            # Basic math functions
+            'ABS': abs,
+            'ROUND': lambda x, digits=0: round(x, digits),
+            'TRUNCATE': lambda x, digits=0: math.trunc(x * 10**digits) / 10**digits,
+            'CEILING': math.ceil,
+            'FLOOR': math.floor,
+            
+            # Statistical functions
+            'SQRT': math.sqrt,
+            'POWER': pow,
+            'EXP': math.exp,
+            'LN': math.log,
+            'LOG': lambda x, base=10: math.log(x, base),
+            'MOD': lambda x, y: x % y,
+            
+            # Trigonometric functions
+            'SIN': math.sin,
+            'COS': math.cos,
+            'TAN': math.tan,
+            'ASIN': math.asin,
+            'ACOS': math.acos,
+            'ATAN': math.atan,
+            'ATAN2': math.atan2,
+            'DEGREES': math.degrees,
+            'RADIANS': math.radians,
+            
+            # String functions
+            'LENGTH': len,
+            'LOWER': str.lower,
+            'UPPER': str.upper,
+            'SUBSTR': lambda s, start, length=None: s[start:start+length] if length else s[start:],
+            
+            # Conditional functions
+            'LEAST': min,
+            'GREATEST': max,
+            'COALESCE': lambda *args: next((arg for arg in args if arg is not None), None),
+            'NULLIF': lambda x, y: None if x == y else x,
+        }
+
+    def _safe_compare(self, left, right, op):
+        """Perform SQL-style comparison with NULL handling."""
+        # Only apply NULL handling for SQL comparisons involving NULL values
+        # Regular comparisons between non-NULL values should work normally
+        if left is None or right is None:
+            return False
+            
+        return op(left, right)
+
+    def visit_Compare(self, node: ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise ValueError("Only simple comparisons are supported")
+        left = self.visit(node.left)
+        right = self.visit(node.comparators[0])
+        
+        # Debug logging for DEFINE mode comparisons
+        logger = get_logger(__name__)
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
+        
+        # Use safe comparison with NULL handling
+        op = node.ops[0]
+        
+        OPERATORS = {
+            ast.Gt: operator.gt,
+            ast.Lt: operator.lt,
+            ast.GtE: operator.ge,
+            ast.LtE: operator.le,
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+        }
+        
+        func = OPERATORS.get(type(op))
+        if func is None:
+            raise ValueError(f"Operator {op} not supported")
+            
+        result = self._safe_compare(left, right, func)
+        
+        # Enhanced debug logging for result
+        if self.evaluation_mode == 'DEFINE':
+            current_var = getattr(self.context, 'current_var', None)
+            logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
+        
+        return result
+
+    def visit_Name(self, node: ast.Name):
+        # Check for special functions
+        if node.id.upper() == "PREV":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
+        elif node.id.upper() == "NEXT":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
+        elif node.id.upper() == "FIRST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
+        elif node.id.upper() == "LAST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
+        elif node.id.upper() == "CLASSIFIER":
+            return lambda var=None: self._get_classifier(var)
+        elif node.id.upper() == "MATCH_NUMBER":
+            return self.context.match_number
+        elif node.id == "row":
+            # Special handling for 'row' references in keyword substitution
+            return {}  # Return an empty dict that will be used in visit_Subscript
+        elif node.id == "get_var_value":
+            # Special function for pattern variable access
+            return self._get_variable_column_value
+                
+        # Regular variable - handle as universal pattern variable
+        # First check if this might be a universal pattern variable (non-prefixed column)
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', node.id):
+            # Check if this conflicts with defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and node.id in self.context.pattern_variables:
+                logger.warning(f"Column name '{node.id}' conflicts with pattern variable name")
+                return None
+            
+            # Universal pattern variable: get from current row
+            value = None
+            if self.current_row is not None:
+                value = self.current_row.get(node.id)
+            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(node.id)
+            
+            if value is not None:
+                logger.debug(f"Universal pattern variable '{node.id}' resolved to: {value}")
+            
+            return value
+        
+        # Fallback for non-standard identifiers
+        value = None
+        if self.current_row is not None:
+            value = self.current_row.get(node.id)
+        elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+            value = self.context.rows[self.context.current_idx].get(node.id)
+        
+        return value
+
+    def _extract_navigation_args(self, node: ast.Call):
+        """Extract arguments from a navigation function call with support for nesting."""
+        args = []
+        
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                # For navigation functions, Name nodes should be treated as column names
+                args.append(arg.id)
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # Handle pattern variable references like A.value -> split to var and column
+                var_name = arg.value.id
+                col_name = arg.attr
+                # For navigation functions like FIRST(A.value), we need both parts
+                args.extend([var_name, col_name])
+            elif isinstance(arg, ast.Constant):
+                # Constant values (numbers, strings)
+                args.append(arg.value)
+            elif isinstance(arg, ast.Num):
+                # Python < 3.8 compatibility
+                args.append(arg.n)
+            else:
+                # For complex expressions, evaluate them
+                value = self.visit(arg)
+                # Handle nested navigation functions
+                if callable(value):
+                    value = value()
+                args.append(value)
+            
+        return args
+
+    def visit_Call(self, node: ast.Call):
+        """Handle function calls (PREV, NEXT, mathematical functions, etc.)"""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            if func_name in self.math_functions:
+                args = [self.visit(arg) for arg in node.args]
+                try:
+                    # Check for NULL arguments - SQL functions typically return NULL if any input is NULL
+                    if any(arg is None for arg in args) and func_name not in ('COALESCE', 'NULLIF'):
+                        return None
+                    return self.math_functions[func_name](*args)
+                except Exception as e:
+                    raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Special handling for pattern variable access
+            if func_name == "GET_VAR_VALUE":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 3:
+                    var_name, col_name, ctx = args
+                    return self._get_variable_column_value(var_name, col_name, ctx)
+            
+            # Enhanced navigation function handling with support for nested functions
+            if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                # Check if this might be a nested navigation call
+                is_nested = False
+                if len(node.args) > 0:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Call) and hasattr(first_arg, 'func') and isinstance(first_arg.func, ast.Name):
+                        inner_func_name = first_arg.func.id.upper()
+                        if inner_func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                            is_nested = True
+                
+                if is_nested:
+                    # For nested navigation, convert to string representation and use evaluate_nested_navigation
+                    navigation_expr = self._build_navigation_expr(node)
+                    return evaluate_nested_navigation(
+                        navigation_expr, 
+                        self.context, 
+                        self.context.current_idx, 
+                        getattr(self.context, 'current_var', None)
+                    )
+                else:
+                    # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
+                    if len(node.args) == 0:
+                        raise ValueError(f"{func_name} function requires at least one argument")
+                    
+                    # Get the first argument which should be either ast.Name or ast.Attribute
+                    first_arg = node.args[0]
+                    
+                    if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                        # Pattern: NEXT(A.value) - variable.column format
+                        var_name = first_arg.value.id
+                        column = first_arg.attr
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Name):
+                        # Pattern: NEXT(column) - simple column format
+                        column = first_arg.id
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST with no specific variable
+                            return self._get_navigation_value(None, column, func_name, steps)
+                    else:
+                        raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
+
+        func = self.visit(node.func)
+        if callable(func):
+            args = [self.visit(arg) for arg in node.args]
+            try:
+                return func(*args)
+            except Exception as e:
+                # More descriptive error
+                raise ValueError(f"Error calling {func_name or 'function'}: {e}")
+        raise ValueError(f"Function {func} not callable")
+
+    def visit_Attribute(self, node: ast.Attribute):
+        """Handle pattern variable references (A.price) with table prefix validation"""
+        if isinstance(node.value, ast.Name):
+            var = node.value.id
+            col = node.attr
+            
+            # Table prefix validation: prevent forbidden table.column references
+            if self._is_table_prefix_in_context(var):
+                raise ValueError(f"Forbidden table prefix reference: '{var}.{col}'. "
+                               f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
+            
+            # Handle pattern variable references
+            result = self._get_variable_column_value(var, col, self.context)
+            
+            return result
+        
+        # If we can't extract a pattern var reference, try regular attribute access
+        obj = self.visit(node.value)
+        if obj is not None:
+            return getattr(obj, node.attr, None)
+        
+        return None
+
+    def _is_table_prefix_in_context(self, var_name: str) -> bool:
+        """
+        Check if a variable name looks like a table prefix in the current context.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if this looks like a forbidden table prefix, False otherwise
+        """
+        # If it's a defined pattern variable, it's not a table prefix
+        if hasattr(self.context, 'var_assignments') and var_name in self.context.var_assignments:
+            return False
+        if hasattr(self.context, 'subsets') and self.context.subsets and var_name in self.context.subsets:
+            return False
+        
+        # Use the same logic as the standalone function
+        from src.matcher.measure_evaluator import _is_table_prefix
+        return _is_table_prefix(var_name, 
+                               getattr(self.context, 'var_assignments', {}),
+                               getattr(self.context, 'subsets', {}))
+
+        # Updates for src/matcher/condition_evaluator.py
+    def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
+        """
+        Get a column value from a pattern variable's matched rows with enhanced subset support.
+        
+        For self-referential conditions (e.g., B.price < A.price when evaluating for B),
+        use the current row's value for the variable being evaluated.
+        
+        Args:
+            var_name: Pattern variable name
+            col_name: Column name
+            ctx: Row context
+            
+        Returns:
+            Column value from the matched row or current row
+        """
+        # Check if we're in DEFINE evaluation mode
+        is_define_mode = self.evaluation_mode == 'DEFINE'
+        
+        # DEBUG: Enhanced logging to trace exact values
+        current_var = getattr(ctx, 'current_var', None)
+        logger.debug(f"[DEBUG] _get_variable_column_value: var_name={var_name}, col_name={col_name}, is_define_mode={is_define_mode}, current_var={current_var}")
+        logger.debug(f"[DEBUG] ctx.current_idx={ctx.current_idx}, ctx.variables={ctx.variables}")
+        
+        # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
+        if is_define_mode:
+            # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
+            # but A.price should use A's previously matched row
+            if var_name == current_var:
+                # Self-reference: use current row being tested
+                logger.debug(f"[DEBUG] DEFINE mode - self-reference for {var_name}.{col_name}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Self-reference value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+                else:
+                    logger.debug(f"[DEBUG] Self-reference: current_idx {ctx.current_idx} out of bounds")
+                    return None
+            
+            # Critical fix for partition boundary handling
+            # Check if this is the first row in a partition
+            is_partition_boundary = False
+            if ctx.partition_boundaries and ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                for start, end in ctx.partition_boundaries:
+                    if ctx.current_idx == start:
+                        is_partition_boundary = True
+                        logger.debug(f"[DEBUG] Found partition boundary at idx={ctx.current_idx}")
+                        break
+            
+            # CRITICAL FIX: At partition boundaries, always use current row's value
+            # This ensures the first row in each partition can correctly match the pattern
+            if is_partition_boundary:
+                logger.debug(f"[DEBUG] PARTITION BOUNDARY: Using current row for {var_name}.{col_name} at idx={ctx.current_idx}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Partition boundary value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+            
+            # Reference to previously matched variable
+            if var_name in ctx.variables:
+                # Get all indices matched to this variable
+                indices = ctx.variables[var_name]
+                if not indices:
+                    logger.debug(f"[DEBUG] No indices found for variable {var_name}")
+                    return None
+                
+                # Get the value from the most recent row matched to this variable
+                # that occurs before the current position
+                for idx in sorted(indices, reverse=True):
+                    if idx < ctx.current_idx and idx >= 0 and idx < len(ctx.rows):
+                        value = ctx.rows[idx].get(col_name)
+                        logger.debug(f"[DEBUG] Previous match value: {var_name}.{col_name} = {value} (from row {idx})")
+                        return value
+                
+                # If no matching row found before current position, use the first matched row
+                if indices and indices[0] >= 0 and indices[0] < len(ctx.rows):
+                    value = ctx.rows[indices[0]].get(col_name)
+                    logger.debug(f"[DEBUG] First match value: {var_name}.{col_name} = {value} (from row {indices[0]})")
+                    return value
+            
+            # Subset variable handling
+            if var_name in ctx.subsets:
+                logger.debug(f"[DEBUG] Handling subset variable: {var_name}")
+                # For subset variables, try each component
+                for component in ctx.subsets[var_name]:
+                    component_value = self._get_variable_column_value(component, col_name, ctx)
+                    if component_value is not None:
+                        logger.debug(f"[DEBUG] Subset component value: {component}.{col_name} = {component_value}")
+                        return component_value
+            
+            logger.debug(f"[DEBUG] No value found for {var_name}.{col_name}")
+            return None
+        
+        # MEASURES mode (logical navigation)
+        else:
+            # In measures mode, we handle variables differently
+            if var_name in ctx.variables:
+                indices = ctx.variables[var_name]
+                if not indices:
+                    return None
+                
+                # Use the last row matched to this variable
+                last_idx = sorted(indices)[-1]
+                if last_idx >= 0 and last_idx < len(ctx.rows):
+                    return ctx.rows[last_idx].get(col_name)
+            
+            # Subset variable handling for measures
+            if var_name in ctx.subsets:
+                # For subset variables, use the last component
+                for component in reversed(ctx.subsets[var_name]):
+                    if component in ctx.variables:
+                        return self._get_variable_column_value(component, col_name, ctx)
+            
+            return None
+
+    def visit_Compare(self, node: ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise ValueError("Only simple comparisons are supported")
+        left = self.visit(node.left)
+        right = self.visit(node.comparators[0])
+        
+        # Debug logging for DEFINE mode comparisons
+        logger = get_logger(__name__)
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
+        
+        # Use safe comparison with NULL handling
+        op = node.ops[0]
+        
+        OPERATORS = {
+            ast.Gt: operator.gt,
+            ast.Lt: operator.lt,
+            ast.GtE: operator.ge,
+            ast.LtE: operator.le,
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+        }
+        
+        func = OPERATORS.get(type(op))
+        if func is None:
+            raise ValueError(f"Operator {op} not supported")
+            
+        result = self._safe_compare(left, right, func)
+        
+        # Enhanced debug logging for result
+        if self.evaluation_mode == 'DEFINE':
+            current_var = getattr(self.context, 'current_var', None)
+            logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
+        
+        return result
+
+    def visit_Name(self, node: ast.Name):
+        # Check for special functions
+        if node.id.upper() == "PREV":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
+        elif node.id.upper() == "NEXT":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
+        elif node.id.upper() == "FIRST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
+        elif node.id.upper() == "LAST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
+        elif node.id.upper() == "CLASSIFIER":
+            return lambda var=None: self._get_classifier(var)
+        elif node.id.upper() == "MATCH_NUMBER":
+            return self.context.match_number
+        elif node.id == "row":
+            # Special handling for 'row' references in keyword substitution
+            return {}  # Return an empty dict that will be used in visit_Subscript
+        elif node.id == "get_var_value":
+            # Special function for pattern variable access
+            return self._get_variable_column_value
+                
+        # Regular variable - handle as universal pattern variable
+        # First check if this might be a universal pattern variable (non-prefixed column)
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', node.id):
+            # Check if this conflicts with defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and node.id in self.context.pattern_variables:
+                logger.warning(f"Column name '{node.id}' conflicts with pattern variable name")
+                return None
+            
+            # Universal pattern variable: get from current row
+            value = None
+            if self.current_row is not None:
+                value = self.current_row.get(node.id)
+            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(node.id)
+            
+            if value is not None:
+                logger.debug(f"Universal pattern variable '{node.id}' resolved to: {value}")
+            
+            return value
+        
+        # Fallback for non-standard identifiers
+        value = None
+        if self.current_row is not None:
+            value = self.current_row.get(node.id)
+        elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+            value = self.context.rows[self.context.current_idx].get(node.id)
+        
+        return value
+
+    def _extract_navigation_args(self, node: ast.Call):
+        """Extract arguments from a navigation function call with support for nesting."""
+        args = []
+        
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                # For navigation functions, Name nodes should be treated as column names
+                args.append(arg.id)
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # Handle pattern variable references like A.value -> split to var and column
+                var_name = arg.value.id
+                col_name = arg.attr
+                # For navigation functions like FIRST(A.value), we need both parts
+                args.extend([var_name, col_name])
+            elif isinstance(arg, ast.Constant):
+                # Constant values (numbers, strings)
+                args.append(arg.value)
+            elif isinstance(arg, ast.Num):
+                # Python < 3.8 compatibility
+                args.append(arg.n)
+            else:
+                # For complex expressions, evaluate them
+                value = self.visit(arg)
+                # Handle nested navigation functions
+                if callable(value):
+                    value = value()
+                args.append(value)
+            
+        return args
+
+    def visit_Call(self, node: ast.Call):
+        """Handle function calls (PREV, NEXT, mathematical functions, etc.)"""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            if func_name in self.math_functions:
+                args = [self.visit(arg) for arg in node.args]
+                try:
+                    # Check for NULL arguments - SQL functions typically return NULL if any input is NULL
+                    if any(arg is None for arg in args) and func_name not in ('COALESCE', 'NULLIF'):
+                        return None
+                    return self.math_functions[func_name](*args)
+                except Exception as e:
+                    raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Special handling for pattern variable access
+            if func_name == "GET_VAR_VALUE":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 3:
+                    var_name, col_name, ctx = args
+                    return self._get_variable_column_value(var_name, col_name, ctx)
+            
+            # Enhanced navigation function handling with support for nested functions
+            if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                # Check if this might be a nested navigation call
+                is_nested = False
+                if len(node.args) > 0:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Call) and hasattr(first_arg, 'func') and isinstance(first_arg.func, ast.Name):
+                        inner_func_name = first_arg.func.id.upper()
+                        if inner_func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                            is_nested = True
+                
+                if is_nested:
+                    # For nested navigation, convert to string representation and use evaluate_nested_navigation
+                    navigation_expr = self._build_navigation_expr(node)
+                    return evaluate_nested_navigation(
+                        navigation_expr, 
+                        self.context, 
+                        self.context.current_idx, 
+                        getattr(self.context, 'current_var', None)
+                    )
+                else:
+                    # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
+                    if len(node.args) == 0:
+                        raise ValueError(f"{func_name} function requires at least one argument")
+                    
+                    # Get the first argument which should be either ast.Name or ast.Attribute
+                    first_arg = node.args[0]
+                    
+                    if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                        # Pattern: NEXT(A.value) - variable.column format
+                        var_name = first_arg.value.id
+                        column = first_arg.attr
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Name):
+                        # Pattern: NEXT(column) - simple column format
+                        column = first_arg.id
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST with no specific variable
+                            return self._get_navigation_value(None, column, func_name, steps)
+                    else:
+                        raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
+
+        func = self.visit(node.func)
+        if callable(func):
+            args = [self.visit(arg) for arg in node.args]
+            try:
+                return func(*args)
+            except Exception as e:
+                # More descriptive error
+                raise ValueError(f"Error calling {func_name or 'function'}: {e}")
+        raise ValueError(f"Function {func} not callable")
+
+    def visit_Attribute(self, node: ast.Attribute):
+        """Handle pattern variable references (A.price) with table prefix validation"""
+        if isinstance(node.value, ast.Name):
+            var = node.value.id
+            col = node.attr
+            
+            # Table prefix validation: prevent forbidden table.column references
+            if self._is_table_prefix_in_context(var):
+                raise ValueError(f"Forbidden table prefix reference: '{var}.{col}'. "
+                               f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
+            
+            # Handle pattern variable references
+            result = self._get_variable_column_value(var, col, self.context)
+            
+            return result
+        
+        # If we can't extract a pattern var reference, try regular attribute access
+        obj = self.visit(node.value)
+        if obj is not None:
+            return getattr(obj, node.attr, None)
+        
+        return None
+
+    def _is_table_prefix_in_context(self, var_name: str) -> bool:
+        """
+        Check if a variable name looks like a table prefix in the current context.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if this looks like a forbidden table prefix, False otherwise
+        """
+        # If it's a defined pattern variable, it's not a table prefix
+        if hasattr(self.context, 'var_assignments') and var_name in self.context.var_assignments:
+            return False
+        if hasattr(self.context, 'subsets') and self.context.subsets and var_name in self.context.subsets:
+            return False
+        
+        # Use the same logic as the standalone function
+        from src.matcher.measure_evaluator import _is_table_prefix
+        return _is_table_prefix(var_name, 
+                               getattr(self.context, 'var_assignments', {}),
+                               getattr(self.context, 'subsets', {}))
+
+        # Updates for src/matcher/condition_evaluator.py
+    def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
+        """
+        Get a column value from a pattern variable's matched rows with enhanced subset support.
+        
+        For self-referential conditions (e.g., B.price < A.price when evaluating for B),
+        use the current row's value for the variable being evaluated.
+        
+        Args:
+            var_name: Pattern variable name
+            col_name: Column name
+            ctx: Row context
+            
+        Returns:
+            Column value from the matched row or current row
+        """
+        # Check if we're in DEFINE evaluation mode
+        is_define_mode = self.evaluation_mode == 'DEFINE'
+        
+        # DEBUG: Enhanced logging to trace exact values
+        current_var = getattr(ctx, 'current_var', None)
+        logger.debug(f"[DEBUG] _get_variable_column_value: var_name={var_name}, col_name={col_name}, is_define_mode={is_define_mode}, current_var={current_var}")
+        logger.debug(f"[DEBUG] ctx.current_idx={ctx.current_idx}, ctx.variables={ctx.variables}")
+        
+        # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
+        if is_define_mode:
+            # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
+            # but A.price should use A's previously matched row
+            if var_name == current_var:
+                # Self-reference: use current row being tested
+                logger.debug(f"[DEBUG] DEFINE mode - self-reference for {var_name}.{col_name}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Self-reference value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+                else:
+                    logger.debug(f"[DEBUG] Self-reference: current_idx {ctx.current_idx} out of bounds")
+                    return None
+            
+            # Critical fix for partition boundary handling
+            # Check if this is the first row in a partition
+            is_partition_boundary = False
+            if ctx.partition_boundaries and ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                for start, end in ctx.partition_boundaries:
+                    if ctx.current_idx == start:
+                        is_partition_boundary = True
+                        logger.debug(f"[DEBUG] Found partition boundary at idx={ctx.current_idx}")
+                        break
+            
+            # CRITICAL FIX: At partition boundaries, always use current row's value
+            # This ensures the first row in each partition can correctly match the pattern
+            if is_partition_boundary:
+                logger.debug(f"[DEBUG] PARTITION BOUNDARY: Using current row for {var_name}.{col_name} at idx={ctx.current_idx}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Partition boundary value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+            
+            # Reference to previously matched variable
+            if var_name in ctx.variables:
+                # Get all indices matched to this variable
+                indices = ctx.variables[var_name]
+                if not indices:
+                    logger.debug(f"[DEBUG] No indices found for variable {var_name}")
+                    return None
+                
+                # Get the value from the most recent row matched to this variable
+                # that occurs before the current position
+                for idx in sorted(indices, reverse=True):
+                    if idx < ctx.current_idx and idx >= 0 and idx < len(ctx.rows):
+                        value = ctx.rows[idx].get(col_name)
+                        logger.debug(f"[DEBUG] Previous match value: {var_name}.{col_name} = {value} (from row {idx})")
+                        return value
+                
+                # If no matching row found before current position, use the first matched row
+                if indices and indices[0] >= 0 and indices[0] < len(ctx.rows):
+                    value = ctx.rows[indices[0]].get(col_name)
+                    logger.debug(f"[DEBUG] First match value: {var_name}.{col_name} = {value} (from row {indices[0]})")
+                    return value
+            
+            # Subset variable handling
+            if var_name in ctx.subsets:
+                logger.debug(f"[DEBUG] Handling subset variable: {var_name}")
+                # For subset variables, try each component
+                for component in ctx.subsets[var_name]:
+                    component_value = self._get_variable_column_value(component, col_name, ctx)
+                    if component_value is not None:
+                        logger.debug(f"[DEBUG] Subset component value: {component}.{col_name} = {component_value}")
+                        return component_value
+            
+            logger.debug(f"[DEBUG] No value found for {var_name}.{col_name}")
+            return None
+        
+        # MEASURES mode (logical navigation)
+        else:
+            # In measures mode, we handle variables differently
+            if var_name in ctx.variables:
+                indices = ctx.variables[var_name]
+                if not indices:
+                    return None
+                
+                # Use the last row matched to this variable
+                last_idx = sorted(indices)[-1]
+                if last_idx >= 0 and last_idx < len(ctx.rows):
+                    return ctx.rows[last_idx].get(col_name)
+            
+            # Subset variable handling for measures
+            if var_name in ctx.subsets:
+                # For subset variables, use the last component
+                for component in reversed(ctx.subsets[var_name]):
+                    if component in ctx.variables:
+                        return self._get_variable_column_value(component, col_name, ctx)
+            
+            return None
+
+    def visit_Compare(self, node: ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise ValueError("Only simple comparisons are supported")
+        left = self.visit(node.left)
+        right = self.visit(node.comparators[0])
+        
+        # Debug logging for DEFINE mode comparisons
+        logger = get_logger(__name__)
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
+        
+        # Use safe comparison with NULL handling
+        op = node.ops[0]
+        
+        OPERATORS = {
+            ast.Gt: operator.gt,
+            ast.Lt: operator.lt,
+            ast.GtE: operator.ge,
+            ast.LtE: operator.le,
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+        }
+        
+        func = OPERATORS.get(type(op))
+        if func is None:
+            raise ValueError(f"Operator {op} not supported")
+            
+        result = self._safe_compare(left, right, func)
+        
+        # Enhanced debug logging for result
+        if self.evaluation_mode == 'DEFINE':
+            current_var = getattr(self.context, 'current_var', None)
+            logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
+        
+        return result
+
+    def visit_Name(self, node: ast.Name):
+        # Check for special functions
+        if node.id.upper() == "PREV":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
+        elif node.id.upper() == "NEXT":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
+        elif node.id.upper() == "FIRST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
+        elif node.id.upper() == "LAST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
+        elif node.id.upper() == "CLASSIFIER":
+            return lambda var=None: self._get_classifier(var)
+        elif node.id.upper() == "MATCH_NUMBER":
+            return self.context.match_number
+        elif node.id == "row":
+            # Special handling for 'row' references in keyword substitution
+            return {}  # Return an empty dict that will be used in visit_Subscript
+        elif node.id == "get_var_value":
+            # Special function for pattern variable access
+            return self._get_variable_column_value
+                
+        # Regular variable - handle as universal pattern variable
+        # First check if this might be a universal pattern variable (non-prefixed column)
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', node.id):
+            # Check if this conflicts with defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and node.id in self.context.pattern_variables:
+                logger.warning(f"Column name '{node.id}' conflicts with pattern variable name")
+                return None
+            
+            # Universal pattern variable: get from current row
+            value = None
+            if self.current_row is not None:
+                value = self.current_row.get(node.id)
+            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(node.id)
+            
+            if value is not None:
+                logger.debug(f"Universal pattern variable '{node.id}' resolved to: {value}")
+            
+            return value
+        
+        # Fallback for non-standard identifiers
+        value = None
+        if self.current_row is not None:
+            value = self.current_row.get(node.id)
+        elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+            value = self.context.rows[self.context.current_idx].get(node.id)
+        
+        return value
+
+    def _extract_navigation_args(self, node: ast.Call):
+        """Extract arguments from a navigation function call with support for nesting."""
+        args = []
+        
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                # For navigation functions, Name nodes should be treated as column names
+                args.append(arg.id)
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # Handle pattern variable references like A.value -> split to var and column
+                var_name = arg.value.id
+                col_name = arg.attr
+                # For navigation functions like FIRST(A.value), we need both parts
+                args.extend([var_name, col_name])
+            elif isinstance(arg, ast.Constant):
+                # Constant values (numbers, strings)
+                args.append(arg.value)
+            elif isinstance(arg, ast.Num):
+                # Python < 3.8 compatibility
+                args.append(arg.n)
+            else:
+                # For complex expressions, evaluate them
+                value = self.visit(arg)
+                # Handle nested navigation functions
+                if callable(value):
+                    value = value()
+                args.append(value)
+            
+        return args
+
+    def visit_Call(self, node: ast.Call):
+        """Handle function calls (PREV, NEXT, mathematical functions, etc.)"""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            if func_name in self.math_functions:
+                args = [self.visit(arg) for arg in node.args]
+                try:
+                    # Check for NULL arguments - SQL functions typically return NULL if any input is NULL
+                    if any(arg is None for arg in args) and func_name not in ('COALESCE', 'NULLIF'):
+                        return None
+                    return self.math_functions[func_name](*args)
+                except Exception as e:
+                    raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Special handling for pattern variable access
+            if func_name == "GET_VAR_VALUE":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 3:
+                    var_name, col_name, ctx = args
+                    return self._get_variable_column_value(var_name, col_name, ctx)
+            
+            # Enhanced navigation function handling with support for nested functions
+            if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                # Check if this might be a nested navigation call
+                is_nested = False
+                if len(node.args) > 0:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Call) and hasattr(first_arg, 'func') and isinstance(first_arg.func, ast.Name):
+                        inner_func_name = first_arg.func.id.upper()
+                        if inner_func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                            is_nested = True
+                
+                if is_nested:
+                    # For nested navigation, convert to string representation and use evaluate_nested_navigation
+                    navigation_expr = self._build_navigation_expr(node)
+                    return evaluate_nested_navigation(
+                        navigation_expr, 
+                        self.context, 
+                        self.context.current_idx, 
+                        getattr(self.context, 'current_var', None)
+                    )
+                else:
+                    # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
+                    if len(node.args) == 0:
+                        raise ValueError(f"{func_name} function requires at least one argument")
+                    
+                    # Get the first argument which should be either ast.Name or ast.Attribute
+                    first_arg = node.args[0]
+                    
+                    if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                        # Pattern: NEXT(A.value) - variable.column format
+                        var_name = first_arg.value.id
+                        column = first_arg.attr
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Name):
+                        # Pattern: NEXT(column) - simple column format
+                        column = first_arg.id
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST with no specific variable
+                            return self._get_navigation_value(None, column, func_name, steps)
+                    else:
+                        raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
+
+        func = self.visit(node.func)
+        if callable(func):
+            args = [self.visit(arg) for arg in node.args]
+            try:
+                return func(*args)
+            except Exception as e:
+                # More descriptive error
+                raise ValueError(f"Error calling {func_name or 'function'}: {e}")
+        raise ValueError(f"Function {func} not callable")
+
+    def visit_Attribute(self, node: ast.Attribute):
+        """Handle pattern variable references (A.price) with table prefix validation"""
+        if isinstance(node.value, ast.Name):
+            var = node.value.id
+            col = node.attr
+            
+            # Table prefix validation: prevent forbidden table.column references
+            if self._is_table_prefix_in_context(var):
+                raise ValueError(f"Forbidden table prefix reference: '{var}.{col}'. "
+                               f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
+            
+            # Handle pattern variable references
+            result = self._get_variable_column_value(var, col, self.context)
+            
+            return result
+        
+        # If we can't extract a pattern var reference, try regular attribute access
+        obj = self.visit(node.value)
+        if obj is not None:
+            return getattr(obj, node.attr, None)
+        
+        return None
+
+    def _is_table_prefix_in_context(self, var_name: str) -> bool:
+        """
+        Check if a variable name looks like a table prefix in the current context.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if this looks like a forbidden table prefix, False otherwise
+        """
+        # If it's a defined pattern variable, it's not a table prefix
+        if hasattr(self.context, 'var_assignments') and var_name in self.context.var_assignments:
+            return False
+        if hasattr(self.context, 'subsets') and self.context.subsets and var_name in self.context.subsets:
+            return False
+        
+        # Use the same logic as the standalone function
+        from src.matcher.measure_evaluator import _is_table_prefix
+        return _is_table_prefix(var_name, 
+                               getattr(self.context, 'var_assignments', {}),
+                               getattr(self.context, 'subsets', {}))
+
+        # Updates for src/matcher/condition_evaluator.py
+    def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
+        """
+        Get a column value from a pattern variable's matched rows with enhanced subset support.
+        
+        For self-referential conditions (e.g., B.price < A.price when evaluating for B),
+        use the current row's value for the variable being evaluated.
+        
+        Args:
+            var_name: Pattern variable name
+            col_name: Column name
+            ctx: Row context
+            
+        Returns:
+            Column value from the matched row or current row
+        """
+        # Check if we're in DEFINE evaluation mode
+        is_define_mode = self.evaluation_mode == 'DEFINE'
+        
+        # DEBUG: Enhanced logging to trace exact values
+        current_var = getattr(ctx, 'current_var', None)
+        logger.debug(f"[DEBUG] _get_variable_column_value: var_name={var_name}, col_name={col_name}, is_define_mode={is_define_mode}, current_var={current_var}")
+        logger.debug(f"[DEBUG] ctx.current_idx={ctx.current_idx}, ctx.variables={ctx.variables}")
+        
+        # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
+        if is_define_mode:
+            # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
+            # but A.price should use A's previously matched row
+            if var_name == current_var:
+                # Self-reference: use current row being tested
+                logger.debug(f"[DEBUG] DEFINE mode - self-reference for {var_name}.{col_name}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Self-reference value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+                else:
+                    logger.debug(f"[DEBUG] Self-reference: current_idx {ctx.current_idx} out of bounds")
+                    return None
+            
+            # Critical fix for partition boundary handling
+            # Check if this is the first row in a partition
+            is_partition_boundary = False
+            if ctx.partition_boundaries and ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                for start, end in ctx.partition_boundaries:
+                    if ctx.current_idx == start:
+                        is_partition_boundary = True
+                        logger.debug(f"[DEBUG] Found partition boundary at idx={ctx.current_idx}")
+                        break
+            
+            # CRITICAL FIX: At partition boundaries, always use current row's value
+            # This ensures the first row in each partition can correctly match the pattern
+            if is_partition_boundary:
+                logger.debug(f"[DEBUG] PARTITION BOUNDARY: Using current row for {var_name}.{col_name} at idx={ctx.current_idx}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Partition boundary value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+            
+            # Reference to previously matched variable
+            if var_name in ctx.variables:
+                # Get all indices matched to this variable
+                indices = ctx.variables[var_name]
+                if not indices:
+                    logger.debug(f"[DEBUG] No indices found for variable {var_name}")
+                    return None
+                
+                # Get the value from the most recent row matched to this variable
+                # that occurs before the current position
+                for idx in sorted(indices, reverse=True):
+                    if idx < ctx.current_idx and idx >= 0 and idx < len(ctx.rows):
+                        value = ctx.rows[idx].get(col_name)
+                        logger.debug(f"[DEBUG] Previous match value: {var_name}.{col_name} = {value} (from row {idx})")
+                        return value
+                
+                # If no matching row found before current position, use the first matched row
+                if indices and indices[0] >= 0 and indices[0] < len(ctx.rows):
+                    value = ctx.rows[indices[0]].get(col_name)
+                    logger.debug(f"[DEBUG] First match value: {var_name}.{col_name} = {value} (from row {indices[0]})")
+                    return value
+            
+            # Subset variable handling
+            if var_name in ctx.subsets:
+                logger.debug(f"[DEBUG] Handling subset variable: {var_name}")
+                # For subset variables, try each component
+                for component in ctx.subsets[var_name]:
+                    component_value = self._get_variable_column_value(component, col_name, ctx)
+                    if component_value is not None:
+                        logger.debug(f"[DEBUG] Subset component value: {component}.{col_name} = {component_value}")
+                        return component_value
+            
+            logger.debug(f"[DEBUG] No value found for {var_name}.{col_name}")
+            return None
+        
+        # MEASURES mode (logical navigation)
+        else:
+            # In measures mode, we handle variables differently
+            if var_name in ctx.variables:
+                indices = ctx.variables[var_name]
+                if not indices:
+                    return None
+                
+                # Use the last row matched to this variable
+                last_idx = sorted(indices)[-1]
+                if last_idx >= 0 and last_idx < len(ctx.rows):
+                    return ctx.rows[last_idx].get(col_name)
+            
+            # Subset variable handling for measures
+            if var_name in ctx.subsets:
+                # For subset variables, use the last component
+                for component in reversed(ctx.subsets[var_name]):
+                    if component in ctx.variables:
+                        return self._get_variable_column_value(component, col_name, ctx)
+            
+            return None
+
+    def visit_Compare(self, node: ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise ValueError("Only simple comparisons are supported")
+        left = self.visit(node.left)
+        right = self.visit(node.comparators[0])
+        
+        # Debug logging for DEFINE mode comparisons
+        logger = get_logger(__name__)
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
+        
+        # Use safe comparison with NULL handling
+        op = node.ops[0]
+        
+        OPERATORS = {
+            ast.Gt: operator.gt,
+            ast.Lt: operator.lt,
+            ast.GtE: operator.ge,
+            ast.LtE: operator.le,
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+        }
+        
+        func = OPERATORS.get(type(op))
+        if func is None:
+            raise ValueError(f"Operator {op} not supported")
+            
+        result = self._safe_compare(left, right, func)
+        
+        # Enhanced debug logging for result
+        if self.evaluation_mode == 'DEFINE':
+            current_var = getattr(self.context, 'current_var', None)
+            logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
+        
+        return result
+
+    def visit_Name(self, node: ast.Name):
+        # Check for special functions
+        if node.id.upper() == "PREV":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
+        elif node.id.upper() == "NEXT":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
+        elif node.id.upper() == "FIRST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
+        elif node.id.upper() == "LAST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
+        elif node.id.upper() == "CLASSIFIER":
+            return lambda var=None: self._get_classifier(var)
+        elif node.id.upper() == "MATCH_NUMBER":
+            return self.context.match_number
+        elif node.id == "row":
+            # Special handling for 'row' references in keyword substitution
+            return {}  # Return an empty dict that will be used in visit_Subscript
+        elif node.id == "get_var_value":
+            # Special function for pattern variable access
+            return self._get_variable_column_value
+                
+        # Regular variable - handle as universal pattern variable
+        # First check if this might be a universal pattern variable (non-prefixed column)
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', node.id):
+            # Check if this conflicts with defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and node.id in self.context.pattern_variables:
+                logger.warning(f"Column name '{node.id}' conflicts with pattern variable name")
+                return None
+            
+            # Universal pattern variable: get from current row
+            value = None
+            if self.current_row is not None:
+                value = self.current_row.get(node.id)
+            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(node.id)
+            
+            if value is not None:
+                logger.debug(f"Universal pattern variable '{node.id}' resolved to: {value}")
+            
+            return value
+        
+        # Fallback for non-standard identifiers
+        value = None
+        if self.current_row is not None:
+            value = self.current_row.get(node.id)
+        elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+            value = self.context.rows[self.context.current_idx].get(node.id)
+        
+        return value
+
+    def _extract_navigation_args(self, node: ast.Call):
+        """Extract arguments from a navigation function call with support for nesting."""
+        args = []
+        
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                # For navigation functions, Name nodes should be treated as column names
+                args.append(arg.id)
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # Handle pattern variable references like A.value -> split to var and column
+                var_name = arg.value.id
+                col_name = arg.attr
+                # For navigation functions like FIRST(A.value), we need both parts
+                args.extend([var_name, col_name])
+            elif isinstance(arg, ast.Constant):
+                # Constant values (numbers, strings)
+                args.append(arg.value)
+            elif isinstance(arg, ast.Num):
+                # Python < 3.8 compatibility
+                args.append(arg.n)
+            else:
+                # For complex expressions, evaluate them
+                value = self.visit(arg)
+                # Handle nested navigation functions
+                if callable(value):
+                    value = value()
+                args.append(value)
+            
+        return args
+
+    def visit_Call(self, node: ast.Call):
+        """Handle function calls (PREV, NEXT, mathematical functions, etc.)"""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            if func_name in self.math_functions:
+                args = [self.visit(arg) for arg in node.args]
+                try:
+                    # Check for NULL arguments - SQL functions typically return NULL if any input is NULL
+                    if any(arg is None for arg in args) and func_name not in ('COALESCE', 'NULLIF'):
+                        return None
+                    return self.math_functions[func_name](*args)
+                except Exception as e:
+                    raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Special handling for pattern variable access
+            if func_name == "GET_VAR_VALUE":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 3:
+                    var_name, col_name, ctx = args
+                    return self._get_variable_column_value(var_name, col_name, ctx)
+            
+            # Enhanced navigation function handling with support for nested functions
+            if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                # Check if this might be a nested navigation call
+                is_nested = False
+                if len(node.args) > 0:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Call) and hasattr(first_arg, 'func') and isinstance(first_arg.func, ast.Name):
+                        inner_func_name = first_arg.func.id.upper()
+                        if inner_func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                            is_nested = True
+                
+                if is_nested:
+                    # For nested navigation, convert to string representation and use evaluate_nested_navigation
+                    navigation_expr = self._build_navigation_expr(node)
+                    return evaluate_nested_navigation(
+                        navigation_expr, 
+                        self.context, 
+                        self.context.current_idx, 
+                        getattr(self.context, 'current_var', None)
+                    )
+                else:
+                    # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
+                    if len(node.args) == 0:
+                        raise ValueError(f"{func_name} function requires at least one argument")
+                    
+                    # Get the first argument which should be either ast.Name or ast.Attribute
+                    first_arg = node.args[0]
+                    
+                    if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                        # Pattern: NEXT(A.value) - variable.column format
+                        var_name = first_arg.value.id
+                        column = first_arg.attr
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Name):
+                        # Pattern: NEXT(column) - simple column format
+                        column = first_arg.id
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST with no specific variable
+                            return self._get_navigation_value(None, column, func_name, steps)
+                    else:
+                        raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
+
+        func = self.visit(node.func)
+        if callable(func):
+            args = [self.visit(arg) for arg in node.args]
+            try:
+                return func(*args)
+            except Exception as e:
+                # More descriptive error
+                raise ValueError(f"Error calling {func_name or 'function'}: {e}")
+        raise ValueError(f"Function {func} not callable")
+
+    def visit_Attribute(self, node: ast.Attribute):
+        """Handle pattern variable references (A.price) with table prefix validation"""
+        if isinstance(node.value, ast.Name):
+            var = node.value.id
+            col = node.attr
+            
+            # Table prefix validation: prevent forbidden table.column references
+            if self._is_table_prefix_in_context(var):
+                raise ValueError(f"Forbidden table prefix reference: '{var}.{col}'. "
+                               f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
+            
+            # Handle pattern variable references
+            result = self._get_variable_column_value(var, col, self.context)
+            
+            return result
+        
+        # If we can't extract a pattern var reference, try regular attribute access
+        obj = self.visit(node.value)
+        if obj is not None:
+            return getattr(obj, node.attr, None)
+        
+        return None
+
+    def _is_table_prefix_in_context(self, var_name: str) -> bool:
+        """
+        Check if a variable name looks like a table prefix in the current context.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if this looks like a forbidden table prefix, False otherwise
+        """
+        # If it's a defined pattern variable, it's not a table prefix
+        if hasattr(self.context, 'var_assignments') and var_name in self.context.var_assignments:
+            return False
+        if hasattr(self.context, 'subsets') and self.context.subsets and var_name in self.context.subsets:
+            return False
+        
+        # Use the same logic as the standalone function
+        from src.matcher.measure_evaluator import _is_table_prefix
+        return _is_table_prefix(var_name, 
+                               getattr(self.context, 'var_assignments', {}),
+                               getattr(self.context, 'subsets', {}))
+
+        # Updates for src/matcher/condition_evaluator.py
+    def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
+        """
+        Get a column value from a pattern variable's matched rows with enhanced subset support.
+        
+        For self-referential conditions (e.g., B.price < A.price when evaluating for B),
+        use the current row's value for the variable being evaluated.
+        
+        Args:
+            var_name: Pattern variable name
+            col_name: Column name
+            ctx: Row context
+            
+        Returns:
+            Column value from the matched row or current row
+        """
+        # Check if we're in DEFINE evaluation mode
+        is_define_mode = self.evaluation_mode == 'DEFINE'
+        
+        # DEBUG: Enhanced logging to trace exact values
+        current_var = getattr(ctx, 'current_var', None)
+        logger.debug(f"[DEBUG] _get_variable_column_value: var_name={var_name}, col_name={col_name}, is_define_mode={is_define_mode}, current_var={current_var}")
+        logger.debug(f"[DEBUG] ctx.current_idx={ctx.current_idx}, ctx.variables={ctx.variables}")
+        
+        # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
+        if is_define_mode:
+            # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
+            # but A.price should use A's previously matched row
+            if var_name == current_var:
+                # Self-reference: use current row being tested
+                logger.debug(f"[DEBUG] DEFINE mode - self-reference for {var_name}.{col_name}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Self-reference value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+                else:
+                    logger.debug(f"[DEBUG] Self-reference: current_idx {ctx.current_idx} out of bounds")
+                    return None
+            
+            # Critical fix for partition boundary handling
+            # Check if this is the first row in a partition
+            is_partition_boundary = False
+            if ctx.partition_boundaries and ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                for start, end in ctx.partition_boundaries:
+                    if ctx.current_idx == start:
+                        is_partition_boundary = True
+                        logger.debug(f"[DEBUG] Found partition boundary at idx={ctx.current_idx}")
+                        break
+            
+            # CRITICAL FIX: At partition boundaries, always use current row's value
+            # This ensures the first row in each partition can correctly match the pattern
+            if is_partition_boundary:
+                logger.debug(f"[DEBUG] PARTITION BOUNDARY: Using current row for {var_name}.{col_name} at idx={ctx.current_idx}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Partition boundary value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+            
+            # Reference to previously matched variable
+            if var_name in ctx.variables:
+                # Get all indices matched to this variable
+                indices = ctx.variables[var_name]
+                if not indices:
+                    logger.debug(f"[DEBUG] No indices found for variable {var_name}")
+                    return None
+                
+                # Get the value from the most recent row matched to this variable
+                # that occurs before the current position
+                for idx in sorted(indices, reverse=True):
+                    if idx < ctx.current_idx and idx >= 0 and idx < len(ctx.rows):
+                        value = ctx.rows[idx].get(col_name)
+                        logger.debug(f"[DEBUG] Previous match value: {var_name}.{col_name} = {value} (from row {idx})")
+                        return value
+                
+                # If no matching row found before current position, use the first matched row
+                if indices and indices[0] >= 0 and indices[0] < len(ctx.rows):
+                    value = ctx.rows[indices[0]].get(col_name)
+                    logger.debug(f"[DEBUG] First match value: {var_name}.{col_name} = {value} (from row {indices[0]})")
+                    return value
+            
+            # Subset variable handling
+            if var_name in ctx.subsets:
+                logger.debug(f"[DEBUG] Handling subset variable: {var_name}")
+                # For subset variables, try each component
+                for component in ctx.subsets[var_name]:
+                    component_value = self._get_variable_column_value(component, col_name, ctx)
+                    if component_value is not None:
+                        logger.debug(f"[DEBUG] Subset component value: {component}.{col_name} = {component_value}")
+                        return component_value
+            
+            logger.debug(f"[DEBUG] No value found for {var_name}.{col_name}")
+            return None
+        
+        # MEASURES mode (logical navigation)
+        else:
+            # In measures mode, we handle variables differently
+            if var_name in ctx.variables:
+                indices = ctx.variables[var_name]
+                if not indices:
+                    return None
+                
+                # Use the last row matched to this variable
+                last_idx = sorted(indices)[-1]
+                if last_idx >= 0 and last_idx < len(ctx.rows):
+                    return ctx.rows[last_idx].get(col_name)
+            
+            # Subset variable handling for measures
+            if var_name in ctx.subsets:
+                # For subset variables, use the last component
+                for component in reversed(ctx.subsets[var_name]):
+                    if component in ctx.variables:
+                        return self._get_variable_column_value(component, col_name, ctx)
+            
+            return None
+
+    def visit_Compare(self, node: ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise ValueError("Only simple comparisons are supported")
+        left = self.visit(node.left)
+        right = self.visit(node.comparators[0])
+        
+        # Debug logging for DEFINE mode comparisons
+        logger = get_logger(__name__)
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
+        
+        # Use safe comparison with NULL handling
+        op = node.ops[0]
+        
+        OPERATORS = {
+            ast.Gt: operator.gt,
+            ast.Lt: operator.lt,
+            ast.GtE: operator.ge,
+            ast.LtE: operator.le,
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+        }
+        
+        func = OPERATORS.get(type(op))
+        if func is None:
+            raise ValueError(f"Operator {op} not supported")
+            
+        result = self._safe_compare(left, right, func)
+        
+        # Enhanced debug logging for result
+        if self.evaluation_mode == 'DEFINE':
+            current_var = getattr(self.context, 'current_var', None)
+            logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
+        
+        return result
+
+    def visit_Name(self, node: ast.Name):
+        # Check for special functions
+        if node.id.upper() == "PREV":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
+        elif node.id.upper() == "NEXT":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
+        elif node.id.upper() == "FIRST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
+        elif node.id.upper() == "LAST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
+        elif node.id.upper() == "CLASSIFIER":
+            return lambda var=None: self._get_classifier(var)
+        elif node.id.upper() == "MATCH_NUMBER":
+            return self.context.match_number
+        elif node.id == "row":
+            # Special handling for 'row' references in keyword substitution
+            return {}  # Return an empty dict that will be used in visit_Subscript
+        elif node.id == "get_var_value":
+            # Special function for pattern variable access
+            return self._get_variable_column_value
+                
+        # Regular variable - handle as universal pattern variable
+        # First check if this might be a universal pattern variable (non-prefixed column)
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', node.id):
+            # Check if this conflicts with defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and node.id in self.context.pattern_variables:
+                logger.warning(f"Column name '{node.id}' conflicts with pattern variable name")
+                return None
+            
+            # Universal pattern variable: get from current row
+            value = None
+            if self.current_row is not None:
+                value = self.current_row.get(node.id)
+            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(node.id)
+            
+            if value is not None:
+                logger.debug(f"Universal pattern variable '{node.id}' resolved to: {value}")
+            
+            return value
+        
+        # Fallback for non-standard identifiers
+        value = None
+        if self.current_row is not None:
+            value = self.current_row.get(node.id)
+        elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+            value = self.context.rows[self.context.current_idx].get(node.id)
+        
+        return value
+
+    def _extract_navigation_args(self, node: ast.Call):
+        """Extract arguments from a navigation function call with support for nesting."""
+        args = []
+        
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                # For navigation functions, Name nodes should be treated as column names
+                args.append(arg.id)
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # Handle pattern variable references like A.value -> split to var and column
+                var_name = arg.value.id
+                col_name = arg.attr
+                # For navigation functions like FIRST(A.value), we need both parts
+                args.extend([var_name, col_name])
+            elif isinstance(arg, ast.Constant):
+                # Constant values (numbers, strings)
+                args.append(arg.value)
+            elif isinstance(arg, ast.Num):
+                # Python < 3.8 compatibility
+                args.append(arg.n)
+            else:
+                # For complex expressions, evaluate them
+                value = self.visit(arg)
+                # Handle nested navigation functions
+                if callable(value):
+                    value = value()
+                args.append(value)
+            
+        return args
+
+    def visit_Call(self, node: ast.Call):
+        """Handle function calls (PREV, NEXT, mathematical functions, etc.)"""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            if func_name in self.math_functions:
+                args = [self.visit(arg) for arg in node.args]
+                try:
+                    # Check for NULL arguments - SQL functions typically return NULL if any input is NULL
+                    if any(arg is None for arg in args) and func_name not in ('COALESCE', 'NULLIF'):
+                        return None
+                    return self.math_functions[func_name](*args)
+                except Exception as e:
+                    raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Special handling for pattern variable access
+            if func_name == "GET_VAR_VALUE":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 3:
+                    var_name, col_name, ctx = args
+                    return self._get_variable_column_value(var_name, col_name, ctx)
+            
+            # Enhanced navigation function handling with support for nested functions
+            if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                # Check if this might be a nested navigation call
+                is_nested = False
+                if len(node.args) > 0:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Call) and hasattr(first_arg, 'func') and isinstance(first_arg.func, ast.Name):
+                        inner_func_name = first_arg.func.id.upper()
+                        if inner_func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                            is_nested = True
+                
+                if is_nested:
+                    # For nested navigation, convert to string representation and use evaluate_nested_navigation
+                    navigation_expr = self._build_navigation_expr(node)
+                    return evaluate_nested_navigation(
+                        navigation_expr, 
+                        self.context, 
+                        self.context.current_idx, 
+                        getattr(self.context, 'current_var', None)
+                    )
+                else:
+                    # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
+                    if len(node.args) == 0:
+                        raise ValueError(f"{func_name} function requires at least one argument")
+                    
+                    # Get the first argument which should be either ast.Name or ast.Attribute
+                    first_arg = node.args[0]
+                    
+                    if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                        # Pattern: NEXT(A.value) - variable.column format
+                        var_name = first_arg.value.id
+                        column = first_arg.attr
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Name):
+                        # Pattern: NEXT(column) - simple column format
+                        column = first_arg.id
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST with no specific variable
+                            return self._get_navigation_value(None, column, func_name, steps)
+                    else:
+                        raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
+
+        func = self.visit(node.func)
+        if callable(func):
+            args = [self.visit(arg) for arg in node.args]
+            try:
+                return func(*args)
+            except Exception as e:
+                # More descriptive error
+                raise ValueError(f"Error calling {func_name or 'function'}: {e}")
+        raise ValueError(f"Function {func} not callable")
+
+    def visit_Attribute(self, node: ast.Attribute):
+        """Handle pattern variable references (A.price) with table prefix validation"""
+        if isinstance(node.value, ast.Name):
+            var = node.value.id
+            col = node.attr
+            
+            # Table prefix validation: prevent forbidden table.column references
+            if self._is_table_prefix_in_context(var):
+                raise ValueError(f"Forbidden table prefix reference: '{var}.{col}'. "
+                               f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
+            
+            # Handle pattern variable references
+            result = self._get_variable_column_value(var, col, self.context)
+            
+            return result
+        
+        # If we can't extract a pattern var reference, try regular attribute access
+        obj = self.visit(node.value)
+        if obj is not None:
+            return getattr(obj, node.attr, None)
+        
+        return None
+
+    def _is_table_prefix_in_context(self, var_name: str) -> bool:
+        """
+        Check if a variable name looks like a table prefix in the current context.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if this looks like a forbidden table prefix, False otherwise
+        """
+        # If it's a defined pattern variable, it's not a table prefix
+        if hasattr(self.context, 'var_assignments') and var_name in self.context.var_assignments:
+            return False
+        if hasattr(self.context, 'subsets') and self.context.subsets and var_name in self.context.subsets:
+            return False
+        
+        # Use the same logic as the standalone function
+        from src.matcher.measure_evaluator import _is_table_prefix
+        return _is_table_prefix(var_name, 
+                               getattr(self.context, 'var_assignments', {}),
+                               getattr(self.context, 'subsets', {}))
+
+        # Updates for src/matcher/condition_evaluator.py
+    def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
+        """
+        Get a column value from a pattern variable's matched rows with enhanced subset support.
+        
+        For self-referential conditions (e.g., B.price < A.price when evaluating for B),
+        use the current row's value for the variable being evaluated.
+        
+        Args:
+            var_name: Pattern variable name
+            col_name: Column name
+            ctx: Row context
+            
+        Returns:
+            Column value from the matched row or current row
+        """
+        # Check if we're in DEFINE evaluation mode
+        is_define_mode = self.evaluation_mode == 'DEFINE'
+        
+        # DEBUG: Enhanced logging to trace exact values
+        current_var = getattr(ctx, 'current_var', None)
+        logger.debug(f"[DEBUG] _get_variable_column_value: var_name={var_name}, col_name={col_name}, is_define_mode={is_define_mode}, current_var={current_var}")
+        logger.debug(f"[DEBUG] ctx.current_idx={ctx.current_idx}, ctx.variables={ctx.variables}")
+        
+        # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
+        if is_define_mode:
+            # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
+            # but A.price should use A's previously matched row
+            if var_name == current_var:
+                # Self-reference: use current row being tested
+                logger.debug(f"[DEBUG] DEFINE mode - self-reference for {var_name}.{col_name}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Self-reference value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+                else:
+                    logger.debug(f"[DEBUG] Self-reference: current_idx {ctx.current_idx} out of bounds")
+                    return None
+            
+            # Critical fix for partition boundary handling
+            # Check if this is the first row in a partition
+            is_partition_boundary = False
+            if ctx.partition_boundaries and ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                for start, end in ctx.partition_boundaries:
+                    if ctx.current_idx == start:
+                        is_partition_boundary = True
+                        logger.debug(f"[DEBUG] Found partition boundary at idx={ctx.current_idx}")
+                        break
+            
+            # CRITICAL FIX: At partition boundaries, always use current row's value
+            # This ensures the first row in each partition can correctly match the pattern
+            if is_partition_boundary:
+                logger.debug(f"[DEBUG] PARTITION BOUNDARY: Using current row for {var_name}.{col_name} at idx={ctx.current_idx}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Partition boundary value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+            
+            # Reference to previously matched variable
+            if var_name in ctx.variables:
+                # Get all indices matched to this variable
+                indices = ctx.variables[var_name]
+                if not indices:
+                    logger.debug(f"[DEBUG] No indices found for variable {var_name}")
+                    return None
+                
+                # Get the value from the most recent row matched to this variable
+                # that occurs before the current position
+                for idx in sorted(indices, reverse=True):
+                    if idx < ctx.current_idx and idx >= 0 and idx < len(ctx.rows):
+                        value = ctx.rows[idx].get(col_name)
+                        logger.debug(f"[DEBUG] Previous match value: {var_name}.{col_name} = {value} (from row {idx})")
+                        return value
+                
+                # If no matching row found before current position, use the first matched row
+                if indices and indices[0] >= 0 and indices[0] < len(ctx.rows):
+                    value = ctx.rows[indices[0]].get(col_name)
+                    logger.debug(f"[DEBUG] First match value: {var_name}.{col_name} = {value} (from row {indices[0]})")
+                    return value
+            
+            # Subset variable handling
+            if var_name in ctx.subsets:
+                logger.debug(f"[DEBUG] Handling subset variable: {var_name}")
+                # For subset variables, try each component
+                for component in ctx.subsets[var_name]:
+                    component_value = self._get_variable_column_value(component, col_name, ctx)
+                    if component_value is not None:
+                        logger.debug(f"[DEBUG] Subset component value: {component}.{col_name} = {component_value}")
+                        return component_value
+            
+            logger.debug(f"[DEBUG] No value found for {var_name}.{col_name}")
+            return None
+        
+        # MEASURES mode (logical navigation)
+        else:
+            # In measures mode, we handle variables differently
+            if var_name in ctx.variables:
+                indices = ctx.variables[var_name]
+                if not indices:
+                    return None
+                
+                # Use the last row matched to this variable
+                last_idx = sorted(indices)[-1]
+                if last_idx >= 0 and last_idx < len(ctx.rows):
+                    return ctx.rows[last_idx].get(col_name)
+            
+            # Subset variable handling for measures
+            if var_name in ctx.subsets:
+                # For subset variables, use the last component
+                for component in reversed(ctx.subsets[var_name]):
+                    if component in ctx.variables:
+                        return self._get_variable_column_value(component, col_name, ctx)
+            
+            return None
+
+    def visit_Compare(self, node: ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise ValueError("Only simple comparisons are supported")
+        left = self.visit(node.left)
+        right = self.visit(node.comparators[0])
+        
+        # Debug logging for DEFINE mode comparisons
+        logger = get_logger(__name__)
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
+        
+        # Use safe comparison with NULL handling
+        op = node.ops[0]
+        
+        OPERATORS = {
+            ast.Gt: operator.gt,
+            ast.Lt: operator.lt,
+            ast.GtE: operator.ge,
+            ast.LtE: operator.le,
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+        }
+        
+        func = OPERATORS.get(type(op))
+        if func is None:
+            raise ValueError(f"Operator {op} not supported")
+            
+        result = self._safe_compare(left, right, func)
+        
+        # Enhanced debug logging for result
+        if self.evaluation_mode == 'DEFINE':
+            current_var = getattr(self.context, 'current_var', None)
+            logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
+        
+        return result
+
+    def visit_Name(self, node: ast.Name):
+        # Check for special functions
+        if node.id.upper() == "PREV":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
+        elif node.id.upper() == "NEXT":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
+        elif node.id.upper() == "FIRST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
+        elif node.id.upper() == "LAST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
+        elif node.id.upper() == "CLASSIFIER":
+            return lambda var=None: self._get_classifier(var)
+        elif node.id.upper() == "MATCH_NUMBER":
+            return self.context.match_number
+        elif node.id == "row":
+            # Special handling for 'row' references in keyword substitution
+            return {}  # Return an empty dict that will be used in visit_Subscript
+        elif node.id == "get_var_value":
+            # Special function for pattern variable access
+            return self._get_variable_column_value
+                
+        # Regular variable - handle as universal pattern variable
+        # First check if this might be a universal pattern variable (non-prefixed column)
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', node.id):
+            # Check if this conflicts with defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and node.id in self.context.pattern_variables:
+                logger.warning(f"Column name '{node.id}' conflicts with pattern variable name")
+                return None
+            
+            # Universal pattern variable: get from current row
+            value = None
+            if self.current_row is not None:
+                value = self.current_row.get(node.id)
+            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(node.id)
+            
+            if value is not None:
+                logger.debug(f"Universal pattern variable '{node.id}' resolved to: {value}")
+            
+            return value
+        
+        # Fallback for non-standard identifiers
+        value = None
+        if self.current_row is not None:
+            value = self.current_row.get(node.id)
+        elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+            value = self.context.rows[self.context.current_idx].get(node.id)
+        
+        return value
+
+    def _extract_navigation_args(self, node: ast.Call):
+        """Extract arguments from a navigation function call with support for nesting."""
+        args = []
+        
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                # For navigation functions, Name nodes should be treated as column names
+                args.append(arg.id)
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # Handle pattern variable references like A.value -> split to var and column
+                var_name = arg.value.id
+                col_name = arg.attr
+                # For navigation functions like FIRST(A.value), we need both parts
+                args.extend([var_name, col_name])
+            elif isinstance(arg, ast.Constant):
+                # Constant values (numbers, strings)
+                args.append(arg.value)
+            elif isinstance(arg, ast.Num):
+                # Python < 3.8 compatibility
+                args.append(arg.n)
+            else:
+                # For complex expressions, evaluate them
+                value = self.visit(arg)
+                # Handle nested navigation functions
+                if callable(value):
+                    value = value()
+                args.append(value)
+            
+        return args
+
+    def visit_Call(self, node: ast.Call):
+        """Handle function calls (PREV, NEXT, mathematical functions, etc.)"""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            if func_name in self.math_functions:
+                args = [self.visit(arg) for arg in node.args]
+                try:
+                    # Check for NULL arguments - SQL functions typically return NULL if any input is NULL
+                    if any(arg is None for arg in args) and func_name not in ('COALESCE', 'NULLIF'):
+                        return None
+                    return self.math_functions[func_name](*args)
+                except Exception as e:
+                    raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Special handling for pattern variable access
+            if func_name == "GET_VAR_VALUE":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 3:
+                    var_name, col_name, ctx = args
+                    return self._get_variable_column_value(var_name, col_name, ctx)
+            
+            # Enhanced navigation function handling with support for nested functions
+            if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                # Check if this might be a nested navigation call
+                is_nested = False
+                if len(node.args) > 0:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Call) and hasattr(first_arg, 'func') and isinstance(first_arg.func, ast.Name):
+                        inner_func_name = first_arg.func.id.upper()
+                        if inner_func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                            is_nested = True
+                
+                if is_nested:
+                    # For nested navigation, convert to string representation and use evaluate_nested_navigation
+                    navigation_expr = self._build_navigation_expr(node)
+                    return evaluate_nested_navigation(
+                        navigation_expr, 
+                        self.context, 
+                        self.context.current_idx, 
+                        getattr(self.context, 'current_var', None)
+                    )
+                else:
+                    # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
+                    if len(node.args) == 0:
+                        raise ValueError(f"{func_name} function requires at least one argument")
+                    
+                    # Get the first argument which should be either ast.Name or ast.Attribute
+                    first_arg = node.args[0]
+                    
+                    if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                        # Pattern: NEXT(A.value) - variable.column format
+                        var_name = first_arg.value.id
+                        column = first_arg.attr
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Name):
+                        # Pattern: NEXT(column) - simple column format
+                        column = first_arg.id
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST with no specific variable
+                            return self._get_navigation_value(None, column, func_name, steps)
+                    else:
+                        raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
+
+        func = self.visit(node.func)
+        if callable(func):
+            args = [self.visit(arg) for arg in node.args]
+            try:
+                return func(*args)
+            except Exception as e:
+                # More descriptive error
+                raise ValueError(f"Error calling {func_name or 'function'}: {e}")
+        raise ValueError(f"Function {func} not callable")
+
+    def visit_Attribute(self, node: ast.Attribute):
+        """Handle pattern variable references (A.price) with table prefix validation"""
+        if isinstance(node.value, ast.Name):
+            var = node.value.id
+            col = node.attr
+            
+            # Table prefix validation: prevent forbidden table.column references
+            if self._is_table_prefix_in_context(var):
+                raise ValueError(f"Forbidden table prefix reference: '{var}.{col}'. "
+                               f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
+            
+            # Handle pattern variable references
+            result = self._get_variable_column_value(var, col, self.context)
+            
+            return result
+        
+        # If we can't extract a pattern var reference, try regular attribute access
+        obj = self.visit(node.value)
+        if obj is not None:
+            return getattr(obj, node.attr, None)
+        
+        return None
+
+    def _is_table_prefix_in_context(self, var_name: str) -> bool:
+        """
+        Check if a variable name looks like a table prefix in the current context.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if this looks like a forbidden table prefix, False otherwise
+        """
+        # If it's a defined pattern variable, it's not a table prefix
+        if hasattr(self.context, 'var_assignments') and var_name in self.context.var_assignments:
+            return False
+        if hasattr(self.context, 'subsets') and self.context.subsets and var_name in self.context.subsets:
+            return False
+        
+        # Use the same logic as the standalone function
+        from src.matcher.measure_evaluator import _is_table_prefix
+        return _is_table_prefix(var_name, 
+                               getattr(self.context, 'var_assignments', {}),
+                               getattr(self.context, 'subsets', {}))
+
+        # Updates for src/matcher/condition_evaluator.py
+    def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
+        """
+        Get a column value from a pattern variable's matched rows with enhanced subset support.
+        
+        For self-referential conditions (e.g., B.price < A.price when evaluating for B),
+        use the current row's value for the variable being evaluated.
+        
+        Args:
+            var_name: Pattern variable name
+            col_name: Column name
+            ctx: Row context
+            
+        Returns:
+            Column value from the matched row or current row
+        """
+        # Check if we're in DEFINE evaluation mode
+        is_define_mode = self.evaluation_mode == 'DEFINE'
+        
+        # DEBUG: Enhanced logging to trace exact values
+        current_var = getattr(ctx, 'current_var', None)
+        logger.debug(f"[DEBUG] _get_variable_column_value: var_name={var_name}, col_name={col_name}, is_define_mode={is_define_mode}, current_var={current_var}")
+        logger.debug(f"[DEBUG] ctx.current_idx={ctx.current_idx}, ctx.variables={ctx.variables}")
+        
+        # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
+        if is_define_mode:
+            # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
+            # but A.price should use A's previously matched row
+            if var_name == current_var:
+                # Self-reference: use current row being tested
+                logger.debug(f"[DEBUG] DEFINE mode - self-reference for {var_name}.{col_name}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Self-reference value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+                else:
+                    logger.debug(f"[DEBUG] Self-reference: current_idx {ctx.current_idx} out of bounds")
+                    return None
+            
+            # Critical fix for partition boundary handling
+            # Check if this is the first row in a partition
+            is_partition_boundary = False
+            if ctx.partition_boundaries and ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                for start, end in ctx.partition_boundaries:
+                    if ctx.current_idx == start:
+                        is_partition_boundary = True
+                        logger.debug(f"[DEBUG] Found partition boundary at idx={ctx.current_idx}")
+                        break
+            
+            # CRITICAL FIX: At partition boundaries, always use current row's value
+            # This ensures the first row in each partition can correctly match the pattern
+            if is_partition_boundary:
+                logger.debug(f"[DEBUG] PARTITION BOUNDARY: Using current row for {var_name}.{col_name} at idx={ctx.current_idx}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Partition boundary value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+            
+            # Reference to previously matched variable
+            if var_name in ctx.variables:
+                # Get all indices matched to this variable
+                indices = ctx.variables[var_name]
+                if not indices:
+                    logger.debug(f"[DEBUG] No indices found for variable {var_name}")
+                    return None
+                
+                # Get the value from the most recent row matched to this variable
+                # that occurs before the current position
+                for idx in sorted(indices, reverse=True):
+                    if idx < ctx.current_idx and idx >= 0 and idx < len(ctx.rows):
+                        value = ctx.rows[idx].get(col_name)
+                        logger.debug(f"[DEBUG] Previous match value: {var_name}.{col_name} = {value} (from row {idx})")
+                        return value
+                
+                # If no matching row found before current position, use the first matched row
+                if indices and indices[0] >= 0 and indices[0] < len(ctx.rows):
+                    value = ctx.rows[indices[0]].get(col_name)
+                    logger.debug(f"[DEBUG] First match value: {var_name}.{col_name} = {value} (from row {indices[0]})")
+                    return value
+            
+            # Subset variable handling
+            if var_name in ctx.subsets:
+                logger.debug(f"[DEBUG] Handling subset variable: {var_name}")
+                # For subset variables, try each component
+                for component in ctx.subsets[var_name]:
+                    component_value = self._get_variable_column_value(component, col_name, ctx)
+                    if component_value is not None:
+                        logger.debug(f"[DEBUG] Subset component value: {component}.{col_name} = {component_value}")
+                        return component_value
+            
+            logger.debug(f"[DEBUG] No value found for {var_name}.{col_name}")
+            return None
+        
+        # MEASURES mode (logical navigation)
+        else:
+            # In measures mode, we handle variables differently
+            if var_name in ctx.variables:
+                indices = ctx.variables[var_name]
+                if not indices:
+                    return None
+                
+                # Use the last row matched to this variable
+                last_idx = sorted(indices)[-1]
+                if last_idx >= 0 and last_idx < len(ctx.rows):
+                    return ctx.rows[last_idx].get(col_name)
+            
+            # Subset variable handling for measures
+            if var_name in ctx.subsets:
+                # For subset variables, use the last component
+                for component in reversed(ctx.subsets[var_name]):
+                    if component in ctx.variables:
+                        return self._get_variable_column_value(component, col_name, ctx)
+            
+            return None
+
+    def visit_Compare(self, node: ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise ValueError("Only simple comparisons are supported")
+        left = self.visit(node.left)
+        right = self.visit(node.comparators[0])
+        
+        # Debug logging for DEFINE mode comparisons
+        logger = get_logger(__name__)
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
+        
+        # Use safe comparison with NULL handling
+        op = node.ops[0]
+        
+        OPERATORS = {
+            ast.Gt: operator.gt,
+            ast.Lt: operator.lt,
+            ast.GtE: operator.ge,
+            ast.LtE: operator.le,
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+        }
+        
+        func = OPERATORS.get(type(op))
+        if func is None:
+            raise ValueError(f"Operator {op} not supported")
+            
+        result = self._safe_compare(left, right, func)
+        
+        # Enhanced debug logging for result
+        if self.evaluation_mode == 'DEFINE':
+            current_var = getattr(self.context, 'current_var', None)
+            logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
+        
+        return result
+
+    def visit_Name(self, node: ast.Name):
+        # Check for special functions
+        if node.id.upper() == "PREV":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
+        elif node.id.upper() == "NEXT":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
+        elif node.id.upper() == "FIRST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
+        elif node.id.upper() == "LAST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
+        elif node.id.upper() == "CLASSIFIER":
+            return lambda var=None: self._get_classifier(var)
+        elif node.id.upper() == "MATCH_NUMBER":
+            return self.context.match_number
+        elif node.id == "row":
+            # Special handling for 'row' references in keyword substitution
+            return {}  # Return an empty dict that will be used in visit_Subscript
+        elif node.id == "get_var_value":
+            # Special function for pattern variable access
+            return self._get_variable_column_value
+                
+        # Regular variable - handle as universal pattern variable
+        # First check if this might be a universal pattern variable (non-prefixed column)
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', node.id):
+            # Check if this conflicts with defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and node.id in self.context.pattern_variables:
+                logger.warning(f"Column name '{node.id}' conflicts with pattern variable name")
+                return None
+            
+            # Universal pattern variable: get from current row
+            value = None
+            if self.current_row is not None:
+                value = self.current_row.get(node.id)
+            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(node.id)
+            
+            if value is not None:
+                logger.debug(f"Universal pattern variable '{node.id}' resolved to: {value}")
+            
+            return value
+        
+        # Fallback for non-standard identifiers
+        value = None
+        if self.current_row is not None:
+            value = self.current_row.get(node.id)
+        elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+            value = self.context.rows[self.context.current_idx].get(node.id)
+        
+        return value
+
+    def _extract_navigation_args(self, node: ast.Call):
+        """Extract arguments from a navigation function call with support for nesting."""
+        args = []
+        
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                # For navigation functions, Name nodes should be treated as column names
+                args.append(arg.id)
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # Handle pattern variable references like A.value -> split to var and column
+                var_name = arg.value.id
+                col_name = arg.attr
+                # For navigation functions like FIRST(A.value), we need both parts
+                args.extend([var_name, col_name])
+            elif isinstance(arg, ast.Constant):
+                # Constant values (numbers, strings)
+                args.append(arg.value)
+            elif isinstance(arg, ast.Num):
+                # Python < 3.8 compatibility
+                args.append(arg.n)
+            else:
+                # For complex expressions, evaluate them
+                value = self.visit(arg)
+                # Handle nested navigation functions
+                if callable(value):
+                    value = value()
+                args.append(value)
+            
+        return args
+
+    def visit_Call(self, node: ast.Call):
+        """Handle function calls (PREV, NEXT, mathematical functions, etc.)"""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            if func_name in self.math_functions:
+                args = [self.visit(arg) for arg in node.args]
+                try:
+                    # Check for NULL arguments - SQL functions typically return NULL if any input is NULL
+                    if any(arg is None for arg in args) and func_name not in ('COALESCE', 'NULLIF'):
+                        return None
+                    return self.math_functions[func_name](*args)
+                except Exception as e:
+                    raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Special handling for pattern variable access
+            if func_name == "GET_VAR_VALUE":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 3:
+                    var_name, col_name, ctx = args
+                    return self._get_variable_column_value(var_name, col_name, ctx)
+            
+            # Enhanced navigation function handling with support for nested functions
+            if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                # Check if this might be a nested navigation call
+                is_nested = False
+                if len(node.args) > 0:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Call) and hasattr(first_arg, 'func') and isinstance(first_arg.func, ast.Name):
+                        inner_func_name = first_arg.func.id.upper()
+                        if inner_func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                            is_nested = True
+                
+                if is_nested:
+                    # For nested navigation, convert to string representation and use evaluate_nested_navigation
+                    navigation_expr = self._build_navigation_expr(node)
+                    return evaluate_nested_navigation(
+                        navigation_expr, 
+                        self.context, 
+                        self.context.current_idx, 
+                        getattr(self.context, 'current_var', None)
+                    )
+                else:
+                    # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
+                    if len(node.args) == 0:
+                        raise ValueError(f"{func_name} function requires at least one argument")
+                    
+                    # Get the first argument which should be either ast.Name or ast.Attribute
+                    first_arg = node.args[0]
+                    
+                    if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                        # Pattern: NEXT(A.value) - variable.column format
+                        var_name = first_arg.value.id
+                        column = first_arg.attr
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Name):
+                        # Pattern: NEXT(column) - simple column format
+                        column = first_arg.id
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST with no specific variable
+                            return self._get_navigation_value(None, column, func_name, steps)
+                    else:
+                        raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
+
+        func = self.visit(node.func)
+        if callable(func):
+            args = [self.visit(arg) for arg in node.args]
+            try:
+                return func(*args)
+            except Exception as e:
+                # More descriptive error
+                raise ValueError(f"Error calling {func_name or 'function'}: {e}")
+        raise ValueError(f"Function {func} not callable")
+
+    def visit_Attribute(self, node: ast.Attribute):
+        """Handle pattern variable references (A.price) with table prefix validation"""
+        if isinstance(node.value, ast.Name):
+            var = node.value.id
+            col = node.attr
+            
+            # Table prefix validation: prevent forbidden table.column references
+            if self._is_table_prefix_in_context(var):
+                raise ValueError(f"Forbidden table prefix reference: '{var}.{col}'. "
+                               f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
+            
+            # Handle pattern variable references
+            result = self._get_variable_column_value(var, col, self.context)
+            
+            return result
+        
+        # If we can't extract a pattern var reference, try regular attribute access
+        obj = self.visit(node.value)
+        if obj is not None:
+            return getattr(obj, node.attr, None)
+        
+        return None
+
+    def _is_table_prefix_in_context(self, var_name: str) -> bool:
+        """
+        Check if a variable name looks like a table prefix in the current context.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if this looks like a forbidden table prefix, False otherwise
+        """
+        # If it's a defined pattern variable, it's not a table prefix
+        if hasattr(self.context, 'var_assignments') and var_name in self.context.var_assignments:
+            return False
+        if hasattr(self.context, 'subsets') and self.context.subsets and var_name in self.context.subsets:
+            return False
+        
+        # Use the same logic as the standalone function
+        from src.matcher.measure_evaluator import _is_table_prefix
+        return _is_table_prefix(var_name, 
+                               getattr(self.context, 'var_assignments', {}),
+                               getattr(self.context, 'subsets', {}))
+
+        # Updates for src/matcher/condition_evaluator.py
+    def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
+        """
+        Get a column value from a pattern variable's matched rows with enhanced subset support.
+        
+        For self-referential conditions (e.g., B.price < A.price when evaluating for B),
+        use the current row's value for the variable being evaluated.
+        
+        Args:
+            var_name: Pattern variable name
+            col_name: Column name
+            ctx: Row context
+            
+        Returns:
+            Column value from the matched row or current row
+        """
+        # Check if we're in DEFINE evaluation mode
+        is_define_mode = self.evaluation_mode == 'DEFINE'
+        
+        # DEBUG: Enhanced logging to trace exact values
+        current_var = getattr(ctx, 'current_var', None)
+        logger.debug(f"[DEBUG] _get_variable_column_value: var_name={var_name}, col_name={col_name}, is_define_mode={is_define_mode}, current_var={current_var}")
+        logger.debug(f"[DEBUG] ctx.current_idx={ctx.current_idx}, ctx.variables={ctx.variables}")
+        
+        # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
+        if is_define_mode:
+            # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
+            # but A.price should use A's previously matched row
+            if var_name == current_var:
+                # Self-reference: use current row being tested
+                logger.debug(f"[DEBUG] DEFINE mode - self-reference for {var_name}.{col_name}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Self-reference value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+                else:
+                    logger.debug(f"[DEBUG] Self-reference: current_idx {ctx.current_idx} out of bounds")
+                    return None
+            
+            # Critical fix for partition boundary handling
+            # Check if this is the first row in a partition
+            is_partition_boundary = False
+            if ctx.partition_boundaries and ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                for start, end in ctx.partition_boundaries:
+                    if ctx.current_idx == start:
+                        is_partition_boundary = True
+                        logger.debug(f"[DEBUG] Found partition boundary at idx={ctx.current_idx}")
+                        break
+            
+            # CRITICAL FIX: At partition boundaries, always use current row's value
+            # This ensures the first row in each partition can correctly match the pattern
+            if is_partition_boundary:
+                logger.debug(f"[DEBUG] PARTITION BOUNDARY: Using current row for {var_name}.{col_name} at idx={ctx.current_idx}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Partition boundary value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+            
+            # Reference to previously matched variable
+            if var_name in ctx.variables:
+                # Get all indices matched to this variable
+                indices = ctx.variables[var_name]
+                if not indices:
+                    logger.debug(f"[DEBUG] No indices found for variable {var_name}")
+                    return None
+                
+                # Get the value from the most recent row matched to this variable
+                # that occurs before the current position
+                for idx in sorted(indices, reverse=True):
+                    if idx < ctx.current_idx and idx >= 0 and idx < len(ctx.rows):
+                        value = ctx.rows[idx].get(col_name)
+                        logger.debug(f"[DEBUG] Previous match value: {var_name}.{col_name} = {value} (from row {idx})")
+                        return value
+                
+                # If no matching row found before current position, use the first matched row
+                if indices and indices[0] >= 0 and indices[0] < len(ctx.rows):
+                    value = ctx.rows[indices[0]].get(col_name)
+                    logger.debug(f"[DEBUG] First match value: {var_name}.{col_name} = {value} (from row {indices[0]})")
+                    return value
+            
+            # Subset variable handling
+            if var_name in ctx.subsets:
+                logger.debug(f"[DEBUG] Handling subset variable: {var_name}")
+                # For subset variables, try each component
+                for component in ctx.subsets[var_name]:
+                    component_value = self._get_variable_column_value(component, col_name, ctx)
+                    if component_value is not None:
+                        logger.debug(f"[DEBUG] Subset component value: {component}.{col_name} = {component_value}")
+                        return component_value
+            
+            logger.debug(f"[DEBUG] No value found for {var_name}.{col_name}")
+            return None
+        
+        # MEASURES mode (logical navigation)
+        else:
+            # In measures mode, we handle variables differently
+            if var_name in ctx.variables:
+                indices = ctx.variables[var_name]
+                if not indices:
+                    return None
+                
+                # Use the last row matched to this variable
+                last_idx = sorted(indices)[-1]
+                if last_idx >= 0 and last_idx < len(ctx.rows):
+                    return ctx.rows[last_idx].get(col_name)
+            
+            # Subset variable handling for measures
+            if var_name in ctx.subsets:
+                # For subset variables, use the last component
+                for component in reversed(ctx.subsets[var_name]):
+                    if component in ctx.variables:
+                        return self._get_variable_column_value(component, col_name, ctx)
+            
+            return None
+
+    def visit_Compare(self, node: ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise ValueError("Only simple comparisons are supported")
+        left = self.visit(node.left)
+        right = self.visit(node.comparators[0])
+        
+        # Debug logging for DEFINE mode comparisons
+        logger = get_logger(__name__)
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
+        
+        # Use safe comparison with NULL handling
+        op = node.ops[0]
+        
+        OPERATORS = {
+            ast.Gt: operator.gt,
+            ast.Lt: operator.lt,
+            ast.GtE: operator.ge,
+            ast.LtE: operator.le,
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+        }
+        
+        func = OPERATORS.get(type(op))
+        if func is None:
+            raise ValueError(f"Operator {op} not supported")
+            
+        result = self._safe_compare(left, right, func)
+        
+        # Enhanced debug logging for result
+        if self.evaluation_mode == 'DEFINE':
+            current_var = getattr(self.context, 'current_var', None)
+            logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
+        
+        return result
+
+    def visit_Name(self, node: ast.Name):
+        # Check for special functions
+        if node.id.upper() == "PREV":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
+        elif node.id.upper() == "NEXT":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
+        elif node.id.upper() == "FIRST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
+        elif node.id.upper() == "LAST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
+        elif node.id.upper() == "CLASSIFIER":
+            return lambda var=None: self._get_classifier(var)
+        elif node.id.upper() == "MATCH_NUMBER":
+            return self.context.match_number
+        elif node.id == "row":
+            # Special handling for 'row' references in keyword substitution
+            return {}  # Return an empty dict that will be used in visit_Subscript
+        elif node.id == "get_var_value":
+            # Special function for pattern variable access
+            return self._get_variable_column_value
+                
+        # Regular variable - handle as universal pattern variable
+        # First check if this might be a universal pattern variable (non-prefixed column)
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', node.id):
+            # Check if this conflicts with defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and node.id in self.context.pattern_variables:
+                logger.warning(f"Column name '{node.id}' conflicts with pattern variable name")
+                return None
+            
+            # Universal pattern variable: get from current row
+            value = None
+            if self.current_row is not None:
+                value = self.current_row.get(node.id)
+            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(node.id)
+            
+            if value is not None:
+                logger.debug(f"Universal pattern variable '{node.id}' resolved to: {value}")
+            
+            return value
+        
+        # Fallback for non-standard identifiers
+        value = None
+        if self.current_row is not None:
+            value = self.current_row.get(node.id)
+        elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+            value = self.context.rows[self.context.current_idx].get(node.id)
+        
+        return value
+
+    def _extract_navigation_args(self, node: ast.Call):
+        """Extract arguments from a navigation function call with support for nesting."""
+        args = []
+        
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                # For navigation functions, Name nodes should be treated as column names
+                args.append(arg.id)
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # Handle pattern variable references like A.value -> split to var and column
+                var_name = arg.value.id
+                col_name = arg.attr
+                # For navigation functions like FIRST(A.value), we need both parts
+                args.extend([var_name, col_name])
+            elif isinstance(arg, ast.Constant):
+                # Constant values (numbers, strings)
+                args.append(arg.value)
+            elif isinstance(arg, ast.Num):
+                # Python < 3.8 compatibility
+                args.append(arg.n)
+            else:
+                # For complex expressions, evaluate them
+                value = self.visit(arg)
+                # Handle nested navigation functions
+                if callable(value):
+                    value = value()
+                args.append(value)
+            
+        return args
+
+    def visit_Call(self, node: ast.Call):
+        """Handle function calls (PREV, NEXT, mathematical functions, etc.)"""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            if func_name in self.math_functions:
+                args = [self.visit(arg) for arg in node.args]
+                try:
+                    # Check for NULL arguments - SQL functions typically return NULL if any input is NULL
+                    if any(arg is None for arg in args) and func_name not in ('COALESCE', 'NULLIF'):
+                        return None
+                    return self.math_functions[func_name](*args)
+                except Exception as e:
+                    raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Special handling for pattern variable access
+            if func_name == "GET_VAR_VALUE":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 3:
+                    var_name, col_name, ctx = args
+                    return self._get_variable_column_value(var_name, col_name, ctx)
+            
+            # Enhanced navigation function handling with support for nested functions
+            if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                # Check if this might be a nested navigation call
+                is_nested = False
+                if len(node.args) > 0:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Call) and hasattr(first_arg, 'func') and isinstance(first_arg.func, ast.Name):
+                        inner_func_name = first_arg.func.id.upper()
+                        if inner_func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                            is_nested = True
+                
+                if is_nested:
+                    # For nested navigation, convert to string representation and use evaluate_nested_navigation
+                    navigation_expr = self._build_navigation_expr(node)
+                    return evaluate_nested_navigation(
+                        navigation_expr, 
+                        self.context, 
+                        self.context.current_idx, 
+                        getattr(self.context, 'current_var', None)
+                    )
+                else:
+                    # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
+                    if len(node.args) == 0:
+                        raise ValueError(f"{func_name} function requires at least one argument")
+                    
+                    # Get the first argument which should be either ast.Name or ast.Attribute
+                    first_arg = node.args[0]
+                    
+                    if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                        # Pattern: NEXT(A.value) - variable.column format
+                        var_name = first_arg.value.id
+                        column = first_arg.attr
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Name):
+                        # Pattern: NEXT(column) - simple column format
+                        column = first_arg.id
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST with no specific variable
+                            return self._get_navigation_value(None, column, func_name, steps)
+                    else:
+                        raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
+
+        func = self.visit(node.func)
+        if callable(func):
+            args = [self.visit(arg) for arg in node.args]
+            try:
+                return func(*args)
+            except Exception as e:
+                # More descriptive error
+                raise ValueError(f"Error calling {func_name or 'function'}: {e}")
+        raise ValueError(f"Function {func} not callable")
+
+    def visit_Attribute(self, node: ast.Attribute):
+        """Handle pattern variable references (A.price) with table prefix validation"""
+        if isinstance(node.value, ast.Name):
+            var = node.value.id
+            col = node.attr
+            
+            # Table prefix validation: prevent forbidden table.column references
+            if self._is_table_prefix_in_context(var):
+                raise ValueError(f"Forbidden table prefix reference: '{var}.{col}'. "
+                               f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
+            
+            # Handle pattern variable references
+            result = self._get_variable_column_value(var, col, self.context)
+            
+            return result
+        
+        # If we can't extract a pattern var reference, try regular attribute access
+        obj = self.visit(node.value)
+        if obj is not None:
+            return getattr(obj, node.attr, None)
+        
+        return None
+
+    def _is_table_prefix_in_context(self, var_name: str) -> bool:
+        """
+        Check if a variable name looks like a table prefix in the current context.
+        
+        Args:
+            var_name: The variable name to check
+            
+        Returns:
+            True if this looks like a forbidden table prefix, False otherwise
+        """
+        # If it's a defined pattern variable, it's not a table prefix
+        if hasattr(self.context, 'var_assignments') and var_name in self.context.var_assignments:
+            return False
+        if hasattr(self.context, 'subsets') and self.context.subsets and var_name in self.context.subsets:
+            return False
+        
+        # Use the same logic as the standalone function
+        from src.matcher.measure_evaluator import _is_table_prefix
+        return _is_table_prefix(var_name, 
+                               getattr(self.context, 'var_assignments', {}),
+                               getattr(self.context, 'subsets', {}))
+
+        # Updates for src/matcher/condition_evaluator.py
+    def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
+        """
+        Get a column value from a pattern variable's matched rows with enhanced subset support.
+        
+        For self-referential conditions (e.g., B.price < A.price when evaluating for B),
+        use the current row's value for the variable being evaluated.
+        
+        Args:
+            var_name: Pattern variable name
+            col_name: Column name
+            ctx: Row context
+            
+        Returns:
+            Column value from the matched row or current row
+        """
+        # Check if we're in DEFINE evaluation mode
+        is_define_mode = self.evaluation_mode == 'DEFINE'
+        
+        # DEBUG: Enhanced logging to trace exact values
+        current_var = getattr(ctx, 'current_var', None)
+        logger.debug(f"[DEBUG] _get_variable_column_value: var_name={var_name}, col_name={col_name}, is_define_mode={is_define_mode}, current_var={current_var}")
+        logger.debug(f"[DEBUG] ctx.current_idx={ctx.current_idx}, ctx.variables={ctx.variables}")
+        
+        # CRITICAL FIX: In DEFINE mode, we need special handling for pattern variable references
+        if is_define_mode:
+            # CRITICAL FIX: When evaluating B's condition, B.price should use the current row
+            # but A.price should use A's previously matched row
+            if var_name == current_var:
+                # Self-reference: use current row being tested
+                logger.debug(f"[DEBUG] DEFINE mode - self-reference for {var_name}.{col_name}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Self-reference value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+                else:
+                    logger.debug(f"[DEBUG] Self-reference: current_idx {ctx.current_idx} out of bounds")
+                    return None
+            
+            # Critical fix for partition boundary handling
+            # Check if this is the first row in a partition
+            is_partition_boundary = False
+            if ctx.partition_boundaries and ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                for start, end in ctx.partition_boundaries:
+                    if ctx.current_idx == start:
+                        is_partition_boundary = True
+                        logger.debug(f"[DEBUG] Found partition boundary at idx={ctx.current_idx}")
+                        break
+            
+            # CRITICAL FIX: At partition boundaries, always use current row's value
+            # This ensures the first row in each partition can correctly match the pattern
+            if is_partition_boundary:
+                logger.debug(f"[DEBUG] PARTITION BOUNDARY: Using current row for {var_name}.{col_name} at idx={ctx.current_idx}")
+                if ctx.current_idx >= 0 and ctx.current_idx < len(ctx.rows):
+                    value = ctx.rows[ctx.current_idx].get(col_name)
+                    logger.debug(f"[DEBUG] Partition boundary value: {var_name}.{col_name} = {value} (from row {ctx.current_idx})")
+                    return value
+            
+            # Reference to previously matched variable
+            if var_name in ctx.variables:
+                # Get all indices matched to this variable
+                indices = ctx.variables[var_name]
+                if not indices:
+                    logger.debug(f"[DEBUG] No indices found for variable {var_name}")
+                    return None
+                
+                # Get the value from the most recent row matched to this variable
+                # that occurs before the current position
+                for idx in sorted(indices, reverse=True):
+                    if idx < ctx.current_idx and idx >= 0 and idx < len(ctx.rows):
+                        value = ctx.rows[idx].get(col_name)
+                        logger.debug(f"[DEBUG] Previous match value: {var_name}.{col_name} = {value} (from row {idx})")
+                        return value
+                
+                # If no matching row found before current position, use the first matched row
+                if indices and indices[0] >= 0 and indices[0] < len(ctx.rows):
+                    value = ctx.rows[indices[0]].get(col_name)
+                    logger.debug(f"[DEBUG] First match value: {var_name}.{col_name} = {value} (from row {indices[0]})")
+                    return value
+            
+            # Subset variable handling
+            if var_name in ctx.subsets:
+                logger.debug(f"[DEBUG] Handling subset variable: {var_name}")
+                # For subset variables, try each component
+                for component in ctx.subsets[var_name]:
+                    component_value = self._get_variable_column_value(component, col_name, ctx)
+                    if component_value is not None:
+                        logger.debug(f"[DEBUG] Subset component value: {component}.{col_name} = {component_value}")
+                        return component_value
+            
+            logger.debug(f"[DEBUG] No value found for {var_name}.{col_name}")
+            return None
+        
+        # MEASURES mode (logical navigation)
+        else:
+            # In measures mode, we handle variables differently
+            if var_name in ctx.variables:
+                indices = ctx.variables[var_name]
+                if not indices:
+                    return None
+                
+                # Use the last row matched to this variable
+                last_idx = sorted(indices)[-1]
+                if last_idx >= 0 and last_idx < len(ctx.rows):
+                    return ctx.rows[last_idx].get(col_name)
+            
+            # Subset variable handling for measures
+            if var_name in ctx.subsets:
+                # For subset variables, use the last component
+                for component in reversed(ctx.subsets[var_name]):
+                    if component in ctx.variables:
+                        return self._get_variable_column_value(component, col_name, ctx)
+            
+            return None
+
+    def visit_Compare(self, node: ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise ValueError("Only simple comparisons are supported")
+        left = self.visit(node.left)
+        right = self.visit(node.comparators[0])
+        
+        # Debug logging for DEFINE mode comparisons
+        logger = get_logger(__name__)
+        if self.evaluation_mode == 'DEFINE':
+            logger.debug(f"[DEBUG] COMPARE: left={left} ({type(left)}), right={right} ({type(right)})")
+            logger.debug(f"[DEBUG] COMPARE AST: left={ast.dump(node.left)}, right={ast.dump(node.comparators[0])}")
+        
+        # Use safe comparison with NULL handling
+        op = node.ops[0]
+        
+        OPERATORS = {
+            ast.Gt: operator.gt,
+            ast.Lt: operator.lt,
+            ast.GtE: operator.ge,
+            ast.LtE: operator.le,
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+        }
+        
+        func = OPERATORS.get(type(op))
+        if func is None:
+            raise ValueError(f"Operator {op} not supported")
+            
+        result = self._safe_compare(left, right, func)
+        
+        # Enhanced debug logging for result
+        if self.evaluation_mode == 'DEFINE':
+            current_var = getattr(self.context, 'current_var', None)
+            logger.debug(f"[DEBUG] COMPARE RESULT: {left} {op.__class__.__name__} {right} = {result} (evaluating for var={current_var})")
+        
+        return result
+
+    def visit_Name(self, node: ast.Name):
+        # Check for special functions
+        if node.id.upper() == "PREV":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
+        elif node.id.upper() == "NEXT":
+            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
+        elif node.id.upper() == "FIRST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
+        elif node.id.upper() == "LAST":
+            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
+        elif node.id.upper() == "CLASSIFIER":
+            return lambda var=None: self._get_classifier(var)
+        elif node.id.upper() == "MATCH_NUMBER":
+            return self.context.match_number
+        elif node.id == "row":
+            # Special handling for 'row' references in keyword substitution
+            return {}  # Return an empty dict that will be used in visit_Subscript
+        elif node.id == "get_var_value":
+            # Special function for pattern variable access
+            return self._get_variable_column_value
+                
+        # Regular variable - handle as universal pattern variable
+        # First check if this might be a universal pattern variable (non-prefixed column)
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', node.id):
+            # Check if this conflicts with defined pattern variables
+            if hasattr(self.context, 'pattern_variables') and node.id in self.context.pattern_variables:
+                logger.warning(f"Column name '{node.id}' conflicts with pattern variable name")
+                return None
+            
+            # Universal pattern variable: get from current row
+            value = None
+            if self.current_row is not None:
+                value = self.current_row.get(node.id)
+            elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+                value = self.context.rows[self.context.current_idx].get(node.id)
+            
+            if value is not None:
+                logger.debug(f"Universal pattern variable '{node.id}' resolved to: {value}")
+            
+            return value
+        
+        # Fallback for non-standard identifiers
+        value = None
+        if self.current_row is not None:
+            value = self.current_row.get(node.id)
+        elif self.context.current_idx >= 0 and self.context.current_idx < len(self.context.rows):
+            value = self.context.rows[self.context.current_idx].get(node.id)
+        
+        return value
+
+    def _extract_navigation_args(self, node: ast.Call):
+        """Extract arguments from a navigation function call with support for nesting."""
+        args = []
+        
+        for arg in node.args:
+            if isinstance(arg, ast.Name):
+                # For navigation functions, Name nodes should be treated as column names
+                args.append(arg.id)
+            elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+                # Handle pattern variable references like A.value -> split to var and column
+                var_name = arg.value.id
+                col_name = arg.attr
+                # For navigation functions like FIRST(A.value), we need both parts
+                args.extend([var_name, col_name])
+            elif isinstance(arg, ast.Constant):
+                # Constant values (numbers, strings)
+                args.append(arg.value)
+            elif isinstance(arg, ast.Num):
+                # Python < 3.8 compatibility
+                args.append(arg.n)
+            else:
+                # For complex expressions, evaluate them
+                value = self.visit(arg)
+                # Handle nested navigation functions
+                if callable(value):
+                    value = value()
+                args.append(value)
+            
+        return args
+
+    def visit_Call(self, node: ast.Call):
+        """Handle function calls (PREV, NEXT, mathematical functions, etc.)"""
+        func_name = None
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            if func_name in self.math_functions:
+                args = [self.visit(arg) for arg in node.args]
+                try:
+                    # Check for NULL arguments - SQL functions typically return NULL if any input is NULL
+                    if any(arg is None for arg in args) and func_name not in ('COALESCE', 'NULLIF'):
+                        return None
+                    return self.math_functions[func_name](*args)
+                except Exception as e:
+                    raise ValueError(f"Error in {func_name} function: {e}")
+            
+            # Special handling for pattern variable access
+            if func_name == "GET_VAR_VALUE":
+                args = [self.visit(arg) for arg in node.args]
+                if len(args) == 3:
+                    var_name, col_name, ctx = args
+                    return self._get_variable_column_value(var_name, col_name, ctx)
+            
+            # Enhanced navigation function handling with support for nested functions
+            if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                # Check if this might be a nested navigation call
+                is_nested = False
+                if len(node.args) > 0:
+                    first_arg = node.args[0]
+                    if isinstance(first_arg, ast.Call) and hasattr(first_arg, 'func') and isinstance(first_arg.func, ast.Name):
+                        inner_func_name = first_arg.func.id.upper()
+                        if inner_func_name in ("PREV", "NEXT", "FIRST", "LAST"):
+                            is_nested = True
+                
+                if is_nested:
+                    # For nested navigation, convert to string representation and use evaluate_nested_navigation
+                    navigation_expr = self._build_navigation_expr(node)
+                    return evaluate_nested_navigation(
+                        navigation_expr, 
+                        self.context, 
+                        self.context.current_idx, 
+                        getattr(self.context, 'current_var', None)
+                    )
+                else:
+                    # Fixed: Handle AST nodes directly instead of using faulty _extract_navigation_args
+                    if len(node.args) == 0:
+                        raise ValueError(f"{func_name} function requires at least one argument")
+                    
+                    # Get the first argument which should be either ast.Name or ast.Attribute
+                    first_arg = node.args[0]
+                    
+                    if isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Name):
+                        # Pattern: NEXT(A.value) - variable.column format
+                        var_name = first_arg.value.id
+                        column = first_arg.attr
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)
+                            else:
+                                # Logical navigation: use pattern match timeline
+                                return self.evaluate_navigation_function(func_name, column, steps)
+                        else:
+                            # Use variable-aware navigation for FIRST/LAST
+                            return self._get_navigation_value(var_name, column, func_name, steps)
+                            
+                    elif isinstance(first_arg, ast.Name):
+                        # Pattern: NEXT(column) - simple column format
+                        column = first_arg.id
+                        
+                        # Get optional steps argument
+                        steps = 1
+                        if len(node.args) > 1:
+                            steps_arg = node.args[1]
+                            if isinstance(steps_arg, (ast.Constant, ast.Num)):
+                                steps = steps_arg.value if isinstance(steps_arg, ast.Constant) else steps_arg.n
+                        
+                        if func_name in ("PREV", "NEXT"):
+                            # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                            if self.evaluation_mode == 'DEFINE':
+                                # Physical navigation: use direct row indexing
+                                return self.evaluate_physical_navigation(func_name, column, steps)

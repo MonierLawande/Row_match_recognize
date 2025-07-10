@@ -4,21 +4,16 @@ Production-ready condition evaluator for SQL:2016 row pattern matching.
 
 This module implements comprehensive condition evaluation with full support for:
 - SQL:2016 pattern matching semantics
-- Navigation functions using centralized navigation engine (FIRST, LAST, PREV, NEXT)
+- Enhanced navigation functions (FIRST, LAST, PREV, NEXT)
 - Pattern variable references and subset variables
 - Mathematical and utility functions
 - Advanced error handling and validation
 - Performance optimization with caching
 
-Navigation Functions:
-- All navigation function implementations have been moved to the centralized 
-  src.matcher.navigation_functions engine for better maintainability.
-- This module now delegates navigation calls to the centralized engine.
-
 Refactored to eliminate duplication and improve maintainability.
 
 Author: Pattern Matching Engine Team
-Version: 3.0.0
+Version: 2.0.0
 """
 
 import ast
@@ -26,7 +21,6 @@ import operator
 import re
 import time
 import threading
-import pandas as pd
 from typing import Dict, Any, Optional, Callable, List, Union, Tuple, Set
 from dataclasses import dataclass
 
@@ -37,7 +31,6 @@ from src.matcher.evaluation_utils import (
     is_null, safe_compare, is_table_prefix, MATH_FUNCTIONS, 
     evaluate_math_function, get_evaluation_metrics
 )
-from src.matcher.navigation_functions import get_navigation_engine
 from src.utils.logging_config import get_logger, PerformanceTimer
 
 # Module logger
@@ -45,6 +38,18 @@ logger = get_logger(__name__)
 
 # Define the type for condition functions
 ConditionFn = Callable[[Dict[str, Any], RowContext], bool]
+
+# Enhanced Navigation Function Info for better structured parsing
+@dataclass
+class NavigationFunctionInfo:
+    """Information about a navigation function call."""
+    function_type: str  # PREV, NEXT, FIRST, LAST
+    variable: Optional[str]
+    column: Optional[str]
+    offset: int
+    is_nested: bool
+    inner_functions: List['NavigationFunctionInfo']
+    raw_expression: str
 
 class ConditionEvaluator(ast.NodeVisitor):
     """
@@ -78,10 +83,6 @@ class ConditionEvaluator(ast.NodeVisitor):
         self.evaluation_mode = evaluation_mode
         self.recursion_depth = recursion_depth
         self.max_recursion_depth = 20  # Increased for complex patterns
-        
-        # Initialize navigation engine
-        from src.matcher.navigation_functions import get_navigation_engine
-        self.navigation_engine = get_navigation_engine()
         
         # Thread safety
         self._lock = threading.RLock()
@@ -357,12 +358,12 @@ class ConditionEvaluator(ast.NodeVisitor):
             func_name = node.func.id.upper()
             
             # Handle null checking helper function
-            if func_name == "__IS_NULL":
+            if func_name == "_IS_NULL":
                 args = [self.visit(arg) for arg in node.args]
                 if len(args) == 1:
                     return is_null(args[0])
                 else:
-                    raise ValueError("__is_null function requires exactly one argument")
+                    raise ValueError("_is_null function requires exactly one argument")
             
             # Handle mathematical and utility functions using shared utilities
             if func_name in MATH_FUNCTIONS:
@@ -423,18 +424,15 @@ class ConditionEvaluator(ast.NodeVisitor):
                     is_nested = True
         
         if is_nested:
-            # For nested navigation, use the centralized nested navigation evaluator
+            # For nested navigation, convert to string representation and use evaluate_nested_navigation
             navigation_expr = self._build_navigation_expr(node)
-            
-            # Use the new centralized nested navigation function
-            from .navigation_functions import evaluate_nested_navigation
-            result = evaluate_nested_navigation(
+            return evaluate_nested_navigation(
                 navigation_expr, 
                 self.context, 
-                self.context.current_idx
+                self.context.current_idx, 
+                getattr(self.context, 'current_var', None),
+                self.recursion_depth + 1
             )
-            
-            return result
         else:
             # Handle standard navigation function calls
             if len(node.args) == 0:
@@ -464,10 +462,10 @@ class ConditionEvaluator(ast.NodeVisitor):
                     # Context-aware navigation: physical for DEFINE, logical for MEASURES
                     if self.evaluation_mode == 'DEFINE':
                         # Physical navigation: use direct row indexing
-                        return self._get_navigation_value(None, column, func_name, steps)
+                        return self.evaluate_physical_navigation(func_name, column, steps)
                     else:
                         # Logical navigation: use pattern match timeline
-                        return self._get_navigation_value(None, column, func_name, steps)
+                        return self.evaluate_navigation_function(func_name, column, steps)
                 else:
                     # Use variable-aware navigation for FIRST/LAST
                     return self._get_navigation_value(var_name, column, func_name, steps)
@@ -480,9 +478,9 @@ class ConditionEvaluator(ast.NodeVisitor):
                 if func_name in ("PREV", "NEXT"):
                     # Context-aware navigation: physical for DEFINE, logical for MEASURES
                     if self.evaluation_mode == 'DEFINE':
-                        return self._get_navigation_value(None, column, func_name, steps)
+                        return self.evaluate_physical_navigation(func_name, column, steps)
                     else:
-                        return self._get_navigation_value(None, column, func_name, steps)
+                        return self.evaluate_navigation_function(func_name, column, steps)
                 else:
                     return self._get_navigation_value(var_name, column, func_name, steps)
                     
@@ -493,9 +491,9 @@ class ConditionEvaluator(ast.NodeVisitor):
                 if func_name in ("PREV", "NEXT"):
                     # Context-aware navigation: physical for DEFINE, logical for MEASURES
                     if self.evaluation_mode == 'DEFINE':
-                        return self._get_navigation_value(None, column, func_name, steps)
+                        return self.evaluate_physical_navigation(func_name, column, steps)
                     else:
-                        return self._get_navigation_value(None, column, func_name, steps)
+                        return self.evaluate_navigation_function(func_name, column, steps)
                 else:
                     return self._get_navigation_value(None, column, func_name, steps)
                     
@@ -517,9 +515,9 @@ class ConditionEvaluator(ast.NodeVisitor):
                         column = str(evaluated_arg)
                         if func_name in ("PREV", "NEXT"):
                             if self.evaluation_mode == 'DEFINE':
-                                return self._get_navigation_value(None, column, func_name, steps)
+                                return self.evaluate_physical_navigation(func_name, column, steps)
                             else:
-                                return self._get_navigation_value(None, column, func_name, steps)
+                                return self.evaluate_navigation_function(func_name, column, steps)
                         else:
                             return self._get_navigation_value(None, column, func_name, steps)
                     else:
@@ -713,7 +711,6 @@ class ConditionEvaluator(ast.NodeVisitor):
     def visit_BinOp(self, node: ast.BinOp):
         """Handle binary operations (addition, subtraction, multiplication, etc.)"""
         import operator
-        from .navigation_functions import NavigationResult
         
         # Map AST operators to Python operators
         op_map = {
@@ -738,19 +735,6 @@ class ConditionEvaluator(ast.NodeVisitor):
             
             if op is None:
                 raise ValueError(f"Unsupported binary operator: {type(node.op).__name__}")
-            
-            # Extract values from NavigationResult objects
-            if isinstance(left, NavigationResult):
-                if not left.success:
-                    logger.warning(f"Left operand navigation failed: {left.error}")
-                    return None
-                left = left.value
-            
-            if isinstance(right, NavigationResult):
-                if not right.success:
-                    logger.warning(f"Right operand navigation failed: {right.error}")
-                    return None
-                right = right.value
             
             # Handle None values - if either operand is None, result is None (SQL semantics)
             if left is None or right is None:
@@ -979,7 +963,15 @@ class ConditionEvaluator(ast.NodeVisitor):
 
     def _get_navigation_value(self, var_name, column, nav_type, steps=1):
         """
-        Wrapper for centralized navigation engine.
+        Enhanced production-grade navigation function with comprehensive improvements.
+        
+        Key improvements:
+        - Better context-aware navigation for DEFINE vs MEASURES modes
+        - Enhanced nested navigation support with recursion protection
+        - Improved bounds checking and partition boundary enforcement
+        - Advanced caching with invalidation strategies
+        - Superior error handling and recovery mechanisms
+        - Optimized algorithms for large datasets
         
         Args:
             var_name: Variable name or function name
@@ -990,57 +982,314 @@ class ConditionEvaluator(ast.NodeVisitor):
         Returns:
             The value at the navigated position or None if navigation is invalid
         """
+        start_time = time.time()
+        
+        logger.debug(f"[NAV_ENHANCED] _get_navigation_value: var_name={var_name}, column={column}, nav_type={nav_type}, steps={steps}")
+        logger.debug(f"[NAV_ENHANCED] Context state: current_idx={self.context.current_idx}, mode={self.evaluation_mode}")
+        
         try:
-            # Create navigation expression
-            if var_name:
-                expr = f"{nav_type}({var_name}.{column}{', ' + str(steps) if steps != 1 else ''})"
-            else:
-                expr = f"{nav_type}({column}{', ' + str(steps) if steps != 1 else ''})"
+            # Enhanced input validation
+            if steps < 0:
+                raise ValueError(f"Navigation steps must be non-negative: {steps}")
             
-            # Determine navigation mode based on function type and evaluation context
-            from .navigation_functions import NavigationMode
+            if not isinstance(column, str) or not column.strip():
+                raise TypeError(f"Column name must be a non-empty string, got {type(column)}: '{column}'")
             
-            # PRODUCTION-READY FIX: Comprehensive navigation mode selection
-            # Key principle: MEASURES mode needs logical navigation with RUNNING semantics for aggregation support
-            if nav_type in ('FIRST', 'LAST'):
-                # FIRST/LAST functions in MEASURES mode need logical navigation with RUNNING semantics
-                # This enables proper handling of expressions like LAST(value, 0) to return current row's value
-                if self.evaluation_mode == 'MEASURES':
-                    mode = NavigationMode.LOGICAL
-                elif var_name:
-                    # FIRST/LAST with pattern variables always use logical navigation
-                    mode = NavigationMode.LOGICAL
-                else:
-                    # DEFINE mode without pattern variables can use physical navigation
-                    mode = NavigationMode.PHYSICAL
-            elif nav_type in ('PREV', 'NEXT'):
-                # PREV/NEXT use mode based on evaluation context
-                if self.evaluation_mode == 'DEFINE':
-                    mode = NavigationMode.PHYSICAL
-                else:  # MEASURES
-                    mode = NavigationMode.LOGICAL
-            else:
-                # Default fallback based on evaluation mode
-                if self.evaluation_mode == 'DEFINE':
-                    mode = NavigationMode.PHYSICAL
-                else:  # MEASURES
-                    mode = NavigationMode.LOGICAL
+            # Initialize performance tracking
+            if hasattr(self.context, 'stats'):
+                self.context.stats["navigation_calls"] = self.context.stats.get("navigation_calls", 0) + 1
+                self.context.stats[f"{nav_type.lower()}_calls"] = self.context.stats.get(f"{nav_type.lower()}_calls", 0) + 1
             
-            # Use the centralized navigation engine with proper mode selection
-            # The default semantics (RUNNING) from the navigation engine are appropriate for MEASURES mode
-            result = self.navigation_engine.evaluate_navigation_expression(
-                expr, self.context, self.context.current_idx, mode
-            )
+            # Enhanced cache management with proper invalidation
+            if not hasattr(self.context, 'navigation_cache'):
+                self.context.navigation_cache = {}
             
-            # Extract the value from NavigationResult
-            if result and result.success:
-                return result.value
-            else:
+            # Advanced cache key with more context factors
+            current_var = getattr(self.context, 'current_var', None)
+            evaluation_mode = self.evaluation_mode
+            partition_key = getattr(self.context, 'partition_key', None)
+            cache_key = (var_name, column, nav_type, steps, self.context.current_idx, 
+                        current_var, evaluation_mode, partition_key, 
+                        id(getattr(self.context, 'variables', {})))
+            
+            # Smart cache lookup with validity checking
+            if cache_key in self.context.navigation_cache:
+                cached_result = self.context.navigation_cache[cache_key]
+                if hasattr(self.context, 'stats'):
+                    self.context.stats["cache_hits"] = self.context.stats.get("cache_hits", 0) + 1
+                logger.debug(f"[NAV_ENHANCED] Cache hit: {cached_result}")
+                return cached_result
+            
+            if hasattr(self.context, 'stats'):
+                self.context.stats["cache_misses"] = self.context.stats.get("cache_misses", 0) + 1
+            
+            # Get enhanced context state
+            curr_idx = self.context.current_idx
+            is_permute = hasattr(self.context, 'pattern_metadata') and getattr(self.context, 'pattern_metadata', {}).get('permute', False)
+            
+            # Fast path validation with detailed logging
+            if curr_idx < 0 or curr_idx >= len(self.context.rows) or not self.context.rows:
+                logger.debug(f"[NAV_ENHANCED] Fast path exit: invalid curr_idx={curr_idx}, rows_len={len(self.context.rows) if self.context.rows else 0}")
+                self.context.navigation_cache[cache_key] = None
                 return None
             
+            # Enhanced subset variable support
+            if nav_type in ('FIRST', 'LAST') and hasattr(self.context, 'subsets') and var_name in self.context.subsets:
+                result = self._handle_subset_navigation(var_name, column, nav_type, steps, cache_key)
+                return result
+            
+            # Improved timeline construction with better algorithms
+            timeline = self._build_optimized_timeline()
+            
+            # Route to appropriate navigation handler
+            if nav_type in ('FIRST', 'LAST'):
+                result = self._handle_logical_navigation(var_name, column, nav_type, steps, timeline, cache_key)
+            elif nav_type in ('PREV', 'NEXT'):
+                # Context-aware navigation: different behavior for DEFINE vs MEASURES
+                if self.evaluation_mode == 'DEFINE':
+                    result = self._handle_physical_navigation_define(column, nav_type, steps, cache_key)
+                else:
+                    result = self._handle_logical_timeline_navigation(var_name, column, nav_type, steps, timeline, cache_key, current_var)
+            else:
+                raise ValueError(f"Unknown navigation type: {nav_type}")
+            
+            # Cache the result with expiration tracking
+            self.context.navigation_cache[cache_key] = result
+            logger.debug(f"[NAV_ENHANCED] Returning result: {result}")
+            return result
+            
         except Exception as e:
-            logger.error(f"Navigation function evaluation error: {e}")
+            logger.error(f"Error in enhanced navigation function: {e}")
+            # Set error flag for debugging
+            if hasattr(self.context, 'stats'):
+                self.context.stats["navigation_errors"] = self.context.stats.get("navigation_errors", 0) + 1
             return None
+            
+        finally:
+            # Enhanced performance tracking
+            if hasattr(self.context, 'timing'):
+                navigation_time = time.time() - start_time
+                self.context.timing['navigation_total'] = self.context.timing.get('navigation_total', 0) + navigation_time
+                if navigation_time > 0.01:  # Log slow navigation calls
+                    logger.debug(f"[NAV_ENHANCED] Slow navigation call: {navigation_time:.3f}s for {nav_type}({var_name}.{column})")
+
+    def _handle_subset_navigation(self, var_name, column, nav_type, steps, cache_key):
+        """Handle navigation for subset variables with enhanced logic."""
+        logger.debug(f"[NAV_ENHANCED] Processing subset variable: {var_name}")
+        
+        component_vars = self.context.subsets[var_name]
+        all_indices = []
+        
+        # Collect indices from all component variables
+        for comp_var in component_vars:
+            if comp_var in self.context.variables:
+                all_indices.extend(self.context.variables[comp_var])
+        
+        if not all_indices:
+            self.context.navigation_cache[cache_key] = None
+            return None
+        
+        # Sort and deduplicate indices
+        all_indices = sorted(set(all_indices))
+        
+        # Apply steps parameter for subset navigation
+        if nav_type == 'FIRST':
+            if steps > len(all_indices):
+                idx = None
+            else:
+                idx = all_indices[steps - 1] if steps > 0 else all_indices[0]
+        else:  # LAST
+            if steps > len(all_indices):
+                idx = None
+            else:
+                idx = all_indices[-steps] if steps > 0 else all_indices[-1]
+        
+        if idx is None or not (0 <= idx < len(self.context.rows)):
+            self.context.navigation_cache[cache_key] = None
+            return None
+        
+        # Check partition boundaries
+        if self._check_partition_boundary(self.context.current_idx, idx):
+            result = self.context.rows[idx].get(column)
+            self.context.navigation_cache[cache_key] = result
+            return result
+        
+        self.context.navigation_cache[cache_key] = None
+        return None
+
+    def _build_optimized_timeline(self):
+        """Build an optimized timeline of variable assignments."""
+        # Use cached timeline if available and valid
+        if (hasattr(self.context, '_timeline') and 
+            hasattr(self.context, '_timeline_version') and
+            self.context._timeline_version == id(self.context.variables)):
+            return self.context._timeline
+        
+        logger.debug(f"[NAV_ENHANCED] Building optimized timeline from variables: {self.context.variables}")
+        
+        # Build timeline with improved algorithm
+        timeline = []
+        for var, indices in self.context.variables.items():
+            for idx in indices:
+                timeline.append((idx, var))
+        
+        # Sort by row index for consistent ordering
+        timeline.sort()
+        
+        # Cache with version tracking
+        self.context._timeline = timeline
+        self.context._timeline_version = id(self.context.variables)
+        
+        logger.debug(f"[NAV_ENHANCED] Built timeline with {len(timeline)} entries")
+        return timeline
+
+    def _handle_logical_navigation(self, var_name, column, nav_type, steps, timeline, cache_key):
+        """Handle FIRST/LAST navigation with enhanced logic."""
+        logger.debug(f"[NAV_ENHANCED] Logical navigation: {nav_type}({var_name}.{column})")
+        
+        if var_name is None:
+            # Navigate across all variables in the match
+            all_indices = []
+            for var, indices in self.context.variables.items():
+                all_indices.extend(indices)
+            
+            if not all_indices:
+                self.context.navigation_cache[cache_key] = None
+                return None
+            
+            all_indices = sorted(set(all_indices))
+            idx = all_indices[0] if nav_type == 'FIRST' else all_indices[-1]
+            
+        elif var_name not in self.context.variables or not self.context.variables[var_name]:
+            logger.debug(f"[NAV_ENHANCED] Variable {var_name} not found or empty")
+            self.context.navigation_cache[cache_key] = None
+            return None
+        else:
+            # Navigate within specific variable
+            var_indices = sorted(set(self.context.variables[var_name]))
+            
+            if not var_indices:
+                self.context.navigation_cache[cache_key] = None
+                return None
+            
+            # Apply steps parameter for logical navigation
+            if nav_type == 'FIRST':
+                if steps > len(var_indices):
+                    idx = None
+                else:
+                    idx = var_indices[steps - 1] if steps > 0 else var_indices[0]
+            else:  # LAST
+                if steps > len(var_indices):
+                    idx = None
+                else:
+                    idx = var_indices[-steps] if steps > 0 else var_indices[-1]
+        
+        if idx is None or not (0 <= idx < len(self.context.rows)):
+            self.context.navigation_cache[cache_key] = None
+            return None
+        
+        # Enhanced boundary checking
+        if self._check_partition_boundary(self.context.current_idx, idx):
+            result = self.context.rows[idx].get(column)
+            self.context.navigation_cache[cache_key] = result
+            return result
+        
+        self.context.navigation_cache[cache_key] = None
+        return None
+
+    def _handle_physical_navigation_define(self, column, nav_type, steps, cache_key):
+        """Handle PREV/NEXT navigation in DEFINE mode (physical navigation)."""
+        logger.debug(f"[NAV_ENHANCED] Physical navigation in DEFINE mode: {nav_type}({column}, {steps})")
+        
+        # For DEFINE mode, navigate through physical input sequence
+        curr_idx = self.context.current_idx
+        
+        if nav_type == 'PREV':
+            target_idx = curr_idx - steps
+        else:  # NEXT
+            target_idx = curr_idx + steps
+        
+        # Enhanced bounds checking
+        if target_idx < 0 or target_idx >= len(self.context.rows):
+            self.context.navigation_cache[cache_key] = None
+            return None
+        
+        # Check partition boundaries for physical navigation
+        if self._check_partition_boundary(curr_idx, target_idx):
+            result = self.context.rows[target_idx].get(column)
+            self.context.navigation_cache[cache_key] = result
+            return result
+        
+        self.context.navigation_cache[cache_key] = None
+        return None
+
+    def _handle_logical_timeline_navigation(self, var_name, column, nav_type, steps, timeline, cache_key, current_var):
+        """Handle PREV/NEXT navigation through pattern timeline."""
+        logger.debug(f"[NAV_ENHANCED] Timeline navigation: {nav_type}({column}, {steps}) for var={var_name}")
+        
+        if not timeline:
+            self.context.navigation_cache[cache_key] = None
+            return None
+        
+        # Find current position in timeline
+        curr_idx = self.context.current_idx
+        curr_pos = -1
+        
+        # Enhanced position finding with variable context
+        for i, (idx, var) in enumerate(timeline):
+            if idx == curr_idx and (current_var is None or var == current_var or var_name is None):
+                curr_pos = i
+                break
+        
+        if curr_pos < 0:
+            # Try alternative matching strategies
+            for i, (idx, var) in enumerate(timeline):
+                if idx == curr_idx:
+                    curr_pos = i
+                    break
+        
+        if curr_pos < 0:
+            self.context.navigation_cache[cache_key] = None
+            return None
+        
+        # Calculate target position
+        if nav_type == 'PREV':
+            target_pos = curr_pos - steps
+        else:  # NEXT
+            target_pos = curr_pos + steps
+        
+        # Bounds checking for timeline
+        if target_pos < 0 or target_pos >= len(timeline):
+            self.context.navigation_cache[cache_key] = None
+            return None
+        
+        target_idx, _ = timeline[target_pos]
+        
+        # Enhanced boundary checking
+        if self._check_partition_boundary(curr_idx, target_idx):
+            if 0 <= target_idx < len(self.context.rows):
+                result = self.context.rows[target_idx].get(column)
+                self.context.navigation_cache[cache_key] = result
+                return result
+        
+        self.context.navigation_cache[cache_key] = None
+        return None
+
+    def _check_partition_boundary(self, curr_idx, target_idx):
+        """Enhanced partition boundary checking."""
+        if not hasattr(self.context, 'partition_boundaries') or not self.context.partition_boundaries:
+            return True  # No partition boundaries defined
+        
+        try:
+            curr_partition = self.context.get_partition_for_row(curr_idx)
+            target_partition = self.context.get_partition_for_row(target_idx)
+            
+            return (curr_partition is not None and 
+                   target_partition is not None and 
+                   curr_partition == target_partition)
+        except Exception as e:
+            logger.warning(f"Error checking partition boundary: {e}")
+            return True  # Default to allowing navigation on error
 
     def _get_classifier(self, variable: Optional[str] = None) -> str:
         """Get the classifier (pattern variable name) for the current or specified position."""
@@ -1077,6 +1326,55 @@ class ConditionEvaluator(ast.NodeVisitor):
         # If no variable found, return empty string
         return ""
     
+    def _get_direct_classifier_at_index(self, row_idx: int, subset_var: Optional[str] = None) -> str:
+        """
+        Get the classifier value directly at a specific row index without recursion.
+        
+        Args:
+            row_idx: The row index to get the classifier for
+            subset_var: Optional subset variable name
+            
+        Returns:
+            The classifier value at the specified index
+        """
+        logger.debug(f"[CLASSIFIER_DEBUG] _get_direct_classifier_at_index(row_idx={row_idx}, subset_var={subset_var})")
+        
+        if subset_var:
+            # For subset variables, return the actual component variable name that matches
+            if subset_var in self.context.subsets:
+                component_vars = self.context.subsets[subset_var]
+                for comp_var in component_vars:
+                    if comp_var in self.context.variables and row_idx in self.context.variables[comp_var]:
+                        logger.debug(f"[CLASSIFIER_DEBUG] Found subset component {comp_var} for row {row_idx}")
+                        return comp_var  # Return the actual component variable, not the subset name
+            logger.debug(f"[CLASSIFIER_DEBUG] No subset component found for row {row_idx}, returning empty string")
+            return ""
+        
+        # Check which variable this row belongs to
+        logger.debug(f"[CLASSIFIER_DEBUG] Context variables: {self.context.variables}")
+        
+        if hasattr(self, '_row_var_index') and row_idx in self._row_var_index:
+            variables = self._row_var_index[row_idx]
+            logger.debug(f"[CLASSIFIER_DEBUG] Found in _row_var_index: {variables}")
+            if len(variables) == 1:
+                result = next(iter(variables))
+                logger.debug(f"[CLASSIFIER_DEBUG] Single variable: {result}")
+                return result
+            elif len(variables) > 1:
+                # Multiple variables - return the first one alphabetically for consistency
+                result = min(variables)
+                logger.debug(f"[CLASSIFIER_DEBUG] Multiple variables, returning: {result}")
+                return result
+        
+        # Fallback to searching through all variables
+        for var_name, indices in self.context.variables.items():
+            if row_idx in indices:
+                logger.debug(f"[CLASSIFIER_DEBUG] Found row {row_idx} in variable {var_name}")
+                return var_name
+        
+        logger.debug(f"[CLASSIFIER_DEBUG] No variable found for row {row_idx}, returning empty string")
+        return ""
+
     def _build_navigation_expr(self, node):
         """
         Convert an AST navigation function call to a string representation.
@@ -1130,6 +1428,197 @@ class ConditionEvaluator(ast.NodeVisitor):
                 
         # Combine into navigation expression
         return f"{func_name}({', '.join(args)})"
+
+    def evaluate_physical_navigation(self, nav_type, column, steps=1):
+        """
+        Physical navigation for DEFINE conditions.
+        
+        This method implements the correct SQL:2016 semantics for navigation functions
+        in DEFINE conditions, where PREV/NEXT refer to the previous/next row in the
+        input sequence (ordered by ORDER BY), not in the pattern match.
+        
+        Args:
+            nav_type: Type of navigation ('PREV' or 'NEXT')
+            column: Column name to retrieve
+            steps: Number of steps to navigate (default: 1)
+            
+        Returns:
+            The value at the navigated position or None if navigation is invalid
+        """
+        # Debug logging
+        logger = get_logger(__name__)
+        logger.debug(f"PHYSICAL_NAV: {nav_type}({column}, {steps}) at current_idx={self.context.current_idx}")
+        
+        # Input validation
+        if steps < 0:
+            raise ValueError(f"Navigation steps must be non-negative: {steps}")
+            
+        if nav_type not in ('PREV', 'NEXT'):
+            raise ValueError(f"Invalid navigation type: {nav_type}")
+        
+        # Get current row index in the input sequence
+        curr_idx = self.context.current_idx
+        
+        # Bounds check for current index
+        if curr_idx < 0 or curr_idx >= len(self.context.rows):
+            logger.debug(f"PHYSICAL_NAV: curr_idx {curr_idx} out of bounds [0, {len(self.context.rows)})")
+            return None
+            
+        # Special case for steps=0 (return current row's value)
+        if steps == 0:
+            result = self.context.rows[curr_idx].get(column)
+            logger.debug(f"PHYSICAL_NAV: steps=0, returning current row value: {result}")
+            return result
+            
+        # Calculate target index based on navigation type
+        if nav_type == 'PREV':
+            target_idx = curr_idx - steps
+        else:  # NEXT
+            target_idx = curr_idx + steps
+            
+        logger.debug(f"PHYSICAL_NAV: target_idx={target_idx} (curr_idx={curr_idx}, nav={nav_type}, steps={steps})")
+            
+        # Check index bounds
+        if target_idx < 0 or target_idx >= len(self.context.rows):
+            logger.debug(f"PHYSICAL_NAV: target_idx {target_idx} out of bounds [0, {len(self.context.rows)})")
+            return None
+            
+        # Check partition boundaries if defined
+        # Physical navigation respects partition boundaries
+        if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
+            current_partition = self.context.get_partition_for_row(curr_idx)
+            target_partition = self.context.get_partition_for_row(target_idx)
+            
+            if (current_partition is None or target_partition is None or
+                current_partition != target_partition):
+                logger.debug(f"PHYSICAL_NAV: partition boundary violation")
+                return None
+                
+        # Get the value from the target row
+        result = self.context.rows[target_idx].get(column)
+        logger.debug(f"PHYSICAL_NAV: returning value from row {target_idx}: {result}")
+        return result
+
+    def evaluate_navigation_function(self, nav_type, column, steps=1, var_name=None):
+        """
+        Context-aware navigation function that uses different strategies based on evaluation mode.
+        
+        DEFINE Mode (Physical Navigation):
+        - PREV/NEXT navigate through the input table rows in ORDER BY sequence
+        - Used for condition evaluation: B.price < PREV(price)
+        
+        MEASURES Mode (Logical Navigation):
+        - PREV/NEXT navigate through pattern match results
+        - Used for value extraction: FIRST(A.order_date)
+        
+        Args:
+            nav_type: Type of navigation ('PREV' or 'NEXT')
+            column: Column name to retrieve
+            steps: Number of steps to navigate (default: 1)
+            var_name: Optional variable name for context
+            
+        Returns:
+            The value at the navigated position or None if navigation is invalid
+        """
+        # Input validation
+        if steps < 0:
+            raise ValueError(f"Navigation steps must be non-negative: {steps}")
+            
+        if nav_type not in ('PREV', 'NEXT'):
+            raise ValueError(f"Invalid navigation type: {nav_type}")
+            
+        # Special case for steps=0 (return current row's value)
+        if steps == 0:
+            if 0 <= self.context.current_idx < len(self.context.rows):
+                return self.context.rows[self.context.current_idx].get(column)
+            return None
+        
+        # DEFINE Mode: Physical Navigation through input sequence
+        if self.evaluation_mode == 'DEFINE':
+            return self._physical_navigation(nav_type, column, steps)
+        
+        # MEASURES Mode: Logical Navigation through pattern matches
+        else:
+            return self._logical_navigation(nav_type, column, steps, var_name)
+    
+    def _physical_navigation(self, nav_type, column, steps):
+        """
+        Enhanced physical navigation for DEFINE conditions with production-ready optimizations.
+        
+        This implementation provides:
+        - Direct integration with optimized context navigation methods
+        - Consistent behavior across all pattern types
+        - Advanced error handling and boundary validation
+        - Performance optimization with early exits
+        - Enhanced null handling for proper SQL semantics
+        
+        Args:
+            nav_type: Navigation type ('PREV' or 'NEXT')
+            column: Column name to retrieve
+            steps: Number of steps to navigate
+            
+        Returns:
+            The value at the navigated position or None if navigation is invalid
+        """
+        start_time = time.time()
+        
+        try:
+            # Use advanced navigation methods from context
+            if nav_type == 'PREV':
+                row = self.context.prev(steps)
+            else:  # NEXT
+                row = self.context.next(steps)
+                
+            # Get column value with proper null handling
+            result = None if row is None else row.get(column)
+            
+            # Track specific navigation type metrics
+            if hasattr(self.context, 'stats'):
+                metric_key = f"{nav_type.lower()}_navigation_calls"
+                self.context.stats[metric_key] = self.context.stats.get(metric_key, 0) + 1
+            
+            return result
+            
+        except Exception as e:
+            # Enhanced error handling with logging
+            logger = get_logger(__name__)
+            logger.error(f"Error in physical navigation ({nav_type}): {str(e)}")
+            
+            # Track errors
+            if hasattr(self.context, 'stats'):
+                self.context.stats["navigation_errors"] = self.context.stats.get("navigation_errors", 0) + 1
+                
+            # Set context error flag for pattern matching to handle
+            self.context._navigation_context_error = True
+            
+            # Return None for proper SQL NULL comparison semantics
+            return None
+            
+        finally:
+            # Track performance metrics
+            if hasattr(self.context, 'timing'):
+                navigation_time = time.time() - start_time
+                self.context.timing['physical_navigation'] = self.context.timing.get('physical_navigation', 0) + navigation_time
+    
+    def _logical_navigation(self, nav_type, column, steps, var_name=None):
+        """
+        Logical navigation for MEASURES expressions.
+        Navigate through pattern match timeline.
+        """
+        # This uses the existing complex logic for pattern timeline navigation
+        return self._get_navigation_value(var_name, column, nav_type, steps)
+            
+        # Check partition boundaries if defined
+        if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
+            current_partition = self.context.get_partition_for_row(target_idx)
+            target_partition = self.context.get_partition_for_row(target_idx)
+            
+            if (current_partition is None or target_partition is None or
+                current_partition != target_partition):
+                return None
+                
+        # Get the value from the target row
+        return self.context.rows[target_idx].get(column)
 
     def visit_Constant(self, node: ast.Constant):
         """Handle all constant types (numbers, strings, booleans, None)"""
@@ -1220,7 +1709,7 @@ class ConditionEvaluator(ast.NodeVisitor):
         For example: 'A' in ('A', 'START') needs to parse the tuple correctly.
         
         Args:
-            node: AST Tuple node representing a tuple literal
+            node: AST Tuple node
             
         Returns:
             A Python tuple with evaluated elements
@@ -1248,7 +1737,7 @@ class ConditionEvaluator(ast.NodeVisitor):
         For example: 'A' in ['A', 'START'] needs to parse the list correctly.
         
         Args:
-            node: AST List node representing a list literal
+            node: AST List node
             
         Returns:
             A Python list with evaluated elements
@@ -1325,8 +1814,15 @@ class ConditionEvaluator(ast.NodeVisitor):
             return None
 
 
-# Note: All navigation function evaluation is now handled by the centralized
-# navigation engine in src.matcher.navigation_functions
+# External function imports that are referenced but defined elsewhere
+def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str] = None, recursion_depth: int = 0) -> Any:
+    """
+    Placeholder for nested navigation evaluation.
+    This function should be implemented in a separate module to handle complex nested navigation.
+    """
+    # This is a placeholder - the actual implementation should be in a separate module
+    logger.warning(f"evaluate_nested_navigation called but not implemented: {expr}")
+    return None
 
 
 def compile_condition(condition_str, evaluation_mode='DEFINE'):
@@ -1351,14 +1847,6 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
     try:
         # Convert SQL syntax to Python syntax
         python_condition = _sql_to_python_condition(condition_str)
-        
-        # CRITICAL FIX: Clean up multiline conditions for Python parsing
-        # Remove line breaks and normalize whitespace that can cause syntax errors
-        python_condition = ' '.join(python_condition.split())
-        
-        # Debug logging
-        if "AND" in condition_str.upper():
-            logger.debug(f"[CONDITION_DEBUG] Original: '{condition_str}' -> Python: '{python_condition}'")
         
         # Parse the condition
         tree = ast.parse(python_condition, mode='eval')
@@ -1390,77 +1878,13 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
                 
         return evaluate_condition
     except SyntaxError as e:
-        # Log the error with the converted Python condition for better debugging
-        logger.error(f"Syntax error in converted Python condition '{python_condition}': {e}")
-        logger.error(f"Original SQL condition was: '{condition_str}'")
+        # Log the error and return a function that always returns False
+        logger.error(f"Syntax error in condition '{condition_str}': {e}")
         return lambda row, ctx: False
     except Exception as e:
         # Log the error and return a function that always returns False
         logger.error(f"Error compiling condition '{condition_str}': {e}")
         return lambda row, ctx: False
-
-
-def _sql_to_python_condition(condition_str: str) -> str:
-    """
-    Convert SQL syntax to Python syntax for condition evaluation.
-    
-    This function handles common SQL-to-Python conversions needed for 
-    row pattern matching conditions.
-    
-    Args:
-        condition_str: SQL condition string
-        
-    Returns:
-        Python-compatible condition string
-    """
-    if not condition_str:
-        return ""
-    
-    # Basic SQL to Python conversions
-    python_condition = condition_str
-    
-    # Handle SQL NULL comparisons first - convert to function calls
-    # For pandas compatibility, we need to handle both None and NaN
-    # Convert IS NULL to a special function call that checks for both None and NaN
-    python_condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NOT\s+NULL\b', r'not __is_null(\1)', python_condition, flags=re.IGNORECASE)
-    python_condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NULL\b', r'__is_null(\1)', python_condition, flags=re.IGNORECASE)
-    
-    # Handle SQL BETWEEN first (before AND/OR replacement)
-    # value BETWEEN a AND b -> (value >= a and value <= b)
-    between_pattern = r'(\w+(?:\.\w+)?)\s+BETWEEN\s+(\d+(?:\.\d+)?)\s+AND\s+(\d+(?:\.\d+)?)'
-    python_condition = re.sub(between_pattern, r'(\1 >= \2 and \1 <= \3)', python_condition, flags=re.IGNORECASE)
-    
-    # Handle SQL CASE statements - support multiple WHEN clauses
-    python_condition = _convert_case_expression(python_condition)
-    
-    # Handle SQL IN and NOT IN predicates - convert to Python syntax
-    # Convert "column IN ('a', 'b', 'c')" to "column in ('a', 'b', 'c')"
-    # Convert "column NOT IN ('a', 'b', 'c')" to "column not in ('a', 'b', 'c')"
-    python_condition = re.sub(r'\bNOT\s+IN\b', ' not in ', python_condition, flags=re.IGNORECASE)
-    python_condition = re.sub(r'\bIN\b', ' in ', python_condition, flags=re.IGNORECASE)
-    
-    # Replace SQL inequality operators first (more specific patterns)
-    python_condition = re.sub(r'\s*<>\s*', ' != ', python_condition)
-    python_condition = re.sub(r'(?<![<>=!])\s*!=\s*', ' != ', python_condition)  # Don't match if already part of another operator
-    
-    # Replace SQL equality operator (be careful not to affect >=, <=, !=, <>)
-    python_condition = re.sub(r'(?<![<>=!])\s*=\s*(?![=])', ' == ', python_condition)
-    
-    # Handle SQL AND/OR - ensure we don't break existing 'and' keywords
-    python_condition = re.sub(r'\bAND\b', ' and ', python_condition, flags=re.IGNORECASE)
-    python_condition = re.sub(r'\bOR\b', ' or ', python_condition, flags=re.IGNORECASE)  
-    python_condition = re.sub(r'\bNOT\b', ' not ', python_condition, flags=re.IGNORECASE)
-    
-    # CRITICAL FIX: Handle string literal quote consistency - ensure we use double quotes to avoid conflicts
-    # Convert single-quoted string literals to double-quoted ones to avoid syntax issues
-    # This prevents syntax errors when the condition is embedded in Python eval() calls
-    python_condition = re.sub(r"'([^']*)'", r'"\1"', python_condition)
-    
-    # ADDITIONAL FIX: Clean up any remaining whitespace issues that could cause parsing errors
-    # Normalize whitespace around operators and keywords
-    python_condition = re.sub(r'\s+', ' ', python_condition).strip()
-    
-    return python_condition
 
 
 def validate_navigation_conditions(pattern_variables, define_clauses):
@@ -1514,143 +1938,778 @@ def validate_navigation_conditions(pattern_variables, define_clauses):
     # If all checks pass
     return True
 
-def _is_boolean_expression(node: ast.AST) -> bool:
-    """
-    Determine if an AST node represents a boolean expression.
-    
-    Args:
-        node: AST node to check
-        
-    Returns:
-        True if the node represents a boolean expression, False otherwise
-    """
-    # Comparison operators always return boolean
-    if isinstance(node, ast.Compare):
-        return True
-    
-    # Boolean operations always return boolean
-    if isinstance(node, ast.BoolOp):
-        return True
-    
-    # Unary not operation returns boolean
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        return True
-    
-    # Function calls that typically return boolean
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-        func_name = node.func.id.upper()
-        # Mathematical comparison functions
-        if func_name in ('ISNAN', 'ISINF', 'ISFINITE'):
-            return True
-        # NULL checking functions
-        elif func_name in ('IS_NULL', '_IS_NULL', 'ISNULL'):
-            return True
-        elif func_name in ('EXISTS', 'IS_NULL', 'IS_NOT_NULL'):
-            return True
-    
-    # For unknown node types, default to boolean for safety
-    return True
 
-def _convert_case_expression(condition_str: str) -> str:
+def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str] = None, recursion_depth: int = 0) -> Any:
     """
-    Convert SQL CASE expressions to Python syntax with support for multiple WHEN clauses.
+    Enhanced nested navigation evaluation with comprehensive pattern support.
     
-    Handles both simple and complex CASE expressions:
-    - CASE WHEN condition THEN value ELSE value END
-    - CASE WHEN condition1 THEN value1 WHEN condition2 THEN value2 ELSE value3 END
+    Key improvements:
+    - Advanced recursion protection with depth tracking
+    - Enhanced parser for complex navigation expressions
+    - Better error handling and recovery mechanisms
+    - Improved performance with smart caching
+    - Support for more complex nested patterns
+    - Thread-safe evaluation with proper context management
+    
+    This function handles complex navigation expressions that may contain nested function calls
+    like NEXT(PREV(value)), FIRST(CLASSIFIER()), PREV(LAST(A.value), 3), and SQL-specific 
+    constructs like PREV(RUNNING LAST(value)).
     
     Args:
-        condition_str: SQL condition string that may contain CASE expressions
+        expr: The navigation expression string to evaluate
+        context: The row context for evaluation
+        current_idx: Current row index
+        current_var: Current pattern variable (optional)
+        recursion_depth: Current recursion depth for protection
         
     Returns:
-        Python-compatible condition string
+        The evaluated result or None if evaluation fails
     """
-    # Pattern to match CASE expressions with multiple WHEN clauses
-    case_pattern = r'CASE\s+(.*?)\s+END'
     
-    def convert_single_case(match):
-        case_body = match.group(1).strip()
+    try:
+        import re
+        import ast
         
-        # Split the case body into WHEN/THEN pairs and ELSE clause
-        parts = []
-        current_part = ""
-        in_when = False
-        paren_count = 0
+        # Enhanced recursion protection
+        max_recursion_depth = 15
+        if recursion_depth >= max_recursion_depth:
+            logger.warning(f"[NESTED_NAV] Maximum recursion depth {max_recursion_depth} reached for: '{expr}'")
+            return None
         
-        tokens = case_body.split()
-        i = 0
+        # Enhanced expression validation and cleanup
+        if not expr or not isinstance(expr, str):
+            logger.warning(f"[NESTED_NAV] Invalid expression: {expr}")
+            return None
         
-        while i < len(tokens):
-            token = tokens[i].upper()
+        processed_expr = expr.strip()
+        if not processed_expr:
+            return None
+        
+        # Set up evaluation context with recursion protection
+        original_evaluator = getattr(context, '_active_evaluator', None)
+        
+        logger.debug(f"[NESTED_NAV] Evaluating: '{processed_expr}' at depth {recursion_depth}")
+        
+        # Enhanced pattern matching for complex navigation structures
+        
+        # Pattern 1: Complex arithmetic with multiple navigation functions
+        # Example: PREV(LAST(A.value), 3) + FIRST(A.value) + PREV(LAST(B.value), 2)
+        complex_arithmetic_pattern = r'.*(?:PREV|NEXT|FIRST|LAST)\s*\(.*[\+\-\*\/].*(?:PREV|NEXT|FIRST|LAST)\s*\('
+        if re.search(complex_arithmetic_pattern, processed_expr, re.IGNORECASE):
+            logger.debug(f"[NESTED_NAV] Complex arithmetic navigation detected")
+            return _evaluate_complex_arithmetic_navigation(processed_expr, context, current_idx, current_var, recursion_depth)
+        
+        # Pattern 2: Nested navigation functions like PREV(FIRST(A.value), 3)
+        nested_nav_pattern = r'(PREV|NEXT)\s*\(\s*(FIRST|LAST)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\)\s*(?:,\s*(\d+))?\s*\)'
+        nested_nav_match = re.match(nested_nav_pattern, processed_expr, re.IGNORECASE)
+        
+        if nested_nav_match:
+            return _evaluate_nested_navigation_pattern(nested_nav_match, context, current_idx, recursion_depth)
+        
+        # Pattern 3: CLASSIFIER navigation functions
+        classifier_nav_pattern = r'(FIRST|LAST|PREV|NEXT)\s*\(\s*CLASSIFIER\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)\s*(?:,\s*(\d+))?\s*\)'
+        classifier_nav_match = re.match(classifier_nav_pattern, processed_expr, re.IGNORECASE)
+        
+        if classifier_nav_match:
+            return _evaluate_classifier_navigation(classifier_nav_match, context, current_idx, recursion_depth)
+        
+        # Pattern 4: Enhanced function call patterns with better variable references
+        enhanced_func_pattern = r'(PREV|NEXT|FIRST|LAST)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*(?:,\s*(\d+))?\s*\)'
+        enhanced_func_match = re.match(enhanced_func_pattern, processed_expr, re.IGNORECASE)
+        
+        if enhanced_func_match:
+            return _evaluate_enhanced_function_call(enhanced_func_match, context, current_idx, recursion_depth)
+        
+        # Pattern 5: SQL-specific constructs (RUNNING, FINAL keywords)
+        sql_construct_pattern = r'(PREV|NEXT)\s*\(\s*(RUNNING|FINAL)\s+(FIRST|LAST)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\)\s*(?:,\s*(\d+))?\s*\)'
+        sql_construct_match = re.match(sql_construct_pattern, processed_expr, re.IGNORECASE)
+        
+        if sql_construct_match:
+            return _evaluate_sql_construct_navigation(sql_construct_match, context, current_idx, recursion_depth)
+        
+        # Fallback: Try AST evaluation with enhanced error handling
+        try:
+            return _evaluate_ast_navigation(processed_expr, context, current_idx, current_var, recursion_depth)
+        except Exception as e:
+            logger.debug(f"[NESTED_NAV] AST evaluation failed: {e}")
+            return None
             
-            if token == 'WHEN':
-                if current_part.strip():
-                    parts.append(current_part.strip())
-                current_part = ""
-                in_when = True
-                i += 1
-                continue
-            elif token == 'THEN':
-                if in_when:
-                    # Find the condition (everything between WHEN and THEN)
-                    condition_tokens = []
-                    j = i + 1
-                    while j < len(tokens) and tokens[j].upper() != 'WHEN' and tokens[j].upper() != 'ELSE':
-                        condition_tokens.append(tokens[j])
-                        j += 1
-                    
-                    condition = " ".join(condition_tokens) if condition_tokens else ""
-                    parts.append(f"WHEN {current_part} THEN {condition}")
-                    current_part = ""
-                    in_when = False
-                    i = j - 1
-                i += 1
-                continue
-            elif token == 'ELSE':
-                if current_part.strip():
-                    parts.append(current_part.strip())
-                # Get everything after ELSE
-                else_tokens = tokens[i + 1:]
-                parts.append(f"ELSE {' '.join(else_tokens)}")
-                break
+    except Exception as e:
+        logger.error(f"[NESTED_NAV] Evaluation error for '{expr}': {e}")
+        return None
+    finally:
+        # Restore original evaluator context
+        if original_evaluator is not None:
+            context._active_evaluator = original_evaluator
+
+
+def _evaluate_complex_arithmetic_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str], recursion_depth: int) -> Any:
+    """Evaluate complex arithmetic expressions with multiple navigation functions."""
+    try:
+        logger.debug(f"[NESTED_NAV] Evaluating complex arithmetic: {expr}")
+        
+        # Use AST parsing for complex arithmetic
+        tree = ast.parse(expr, mode='eval')
+        
+        # Create or reuse evaluator with recursion protection
+        if hasattr(context, '_active_evaluator') and context._active_evaluator is not None:
+            evaluator = context._active_evaluator
+            evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
+        else:
+            evaluator = ConditionEvaluator(context, 'MEASURES', recursion_depth + 1)
+            evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
+            context._active_evaluator = evaluator
+        
+        result = evaluator.visit(tree.body)
+        logger.debug(f"[NESTED_NAV] Complex arithmetic result: {result}")
+        return result
+        
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] Complex arithmetic evaluation failed: {e}")
+        return None
+
+
+def _evaluate_nested_navigation_pattern(match, context: RowContext, current_idx: int, recursion_depth: int) -> Any:
+    """Evaluate nested navigation patterns like PREV(FIRST(A.value), 3)."""
+    try:
+        outer_func = match.group(1).upper()  # PREV or NEXT
+        inner_func = match.group(2).upper()  # FIRST or LAST
+        column_ref = match.group(3)          # A.value or just column
+        steps = int(match.group(4)) if match.group(4) else 1
+        
+        logger.debug(f"[NESTED_NAV] Nested pattern: {outer_func}({inner_func}({column_ref}), {steps})")
+        
+        # Parse column reference
+        if '.' in column_ref:
+            var_name, col_name = column_ref.split('.', 1)
+        else:
+            var_name = None
+            col_name = column_ref
+        
+        # Find the FIRST/LAST row index for the variable
+        if var_name and hasattr(context, 'variables') and var_name in context.variables:
+            var_indices = context.variables[var_name]
+            logger.debug(f"[NESTED_NAV] Variable {var_name} indices: {var_indices}")
+            
+            if var_indices:
+                if inner_func == 'FIRST':
+                    target_base_idx = min(var_indices)
+                else:  # LAST
+                    target_base_idx = max(var_indices)
+                
+                logger.debug(f"[NESTED_NAV] {inner_func} index: {target_base_idx}")
+                
+                # Apply PREV/NEXT with steps
+                if outer_func == 'PREV':
+                    final_idx = target_base_idx - steps
+                else:  # NEXT
+                    final_idx = target_base_idx + steps
+                
+                logger.debug(f"[NESTED_NAV] Final index: {final_idx}")
+                
+                # Get value with bounds checking
+                if 0 <= final_idx < len(context.rows):
+                    result = context.rows[final_idx].get(col_name)
+                    logger.debug(f"[NESTED_NAV] Result: {result}")
+                    return result
+                else:
+                    logger.debug(f"[NESTED_NAV] Index {final_idx} out of bounds")
+                    return None
             else:
-                current_part += " " + tokens[i]
-                i += 1
+                logger.debug(f"[NESTED_NAV] No indices for variable {var_name}")
+                return None
+        else:
+            # Handle case where var_name is None (column-only reference)
+            logger.debug(f"[NESTED_NAV] Column-only reference: {col_name}")
+            
+            # Find all indices in current match
+            all_indices = []
+            if hasattr(context, 'variables'):
+                for var, indices in context.variables.items():
+                    all_indices.extend(indices)
+            
+            if all_indices:
+                all_indices = sorted(set(all_indices))
+                
+                if inner_func == 'FIRST':
+                    target_base_idx = all_indices[0]
+                else:  # LAST
+                    target_base_idx = all_indices[-1]
+                
+                # Apply PREV/NEXT
+                if outer_func == 'PREV':
+                    final_idx = target_base_idx - steps
+                else:  # NEXT
+                    final_idx = target_base_idx + steps
+                
+                if 0 <= final_idx < len(context.rows):
+                    result = context.rows[final_idx].get(col_name)
+                    return result
+            
+            return None
         
-        if current_part.strip():
-            parts.append(current_part.strip())
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] Nested pattern evaluation failed: {e}")
+        return None
+
+
+def _evaluate_classifier_navigation(match, context: RowContext, current_idx: int, recursion_depth: int) -> Any:
+    """Evaluate CLASSIFIER navigation functions."""
+    try:
+        nav_func = match.group(1).upper()     # FIRST, LAST, PREV, NEXT
+        classifier_var = match.group(2)       # Optional variable name
+        steps = int(match.group(3)) if match.group(3) else 1
         
-        # Now convert the parts to Python syntax
-        if len(parts) == 0:
-            return "None"
+        logger.debug(f"[NESTED_NAV] Classifier navigation: {nav_func}(CLASSIFIER({classifier_var}), {steps})")
         
-        # Build the Python expression from right to left
-        result = None
+        if nav_func in ('FIRST', 'LAST'):
+            # Handle FIRST/LAST CLASSIFIER
+            return _handle_first_last_classifier_navigation(nav_func, classifier_var, steps, context)
+        elif nav_func in ('PREV', 'NEXT'):
+            # Handle PREV/NEXT CLASSIFIER
+            return _handle_prev_next_classifier_navigation(nav_func, classifier_var, steps, context, current_idx)
+        else:
+            logger.warning(f"[NESTED_NAV] Unsupported classifier navigation: {nav_func}")
+            return None
+            
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] Classifier navigation failed: {e}")
+        return None
+
+
+def _handle_first_last_classifier_navigation(nav_func: str, classifier_var: Optional[str], steps: int, context: RowContext) -> Any:
+    """Handle FIRST/LAST CLASSIFIER navigation."""
+    try:
+        # Check if we're in FINAL semantics mode
+        # For FINAL semantics, LAST should return the absolute last classifier, not relative to current position
+        is_final_semantics = False
         
-        # Find the ELSE clause first
-        else_value = "None"
-        when_clauses = []
+        # Try to detect FINAL semantics from evaluator or context
+        if hasattr(context, '_active_evaluator'):
+            evaluator = context._active_evaluator
+            # Check if evaluator is in MEASURES mode, which typically indicates FINAL semantics for LAST
+            if hasattr(evaluator, 'evaluation_mode') and evaluator.evaluation_mode == 'MEASURES':
+                is_final_semantics = True
         
-        for part in parts:
-            if part.startswith('ELSE '):
-                else_value = part[5:].strip()
-            elif part.startswith('WHEN '):
-                # Parse "WHEN condition THEN value"
-                when_part = part[5:].strip()  # Remove "WHEN "
-                if ' THEN ' in when_part:
-                    condition, value = when_part.split(' THEN ', 1)
-                    when_clauses.append((condition.strip(), value.strip()))
+        # Alternative: Check if context has semantics information
+        if hasattr(context, '_current_semantics'):
+            is_final_semantics = context._current_semantics == 'FINAL'
+            
+        logger.debug(f"[CLASSIFIER_NAV] {nav_func}(CLASSIFIER({classifier_var}), {steps}) - FINAL semantics: {is_final_semantics}")
         
-        # Build the nested conditional expression
-        if not when_clauses:
-            return else_value
+        if classifier_var and hasattr(context, 'subsets') and classifier_var in context.subsets:
+            # Subset variable navigation
+            component_vars = context.subsets[classifier_var]
+            all_indices = []
+            
+            for comp_var in component_vars:
+                if comp_var in context.variables:
+                    all_indices.extend(context.variables[comp_var])
+            
+            if all_indices:
+                all_indices = sorted(set(all_indices))
+                
+                if nav_func == 'FIRST':
+                    if steps > len(all_indices):
+                        return None
+                    target_idx = all_indices[steps - 1] if steps > 0 else all_indices[0]
+                else:  # LAST
+                    if is_final_semantics:
+                        # FINAL semantics: always return classifier from the absolute last row
+                        target_idx = all_indices[-1] if all_indices else None
+                        if target_idx is None:
+                            return None
+                    else:
+                        # RUNNING semantics: relative to current position
+                        if not hasattr(context, 'current_idx'):
+                            return None
+                        current_idx = context.current_idx
+                        target_idx = current_idx - steps
+                        if target_idx < 0 or target_idx not in all_indices:
+                            return None
+                
+                logger.debug(f"[CLASSIFIER_NAV] Subset navigation target_idx: {target_idx}")
+                return _get_classifier_at_index(target_idx, classifier_var, context)
+        else:
+            # General CLASSIFIER navigation
+            all_indices = []
+            if hasattr(context, 'variables'):
+                for var, indices in context.variables.items():
+                    all_indices.extend(indices)
+            
+            if all_indices:
+                all_indices = sorted(set(all_indices))
+                
+                if nav_func == 'FIRST':
+                    if steps > len(all_indices):
+                        return None
+                    target_idx = all_indices[steps - 1] if steps > 0 else all_indices[0]
+                else:  # LAST
+                    if is_final_semantics:
+                        # FINAL semantics: always return classifier from the absolute last row in the match
+                        target_idx = all_indices[-1] if all_indices else None
+                        if target_idx is None:
+                            return None
+                        logger.debug(f"[CLASSIFIER_NAV] FINAL LAST: using absolute last index {target_idx}")
+                    else:
+                        # RUNNING semantics: relative to current position
+                        if not hasattr(context, 'current_idx'):
+                            return None
+                        current_idx = context.current_idx
+                        target_idx = current_idx - steps
+                        if target_idx < 0:
+                            return None
+                        logger.debug(f"[CLASSIFIER_NAV] RUNNING LAST: using relative index {target_idx} (current={current_idx} - steps={steps})")
+                
+                logger.debug(f"[CLASSIFIER_NAV] General navigation target_idx: {target_idx}")
+                return _get_classifier_at_index(target_idx, None, context)
         
-        # Build from right to left: (value1 if condition1 else (value2 if condition2 else else_value))
-        result = else_value
-        for condition, value in reversed(when_clauses):
-            result = f"({value} if {condition} else {result})"
+        return None
+        
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] FIRST/LAST classifier navigation failed: {e}")
+        return None
+
+
+def _handle_prev_next_classifier_navigation(nav_func: str, classifier_var: Optional[str], steps: int, context: RowContext, current_idx: int) -> Any:
+    """Handle PREV/NEXT CLASSIFIER navigation."""
+    try:
+        if nav_func == 'PREV':
+            target_idx = current_idx - steps
+        else:  # NEXT
+            target_idx = current_idx + steps
+        
+        # Check bounds
+        if target_idx < 0 or target_idx >= len(context.rows):
+            return None
+        
+        return _get_classifier_at_index(target_idx, classifier_var, context)
+        
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] PREV/NEXT classifier navigation failed: {e}")
+        return None
+
+
+def _get_classifier_at_index(row_idx: int, subset_var: Optional[str], context: RowContext) -> str:
+    """Get classifier value at specific index."""
+    try:
+        if row_idx < 0 or row_idx >= len(context.rows):
+            return ""
+        
+        # Find which variable(s) this row belongs to
+        matching_vars = []
+        
+        # Use full variables for forward navigation if available
+        variables_to_search = getattr(context, '_full_match_variables', None) or getattr(context, 'variables', {})
+        
+        if variables_to_search:
+            for var_name, indices in variables_to_search.items():
+                if row_idx in indices:
+                    matching_vars.append(var_name)
+        
+        if not matching_vars:
+            return ""
+        
+        # If subset variable specified, validate
+        if subset_var and hasattr(context, 'subsets') and subset_var in context.subsets:
+            subset_components = context.subsets[subset_var]
+            matching_vars = [var for var in matching_vars if var in subset_components]
+            if matching_vars:
+                # Return the actual component variable, not the subset name
+                result_var = matching_vars[0]
+                if hasattr(context, 'defined_variables') and context.defined_variables:
+                    if result_var.lower() in [v.lower() for v in context.defined_variables]:
+                        return result_var
+                    else:
+                        return result_var.upper()
+                else:
+                    return result_var.upper()
+        
+        if matching_vars:
+            # Apply case sensitivity rules for classifier
+            result_var = matching_vars[0]
+            if hasattr(context, 'defined_variables') and context.defined_variables:
+                if result_var.lower() in [v.lower() for v in context.defined_variables]:
+                    return result_var
+                else:
+                    return result_var.upper()
+            else:
+                return result_var.upper()
+        
+        return ""
+        
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] Get classifier at index failed: {e}")
+        return ""
+
+
+def _evaluate_enhanced_function_call(match, context: RowContext, current_idx: int, recursion_depth: int) -> Any:
+    """Evaluate enhanced function calls with better variable handling."""
+    try:
+        func_name = match.group(1).upper()
+        column_ref = match.group(2)
+        steps = int(match.group(3)) if match.group(3) else 1
+        
+        logger.debug(f"[NESTED_NAV] Enhanced function call: {func_name}({column_ref}, {steps})")
+        
+        # Parse column reference
+        if '.' in column_ref:
+            var_name, col_name = column_ref.split('.', 1)
+        else:
+            var_name = None
+            col_name = column_ref
+        
+        # Create evaluator for navigation
+        evaluator = ConditionEvaluator(context, 'MEASURES', recursion_depth + 1)
+        evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
+        
+        # Use enhanced navigation function
+        result = evaluator._get_navigation_value(var_name, col_name, func_name, steps)
+        logger.debug(f"[NESTED_NAV] Enhanced function result: {result}")
+        return result
+        
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] Enhanced function call failed: {e}")
+        return None
+
+
+def _evaluate_sql_construct_navigation(match, context: RowContext, current_idx: int, recursion_depth: int) -> Any:
+    """Evaluate SQL construct navigation (RUNNING/FINAL keywords)."""
+    try:
+        outer_func = match.group(1).upper()     # PREV or NEXT
+        sql_keyword = match.group(2).upper()   # RUNNING or FINAL
+        inner_func = match.group(3).upper()    # FIRST or LAST
+        column_ref = match.group(4)
+        steps = int(match.group(5)) if match.group(5) else 1
+        
+        logger.debug(f"[NESTED_NAV] SQL construct: {outer_func}({sql_keyword} {inner_func}({column_ref}), {steps})")
+        
+        # Parse column reference
+        if '.' in column_ref:
+            var_name, col_name = column_ref.split('.', 1)
+        else:
+            var_name = None
+            col_name = column_ref
+        
+        # Handle RUNNING vs FINAL semantics
+        if sql_keyword == 'RUNNING':
+            # RUNNING semantics: consider only rows up to current_idx in the match
+            # Find the appropriate base row index using RUNNING semantics
+            target_base_idx = _find_running_base_index(inner_func, var_name, col_name, context, current_idx)
+        else:  # FINAL
+            # FINAL semantics: consider all rows in the complete match
+            target_base_idx = _find_final_base_index(inner_func, var_name, col_name, context)
+        
+        if target_base_idx is None:
+            logger.debug(f"[NESTED_NAV] Could not find base index for {sql_keyword} {inner_func}")
+            return None
+        
+        logger.debug(f"[NESTED_NAV] {sql_keyword} {inner_func} base index: {target_base_idx}")
+        
+        # Apply PREV/NEXT with steps
+        if outer_func == 'PREV':
+            final_idx = target_base_idx - steps
+        else:  # NEXT
+            final_idx = target_base_idx + steps
+        
+        logger.debug(f"[NESTED_NAV] Final index after {outer_func}({steps}): {final_idx}")
+        
+        # Get value with bounds checking
+        if 0 <= final_idx < len(context.rows):
+            result = context.rows[final_idx].get(col_name)
+            logger.debug(f"[NESTED_NAV] Result: {result}")
+            return result
+        else:
+            logger.debug(f"[NESTED_NAV] Index {final_idx} out of bounds [0, {len(context.rows)})")
+            return None
+        
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] SQL construct navigation failed: {e}")
+        return None
+
+
+def _find_running_base_index(inner_func: str, var_name: Optional[str], col_name: str, context: RowContext, current_idx: int) -> Optional[int]:
+    """Find base index for RUNNING semantics (considering only rows up to current_idx)."""
+    try:
+        if var_name and hasattr(context, 'variables') and var_name in context.variables:
+            # Variable-specific running semantics
+            var_indices = [idx for idx in context.variables[var_name] if idx <= current_idx]
+            if var_indices:
+                if inner_func == 'FIRST':
+                    return min(var_indices)
+                else:  # LAST
+                    return max(var_indices)
+        else:
+            # Column-only reference: consider all rows up to current_idx
+            if inner_func == 'FIRST':
+                return 0 if current_idx >= 0 else None
+            else:  # LAST
+                return current_idx if current_idx >= 0 else None
+        
+        return None
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] Error finding running base index: {e}")
+        return None
+
+
+def _find_final_base_index(inner_func: str, var_name: Optional[str], col_name: str, context: RowContext) -> Optional[int]:
+    """Find base index for FINAL semantics (considering all rows in match)."""
+    try:
+        if var_name and hasattr(context, 'variables') and var_name in context.variables:
+            # Variable-specific final semantics
+            var_indices = context.variables[var_name]
+            if var_indices:
+                if inner_func == 'FIRST':
+                    return min(var_indices)
+                else:  # LAST
+                    return max(var_indices)
+        else:
+            # Column-only reference: consider all rows in context
+            if inner_func == 'FIRST':
+                return 0 if context.rows else None
+            else:  # LAST
+                return len(context.rows) - 1 if context.rows else None
+        
+        return None
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] Error finding final base index: {e}")
+        return None
+
+
+def _evaluate_ast_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str], recursion_depth: int) -> Any:
+    """Fallback AST evaluation for navigation expressions."""
+    try:
+        logger.debug(f"[NESTED_NAV] AST fallback evaluation: {expr}")
+        
+        tree = ast.parse(expr, mode='eval')
+        
+        # Create evaluator with recursion protection
+        evaluator = ConditionEvaluator(context, 'MEASURES', recursion_depth + 1)
+        evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
+        
+        # Set active evaluator to prevent further nesting
+        original_evaluator = getattr(context, '_active_evaluator', None)
+        context._active_evaluator = evaluator
+        
+        try:
+            result = evaluator.visit(tree.body)
+            logger.debug(f"[NESTED_NAV] AST result: {result}")
+            return result
+        finally:
+            context._active_evaluator = original_evaluator
+        
+    except Exception as e:
+        logger.debug(f"[NESTED_NAV] AST evaluation failed: {e}")
+        return None
+
+
+def _sql_to_python_condition(condition: str) -> str:
+    """
+    Convert SQL condition syntax to Python expression syntax.
+    
+    Args:
+        condition: SQL condition string
+        
+    Returns:
+        Python expression string
+    """
+    if not condition:
+        return condition
+    
+    import re
+    
+    # Clean up whitespace and newlines to make valid Python expression
+    # Replace newlines and multiple spaces with single spaces
+    condition = re.sub(r'\s+', ' ', condition.strip())
+    
+    # Convert SQL equality to Python equality
+    # Handle cases like 'value = 10' -> 'value == 10'
+    # But avoid changing '==' to '===='
+    
+    # First, preserve quoted strings to avoid corrupting them during regex replacements
+    # Find all quoted strings and replace them with placeholders
+    quote_patterns = [
+        (r"'([^']*)'", "SINGLE_QUOTE_"),  # Single quotes
+        (r'"([^"]*)"', "DOUBLE_QUOTE_"),  # Double quotes
+    ]
+    
+    preserved_strings = {}
+    placeholder_counter = 0
+    
+    for pattern, prefix in quote_patterns:
+        matches = re.finditer(pattern, condition)
+        for match in matches:
+            placeholder = f"{prefix}{placeholder_counter}"
+            preserved_strings[placeholder] = match.group(0)
+            condition = condition.replace(match.group(0), placeholder, 1)
+            placeholder_counter += 1
+    
+    # Convert SQL CASE expressions to Python conditional expressions
+    # Pattern: CASE WHEN condition1 THEN result1 WHEN condition2 THEN result2 ... ELSE default END
+    case_pattern = r'\bCASE\s+(.*?)\s+END\b'
+    
+    def convert_case(match):
+        case_content = match.group(1)
+        
+        # Find all WHEN...THEN pairs
+        when_pattern = r'\bWHEN\s+(.*?)\s+THEN\s+(.*?)(?=\s+WHEN|\s+ELSE|$)'
+        when_matches = re.findall(when_pattern, case_content, re.IGNORECASE | re.DOTALL)
+        
+        # Find ELSE clause
+        else_match = re.search(r'\bELSE\s+(.*?)$', case_content, re.IGNORECASE | re.DOTALL)
+        else_clause = else_match.group(1).strip() if else_match else 'None'
+        
+        if not when_matches:
+            return match.group(0)  # Return original if can't parse
+        
+        # Build nested conditional expression from right to left
+        result = else_clause
+        
+        # Process WHEN clauses in reverse order to build nested conditionals
+        for when_condition, then_result in reversed(when_matches):
+            when_condition = when_condition.strip()
+            then_result = then_result.strip()
+            
+            # Recursively convert the condition (but avoid infinite recursion)
+            # Don't recursively call _sql_to_python_condition here as it can cause issues
+            # Just handle basic operators in the when_condition
+            when_condition = re.sub(r'(?<![=!<>])\s*=\s*(?!=)', ' == ', when_condition)
+            when_condition = re.sub(r'\bAND\b', 'and', when_condition, flags=re.IGNORECASE)
+            when_condition = re.sub(r'\bOR\b', 'or', when_condition, flags=re.IGNORECASE)
+            when_condition = re.sub(r'\bNOT\b', 'not', when_condition, flags=re.IGNORECASE)
+            
+            result = f'({then_result} if {when_condition} else {result})'
         
         return result
     
-    # Apply the conversion to all CASE expressions in the string
-    return re.sub(case_pattern, convert_single_case, condition_str, flags=re.IGNORECASE | re.DOTALL)
+    # Apply CASE conversion
+    condition = re.sub(case_pattern, convert_case, condition, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Replace single = with == but avoid changing already existing ==
+    condition = re.sub(r'(?<![=!<>])\s*=\s*(?!=)', ' == ', condition)
+    
+    # Convert SQL logical operators to Python operators
+    # Use word boundaries to avoid replacing parts of words
+    condition = re.sub(r'\bAND\b', 'and', condition, flags=re.IGNORECASE)
+    condition = re.sub(r'\bOR\b', 'or', condition, flags=re.IGNORECASE)
+    condition = re.sub(r'\bNOT\b', 'not', condition, flags=re.IGNORECASE)
+    
+    # Convert SQL BETWEEN to Python range check
+    # BETWEEN pattern: column BETWEEN value1 AND value2
+    between_pattern = r'(\w+)\s+BETWEEN\s+([^A]+?)\s+AND\s+([^A]+?)(?=\s|$)'
+    condition = re.sub(between_pattern, r'(\2 <= \1 <= \3)', condition, flags=re.IGNORECASE)
+    
+    # Handle IS NULL and IS NOT NULL
+    # Use a helper function for null checking that handles both None and NaN
+    condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NULL\b', r'_is_null(\1)', condition, flags=re.IGNORECASE)
+    condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NOT\s+NULL\b', r'(not _is_null(\1))', condition, flags=re.IGNORECASE)
+    
+    # Handle IN predicates - convert SQL IN to Python in
+    # Pattern: expression IN (value1, value2, ...) -> expression in [value1, value2, ...]
+    # Enhanced to support function calls like LOWER(column) IN (...)
+    def convert_in_predicate(match):
+        full_match = match.group(0)
+        left_expr = match.group(1).strip()
+        in_values = match.group(2).strip()
+        
+        # If empty, return special handling
+        if not in_values:
+            return f'{left_expr} in []'
+        
+        # Convert parentheses to square brackets for Python list syntax
+        python_list = f'[{in_values}]'
+        return f'{left_expr} in {python_list}'
+    
+    # Enhanced IN predicates pattern to handle various expressions
+    # This pattern matches multiple cases:
+    # 1. Simple identifiers: column
+    # 2. Dotted expressions: table.column
+    # 3. Function calls: FUNCTION(args)
+    # 4. Parenthesized expressions: (expression)
+    # 5. Complex expressions: (value + 10), (column * 2), etc.
+    
+    # First try to match parenthesized expressions like (value + 10) IN (...)
+    parenthesized_in_pattern = r'(\([^)]+\))\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(parenthesized_in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Then match function calls like SUBSTR(column, 1, 1) IN (...)
+    complex_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*\([^)]*(?:\([^)]*\)[^)]*)*\))\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(complex_in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Finally match simple expressions: column IN (...), table.column IN (...)
+    simple_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(simple_in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Handle NOT IN predicates
+    def convert_not_in_predicate(match):
+        full_match = match.group(0)
+        left_expr = match.group(1).strip()
+        in_values = match.group(2).strip()
+        
+        # If empty, return special handling
+        if not in_values:
+            return f'{left_expr} not in []'
+        
+        # Convert parentheses to square brackets for Python list syntax
+        python_list = f'[{in_values}]'
+        return f'{left_expr} not in {python_list}'
+    
+    # Enhanced NOT IN predicates pattern to handle various expressions
+    # First try to match parenthesized expressions like (value + 10) NOT IN (...)
+    parenthesized_not_in_pattern = r'(\([^)]+\))\s+NOT\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(parenthesized_not_in_pattern, convert_not_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Then match function calls like SUBSTR(column, 1, 1) NOT IN (...)
+    complex_not_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*\([^)]*(?:\([^)]*\)[^)]*)*\))\s+NOT\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(complex_not_in_pattern, convert_not_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Finally match simple expressions: column NOT IN (...), table.column NOT IN (...)
+    simple_not_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s+NOT\s+IN\s*\(([^)]*)\)'
+    condition = re.sub(simple_not_in_pattern, convert_not_in_predicate, condition, flags=re.IGNORECASE)
+    
+    # Handle empty IN predicates - convert to always false/true
+    condition = re.sub(r'\bIN\s*\(\s*\)', 'in []', condition, flags=re.IGNORECASE)
+    condition = re.sub(r'\bNOT\s+IN\s*\(\s*\)', 'not in []', condition, flags=re.IGNORECASE)
+    
+    # Restore preserved quoted strings
+    for placeholder, original_string in preserved_strings.items():
+        condition = condition.replace(placeholder, original_string)
+    
+    return condition
+
+def _is_boolean_expression(node):
+    """
+    Determine if an AST node represents a boolean expression that should return True/False
+    vs a value expression that should return the actual value.
+    
+    Args:
+        node: AST node to analyze
+        
+    Returns:
+        True if the expression should return a boolean, False if it should return actual value
+    """
+    if isinstance(node, (ast.Compare, ast.BoolOp, ast.UnaryOp)):
+        # Comparison operations (=, <, >, IN, etc.), boolean operations (AND, OR), 
+        # or unary operations (NOT) should return boolean
+        return True
+    elif isinstance(node, ast.IfExp):
+        # Conditional expressions (CASE WHEN) should return boolean if both branches are boolean
+        return _is_boolean_expression(node.body) and _is_boolean_expression(node.orelse)
+    elif isinstance(node, ast.Call):
+        # Function calls - need to check the function name
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id.upper()
+            # Navigation functions and CLASSIFIER should return actual values
+            if func_name in ('CLASSIFIER', 'PREV', 'NEXT', 'FIRST', 'LAST'):
+                return False
+            # Boolean functions should return boolean
+            elif func_name in ('EXISTS', 'IS_NULL', 'IS_NOT_NULL'):
+                return True
+        # Default for unknown functions: return boolean for safety
+        return True
+    elif isinstance(node, (ast.Name, ast.Attribute, ast.Constant)):
+        # Simple values should return their actual value
+        return False
+    else:
+        # For unknown node types, default to boolean for safety
+        return True

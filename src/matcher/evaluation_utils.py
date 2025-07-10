@@ -9,6 +9,7 @@ Features:
 - Common mathematical and utility functions
 - Shared type conversion and preservation utilities
 - Table prefix validation and security functions
+- Navigation function helpers
 - Null handling and SQL semantics
 - Thread-safe operations with proper validation
 
@@ -39,8 +40,8 @@ MAX_RECURSION_DEPTH = 50      # Prevent infinite recursion
 
 class EvaluationMode(Enum):
     """Enumeration of evaluation modes."""
-    DEFINE = "DEFINE"      # Evaluation for pattern definitions
-    MEASURES = "MEASURES"  # Evaluation for measures
+    DEFINE = "DEFINE"      # Physical navigation for pattern definitions
+    MEASURES = "MEASURES"  # Logical navigation for measures
 
 class ValidationError(Exception):
     """Base class for validation errors."""
@@ -425,17 +426,8 @@ def safe_compare(left: Any, right: Any, op: Union[Callable, ast.operator]) -> An
     Returns:
         Comparison result with SQL NULL semantics (None if any operand is NULL)
     """
-    # Special handling for IS NULL / IS NOT NULL comparisons with pandas compatibility
-    if isinstance(op, ast.Is) and right is None:
-        # For "x IS NULL", return True if x is null (None or NaN)
-        return is_null(left)
-    elif isinstance(op, ast.IsNot) and right is None:
-        # For "x IS NOT NULL", return True if x is not null
-        return not is_null(left)
-    
     # SQL NULL semantics: any comparison with NULL is NULL (None)
-    # But only for non-IS comparisons
-    if not isinstance(op, (ast.Is, ast.IsNot)) and (is_null(left) or is_null(right)):
+    if is_null(left) or is_null(right):
         return None
     
     # Map AST operators to Python functions
