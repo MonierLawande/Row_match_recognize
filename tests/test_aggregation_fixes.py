@@ -295,6 +295,10 @@ class TestAggregationFixes:
         """
         Test fix for percentile function syntax parsing.
         Addresses: PERCENTILE_CONT, PERCENTILE_DISC syntax issues.
+        
+        Production Note: This test uses mathematically correct percentile calculations
+        based on linear interpolation method as specified in SQL:2016 standard.
+        For 2 elements [10, 20], Q1 (25th percentile) = 10 + 0.25 * (20 - 10) = 12.5
         """
         df = pd.DataFrame({
             'id': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
@@ -320,12 +324,12 @@ class TestAggregationFixes:
         
         result = self.match_recognize(query, df)
         
-        # Expected: Approximate percentile calculations
+        # Expected: Approximate percentile calculations (corrected for mathematical accuracy)
         expected = pd.DataFrame({
             'id': list(range(1, 11)),
             'median_approx': [10, 15, 20, 25, 30, 35, 40, 45, 50, 55],  # Running medians
-            'q1_approx': [10, 10, 15, 17.5, 20, 22.5, 25, 27.5, 30, 32.5],  # Q1
-            'q3_approx': [10, 20, 25, 32.5, 40, 47.5, 55, 62.5, 70, 77.5]   # Q3
+            'q1_approx': [10, 12.5, 15, 17.5, 20, 22.5, 25, 27.5, 30, 32.5],  # Q1 (corrected)
+            'q3_approx': [10, 17.5, 25, 32.5, 40, 47.5, 55, 62.5, 70, 77.5]   # Q3 (corrected)
         })
         
         self.assert_dataframe_equals(result, expected, "Percentile function syntax test failed")
@@ -433,6 +437,11 @@ class TestAggregationFixes:
         """
         Test edge cases in aggregation functions.
         Addresses: Division by zero, empty sets, extreme values.
+        
+        Production Note: This test validates mathematically correct handling of edge cases:
+        - Large finite numbers (±1e10) are correctly identified as finite
+        - Running averages properly exclude division-by-zero cases
+        - Final safe_division average: (5.0 + 7.5 + 10.0) / 3 = 7.5
         """
         df = pd.DataFrame({
             'id': [1, 2, 3, 4, 5],
@@ -463,12 +472,12 @@ class TestAggregationFixes:
         
         result = self.match_recognize(query, df)
         
-        # Expected: Safe handling of edge cases
+        # Expected: Safe handling of edge cases (corrected for mathematical accuracy)
         expected = pd.DataFrame({
             'id': [1, 2, 3, 4, 5],
-            'safe_division': [5.0, 5.0, 6.25, 6.25, 7.0],  # Division by zero handled
+            'safe_division': [5.0, 5.0, 6.25, 6.25, 7.5],  # Division by zero handled (corrected)
             'sum_extreme': [1e10, 0, 1e-10, 1e-10, 1e-10],  # Infinite values handled
-            'count_finite': [1, 1, 2, 2, 2]                 # Only finite values counted
+            'count_finite': [1, 2, 3, 3, 3]                 # Only finite values counted (corrected)
         })
         
         self.assert_dataframe_equals(result, expected, "Aggregation edge cases test failed")
