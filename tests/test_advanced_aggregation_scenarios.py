@@ -186,12 +186,12 @@ class TestAdvancedAggregationScenarios:
             'value': [10, 20, 30, 25, 15, 35]
         })
         
-        # Expected output
+        # Expected output - PERMUTE should find both XYZ and YXZ patterns
         expected = pd.DataFrame({
-            'order_seq': ['XYZ'],
-            'total_sum': [60],
-            'pattern_count': [3],
-            'unique_values': [3]
+            'order_seq': ['XYZ', 'YXZ'],
+            'total_sum': [60, 75],
+            'pattern_count': [3, 3],
+            'unique_values': [3, 3]
         })
         
         result = match_recognize(query, df)

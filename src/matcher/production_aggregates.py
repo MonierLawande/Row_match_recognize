@@ -1162,6 +1162,30 @@ class ProductionAggregateEvaluator:
 
     def _get_expression_values(self, expr: str, is_running: bool, filter_mask: List[bool] = None) -> List[Any]:
         """Get values for an expression across all relevant rows, optionally filtered."""
+        # PRODUCTION FIX: Special handling for MATCH_NUMBER() function
+        # MATCH_NUMBER() should return the same value for all rows in the current match
+        if expr.upper().strip() == "MATCH_NUMBER()":
+            row_indices = self._get_row_indices(expr, is_running)
+            match_number_value = getattr(self.context, 'match_number', 1)
+            values = []
+            
+            # Debug logging
+            logger.debug(f"MATCH_NUMBER() special handling: match_number={match_number_value}, row_indices={row_indices}")
+            
+            for i, idx in enumerate(row_indices):
+                if idx >= len(self.context.rows):
+                    continue
+                
+                # Apply filter mask if provided
+                if filter_mask and i < len(filter_mask) and not filter_mask[i]:
+                    continue
+                
+                values.append(match_number_value)
+            
+            logger.debug(f"MATCH_NUMBER() returning values: {values}")
+            return values
+        
+        # Standard handling for other expressions
         row_indices = self._get_row_indices(expr, is_running)
         values = []
         
@@ -1290,6 +1314,8 @@ class ProductionAggregateEvaluator:
         """Evaluate a single expression in the current context."""
         # Handle special functions first
         if expr.upper() == "MATCH_NUMBER()":
+            # PRODUCTION FIX: Always return the current match_number from context
+            # This ensures MATCH_NUMBER() returns consistent values within aggregates
             return getattr(self.context, 'match_number', 1)
         
         classifier_match = re.match(r'CLASSIFIER\(\s*([A-Z_][A-Z0-9_]*)?\s*\)', expr, re.IGNORECASE)

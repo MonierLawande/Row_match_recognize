@@ -3101,6 +3101,7 @@ class EnhancedMatcher:
                             variables=match["variables"],
                             current_idx=idx
                         )
+                        temp_context.match_number = match_number  # PRODUCTION FIX: Set correct match_number for MATCH_NUMBER() evaluation
                         temp_context.subsets = self.subsets.copy() if self.subsets else {}
                         
                         # Use production aggregate evaluator

@@ -1616,6 +1616,25 @@ class MeasureEvaluator:
         values = []
         indices_to_use = []
         
+        # PRODUCTION FIX: Special handling for MATCH_NUMBER() function
+        if args_str.upper().strip() == "MATCH_NUMBER()":
+            # For MATCH_NUMBER(), return the current match_number for all rows in the match
+            match_number_value = getattr(self.context, 'match_number', 1)
+            
+            # Get all matched rows
+            for indices in self.context.variables.values():
+                indices_to_use.extend(indices)
+            indices_to_use = sorted(set(indices_to_use))
+            
+            # Apply RUNNING semantics filter
+            if is_running:
+                indices_to_use = [idx for idx in indices_to_use if idx <= self.context.current_idx]
+            
+            # Return match_number for each row
+            values = [match_number_value] * len(indices_to_use)
+            logger.debug(f"MATCH_NUMBER() aggregation: match_number={match_number_value}, indices={indices_to_use}, values={values}")
+            return values
+        
         # Check for pattern variable prefix
         var_col_match = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)', args_str)
         
