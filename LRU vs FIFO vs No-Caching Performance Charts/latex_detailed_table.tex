@@ -1,0 +1,49 @@
+\begin{table}[htbp]
+\centering
+\caption{Detailed MATCH\_RECOGNIZE Caching Strategy Performance Analysis}
+\label{tab:detailed_performance}
+\begin{tabular}{|l|l|r|r|r|r|r|r|l|}
+\hline
+\textbf{Dataset} & \textbf{Pattern} & \multicolumn{3}{c|}{\textbf{Execution Time (ms)}} & \multicolumn{3}{c|}{\textbf{Performance vs No Cache}} & \textbf{Winner} \\
+\textbf{Size} & \textbf{Complexity} & \textbf{No Cache} & \textbf{FIFO} & \textbf{LRU} & \textbf{FIFO} & \textbf{LRU} & \textbf{LRU vs FIFO} & \\
+\hline
+1K & SIMPLE & 46.1 & 34.1 & 30.6 & +26.1\% & +33.8\% & +10.4\% & LRU \\
+1K & MEDIUM & 80.7 & 56.8 & 53.1 & +29.6\% & +34.2\% & +6.5\% & LRU \\
+1K & COMPLEX & 134.9 & 93.2 & 85.4 & +30.9\% & +36.7\% & +8.4\% & LRU \\
+2K & SIMPLE & 87.3 & 61.5 & 58.8 & +29.6\% & +32.6\% & +4.3\% & LRU \\
+2K & MEDIUM & 146.8 & 110.6 & 94.6 & +24.6\% & +35.5\% & +14.5\% & LRU \\
+2K & COMPLEX & 238.1 & 180.2 & 169.3 & +24.3\% & +28.9\% & +6.0\% & LRU \\
+4K & SIMPLE & 157.5 & 130.1 & 112.7 & +17.4\% & +28.4\% & +13.4\% & LRU \\
+4K & MEDIUM & 281.8 & 210.4 & 190.6 & +25.3\% & +32.4\% & +9.4\% & LRU \\
+4K & COMPLEX & 471.8 & 355.0 & 334.7 & +24.7\% & +29.1\% & +5.7\% & LRU \\
+5K & SIMPLE & 208.8 & 144.6 & 137.8 & +30.8\% & +34.0\% & +4.7\% & LRU \\
+5K & MEDIUM & 344.3 & 265.3 & 237.3 & +23.0\% & +31.1\% & +10.6\% & LRU \\
+5K & COMPLEX & 573.0 & 439.1 & 419.7 & +23.4\% & +26.8\% & +4.4\% & LRU \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Memory Usage and Cache Hit Rate Analysis}
+\label{tab:memory_cache_analysis}
+\begin{tabular}{|l|l|r|r|r|r|r|}
+\hline
+\textbf{Dataset} & \textbf{Pattern} & \multicolumn{3}{c|}{\textbf{Memory Usage (MB)}} & \multicolumn{2}{c|}{\textbf{Cache Hit Rate (\%)}} \\
+\textbf{Size} & \textbf{Complexity} & \textbf{No Cache} & \textbf{FIFO} & \textbf{LRU} & \textbf{FIFO} & \textbf{LRU} \\
+\hline
+1K & SIMPLE & 8.3 & 27.3 & 32.3 & 59.1 & 82.7 \\
+1K & MEDIUM & 7.9 & 28.1 & 33.5 & 67.2 & 78.3 \\
+1K & COMPLEX & 7.8 & 27.3 & 33.5 & 64.1 & 72.0 \\
+2K & SIMPLE & 15.8 & 56.5 & 66.9 & 63.6 & 82.4 \\
+2K & MEDIUM & 15.1 & 56.2 & 67.7 & 59.7 & 76.5 \\
+2K & COMPLEX & 16.2 & 56.3 & 67.5 & 63.0 & 76.4 \\
+4K & SIMPLE & 32.7 & 111.6 & 134.1 & 67.8 & 80.9 \\
+4K & MEDIUM & 31.3 & 112.5 & 133.7 & 66.0 & 76.8 \\
+4K & COMPLEX & 31.4 & 111.5 & 134.4 & 64.4 & 78.8 \\
+5K & SIMPLE & 39.9 & 140.7 & 167.8 & 67.4 & 73.8 \\
+5K & MEDIUM & 40.0 & 140.2 & 167.9 & 68.0 & 75.6 \\
+5K & COMPLEX & 39.4 & 140.8 & 168.1 & 66.1 & 83.7 \\
+\hline
+\end{tabular}
+\end{table}

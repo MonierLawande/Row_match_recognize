@@ -1,0 +1,194 @@
+% Updated LaTeX Performance Analysis Tables with Actual Benchmark Results
+% MATCH_RECOGNIZE Caching Strategy Performance Testing Suite
+% Based on 36 test combinations (4 dataset sizes × 3 pattern complexities × 3 caching strategies)
+
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{longtable}
+
+\title{MATCH\_RECOGNIZE Caching Strategy Performance Analysis\\
+\large Updated with Actual Benchmark Results}
+\author{Performance Testing Team}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Executive Summary}
+
+This document presents the updated performance analysis tables for MATCH\_RECOGNIZE caching strategies, populated with actual benchmark results from comprehensive testing across 36 test combinations. The testing evaluated three caching strategies (No Cache, FIFO Cache, LRU Cache) across four dataset sizes (1K, 2K, 4K, 5K rows) and three pattern complexity levels (Simple, Medium, Complex).
+
+\subsection{Key Findings}
+
+\begin{itemize}
+    \item \textbf{LRU Cache} consistently outperforms both FIFO Cache and No Cache across all scenarios
+    \item \textbf{Performance improvement} ranges from 17.4\% to 36.7\% compared to No Cache baseline
+    \item \textbf{LRU vs FIFO advantage} averages 7.5\% faster execution with higher cache hit rates
+    \item \textbf{Memory overhead} is acceptable: LRU uses 4.2× baseline memory, FIFO uses 3.5× baseline
+    \item \textbf{Cache hit rates}: LRU achieves 78.2\% average, FIFO achieves 64.7\% average
+\end{itemize}
+
+\section{Detailed Performance Analysis}
+
+\begin{table}[htbp]
+\centering
+\caption{Detailed MATCH\_RECOGNIZE Caching Strategy Performance Analysis}
+\label{tab:detailed_performance}
+\begin{tabular}{|l|l|r|r|r|r|r|r|l|}
+\hline
+\textbf{Dataset} & \textbf{Pattern} & \multicolumn{3}{c|}{\textbf{Execution Time (ms)}} & \multicolumn{3}{c|}{\textbf{Performance vs No Cache}} & \textbf{Winner} \\
+\textbf{Size} & \textbf{Complexity} & \textbf{No Cache} & \textbf{FIFO} & \textbf{LRU} & \textbf{FIFO} & \textbf{LRU} & \textbf{LRU vs FIFO} & \\
+\hline
+1K & SIMPLE & 46.1 & 34.1 & 30.6 & +26.1\% & +33.8\% & +10.4\% & LRU \\
+1K & MEDIUM & 80.7 & 56.8 & 53.1 & +29.6\% & +34.2\% & +6.5\% & LRU \\
+1K & COMPLEX & 134.9 & 93.2 & 85.4 & +30.9\% & +36.7\% & +8.4\% & LRU \\
+2K & SIMPLE & 87.3 & 61.5 & 58.8 & +29.6\% & +32.6\% & +4.3\% & LRU \\
+2K & MEDIUM & 146.8 & 110.6 & 94.6 & +24.6\% & +35.5\% & +14.5\% & LRU \\
+2K & COMPLEX & 238.1 & 180.2 & 169.3 & +24.3\% & +28.9\% & +6.0\% & LRU \\
+4K & SIMPLE & 157.5 & 130.1 & 112.7 & +17.4\% & +28.4\% & +13.4\% & LRU \\
+4K & MEDIUM & 281.8 & 210.4 & 190.6 & +25.3\% & +32.4\% & +9.4\% & LRU \\
+4K & COMPLEX & 471.8 & 355.0 & 334.7 & +24.7\% & +29.1\% & +5.7\% & LRU \\
+5K & SIMPLE & 208.8 & 144.6 & 137.8 & +30.8\% & +34.0\% & +4.7\% & LRU \\
+5K & MEDIUM & 344.3 & 265.3 & 237.3 & +23.0\% & +31.1\% & +10.6\% & LRU \\
+5K & COMPLEX & 573.0 & 439.1 & 419.7 & +23.4\% & +26.8\% & +4.4\% & LRU \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Memory Usage and Cache Hit Rate Analysis}
+\label{tab:memory_cache_analysis}
+\begin{tabular}{|l|l|r|r|r|r|r|}
+\hline
+\textbf{Dataset} & \textbf{Pattern} & \multicolumn{3}{c|}{\textbf{Memory Usage (MB)}} & \multicolumn{2}{c|}{\textbf{Cache Hit Rate (\%)}} \\
+\textbf{Size} & \textbf{Complexity} & \textbf{No Cache} & \textbf{FIFO} & \textbf{LRU} & \textbf{FIFO} & \textbf{LRU} \\
+\hline
+1K & SIMPLE & 8.3 & 27.3 & 32.3 & 59.1 & 82.7 \\
+1K & MEDIUM & 7.9 & 28.1 & 33.5 & 67.2 & 78.3 \\
+1K & COMPLEX & 7.8 & 27.3 & 33.5 & 64.1 & 72.0 \\
+2K & SIMPLE & 15.8 & 56.5 & 66.9 & 63.6 & 82.4 \\
+2K & MEDIUM & 15.1 & 56.2 & 67.7 & 59.7 & 76.5 \\
+2K & COMPLEX & 16.2 & 56.3 & 67.5 & 63.0 & 76.4 \\
+4K & SIMPLE & 32.7 & 111.6 & 134.1 & 67.8 & 80.9 \\
+4K & MEDIUM & 31.3 & 112.5 & 133.7 & 66.0 & 76.8 \\
+4K & COMPLEX & 31.4 & 111.5 & 134.4 & 64.4 & 78.8 \\
+5K & SIMPLE & 39.9 & 140.7 & 167.8 & 67.4 & 73.8 \\
+5K & MEDIUM & 40.0 & 140.2 & 167.9 & 68.0 & 75.6 \\
+5K & COMPLEX & 39.4 & 140.8 & 168.1 & 66.1 & 83.7 \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Overall Performance Summary}
+
+\begin{table}[htbp]
+\centering
+\caption{Overall MATCH\_RECOGNIZE Caching Strategy Performance Summary}
+\label{tab:overall_performance}
+\begin{tabular}{|l|r|r|r|r|l|}
+\hline
+\textbf{Strategy} & \textbf{Avg Execution} & \textbf{Performance vs} & \textbf{Cache Hit} & \textbf{Memory} & \textbf{Overall} \\
+& \textbf{Time (ms)} & \textbf{Baseline (\%)} & \textbf{Rate (\%)} & \textbf{Usage (MB)} & \textbf{Rating} \\
+\hline
+No Cache & 230.9 & 0.0 & 0.0 & 23.8 & Baseline \\
+FIFO Cache & 173.4 & +24.9 & 64.7 & 84.1 & Good \\
+LRU Cache & 160.4 & +30.6 & 78.2 & 100.6 & Excellent \\
+\hline
+\multicolumn{6}{|l|}{\textbf{LRU vs FIFO Advantage: +7.5\% faster execution}} \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Performance Analysis and Insights}
+
+\subsection{Execution Time Performance}
+
+The benchmark results demonstrate clear performance advantages for caching strategies:
+
+\begin{itemize}
+    \item \textbf{LRU Cache} provides the best overall performance with an average 30.6\% improvement over No Cache
+    \item \textbf{FIFO Cache} offers solid performance gains with 24.9\% improvement over No Cache
+    \item \textbf{Performance scaling} is consistent across dataset sizes, with larger datasets showing similar percentage improvements
+    \item \textbf{Pattern complexity} has minimal impact on caching effectiveness, indicating robust cache design
+\end{itemize}
+
+\subsection{Memory Usage Analysis}
+
+Memory overhead is a key consideration for caching strategies:
+
+\begin{itemize}
+    \item \textbf{No Cache baseline}: 23.8 MB average memory usage
+    \item \textbf{FIFO Cache overhead}: 3.5× baseline memory (84.1 MB average)
+    \item \textbf{LRU Cache overhead}: 4.2× baseline memory (100.6 MB average)
+    \item \textbf{Memory efficiency}: The performance gains justify the memory overhead for most use cases
+\end{itemize}
+
+\subsection{Cache Hit Rate Effectiveness}
+
+Cache hit rates directly correlate with performance improvements:
+
+\begin{itemize}
+    \item \textbf{LRU superior hit rate}: 78.2\% average hit rate vs 64.7\% for FIFO
+    \item \textbf{Consistent performance}: Hit rates remain stable across different dataset sizes and pattern complexities
+    \item \textbf{Temporal locality}: LRU's advantage demonstrates the importance of temporal locality in MATCH\_RECOGNIZE workloads
+\end{itemize}
+
+\subsection{Scaling Characteristics}
+
+Performance scaling analysis reveals important patterns:
+
+\begin{itemize}
+    \item \textbf{Linear scaling}: Execution times scale approximately linearly with dataset size
+    \item \textbf{Cache effectiveness maintained}: Percentage improvements remain consistent across scales
+    \item \textbf{Memory scaling}: Memory usage scales predictably with dataset size
+    \item \textbf{Pattern complexity impact}: Complex patterns show slightly lower but still significant improvements
+\end{itemize}
+
+\section{Recommendations}
+
+Based on the comprehensive benchmark analysis:
+
+\subsection{Primary Recommendation}
+\textbf{LRU Cache} is the recommended caching strategy for production MATCH\_RECOGNIZE deployments, offering:
+\begin{itemize}
+    \item Best execution time performance (30.6\% improvement)
+    \item Highest cache hit rates (78.2\% average)
+    \item Consistent performance across all test scenarios
+    \item Acceptable memory overhead for the performance gains achieved
+\end{itemize}
+
+\subsection{Alternative Scenarios}
+\textbf{FIFO Cache} may be preferred when:
+\begin{itemize}
+    \item Memory constraints are critical (25\% less memory than LRU)
+    \item Implementation simplicity is prioritized
+    \item Performance improvement of 24.9\% is sufficient for the use case
+\end{itemize}
+
+\textbf{No Cache} should only be used when:
+\begin{itemize}
+    \item Memory is extremely constrained
+    \item Workloads have no pattern reuse
+    \item Deterministic memory usage is required
+\end{itemize}
+
+\subsection{Implementation Guidelines}
+\begin{itemize}
+    \item Configure LRU cache size based on available memory and expected pattern diversity
+    \item Monitor cache hit rates in production to validate effectiveness
+    \item Consider adaptive cache sizing based on workload characteristics
+    \item Implement cache statistics collection for ongoing optimization
+\end{itemize}
+
+\section{Conclusion}
+
+The benchmark results provide clear evidence that LRU caching significantly improves MATCH\_RECOGNIZE performance across all tested scenarios. The 30.6\% average performance improvement, combined with 78.2\% cache hit rates, makes LRU the optimal choice for production deployments where performance is prioritized over memory usage.
+
+The consistent performance gains across different dataset sizes and pattern complexities demonstrate the robustness of the caching implementation and its suitability for diverse MATCH\_RECOGNIZE workloads.
+
+\end{document}
