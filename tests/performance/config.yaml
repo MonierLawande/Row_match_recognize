@@ -1,0 +1,125 @@
+# Performance Testing Configuration for MATCH_RECOGNIZE Caching Strategies
+# This file defines the test parameters and scenarios for comprehensive performance evaluation
+
+# Test Execution Parameters
+execution:
+  iterations_per_test: 5          # Number of iterations to run per test case for averaging
+  timeout_seconds: 300            # Maximum time allowed per test case
+  warmup_iterations: 2            # Number of warmup iterations before measurement
+  gc_between_tests: true          # Force garbage collection between test cases
+
+# Dataset Configuration
+datasets:
+  size_1k:
+    size: 1000
+    description: "1K dataset for baseline testing"
+    patterns_to_test: ["simple", "medium", "complex"]
+
+  size_2k:
+    size: 2000
+    description: "2K dataset for moderate scale testing"
+    patterns_to_test: ["simple", "medium", "complex"]
+
+  size_4k:
+    size: 4000
+    description: "4K dataset for higher scale testing"
+    patterns_to_test: ["simple", "medium", "complex"]
+
+  size_5k:
+    size: 5000
+    description: "5K dataset for maximum scale testing"
+    patterns_to_test: ["simple", "medium", "complex"]
+
+# Pattern Definitions by Complexity Level
+patterns:
+  simple:
+    description: "Basic patterns with simple quantifiers"
+    patterns:
+      - "A+"
+      - "A B*"
+      - "A{2,5}"
+      - "START END"
+      - "(UP | DOWN)+"
+    
+  medium:
+    description: "Patterns with alternations and moderate complexity"
+    patterns:
+      - "(A | B)+ C"
+      - "START (PROCESS)* END"
+      - "A{1,3} B{2,4} C?"
+      - "(UP | DOWN){2,} STABLE"
+      - "PEAK (DECLINE | STABLE)+ END"
+    
+  complex:
+    description: "Complex patterns with nested quantifiers and back-references"
+    patterns:
+      - "(A{2,5} | B+)* C D{1,3}"
+      - "START (PROCESS{1,3} | PEAK)+ (DECLINE | STABLE)* END"
+      - "((UP | DOWN){2,4} STABLE?){1,3} (PEAK | END)"
+      - "(A B{2,} | C+ D?)* E{1,2}"
+      - "START ((PROCESS | PEAK){1,2} DECLINE?){2,} END"
+
+# Caching Strategy Configuration
+caching_strategies:
+  lru:
+    name: "LRU"
+    description: "Least Recently Used caching"
+    parameters:
+      cache_size: 1000
+      eviction_policy: "lru"
+      enable_statistics: true
+    
+  fifo:
+    name: "FIFO"
+    description: "First In, First Out caching"
+    parameters:
+      cache_size: 1000
+      eviction_policy: "fifo"
+      enable_statistics: true
+    
+  no_cache:
+    name: "NO_CACHE"
+    description: "No caching (baseline)"
+    parameters:
+      cache_size: 0
+      eviction_policy: "none"
+      enable_statistics: false
+
+# Performance Metrics Configuration
+metrics:
+  execution_time:
+    unit: "milliseconds"
+    precision: 2
+    threshold_regression_percent: 10.0
+    
+  memory_usage:
+    unit: "megabytes"
+    precision: 2
+    threshold_regression_percent: 15.0
+    
+  cache_hit_rate:
+    unit: "percentage"
+    precision: 1
+    threshold_regression_percent: 5.0
+
+# Output Configuration
+output:
+  results_directory: "tests/performance/results"
+  baseline_file: "tests/performance/baseline_results.json"
+  detailed_csv: true
+  generate_charts: true
+  chart_formats: ["png", "svg"]
+  
+# Reporting Configuration
+reporting:
+  include_statistical_analysis: true
+  confidence_interval: 0.95
+  generate_recommendations: true
+  export_formats: ["json", "csv", "html"]
+  
+# Quick Test Mode Configuration (for CI/CD)
+quick_mode:
+  iterations_per_test: 2
+  dataset_sizes: ["size_1k", "size_2k"]  # Test smaller datasets only
+  pattern_complexities: ["simple", "medium"]  # Skip complex patterns
+  reduced_pattern_count: 3  # Test only first 3 patterns per complexity level

@@ -1,0 +1,53 @@
+# Performance Testing Dependencies for MATCH_RECOGNIZE Caching Strategy Evaluation
+# Install with: pip install -r tests/performance/requirements.txt
+
+# Core data processing and analysis
+pandas>=1.5.0
+numpy>=1.21.0
+
+# System monitoring and profiling
+psutil>=5.8.0              # System and process monitoring
+memory-profiler>=0.60.0    # Memory usage profiling
+
+# Visualization and charting
+matplotlib>=3.5.0          # Core plotting library
+seaborn>=0.11.0           # Statistical data visualization
+plotly>=5.0.0             # Interactive charts (optional)
+
+# Configuration and data formats
+pyyaml>=6.0               # YAML configuration file support
+toml>=0.10.2              # TOML configuration support (alternative)
+
+# Statistical analysis
+scipy>=1.7.0              # Statistical functions and tests
+statsmodels>=0.13.0       # Advanced statistical modeling
+
+# Performance and benchmarking
+pytest-benchmark>=3.4.0   # Pytest benchmarking plugin
+py-spy>=0.3.0             # Python profiler (optional)
+
+# Reporting and export
+jinja2>=3.0.0             # Template engine for HTML reports
+openpyxl>=3.0.0           # Excel file support
+xlsxwriter>=3.0.0         # Excel writing with formatting
+
+# Development and testing utilities
+pytest>=7.0.0             # Testing framework
+pytest-xdist>=2.5.0       # Parallel test execution
+pytest-cov>=3.0.0         # Coverage reporting
+tqdm>=4.60.0              # Progress bars
+
+# Optional: Advanced profiling tools
+# line-profiler>=3.5.0    # Line-by-line profiling
+# pympler>=0.9            # Advanced memory analysis
+# guppy3>=3.1.0           # Heap analysis
+# tracemalloc             # Built-in Python memory tracing (Python 3.4+)
+
+# Optional: Database support for result storage
+# sqlalchemy>=1.4.0       # Database ORM
+# sqlite3                 # Built-in SQLite support (Python standard library)
+
+# Optional: Cloud storage and reporting
+# boto3>=1.20.0           # AWS S3 for result storage
+# google-cloud-storage>=2.0.0  # Google Cloud Storage
+# azure-storage-blob>=12.0.0   # Azure Blob Storage
