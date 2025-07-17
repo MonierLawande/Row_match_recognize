@@ -1,0 +1,65 @@
+{
+  "performance_summary": {
+    "NO_CACHE": {
+      "avg_execution_time_ms": 655.938168307555,
+      "median_execution_time_ms": 550.1282870248567,
+      "std_execution_time_ms": 487.66133812549447,
+      "min_execution_time_ms": 114.8685035450817,
+      "max_execution_time_ms": 1668.4905612536338,
+      "avg_memory_usage_mb": 27.0,
+      "avg_cache_hit_rate": 0.0,
+      "total_cache_hits": 0,
+      "total_cache_misses": 0,
+      "test_count": 12,
+      "success_rate": 100.0,
+      "total_matches_found": 3298
+    },
+    "FIFO": {
+      "avg_execution_time_ms": 497.56352310429816,
+      "median_execution_time_ms": 420.7101006702952,
+      "std_execution_time_ms": 367.13455735495654,
+      "min_execution_time_ms": 86.5044388330284,
+      "max_execution_time_ms": 1266.9503176200808,
+      "avg_memory_usage_mb": 97.2,
+      "avg_cache_hit_rate": 60.40830948240492,
+      "total_cache_hits": 47,
+      "total_cache_misses": 40,
+      "test_count": 12,
+      "success_rate": 100.0,
+      "total_matches_found": 3225,
+      "performance_improvement_pct": 24.14475218173284
+    },
+    "LRU": {
+      "avg_execution_time_ms": 452.62932892252087,
+      "median_execution_time_ms": 386.001845564955,
+      "std_execution_time_ms": 330.972565118344,
+      "min_execution_time_ms": 82.27074395102233,
+      "max_execution_time_ms": 1134.718820798432,
+      "avg_memory_usage_mb": 116.09999999999998,
+      "avg_cache_hit_rate": 76.70170457571434,
+      "total_cache_hits": 61,
+      "total_cache_misses": 22,
+      "test_count": 12,
+      "success_rate": 100.0,
+      "total_matches_found": 3215,
+      "performance_improvement_pct": 30.995122590534642
+    }
+  },
+  "synthetic_validation": {
+    "FIFO": {
+      "time_validation": 186.94551505438187,
+      "improvement_validation": 0.7552478182671578
+    },
+    "LRU": {
+      "time_validation": 182.18786092426484,
+      "improvement_validation": 0.3951225905346405,
+      "hit_rate_validation": 1.4982954242856579
+    }
+  },
+  "test_metadata": {
+    "total_tests": 36,
+    "dataset_source": "Amazon UK E-commerce Data",
+    "test_date": "2025-07-17T15:41:36.492267",
+    "random_seed": 42
+  }
+}
