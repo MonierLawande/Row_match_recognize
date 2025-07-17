@@ -1,5 +1,0 @@
-test_name,timestamp,data_size,num_partitions,execution_time_seconds,memory_used_mb,success,error,num_results,cache_enabled,cache_hits,cache_misses,cache_hit_rate,memory_used_by_cache_mb
-StressTest:long_chain,2025-06-10T16:58:53.281136,5000,20,10.432623147964478,0.0,True,,182,True,0,31,0.0,0.5
-StressTest:nested_exclusion,2025-06-10T17:00:17.164272,5000,20,83.77781915664673,0.0,True,,0,True,0,32,0.0,0.5
-StressTest:backtracking,2025-06-10T17:00:44.744049,5000,20,27.491184949874878,0.0,True,,20,True,0,33,0.0,0.5
-StressTest:highly_selective,2025-06-10T17:00:54.718934,5000,20,9.890174150466919,0.0,True,,0,True,0,34,0.0,0.5

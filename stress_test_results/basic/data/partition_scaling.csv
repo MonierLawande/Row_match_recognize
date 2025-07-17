@@ -1,7 +1,0 @@
-test_name,timestamp,data_size,num_partitions,execution_time_seconds,memory_used_mb,success,error,num_results,cache_enabled,cache_hits,cache_misses,cache_hit_rate,memory_used_by_cache_mb
-Partitions:1 Size:10000,2025-06-10T16:56:01.889419,10000,1,42.58407378196716,1.875,True,,1505,True,0,25,0.0,0.5
-Partitions:5 Size:10000,2025-06-10T16:56:35.208454,10000,5,33.18290042877197,1.75,True,,1551,True,0,26,0.0,0.5
-Partitions:10 Size:10000,2025-06-10T16:57:06.964444,10000,10,31.60599160194397,0.25,True,,1571,True,0,27,0.0,0.5
-Partitions:50 Size:10000,2025-06-10T16:57:38.873741,10000,50,31.710881233215332,0.125,True,,1573,True,0,28,0.0,0.5
-Partitions:100 Size:10000,2025-06-10T16:58:11.253646,10000,100,32.05298471450806,0.375,True,,1573,True,0,29,0.0,0.5
-Partitions:500 Size:10000,2025-06-10T16:58:41.303847,10000,500,29.418258666992188,1.625,True,,1487,True,0,30,0.0,0.5
