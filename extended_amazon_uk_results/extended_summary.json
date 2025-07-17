@@ -1,0 +1,31 @@
+{
+  "NO_CACHE": {
+    "avg_execution_time_ms": 4396.405142305005,
+    "median_execution_time_ms": 2007.4687507225074,
+    "std_execution_time_ms": 5105.196856294891,
+    "avg_memory_usage_mb": 153.0,
+    "avg_cache_hit_rate": 0.0,
+    "test_count": 45,
+    "total_matches_found": 55914
+  },
+  "FIFO": {
+    "avg_execution_time_ms": 3310.9782537247356,
+    "median_execution_time_ms": 1436.1650760025911,
+    "std_execution_time_ms": 3971.771726843586,
+    "avg_memory_usage_mb": 581.4,
+    "avg_cache_hit_rate": 59.28871039434183,
+    "test_count": 45,
+    "total_matches_found": 56090,
+    "performance_improvement_pct": 24.688964129706832
+  },
+  "LRU": {
+    "avg_execution_time_ms": 3011.206718561237,
+    "median_execution_time_ms": 1423.234973056094,
+    "std_execution_time_ms": 3565.2110160456537,
+    "avg_memory_usage_mb": 688.5,
+    "avg_cache_hit_rate": 75.20553753565248,
+    "test_count": 45,
+    "total_matches_found": 56401,
+    "performance_improvement_pct": 31.50752441840513
+  }
+}
