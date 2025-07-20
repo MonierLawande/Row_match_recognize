@@ -10,7 +10,16 @@
 //   - DEFINE clause (list of variable definitions with expressions)
 //   - AFTER MATCH SKIP clause (options: PAST LAST ROW, TO FIRST <var>, TO LAST <var>)
 
+SQL MATCH_RECOGNIZE
+    PARTITION BY <column_list>
+    ORDER BY <column_list>
+    MEASURES <measure_list>
+    PATTERN (<pattern>)
+    DEFINE <variable_definitions>
+    SUBSET <subset_mapping>
+    AFTER MATCH SKIP <skip_option>
 
+    
 AST Generation: Occurs immediately after parsing during the transformation phase.
 Notes:
 – The AST should capture every clause as a node.
