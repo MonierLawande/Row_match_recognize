@@ -19,7 +19,7 @@ SQL MATCH_RECOGNIZE
     SUBSET <subset_mapping>
     AFTER MATCH SKIP <skip_option>
 
-    
+---    
 AST Generation: Occurs immediately after parsing during the transformation phase.
 Notes:
 – The AST should capture every clause as a node.
