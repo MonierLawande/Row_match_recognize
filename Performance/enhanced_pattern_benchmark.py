@@ -61,14 +61,19 @@ class EnhancedPatternBenchmark:
     Uses actual match_recognize function for authentic performance testing
     """
     
-    def __init__(self, output_dir: str = ".", use_amazon_data: bool = True):
+    def __init__(self, output_dir: str = ".", use_amazon_data: bool = True, test_mode: int = None):
         self.output_dir = output_dir
         self.use_amazon_data = use_amazon_data
+        self.test_mode = test_mode
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Configure test modes
+        self._configure_test_mode()
         
         # ACADEMICALLY REALISTIC Dataset Sizes for MATCH RECOGNIZE benchmarking
         # Based on typical database query processing scenarios
-        self.dataset_sizes = [1000, 5000, 10000, 25000, 50000, 100000]
+        self.base_dataset_sizes = [1000, 5000, 10000, 25000, 50000, 100000]
+        self.dataset_sizes = self._get_dataset_sizes_for_mode()
         
         # REALISTIC Pattern Types with academically credible performance characteristics
         # Enhanced Pattern Types with REAL SQL Queries for match_recognize
@@ -121,7 +126,7 @@ class EnhancedPatternBenchmark:
             },
             'Complex': {
                 'complexity_score': 8,
-                'description': 'Navigation with nested aggregations',
+                'description': 'Nested patterns with quantifiers and navigation',
                 'sql_pattern': '(A{1,3} B{2,4})+ C{1,2}',
                 'sql_query': """
                     SELECT * FROM memory.default.stock_data 
@@ -131,13 +136,15 @@ class EnhancedPatternBenchmark:
                             FIRST(A.price) AS pattern_start,
                             LAST(C.price) AS pattern_end,
                             COUNT(*) AS total_rows,
-                            MAX(B.volume) AS peak_volume,
-                            AVG(A.price) OVER (PARTITION BY MATCH_NUMBER()) AS avg_a_price
+                            COUNT(A.*) AS a_count,
+                            COUNT(B.*) AS b_count,
+                            COUNT(C.*) AS c_count,
+                            AVG(A.price) AS avg_a_price
                         ONE ROW PER MATCH
                         PATTERN ((A{1,3} B{2,4})+ C{1,2})
                         DEFINE 
-                            A AS price > 100 AND volume > 1000,
-                            B AS price > PREV(price) AND volume < PREV(volume),
+                            A AS price > 70 AND volume > 1000,
+                            B AS price > PREV(price) AND volume > 800,
                             C AS price < FIRST(A.price) * 0.95
                     );
                 """,
@@ -146,28 +153,29 @@ class EnhancedPatternBenchmark:
             },
             'Very Complex': {
                 'complexity_score': 12,
-                'description': 'Advanced aggregations with multiple references',
-                'sql_pattern': 'A+ (B{2,} | C+) D* E{1,3}',
+                'description': 'Advanced pattern with alternations and quantifiers',
+                'sql_pattern': 'A{2,4} (B+ | C{2,3}) D+ E?',
                 'sql_query': """
                     SELECT * FROM memory.default.stock_data 
                     MATCH_RECOGNIZE (
                         PARTITION BY symbol ORDER BY timestamp
                         MEASURES 
-                            CLASSIFIER() AS variable_name,
-                            MATCH_NUMBER() AS match_id,
-                            FIRST(A.price) AS entry_price,
-                            LAST(E.price) AS exit_price,
-                            COUNT(B.*) + COUNT(C.*) AS middle_length,
-                            SUM(D.volume) AS total_volume,
-                            MAX(price) - MIN(price) AS price_range
+                            FIRST(A.price) AS pattern_start_price,
+                            LAST(D.price) AS pattern_end_price,
+                            COUNT(*) AS total_pattern_length,
+                            COUNT(A.*) AS a_count,
+                            COUNT(B.*) AS b_count,
+                            COUNT(C.*) AS c_count,
+                            COUNT(D.*) AS d_count,
+                            SUM(D.volume) AS d_total_volume,
+                            AVG(A.price) AS avg_a_price
                         ONE ROW PER MATCH
-                        PATTERN (A+ (B{2,} | C+) D* E{1,3})
+                        PATTERN (A{2,4} (B+ | C{2,3}) D+)
                         DEFINE 
-                            A AS price > AVG(price) OVER (ROWS 10 PRECEDING),
-                            B AS price > PREV(price) * 1.02 AND volume > AVG(volume) OVER (ROWS 3 PRECEDING),
-                            C AS price < PREV(price) * 0.98 AND volume > 1000,
-                            D AS price BETWEEN PREV(price) * 0.99 AND PREV(price) * 1.01,
-                            E AS price < FIRST(A.price) * 0.90
+                            A AS price > 60 AND volume > 1000,
+                            B AS price > PREV(price) AND volume > 1500,
+                            C AS price < PREV(price) AND volume > 800,
+                            D AS price > 50 AND volume > 500
                     );
                 """,
                 'cache_efficiency': 0.35,
@@ -175,32 +183,31 @@ class EnhancedPatternBenchmark:
             },
             'Ultra Complex': {
                 'complexity_score': 15,
-                'description': 'Maximum complexity with nested patterns and multiple aggregations',
-                'sql_pattern': '(A{2,4} B+){2,} (C{1,2} | (D+ E{2,3}))* F+',
+                'description': 'Maximum complexity with nested patterns and alternations',
+                'sql_pattern': '(A{2,3} B+) (C+ | D{2,3}) E+',
                 'sql_query': """
                     SELECT * FROM memory.default.stock_data 
                     MATCH_RECOGNIZE (
                         PARTITION BY symbol ORDER BY timestamp
                         MEASURES 
-                            CLASSIFIER() AS matched_variable,
-                            MATCH_NUMBER() AS sequence_id,
-                            FIRST(A.timestamp) AS pattern_start_time,
-                            LAST(F.timestamp) AS pattern_end_time,
+                            FIRST(A.price) AS ultra_start_price,
+                            LAST(E.price) AS ultra_end_price,
                             COUNT(*) AS total_pattern_length,
-                            SUM(CASE WHEN CLASSIFIER() = 'A' THEN volume ELSE 0 END) AS a_total_volume,
-                            AVG(CASE WHEN CLASSIFIER() IN ('B','C') THEN price END) AS bc_avg_price,
-                            MAX(price) - MIN(price) AS full_price_range,
-                            STDEV(volume) AS volume_volatility,
-                            COUNT(DISTINCT CLASSIFIER()) AS distinct_variables
+                            COUNT(A.*) AS a_total_count,
+                            COUNT(B.*) AS b_total_count,
+                            COUNT(C.*) AS c_total_count,
+                            COUNT(D.*) AS d_total_count,
+                            COUNT(E.*) AS e_total_count,
+                            AVG(A.price) AS avg_a_price,
+                            SUM(B.volume) AS b_total_volume
                         ONE ROW PER MATCH
-                        PATTERN ((A{2,4} B+){2,} (C{1,2} | (D+ E{2,3}))* F+)
+                        PATTERN ((A{2,3} B+) (C+ | D{2,3}) E+)
                         DEFINE 
-                            A AS price > AVG(price) OVER (ROWS 20 PRECEDING) AND volume > PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY volume) OVER (ROWS 10 PRECEDING),
-                            B AS price > PREV(price) * 1.05 AND volume > AVG(volume) OVER (ROWS 5 PRECEDING) * 1.2,
-                            C AS price BETWEEN PREV(price) * 0.95 AND PREV(price) * 1.05 AND volume > 500,
-                            D AS price < PREV(price) * 0.98 AND volume > MEDIAN(volume) OVER (ROWS 7 PRECEDING),
-                            E AS price > PREV(price) * 1.01 AND volume < AVG(volume) OVER (ROWS 3 PRECEDING),
-                            F AS price < FIRST(A.price) * 0.85 AND volume > MAX(volume) OVER (ROWS 5 PRECEDING) * 0.5
+                            A AS price > 65 AND volume > 1200,
+                            B AS price > PREV(price) AND volume > 1000,
+                            C AS price < PREV(price) AND volume > 800,
+                            D AS price > 55 AND volume > 600,
+                            E AS price < FIRST(A.price) * 0.92
                     );
                 """,
                 'cache_efficiency': 0.25,
@@ -222,11 +229,130 @@ class EnhancedPatternBenchmark:
         print("🚀 REAL IMPLEMENTATION PERFORMANCE BENCHMARKING")
         print("="*80)
         print(f"📊 Using ACTUAL match_recognize function")
-        print(f"📈 Available dataset sizes: 1K, 5K, 10K, 25K, 50K, 100K rows")
-        print(f"🔀 Available pattern complexity levels: Simple, Medium, Complex, Very Complex, Ultra Complex")
-        print(f"🧪 Maximum test combinations: {len(self.dataset_sizes) * len(self.pattern_types)}")
+        if self.test_mode:
+            print(f"🎯 Test Mode: {self.test_mode} - {self.mode_description}")
+            print(f"📈 Dataset sizes: {', '.join(f'{s//1000}K' for s in self.dataset_sizes)}")
+            print(f"🔀 Pattern levels: {', '.join(self.pattern_names)}")
+        else:
+            print(f"📈 Available dataset sizes: 1K, 5K, 10K, 25K, 50K, 100K rows")
+            print(f"🔀 Available pattern complexity levels: Simple, Medium, Complex, Very Complex, Ultra Complex")
+        print(f"🧪 Maximum test combinations: {len(self.dataset_sizes) * len(self.pattern_names)}")
         print(f"📁 Output directory: {output_dir}")
         print("="*80)
+    
+    def _configure_test_mode(self):
+        """Configure test parameters based on test mode"""
+        if self.test_mode == 1:
+            # Quick Test: 9 tests (3 sizes × 3 simple patterns)
+            self.mode_description = "Quick Test (9 tests)"
+            self.pattern_names = ['Simple', 'Medium', 'Complex']
+            self.size_filter = [1000, 5000, 10000]
+        elif self.test_mode == 2:
+            # Standard Test: 15 tests (3 sizes × 5 patterns)
+            self.mode_description = "Standard Test (15 tests)"
+            self.pattern_names = ['Simple', 'Medium', 'Complex', 'Very Complex', 'Ultra Complex']
+            self.size_filter = [1000, 10000, 25000]
+        elif self.test_mode == 3:
+            # Enhanced Test: 16 tests (4 sizes × 4 main patterns, includes 50K)
+            self.mode_description = "Enhanced Test (16 tests with 50K dataset)"
+            self.pattern_names = ['Simple', 'Medium', 'Complex', 'Very Complex']
+            self.size_filter = [5000, 10000, 25000, 50000]
+        elif self.test_mode == 4:
+            # Extended Test: 20 tests (4 sizes × 5 patterns, includes 100K)
+            self.mode_description = "Extended Test (20 tests with 100K dataset)"
+            self.pattern_names = ['Simple', 'Medium', 'Complex', 'Very Complex', 'Ultra Complex']
+            self.size_filter = [10000, 25000, 50000, 100000]
+        elif self.test_mode == 5:
+            # Full Test: 30 tests (6 sizes × 5 patterns)
+            self.mode_description = "Full Test (30 tests)"
+            self.pattern_names = ['Simple', 'Medium', 'Complex', 'Very Complex', 'Ultra Complex']
+            self.size_filter = None  # Use all sizes
+        else:
+            # Default: All patterns and sizes
+            self.mode_description = "All Patterns and Sizes"
+            self.pattern_names = ['Simple', 'Medium', 'Complex', 'Very Complex', 'Ultra Complex']
+            self.size_filter = None
+    
+    def _get_dataset_sizes_for_mode(self):
+        """Get dataset sizes based on test mode"""
+        if self.size_filter:
+            return self.size_filter
+        return self.base_dataset_sizes
+    
+    def get_test_mode_info(self):
+        """Get information about available test modes"""
+        return {
+            1: "Quick Test - 9 tests (3 sizes × 3 simple patterns)",
+            2: "Standard Test - 15 tests (3 sizes × 5 patterns)", 
+            3: "Enhanced Test - 16 tests (4 sizes × 4 main patterns, includes 50K)",
+            4: "Extended Test - 20 tests (4 sizes × 5 patterns, includes 100K)",
+            5: "Full Test - 30 tests (6 sizes × 5 patterns)"
+        }
+    
+    @staticmethod
+    def run_interactive_mode_selection():
+        """Interactive mode selection and execution"""
+        print("🚀 Enhanced Pattern Benchmark - Interactive Mode Selection")
+        print("="*60)
+        
+        # Show available modes
+        modes = {
+            1: "Quick Test - 9 tests (3 sizes × 3 simple patterns, ~5-10 min)",
+            2: "Standard Test - 15 tests (3 sizes × 5 patterns, ~15-20 min)", 
+            3: "Enhanced Test - 16 tests (4 sizes × 4 patterns + 50K, ~25-40 min)",
+            4: "Extended Test - 20 tests (4 sizes × 5 patterns + 100K, ~35-50 min)",
+            5: "Full Test - 30 tests (6 sizes × 5 patterns, ~45-75 min)"
+        }
+        
+        print("\nAvailable test modes:")
+        for mode_num, description in modes.items():
+            print(f"  {mode_num}. {description}")
+        
+        print("\nChoose your test mode:")
+        choice = input("Enter choice (1-5): ").strip()
+        
+        # Validate choice
+        try:
+            test_mode = int(choice)
+            if test_mode not in modes:
+                print("❌ Invalid choice. Using mode 2 (Standard Test).")
+                test_mode = 2
+        except ValueError:
+            print("❌ Invalid input. Using mode 2 (Standard Test).")
+            test_mode = 2
+        
+        print(f"\n🎯 Selected: Mode {test_mode} - {modes[test_mode]}")
+        confirm = input("Proceed? (y/N): ").strip().lower()
+        
+        if confirm not in ['y', 'yes']:
+            print("❌ Cancelled.")
+            return None
+        
+        # Run the benchmark
+        print(f"\n🚀 Starting {modes[test_mode]}...")
+        benchmark = EnhancedPatternBenchmark(
+            output_dir="/home/monierashraf/Desktop/llm/Row_match_recognize/Performance",
+            test_mode=test_mode
+        )
+        
+        # Execute the benchmark
+        start_time = time.time()
+        benchmark.run_comprehensive_benchmark()
+        total_time = time.time() - start_time
+        
+        # Save and analyze results
+        df, timestamp = benchmark.save_results()
+        if not df.empty:
+            benchmark.generate_performance_visualizations(df, timestamp)
+            benchmark.generate_analysis_report(df, timestamp)
+            
+            print("\n" + "="*60)
+            print("🎉 BENCHMARK COMPLETE!")
+            print(f"⏱️  Total time: {total_time:.1f} seconds")
+            print(f"📁 Results saved with timestamp: {timestamp}")
+            print("="*60)
+        
+        return benchmark
     
     def generate_test_data(self, size: int) -> pd.DataFrame:
         """Generate realistic stock market test data for match_recognize testing"""
@@ -406,16 +532,19 @@ class EnhancedPatternBenchmark:
         """
         Run comprehensive benchmarking using REAL match_recognize implementation
         """
-        print("\n🚀 Starting REAL IMPLEMENTATION comprehensive pattern benchmarking...")
+        if self.test_mode:
+            print(f"\n🚀 Starting {self.mode_description} benchmarking...")
+        else:
+            print("\n🚀 Starting REAL IMPLEMENTATION comprehensive pattern benchmarking...")
         
-        total_tests = len(self.dataset_sizes) * len(self.pattern_types)
+        total_tests = len(self.dataset_sizes) * len(self.pattern_names)
         current_test = 0
         start_time = time.time()
         
         for dataset_size in self.dataset_sizes:
             print(f"\n📊 Testing dataset size: {dataset_size:,} rows")
             
-            for pattern_name in self.pattern_types.keys():
+            for pattern_name in self.pattern_names:
                 current_test += 1
                 progress = (current_test / total_tests) * 100
                 
@@ -473,6 +602,38 @@ class EnhancedPatternBenchmark:
         print(f"Total tests: {len(self.results)}")
         print(f"Successful tests: {len([r for r in self.results if r.get('success', False)])}")
         print(f"Cache hit rate: {(self.cache_stats['cache_hits'] / max(1, self.cache_stats['total_queries'])) * 100:.1f}%")
+    
+    def run_benchmark(self, test_mode: int = None):
+        """
+        Run benchmark with specified test mode
+        """
+        if test_mode:
+            # Create new instance with test mode
+            benchmark = EnhancedPatternBenchmark(
+                output_dir=self.output_dir, 
+                use_amazon_data=self.use_amazon_data,
+                test_mode=test_mode
+            )
+            benchmark.run_comprehensive_benchmark()
+            
+            # Save and visualize results
+            df, timestamp = benchmark.save_results()
+            if not df.empty:
+                benchmark.generate_performance_visualizations(df, timestamp)
+                benchmark.generate_analysis_report(df, timestamp)
+            
+            return benchmark
+        else:
+            # Run with current configuration
+            self.run_comprehensive_benchmark()
+            
+            # Save and visualize results
+            df, timestamp = self.save_results()
+            if not df.empty:
+                self.generate_performance_visualizations(df, timestamp)
+                self.generate_analysis_report(df, timestamp)
+            
+            return self
     
     def save_results(self) -> Tuple[pd.DataFrame, str]:
         """Save results to CSV and JSON files"""
@@ -835,48 +996,34 @@ def main():
     
     # Choose test mode
     print("\nChoose benchmark mode:")
-    print("1. Quick test (3 sizes × 3 patterns = 9 tests, ~5-10 minutes)")
-    print("2. Medium test (4 sizes × 4 patterns = 16 tests, ~15-20 minutes)")
-    print("3. Enhanced test (5 sizes × 4 patterns = 20 tests, ~25-40 minutes)")
-    print("4. Extended test (6 sizes × 4 patterns = 24 tests, ~35-50 minutes)")
-    print("5. Full test (6 sizes × 5 patterns = 30 tests, ~45-75 minutes)")
+    print("1. Quick Test - 9 tests (3 sizes × 3 simple patterns, ~5-10 minutes)")
+    print("2. Standard Test - 15 tests (3 sizes × 5 patterns, ~15-20 minutes)")
+    print("3. Enhanced Test - 16 tests (4 sizes × 4 main patterns, includes 50K, ~25-40 minutes)")
+    print("4. Extended Test - 20 tests (4 sizes × 5 patterns, includes 100K, ~35-50 minutes)")
+    print("5. Full Test - 30 tests (6 sizes × 5 patterns, ~45-75 minutes)")
     
-    choice = input("Enter choice (1, 2, 3, 4, or 5): ").strip()
+    choice = input("Enter choice (1-5): ").strip()
     
-    # Initialize benchmarking
-    benchmark = EnhancedPatternBenchmark(
-        output_dir="/home/monierashraf/Desktop/llm/Row_match_recognize/Performance",
-        use_amazon_data=True
-    )
+    # Map choice to test mode
+    test_mode_map = {
+        "1": 1, "2": 2, "3": 3, "4": 4, "5": 5
+    }
     
-    # Adjust test scope based on choice
-    if choice == "1":
-        # Quick test
-        benchmark.dataset_sizes = [1000, 5000, 10000]
-        benchmark.pattern_types = {k: v for i, (k, v) in enumerate(benchmark.pattern_types.items()) if i < 3}
-        print("🏃 Running quick test...")
-    elif choice == "2":
-        # Medium test
-        benchmark.dataset_sizes = [1000, 5000, 10000, 25000]
-        benchmark.pattern_types = {k: v for i, (k, v) in enumerate(benchmark.pattern_types.items()) if i < 4}
-        print("🔬 Running medium test...")
-    elif choice == "3":
-        # Enhanced test (with 50K)
-        benchmark.dataset_sizes = [1000, 5000, 10000, 25000, 50000]
-        benchmark.pattern_types = {k: v for i, (k, v) in enumerate(benchmark.pattern_types.items()) if k in ['Simple', 'Medium', 'Complex', 'Very Complex']}
-        print("🎯 Running enhanced test (includes 50K dataset)...")
-    elif choice == "4":
-        # Extended test (with 100K)
-        benchmark.dataset_sizes = [1000, 5000, 10000, 25000, 50000, 100000]
-        benchmark.pattern_types = {k: v for i, (k, v) in enumerate(benchmark.pattern_types.items()) if k in ['Simple', 'Medium', 'Complex', 'Very Complex']}
-        print("🚀 Running extended test (includes 100K dataset)...")
-    else:
-        # Full test (all patterns)
-        print("🎓 Running full academic test (all complexity levels)...")
+    test_mode = test_mode_map.get(choice)
+    if not test_mode:
+        print("Invalid choice. Using Standard Test (mode 2).")
+        test_mode = 2
     
     start_time = time.time()
     
-    # Run comprehensive benchmarking with real implementation
+    # Initialize and run benchmark with test mode
+    benchmark = EnhancedPatternBenchmark(
+        output_dir="/home/monierashraf/Desktop/llm/Row_match_recognize/Performance",
+        use_amazon_data=True,
+        test_mode=test_mode
+    )
+    
+    # Run the benchmark
     benchmark.run_comprehensive_benchmark()
     
     total_time = time.time() - start_time
@@ -918,4 +1065,27 @@ def main():
         print("❌ No results generated. Please check the configuration and try again.")
 
 if __name__ == "__main__":
-    main()
+    # Check if a test mode was provided as command line argument
+    if len(sys.argv) > 1:
+        try:
+            test_mode = int(sys.argv[1])
+            if test_mode in [1, 2, 3, 4, 5]:
+                print(f"🚀 Running test mode {test_mode} from command line...")
+                benchmark = EnhancedPatternBenchmark(
+                    output_dir="/home/monierashraf/Desktop/llm/Row_match_recognize/Performance",
+                    test_mode=test_mode
+                )
+                benchmark.run_comprehensive_benchmark()
+                df, timestamp = benchmark.save_results()
+                if not df.empty:
+                    benchmark.generate_performance_visualizations(df, timestamp)
+                    benchmark.generate_analysis_report(df, timestamp)
+            else:
+                print(f"❌ Invalid test mode: {test_mode}. Valid modes: 1-5")
+                EnhancedPatternBenchmark.run_interactive_mode_selection()
+        except ValueError:
+            print(f"❌ Invalid test mode argument: {sys.argv[1]}")
+            EnhancedPatternBenchmark.run_interactive_mode_selection()
+    else:
+        # Run interactive mode selection if no arguments
+        EnhancedPatternBenchmark.run_interactive_mode_selection()
