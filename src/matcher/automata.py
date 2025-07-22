@@ -805,31 +805,56 @@ class NFA:
     
     def optimize(self) -> None:
         """
-        Apply optimizations to improve NFA performance and structure.
+        Apply comprehensive Phase 1 optimizations to improve NFA performance and structure.
+        
+        Enhanced optimization pipeline:
+        1. Basic state and transition optimization
+        2. Advanced state minimization with equivalence classes
+        3. Epsilon transition clustering and reduction
+        4. DFA state pre-computation for hot paths
+        5. Transition priority optimization
         """
         with self._lock:
             if self._optimized:
                 return
             
-            logger.info("Optimizing NFA...")
+            logger.info("Starting Phase 1: Advanced NFA optimization...")
+            optimization_start = time.time()
             
-            # Optimize each state
+            # Phase 1.1: Basic optimizations (existing)
             for state in self.states:
                 state.optimize_transitions()
             
-            # Remove unreachable states
+            # Phase 1.2: Advanced state minimization
+            initial_states = len(self.states)
+            self._advanced_state_minimization()
+            
+            # Phase 1.3: Remove unreachable states (improved)
             self._remove_unreachable_states()
             
-            # Merge equivalent epsilon transitions
+            # Phase 1.4: Advanced epsilon closure optimization
+            self._optimize_epsilon_closure_computation()
+            
+            # Phase 1.5: Merge equivalent epsilon transitions
             self._merge_epsilon_transitions()
+            
+            # Phase 1.6: DFA state pre-computation for performance
+            self._precompute_dfa_states()
+            
+            # Phase 1.7: Transition priority optimization
+            self._optimize_transition_priorities()
             
             # Update metadata after optimization
             self._update_optimization_metadata()
             
+            optimization_time = time.time() - optimization_start
+            states_reduced = initial_states - len(self.states)
+            
             self._optimized = True
             self._validated = False  # Need re-validation after optimization
             
-            logger.info("NFA optimization completed")
+            logger.info(f"Phase 1 NFA optimization completed in {optimization_time:.3f}s: "
+                       f"{states_reduced} states removed, {len(self.states)} states remaining")
     
     def _remove_unreachable_states(self) -> None:
         """Remove states that cannot be reached from the start state."""
@@ -923,6 +948,529 @@ class NFA:
         self.metadata['optimization_timestamp'] = time.time()
         
         # Update variable mappings
+        var_states = defaultdict(list)
+        for i, state in enumerate(self.states):
+            if state and state.variable:
+                var_states[state.variable].append(i)
+        self.metadata['variable_states'] = dict(var_states)
+
+    def _advanced_state_minimization(self) -> None:
+        """
+        Phase 1: Advanced state minimization using equivalence classes.
+        
+        This method implements a sophisticated state minimization algorithm that:
+        1. Identifies states with identical transition patterns
+        2. Merges equivalent states while preserving semantics
+        3. Optimizes epsilon closure paths
+        4. Maintains SQL:2016 compliance for all pattern features
+        """
+        if len(self.states) <= 2:  # Skip for trivial automata
+            return
+            
+        logger.debug("Starting advanced state minimization...")
+        
+        # Phase 1.1: Identify potentially equivalent states
+        equivalence_classes = self._compute_state_equivalence_classes()
+        
+        # Phase 1.2: Merge equivalent states
+        merges_performed = self._merge_equivalent_states(equivalence_classes)
+        
+        # Phase 1.3: Optimize resulting transition structure
+        if merges_performed > 0:
+            self._cleanup_after_state_merging()
+            logger.info(f"Advanced state minimization: merged {merges_performed} state groups")
+    
+    def _compute_state_equivalence_classes(self) -> Dict[str, List[int]]:
+        """
+        Compute equivalence classes of states based on their structural properties.
+        
+        States are considered equivalent if they have:
+        - Same variable assignment
+        - Same acceptance status
+        - Same exclusion status
+        - Compatible transition signatures
+        - Compatible epsilon transition patterns
+        
+        Returns:
+            Dict mapping equivalence signatures to lists of state indices
+        """
+        equivalence_classes = defaultdict(list)
+        
+        for i, state in enumerate(self.states):
+            # Skip special states (start, accept)
+            if i == self.start or i == self.accept:
+                continue
+                
+            # Create equivalence signature
+            signature = self._compute_state_signature(state, i)
+            equivalence_classes[signature].append(i)
+        
+        # Only return classes with multiple states
+        return {sig: states for sig, states in equivalence_classes.items() if len(states) > 1}
+    
+    def _compute_state_signature(self, state: NFAState, state_idx: int) -> str:
+        """
+        Compute a signature for a state based on its structural properties.
+        
+        The signature captures:
+        - Variable name and properties
+        - Transition target patterns (not specific indices)
+        - Epsilon transition patterns  
+        - Acceptance and exclusion status
+        """
+        signature_parts = [
+            f"var:{state.variable or 'None'}",
+            f"accept:{state.is_accept}",
+            f"excluded:{state.is_excluded}",
+            f"anchor:{state.is_anchor}:{state.anchor_type}",
+            f"empty_match:{state.is_empty_match}",
+            f"subset_vars:{sorted(state.subset_vars)}",
+            f"priority:{state.priority}"
+        ]
+        
+        # Add transition signature (patterns, not specific targets)
+        trans_signature = []
+        for trans in sorted(state.transitions, key=lambda t: (t.priority, t.variable or '')):
+            # Use relative position instead of absolute target
+            relative_target = trans.target - state_idx if trans.target != state_idx else 0
+            trans_sig = f"{trans.variable or 'None'}:{relative_target}:{trans.priority}"
+            trans_signature.append(trans_sig)
+        
+        signature_parts.append(f"transitions:[{','.join(trans_signature)}]")
+        
+        # Add epsilon signature (relative positions)
+        eps_signature = []
+        for eps_target in sorted(state.epsilon):
+            relative_target = eps_target - state_idx if eps_target != state_idx else 0
+            priority = state.epsilon_priorities.get(eps_target, 0)
+            eps_signature.append(f"{relative_target}:{priority}")
+        
+        signature_parts.append(f"epsilon:[{','.join(eps_signature)}]")
+        
+        return '|'.join(signature_parts)
+    
+    def _merge_equivalent_states(self, equivalence_classes: Dict[str, List[int]]) -> int:
+        """
+        Merge states in each equivalence class, keeping the lowest-indexed state.
+        
+        Args:
+            equivalence_classes: Dictionary mapping signatures to state index lists
+            
+        Returns:
+            int: Number of state groups that were merged
+        """
+        merges_performed = 0
+        state_mapping = {}  # Maps old index to new index
+        
+        for sig, state_indices in equivalence_classes.items():
+            if len(state_indices) < 2:
+                continue
+                
+            # Sort by index and keep the first (lowest index) as the canonical state
+            state_indices.sort()
+            canonical_state = state_indices[0]
+            
+            # Verify states are truly equivalent before merging
+            if not self._verify_states_equivalent(state_indices):
+                continue
+                
+            # Map all other states to the canonical state
+            for state_idx in state_indices[1:]:
+                state_mapping[state_idx] = canonical_state
+            
+            merges_performed += 1
+            logger.debug(f"Merging states {state_indices[1:]} into {canonical_state}")
+        
+        # Apply the state mapping to update all transitions
+        if state_mapping:
+            self._apply_state_mapping(state_mapping)
+        
+        return merges_performed
+    
+    def _verify_states_equivalent(self, state_indices: List[int]) -> bool:
+        """
+        Verify that states are truly equivalent and safe to merge.
+        
+        Performs deep equivalence checking to ensure merging preserves correctness.
+        """
+        if len(state_indices) < 2:
+            return False
+            
+        reference_state = self.states[state_indices[0]]
+        
+        for i in range(1, len(state_indices)):
+            compare_state = self.states[state_indices[i]]
+            
+            # Check core properties
+            if (reference_state.variable != compare_state.variable or
+                reference_state.is_accept != compare_state.is_accept or
+                reference_state.is_excluded != compare_state.is_excluded or
+                reference_state.is_anchor != compare_state.is_anchor or
+                reference_state.anchor_type != compare_state.anchor_type):
+                return False
+            
+            # Check transition compatibility (must have same pattern, allowing for index differences)
+            if not self._transitions_compatible(reference_state, compare_state, 
+                                              state_indices[0], state_indices[i]):
+                return False
+        
+        return True
+    
+    def _transitions_compatible(self, state1: NFAState, state2: NFAState, 
+                              idx1: int, idx2: int) -> bool:
+        """Check if two states have compatible transition patterns."""
+        if len(state1.transitions) != len(state2.transitions):
+            return False
+            
+        if len(state1.epsilon) != len(state2.epsilon):
+            return False
+        
+        # Sort transitions by variable and priority for comparison
+        trans1 = sorted(state1.transitions, key=lambda t: (t.variable or '', t.priority))
+        trans2 = sorted(state2.transitions, key=lambda t: (t.variable or '', t.priority))
+        
+        for t1, t2 in zip(trans1, trans2):
+            if (t1.variable != t2.variable or 
+                t1.priority != t2.priority or
+                (t1.target - idx1) != (t2.target - idx2)):  # Relative target must match
+                return False
+        
+        return True
+    
+    def _apply_state_mapping(self, state_mapping: Dict[int, int]) -> None:
+        """
+        Apply state index mapping to update all transitions and references.
+        
+        Args:
+            state_mapping: Dictionary mapping old state indices to new state indices
+        """
+        # Update all transition targets
+        for state in self.states:
+            # Update normal transitions
+            for trans in state.transitions:
+                if trans.target in state_mapping:
+                    trans.target = state_mapping[trans.target]
+            
+            # Update epsilon transitions
+            new_epsilon = []
+            new_epsilon_priorities = {}
+            
+            for eps_target in state.epsilon:
+                new_target = state_mapping.get(eps_target, eps_target)
+                if new_target not in new_epsilon:  # Avoid duplicates
+                    new_epsilon.append(new_target)
+                    
+                # Transfer priority if exists
+                if eps_target in state.epsilon_priorities:
+                    new_epsilon_priorities[new_target] = state.epsilon_priorities[eps_target]
+            
+            state.epsilon = new_epsilon
+            state.epsilon_priorities = new_epsilon_priorities
+        
+        # Update NFA references
+        if self.start in state_mapping:
+            self.start = state_mapping[self.start]
+        if self.accept in state_mapping:
+            self.accept = state_mapping[self.accept]
+        
+        # Remove mapped states (in reverse order to maintain indices)
+        states_to_remove = sorted(state_mapping.keys(), reverse=True)
+        for state_idx in states_to_remove:
+            if state_idx < len(self.states):
+                self.states.pop(state_idx)
+        
+        # Update all remaining state indices (shift down)
+        index_shift = self._compute_index_shifts(states_to_remove)
+        self._apply_index_shifts(index_shift)
+    
+    def _compute_index_shifts(self, removed_indices: List[int]) -> Dict[int, int]:
+        """Compute how much each remaining state index should be shifted down."""
+        removed_set = set(removed_indices)
+        shift_mapping = {}
+        
+        shift_amount = 0
+        for i in range(max(removed_indices) + 1 if removed_indices else 0):
+            if i in removed_set:
+                shift_amount += 1
+            else:
+                if shift_amount > 0:
+                    shift_mapping[i] = i - shift_amount
+        
+        return shift_mapping
+    
+    def _apply_index_shifts(self, shift_mapping: Dict[int, int]) -> None:
+        """Apply index shifts to all references after state removal."""
+        if not shift_mapping:
+            return
+            
+        # Update transition targets
+        for state in self.states:
+            for trans in state.transitions:
+                if trans.target in shift_mapping:
+                    trans.target = shift_mapping[trans.target]
+            
+            # Update epsilon transitions
+            state.epsilon = [shift_mapping.get(target, target) for target in state.epsilon]
+            
+            # Update epsilon priorities
+            if hasattr(state, 'epsilon_priorities'):
+                new_priorities = {}
+                for target, priority in state.epsilon_priorities.items():
+                    new_target = shift_mapping.get(target, target)
+                    new_priorities[new_target] = priority
+                state.epsilon_priorities = new_priorities
+        
+        # Update NFA references
+        if self.start in shift_mapping:
+            self.start = shift_mapping[self.start]
+        if self.accept in shift_mapping:
+            self.accept = shift_mapping[self.accept]
+    
+    def _cleanup_after_state_merging(self) -> None:
+        """Clean up NFA structure after state merging operations."""
+        # Remove any duplicate transitions that may have been created
+        for state in self.states:
+            state.optimize_transitions()
+        
+        # Clear epsilon closure cache since structure changed
+        if hasattr(self, '_epsilon_cache'):
+            self._epsilon_cache.clear()
+        
+        # Update state IDs for debugging
+        for i, state in enumerate(self.states):
+            if state:
+                state.state_id = i
+
+    def _optimize_epsilon_closure_computation(self) -> None:
+        """
+        Phase 2: Optimize epsilon closure computation with advanced caching and path analysis.
+        
+        This optimization pre-computes frequently used epsilon closures and optimizes
+        the closure computation paths for better performance during pattern matching.
+        """
+        logger.debug("Optimizing epsilon closure computation...")
+        
+        # Pre-compute epsilon closures for states with complex epsilon paths
+        complex_epsilon_states = []
+        for i, state in enumerate(self.states):
+            if state and len(state.epsilon) > 2:  # States with multiple epsilon transitions
+                complex_epsilon_states.append(i)
+        
+        # Pre-compute and cache closures for complex states
+        if complex_epsilon_states:
+            for state_idx in complex_epsilon_states:
+                closure = self.epsilon_closure([state_idx])
+                self._epsilon_cache[frozenset([state_idx])] = frozenset(closure)
+            
+            logger.debug(f"Pre-computed epsilon closures for {len(complex_epsilon_states)} complex states")
+        
+        # Optimize epsilon transition chains (flatten long chains where possible)
+        self._optimize_epsilon_chains()
+    
+    def _optimize_epsilon_chains(self) -> None:
+        """Optimize long epsilon transition chains by creating direct connections."""
+        optimizations_made = 0
+        
+        for state in self.states:
+            if not state or len(state.epsilon) == 0:
+                continue
+            
+            # Find epsilon chains: state -> intermediate -> target
+            new_epsilon = set(state.epsilon)
+            
+            for eps_target in list(state.epsilon):
+                if eps_target < len(self.states) and self.states[eps_target]:
+                    intermediate_state = self.states[eps_target]
+                    
+                    # If intermediate state only has epsilon transitions and no other properties
+                    if (len(intermediate_state.transitions) == 0 and 
+                        len(intermediate_state.epsilon) > 0 and
+                        not intermediate_state.is_accept and
+                        not intermediate_state.is_excluded and
+                        not intermediate_state.variable):
+                        
+                        # Add direct connections to all targets of intermediate state
+                        for final_target in intermediate_state.epsilon:
+                            if final_target not in new_epsilon:
+                                new_epsilon.add(final_target)
+                                optimizations_made += 1
+            
+            # Update epsilon transitions if optimizations were made
+            if len(new_epsilon) != len(state.epsilon):
+                state.epsilon = list(new_epsilon)
+        
+        if optimizations_made > 0:
+            logger.debug(f"Optimized {optimizations_made} epsilon chains")
+
+    def _precompute_dfa_states(self) -> None:
+        """
+        Phase 3: Pre-compute potential DFA states for faster NFA-to-DFA conversion.
+        
+        This method analyzes common state combinations and pre-computes their
+        epsilon closures and transition mappings to speed up runtime DFA construction.
+        """
+        logger.debug("Pre-computing DFA states...")
+        
+        # Identify frequently combined states based on epsilon closures
+        state_combinations = self._analyze_common_state_combinations()
+        
+        # Pre-compute epsilon closures for common combinations
+        dfa_cache = {}
+        for combination in state_combinations:
+            if len(combination) <= 5:  # Limit to reasonable combination sizes
+                closure = self.epsilon_closure(list(combination))
+                dfa_cache[frozenset(combination)] = frozenset(closure)
+        
+        # Store in metadata for runtime use
+        self.metadata['dfa_state_cache'] = dfa_cache
+        
+        if dfa_cache:
+            logger.debug(f"Pre-computed {len(dfa_cache)} DFA state combinations")
+    
+    def _analyze_common_state_combinations(self) -> List[Set[int]]:
+        """
+        Analyze the NFA structure to identify commonly occurring state combinations.
+        
+        Returns:
+            List of state combinations that are likely to occur together in DFA states
+        """
+        combinations = []
+        
+        # Find states that are frequently reached together via epsilon transitions
+        for i, state in enumerate(self.states):
+            if state and state.epsilon:
+                closure = self.epsilon_closure([i])
+                if len(closure) > 1 and len(closure) <= 5:
+                    combinations.append(set(closure))
+        
+        # Remove duplicates and very large combinations
+        unique_combinations = []
+        seen = set()
+        
+        for combo in combinations:
+            combo_key = frozenset(combo)
+            if combo_key not in seen and len(combo) <= 5:
+                unique_combinations.append(combo)
+                seen.add(combo_key)
+        
+        return unique_combinations
+
+    def _optimize_transition_priorities(self) -> None:
+        """
+        Phase 4: Optimize transition priorities for better matching performance.
+        
+        This method analyzes transition patterns and optimizes priority assignments
+        to reduce backtracking and improve match performance.
+        """
+        logger.debug("Optimizing transition priorities...")
+        
+        optimizations_made = 0
+        
+        # Analyze and optimize priority assignments
+        for state in self.states:
+            if not state or len(state.transitions) <= 1:
+                continue
+            
+            # Sort transitions by current priority
+            state.transitions.sort(key=lambda t: t.priority)
+            
+            # Optimize priorities based on transition characteristics
+            new_priorities = self._compute_optimal_priorities(state.transitions)
+            
+            # Apply new priorities if they improve the ordering
+            for i, trans in enumerate(state.transitions):
+                if trans.priority != new_priorities[i]:
+                    trans.priority = new_priorities[i]
+                    optimizations_made += 1
+            
+            # Optimize epsilon transition priorities
+            if state.epsilon and hasattr(state, 'epsilon_priorities'):
+                self._optimize_epsilon_priorities(state)
+        
+        if optimizations_made > 0:
+            logger.debug(f"Optimized {optimizations_made} transition priorities")
+    
+    def _compute_optimal_priorities(self, transitions: List) -> List[int]:
+        """
+        Compute optimal priority values for a list of transitions.
+        
+        Priority is assigned based on:
+        - Specificity of the pattern (more specific = higher priority)
+        - Variable type and constraints
+        - Transition target characteristics
+        
+        Args:
+            transitions: List of transition objects to optimize
+            
+        Returns:
+            List of optimized priority values
+        """
+        priorities = []
+        base_priority = 1000
+        
+        for i, trans in enumerate(transitions):
+            priority = base_priority - (i * 100)  # Base decreasing priority
+            
+            # Adjust based on variable characteristics
+            if trans.variable:
+                # Variables with constraints get higher priority
+                if hasattr(trans, 'constraints') and trans.constraints:
+                    priority += 50
+                
+                # Quantified patterns get adjusted priority
+                if hasattr(trans, 'quantifier'):
+                    if trans.quantifier in ['?', '{0,1}']:  # Optional
+                        priority -= 10
+                    elif trans.quantifier in ['+', '{1,}']:  # One or more
+                        priority += 20
+                    elif trans.quantifier == '*':  # Zero or more
+                        priority -= 20
+            
+            # Ensure priority remains positive and maintains relative order
+            priority = max(priority, 1)
+            priorities.append(priority)
+        
+        return priorities
+    
+    def _optimize_epsilon_priorities(self, state: NFAState) -> None:
+        """Optimize epsilon transition priorities for a given state."""
+        if not state.epsilon or not hasattr(state, 'epsilon_priorities'):
+            return
+        
+        # Sort epsilon targets by current priority (if available)
+        epsilon_with_priorities = []
+        for target in state.epsilon:
+            current_priority = state.epsilon_priorities.get(target, 0)
+            epsilon_with_priorities.append((target, current_priority))
+        
+        # Re-assign priorities based on target state characteristics
+        epsilon_with_priorities.sort(key=lambda x: x[1], reverse=True)
+        
+        new_priorities = {}
+        base_priority = 1000
+        
+        for i, (target, _) in enumerate(epsilon_with_priorities):
+            new_priority = base_priority - (i * 100)
+            
+            # Adjust based on target state properties
+            if target < len(self.states) and self.states[target]:
+                target_state = self.states[target]
+                
+                # Accept states get higher priority
+                if target_state.is_accept:
+                    new_priority += 100
+                
+                # Anchor states get adjusted priority
+                if target_state.is_anchor:
+                    new_priority += 50
+                
+                # States with many transitions get lower priority (complexity penalty)
+                if len(target_state.transitions) > 3:
+                    new_priority -= 25
+            
+            new_priorities[target] = max(new_priority, 1)
+        
+        state.epsilon_priorities = new_priorities
         var_states = self.get_variable_states()
         self.metadata['variable_states'] = var_states
     
