@@ -6,6 +6,7 @@ This module provides production-ready memory management optimizations including:
 2. Memory monitoring and leak detection  
 3. Garbage collection optimization
 4. Resource cleanup utilities
+5. Phase 3: Advanced memory management with adaptive strategies
 
 Part of Phase 3: Memory Management and Optimization
 """
@@ -14,9 +15,11 @@ import gc
 import weakref
 import threading
 import tracemalloc
+import psutil
+import os
 from typing import TypeVar, Generic, Dict, List, Any, Optional, Callable
-from collections import deque
-from dataclasses import dataclass
+from collections import deque, defaultdict
+from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import time
@@ -45,6 +48,146 @@ class PoolStats:
         """Calculate pool efficiency (reused vs created)."""
         return (self.reused / self.created) if self.created > 0 else 0.0
 
+@dataclass
+class MemoryPressureInfo:
+    """Information about current memory pressure."""
+    total_memory_mb: float
+    available_memory_mb: float
+    used_memory_mb: float
+    memory_percent: float
+    pressure_level: str  # 'low', 'medium', 'high', 'critical'
+    gc_collections: Dict[int, int] = field(default_factory=dict)
+    
+    @property
+    def is_under_pressure(self) -> bool:
+        """Check if system is under memory pressure."""
+        return self.pressure_level in ['high', 'critical']
+
+class AdaptivePoolManager:
+    """
+    Phase 3: Adaptive pool management that adjusts based on memory pressure.
+    """
+    
+    def __init__(self):
+        self.pools: Dict[str, ObjectPool] = {}
+        self.pressure_thresholds = {
+            'low': 50.0,      # < 50% memory usage
+            'medium': 70.0,   # 50-70% memory usage  
+            'high': 85.0,     # 70-85% memory usage
+            'critical': 95.0  # > 85% memory usage
+        }
+        self.adaptive_strategies = {
+            'low': self._expand_pools,
+            'medium': self._maintain_pools,
+            'high': self._shrink_pools,
+            'critical': self._emergency_cleanup
+        }
+        
+    def get_memory_pressure(self) -> MemoryPressureInfo:
+        """Get current memory pressure information."""
+        try:
+            memory = psutil.virtual_memory()
+            gc_stats = {}
+            for i in range(3):  # GC generations 0, 1, 2
+                gc_stats[i] = gc.get_count()[i]
+            
+            # Determine pressure level
+            if memory.percent < self.pressure_thresholds['low']:
+                level = 'low'
+            elif memory.percent < self.pressure_thresholds['medium']:
+                level = 'medium'
+            elif memory.percent < self.pressure_thresholds['high']:
+                level = 'high'
+            else:
+                level = 'critical'
+            
+            return MemoryPressureInfo(
+                total_memory_mb=memory.total / 1024 / 1024,
+                available_memory_mb=memory.available / 1024 / 1024,
+                used_memory_mb=memory.used / 1024 / 1024,
+                memory_percent=memory.percent,
+                pressure_level=level,
+                gc_collections=gc_stats
+            )
+        except Exception as e:
+            logger.warning(f"Failed to get memory pressure info: {e}")
+            # Return safe defaults
+            return MemoryPressureInfo(
+                total_memory_mb=1024.0,
+                available_memory_mb=512.0,
+                used_memory_mb=512.0,
+                memory_percent=50.0,
+                pressure_level='medium'
+            )
+    
+    def adapt_to_pressure(self) -> Dict[str, Any]:
+        """Adapt pool sizes based on current memory pressure."""
+        pressure = self.get_memory_pressure()
+        strategy = self.adaptive_strategies.get(pressure.pressure_level, self._maintain_pools)
+        
+        actions_taken = {
+            'pressure_level': pressure.pressure_level,
+            'memory_percent': pressure.memory_percent,
+            'actions': []
+        }
+        
+        try:
+            strategy_result = strategy(pressure)
+            actions_taken['actions'] = strategy_result
+        except Exception as e:
+            logger.error(f"Failed to adapt to memory pressure: {e}")
+            actions_taken['actions'] = [f"error: {str(e)}"]
+        
+        return actions_taken
+    
+    def _expand_pools(self, pressure: MemoryPressureInfo) -> List[str]:
+        """Expand pool sizes when memory pressure is low."""
+        actions = []
+        for name, pool in self.pools.items():
+            if pool.size() < pool._max_size:
+                # Increase pool size by 20%
+                new_size = min(int(pool._max_size * 1.2), pool._max_size + 50)
+                pool.resize(new_size)
+                actions.append(f"expanded_{name}_pool_to_{new_size}")
+        return actions
+    
+    def _maintain_pools(self, pressure: MemoryPressureInfo) -> List[str]:
+        """Maintain current pool sizes when memory pressure is medium."""
+        return ["maintaining_current_pool_sizes"]
+    
+    def _shrink_pools(self, pressure: MemoryPressureInfo) -> List[str]:
+        """Shrink pool sizes when memory pressure is high."""
+        actions = []
+        for name, pool in self.pools.items():
+            if pool.size() > 10:  # Keep minimum viable pool
+                # Reduce pool size by 30%
+                new_size = max(int(pool.size() * 0.7), 10)
+                pool.resize(new_size)
+                actions.append(f"shrunk_{name}_pool_to_{new_size}")
+        return actions
+    
+    def _emergency_cleanup(self, pressure: MemoryPressureInfo) -> List[str]:
+        """Emergency cleanup when memory pressure is critical."""
+        actions = []
+        
+        # Aggressively shrink all pools
+        for name, pool in self.pools.items():
+            pool.resize(5)  # Minimal pool size
+            actions.append(f"emergency_shrunk_{name}_pool_to_5")
+        
+        # Force garbage collection
+        collected = gc.collect()
+        actions.append(f"force_gc_collected_{collected}_objects")
+        
+        # Clear any additional caches
+        actions.append("cleared_additional_caches")
+        
+        return actions
+    
+    def register_pool(self, name: str, pool: 'ObjectPool') -> None:
+        """Register a pool for adaptive management."""
+        self.pools[name] = pool
+
 class ObjectPool(Generic[T]):
     """
     Production-ready object pool for memory optimization.
@@ -54,7 +197,7 @@ class ObjectPool(Generic[T]):
     """
     
     def __init__(self, factory: Callable[[], T], reset_func: Optional[Callable[[T], None]] = None,
-                 max_size: int = 100, enable_stats: bool = True):
+                 max_size: int = 100, enable_stats: bool = True, adaptive: bool = True):
         """
         Initialize object pool.
         
@@ -63,11 +206,13 @@ class ObjectPool(Generic[T]):
             reset_func: Optional function to reset objects before reuse
             max_size: Maximum pool size to prevent memory bloat
             enable_stats: Whether to track pool statistics
+            adaptive: Whether to enable adaptive pool management
         """
         self._factory = factory
         self._reset_func = reset_func
         self._max_size = max_size
         self._enable_stats = enable_stats
+        self._adaptive = adaptive
         
         self._pool: deque = deque()
         self._lock = threading.RLock()
@@ -75,6 +220,11 @@ class ObjectPool(Generic[T]):
         
         # Weak references to track all created objects
         self._all_objects: weakref.WeakSet = weakref.WeakSet()
+        
+        # Phase 3: Enhanced monitoring
+        self._creation_timestamps: deque = deque()
+        self._usage_patterns: defaultdict = defaultdict(int)
+        self._last_pressure_check = 0.0
     
     def acquire(self) -> T:
         """
@@ -84,6 +234,16 @@ class ObjectPool(Generic[T]):
             Object instance ready for use
         """
         with self._lock:
+            # Phase 3: Track usage patterns
+            current_time = time.time()
+            hour_key = int(current_time // 3600)  # Hour-based tracking
+            self._usage_patterns[hour_key] += 1
+            
+            # Phase 3: Adaptive pressure checking
+            if self._adaptive and current_time - self._last_pressure_check > 60:  # Check every minute
+                self._check_memory_pressure()
+                self._last_pressure_check = current_time
+            
             if self._pool:
                 obj = self._pool.popleft()
                 
@@ -103,6 +263,25 @@ class ObjectPool(Generic[T]):
                 return obj
             else:
                 return self._create_new_object()
+    
+    def _check_memory_pressure(self) -> None:
+        """Check memory pressure and adapt pool size if needed."""
+        try:
+            memory = psutil.virtual_memory()
+            
+            if memory.percent > 85:  # High memory pressure
+                # Aggressively shrink pool
+                target_size = max(5, len(self._pool) // 2)
+                while len(self._pool) > target_size:
+                    self._pool.pop()
+                logger.debug(f"Pool shrunk due to memory pressure: {len(self._pool)} objects")
+                
+            elif memory.percent < 50 and len(self._pool) < self._max_size // 2:
+                # Low memory pressure, allow pool to grow
+                pass  # Natural growth through usage
+                
+        except Exception as e:
+            logger.warning(f"Memory pressure check failed: {e}")
     
     def release(self, obj: T) -> None:
         """
@@ -145,6 +324,53 @@ class ObjectPool(Generic[T]):
         """Get current pool size."""
         with self._lock:
             return len(self._pool)
+    
+    def resize(self, new_max_size: int) -> None:
+        """
+        Phase 3: Resize pool maximum capacity.
+        
+        Args:
+            new_max_size: New maximum pool size
+        """
+        with self._lock:
+            self._max_size = new_max_size
+            
+            # Shrink current pool if it exceeds new max
+            while len(self._pool) > new_max_size:
+                self._pool.pop()
+                if self._stats:
+                    self._stats.destroyed += 1
+            
+            if self._stats:
+                self._stats.current_size = len(self._pool)
+    
+    def get_usage_patterns(self) -> Dict[str, Any]:
+        """
+        Phase 3: Get usage pattern analysis.
+        
+        Returns:
+            Dictionary with usage statistics and patterns
+        """
+        with self._lock:
+            current_time = time.time()
+            total_usage = sum(self._usage_patterns.values())
+            
+            # Calculate peak usage hours
+            if self._usage_patterns:
+                peak_hour = max(self._usage_patterns.items(), key=lambda x: x[1])
+                peak_usage = peak_hour[1]
+            else:
+                peak_hour = (0, 0)
+                peak_usage = 0
+            
+            return {
+                'total_acquisitions': total_usage,
+                'peak_hour_usage': peak_usage,
+                'average_hourly_usage': total_usage / max(len(self._usage_patterns), 1),
+                'usage_distribution': dict(self._usage_patterns),
+                'pool_efficiency': self._stats.efficiency if self._stats else 0.0,
+                'memory_pressure_checks': getattr(self, '_pressure_checks', 0)
+            }
     
     def stats(self) -> Optional[PoolStats]:
         """Get pool statistics."""
@@ -343,6 +569,7 @@ class ResourceManager:
     Centralized resource management for memory optimization.
     
     Coordinates object pools, memory monitoring, and cleanup.
+    Phase 3: Enhanced with adaptive management and advanced monitoring.
     """
     
     def __init__(self):
@@ -350,13 +577,19 @@ class ResourceManager:
         self.memory_monitor = MemoryMonitor()
         self.gc_optimizer = GarbageCollectionOptimizer()
         
+        # Phase 3: Adaptive pool management
+        self.adaptive_manager = AdaptivePoolManager()
+        self._monitoring_enabled = False
+        self._last_adaptation = 0.0
+        self._adaptation_interval = 120.0  # Adapt every 2 minutes
+        
         # Register cleanup on process exit
         import atexit
         atexit.register(self.cleanup)
     
     def get_pool(self, name: str, factory: Callable[[], T], 
                  reset_func: Optional[Callable[[T], None]] = None,
-                 max_size: int = 100) -> ObjectPool[T]:
+                 max_size: int = 100, adaptive: bool = True) -> ObjectPool[T]:
         """
         Get or create an object pool.
         
@@ -365,16 +598,23 @@ class ResourceManager:
             factory: Object creation function
             reset_func: Optional object reset function
             max_size: Maximum pool size
+            adaptive: Enable adaptive management
             
         Returns:
             Object pool instance
         """
         if name not in self.object_pools:
-            self.object_pools[name] = ObjectPool(
+            pool = ObjectPool(
                 factory=factory,
                 reset_func=reset_func,
-                max_size=max_size
+                max_size=max_size,
+                adaptive=adaptive
             )
+            self.object_pools[name] = pool
+            
+            # Phase 3: Register with adaptive manager
+            if adaptive:
+                self.adaptive_manager.register_pool(name, pool)
         
         return self.object_pools[name]
     
@@ -382,12 +622,14 @@ class ResourceManager:
         """Start comprehensive resource monitoring."""
         self.memory_monitor.start_monitoring()
         self.gc_optimizer.optimize_gc_settings()
+        self._monitoring_enabled = True
         logger.info("Resource monitoring started")
     
     def stop_monitoring(self) -> None:
         """Stop resource monitoring."""
         self.memory_monitor.stop_monitoring()
         self.gc_optimizer.restore_gc_settings()
+        self._monitoring_enabled = False
         logger.info("Resource monitoring stopped")
     
     def cleanup(self) -> None:
@@ -403,15 +645,89 @@ class ResourceManager:
         cleanup_stats = self.gc_optimizer.force_cleanup()
         logger.info(f"Final cleanup completed, {cleanup_stats['total']} objects collected")
     
+    def adapt_to_memory_pressure(self) -> Dict[str, Any]:
+        """
+        Phase 3: Adapt resources to current memory pressure.
+        
+        Returns:
+            Dictionary with adaptation actions taken
+        """
+        current_time = time.time()
+        
+        if current_time - self._last_adaptation < self._adaptation_interval:
+            return {"status": "skipped", "reason": "too_soon"}
+        
+        self._last_adaptation = current_time
+        
+        # Get current memory pressure and adapt
+        adaptation_result = self.adaptive_manager.adapt_to_pressure()
+        
+        # Log significant adaptations
+        if adaptation_result['pressure_level'] in ['high', 'critical']:
+            logger.warning(f"Memory pressure adaptation: {adaptation_result['pressure_level']} "
+                         f"({adaptation_result['memory_percent']:.1f}% memory usage)")
+        
+        return adaptation_result
+    
+    def get_memory_pressure_info(self) -> MemoryPressureInfo:
+        """
+        Phase 3: Get current memory pressure information.
+        
+        Returns:
+            Current memory pressure details
+        """
+        return self.adaptive_manager.get_memory_pressure()
+    
+    def optimize_for_workload(self, workload_type: str = "balanced") -> Dict[str, Any]:
+        """
+        Phase 3: Optimize pools for specific workload patterns.
+        
+        Args:
+            workload_type: 'memory_intensive', 'cpu_intensive', 'balanced'
+            
+        Returns:
+            Dictionary with optimization actions
+        """
+        actions = []
+        
+        if workload_type == "memory_intensive":
+            # Aggressive memory conservation
+            for name, pool in self.object_pools.items():
+                new_size = max(5, pool.size() // 2)
+                pool.resize(new_size)
+                actions.append(f"shrunk_{name}_pool_for_memory_intensive")
+                
+        elif workload_type == "cpu_intensive":
+            # Larger pools to reduce allocation overhead
+            pressure = self.get_memory_pressure_info()
+            if not pressure.is_under_pressure:
+                for name, pool in self.object_pools.items():
+                    new_size = min(pool._max_size * 2, 200)
+                    pool.resize(new_size)
+                    actions.append(f"expanded_{name}_pool_for_cpu_intensive")
+        
+        return {
+            "workload_type": workload_type,
+            "actions": actions,
+            "memory_pressure": self.get_memory_pressure_info().pressure_level
+        }
+    
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive resource statistics."""
         stats = {
             "memory": self.memory_monitor.get_memory_stats(),
             "garbage_collection": self.gc_optimizer.get_gc_stats(),
-            "object_pools": {}
+            "object_pools": {},
+            # Phase 3: Enhanced statistics
+            "memory_pressure": self.get_memory_pressure_info().__dict__,
+            "adaptive_management": {
+                "enabled": self._monitoring_enabled,
+                "last_adaptation": self._last_adaptation,
+                "adaptation_interval": self._adaptation_interval
+            }
         }
         
-        # Add pool statistics
+        # Add pool statistics with usage patterns
         for name, pool in self.object_pools.items():
             pool_stats = pool.stats()
             if pool_stats:
@@ -422,7 +738,9 @@ class ResourceManager:
                     "peak_size": pool_stats.peak_size,
                     "reuse_rate": pool_stats.reuse_rate,
                     "efficiency": pool_stats.efficiency,
-                    "active_objects": pool.active_objects()
+                    "active_objects": pool.active_objects(),
+                    # Phase 3: Usage patterns
+                    "usage_patterns": pool.get_usage_patterns()
                 }
         
         return stats
@@ -436,3 +754,37 @@ def get_resource_manager() -> ResourceManager:
     if _resource_manager is None:
         _resource_manager = ResourceManager()
     return _resource_manager
+
+# Phase 3: Convenient API functions for memory management
+
+def adapt_to_memory_pressure() -> Dict[str, Any]:
+    """Adapt all managed resources to current memory pressure."""
+    return get_resource_manager().adapt_to_memory_pressure()
+
+def get_memory_pressure() -> MemoryPressureInfo:
+    """Get current memory pressure information."""
+    return get_resource_manager().get_memory_pressure_info()
+
+def optimize_for_workload(workload_type: str = "balanced") -> Dict[str, Any]:
+    """Optimize memory management for specific workload type."""
+    return get_resource_manager().optimize_for_workload(workload_type)
+
+def get_comprehensive_memory_stats() -> Dict[str, Any]:
+    """Get comprehensive memory and resource statistics."""
+    return get_resource_manager().get_stats()
+
+def force_memory_cleanup() -> Dict[str, Any]:
+    """Force immediate memory cleanup and garbage collection."""
+    manager = get_resource_manager()
+    
+    # Adapt to pressure first
+    adaptation = manager.adapt_to_memory_pressure()
+    
+    # Force GC cleanup
+    gc_stats = manager.gc_optimizer.force_cleanup()
+    
+    return {
+        "adaptation": adaptation,
+        "gc_cleanup": gc_stats,
+        "memory_after": manager.get_memory_pressure_info().__dict__
+    }

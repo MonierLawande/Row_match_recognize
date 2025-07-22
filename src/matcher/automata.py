@@ -1742,8 +1742,12 @@ class NFABuilder:
         # Pattern compilation cache from Phase 2
         self._pattern_cache = get_pattern_cache()
         
-        # Phase 2: Enhanced compilation optimizations (using existing modules)
+        # Phase 3: Enhanced compilation optimizations (using existing modules)
         self._define_optimizer = get_define_optimizer()
+        
+        # Phase 3: Enhanced memory management
+        self._resource_manager = get_resource_manager()
+        self._memory_pressure_checks = 0
         
         # Thread safety
         self._lock = threading.RLock()
@@ -1770,6 +1774,15 @@ class NFABuilder:
     def new_state(self) -> int:
         """Create a new NFA state using object pool and return its index."""
         with self._lock:
+            # Phase 3: Check memory pressure periodically
+            self._memory_pressure_checks += 1
+            if self._memory_pressure_checks % 100 == 0:  # Check every 100 state creations
+                pressure = self._resource_manager.get_memory_pressure_info()
+                if pressure.is_under_pressure:
+                    # Force adaptation to memory pressure
+                    adaptation = self._resource_manager.adapt_to_memory_pressure()
+                    logger.debug(f"Memory pressure adaptation: {adaptation['pressure_level']}")
+            
             # Try to get state from pool first
             try:
                 state = self._state_pool.acquire()
@@ -1941,7 +1954,9 @@ class NFABuilder:
             "state_pool_size": self._state_pool.size(),
             "transition_pool_size": self._transition_pool.size(),
             # Phase 2: Include optimization cache stats
-            "phase2_stats": self.get_phase2_optimization_stats()
+            "phase2_stats": self.get_phase2_optimization_stats(),
+            # Phase 3: Include memory management stats
+            "phase3_stats": self.get_phase3_memory_stats()
         }
     
     def get_phase2_optimization_stats(self) -> Dict[str, Any]:
@@ -1950,6 +1965,18 @@ class NFABuilder:
             "define_optimizer": self._define_optimizer.get_optimization_stats(),
             "pattern_cache": self._pattern_cache.get_stats(),
             "all_cache_stats": get_all_cache_stats()
+        }
+    
+    def get_phase3_memory_stats(self) -> Dict[str, Any]:
+        """Get Phase 3 memory management statistics."""
+        return {
+            "memory_pressure": self._resource_manager.get_memory_pressure_info().__dict__,
+            "resource_stats": self._resource_manager.get_stats(),
+            "memory_pressure_checks": self._memory_pressure_checks,
+            "adaptive_management": {
+                "pools_managed": len(self._resource_manager.object_pools),
+                "monitoring_enabled": self._resource_manager._monitoring_enabled
+            }
         }
 
     def _generate_pattern_signature(self, tokens: List[PatternToken], define: Dict[str, str], 
