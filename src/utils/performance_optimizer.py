@@ -7,30 +7,438 @@ import re
 import os
 import asyncio
 import concurrent.futures
+import hashlib
+import pickle
+import weakref
 from typing import Dict, Any, Optional, List, Callable, Set, Tuple, Union
 from dataclasses import dataclass, field
-from collections import defaultdict, deque
+from collections import defaultdict, deque, OrderedDict
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import multiprocessing as mp
+from enum import Enum
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+class CacheEvictionPolicy(Enum):
+    """Cache eviction policies for smart caching."""
+    LRU = "lru"  # Least Recently Used
+    LFU = "lfu"  # Least Frequently Used
+    ADAPTIVE = "adaptive"  # Adaptive based on access patterns
+    TTL = "ttl"  # Time To Live
+    SIZE_BASED = "size_based"  # Based on memory size
+
+@dataclass
+class SmartCacheConfig:
+    """Configuration for smart caching system."""
+    max_size_mb: float = 100.0  # Maximum cache size in MB
+    max_entries: int = 10000  # Maximum number of cache entries
+    eviction_policy: CacheEvictionPolicy = CacheEvictionPolicy.ADAPTIVE
+    ttl_seconds: float = 3600.0  # Time to live for TTL policy
+    hit_rate_target: float = 0.7  # Target cache hit rate (70%)
+    memory_pressure_threshold: float = 0.8  # Memory pressure threshold
+    enable_statistics: bool = True
+    enable_persistence: bool = False  # Save cache to disk
+    compression_enabled: bool = True
+
+@dataclass
+class CacheEntry:
+    """Individual cache entry with metadata."""
+    key: str
+    value: Any
+    timestamp: float
+    access_count: int = 0
+    last_access: float = 0.0
+    size_bytes: int = 0
+    ttl: Optional[float] = None
+    
+    def __post_init__(self):
+        self.last_access = self.timestamp
+        if self.size_bytes == 0:
+            self.size_bytes = self._estimate_size()
+    
+    def _estimate_size(self) -> int:
+        """Estimate memory size of the cache entry."""
+        try:
+            # Rough estimation using pickle
+            return len(pickle.dumps(self.value))
+        except:
+            # Fallback estimation
+            if isinstance(self.value, str):
+                return len(self.value) * 2  # Unicode
+            elif isinstance(self.value, (list, tuple)):
+                return len(self.value) * 8
+            elif isinstance(self.value, dict):
+                return len(self.value) * 16
+            else:
+                return 64  # Default estimate
+
+class SmartCache:
+    """
+    Intelligent caching system for pattern matching operations.
+    
+    Features:
+    - Multiple eviction policies (LRU, LFU, Adaptive, TTL)
+    - Memory pressure monitoring and adaptive sizing
+    - Cache hit/miss rate tracking and optimization
+    - Pattern-aware caching with intelligent key generation
+    - Cross-instance cache sharing
+    - Cache statistics and performance reporting
+    """
+    
+    def __init__(self, config: Optional[SmartCacheConfig] = None):
+        self.config = config or SmartCacheConfig()
+        self.cache: OrderedDict[str, CacheEntry] = OrderedDict()
+        self.lock = threading.RLock()
+        
+        # Statistics tracking
+        self.stats = {
+            'hits': 0,
+            'misses': 0,
+            'evictions': 0,
+            'size_bytes': 0,
+            'entries_count': 0,
+            'memory_pressure_events': 0,
+            'policy_switches': 0
+        }
+        
+        # Access pattern tracking for adaptive policy
+        self.access_patterns = defaultdict(list)
+        self.frequency_counter = defaultdict(int)
+        
+        # Memory monitoring
+        self.memory_monitor = psutil.Process()
+        self.last_memory_check = time.time()
+        
+        logger.info(f"SmartCache initialized with {self.config.eviction_policy.value} policy, "
+                   f"max_size: {self.config.max_size_mb}MB, max_entries: {self.config.max_entries}")
+    
+    def get(self, key: str) -> Optional[Any]:
+        """
+        Retrieve value from cache.
+        
+        Args:
+            key: Cache key
+            
+        Returns:
+            Cached value or None if not found
+        """
+        with self.lock:
+            if key not in self.cache:
+                self.stats['misses'] += 1
+                return None
+            
+            entry = self.cache[key]
+            
+            # Check TTL expiration
+            if self._is_expired(entry):
+                del self.cache[key]
+                self.stats['misses'] += 1
+                self.stats['entries_count'] -= 1
+                self.stats['size_bytes'] -= entry.size_bytes
+                return None
+            
+            # Update access metadata
+            entry.last_access = time.time()
+            entry.access_count += 1
+            self.frequency_counter[key] += 1
+            
+            # Move to end for LRU
+            if self.config.eviction_policy == CacheEvictionPolicy.LRU:
+                self.cache.move_to_end(key)
+            
+            # Track access patterns for adaptive policy
+            if self.config.eviction_policy == CacheEvictionPolicy.ADAPTIVE:
+                self.access_patterns[key].append(time.time())
+                # Keep only recent access times (last hour)
+                cutoff = time.time() - 3600
+                self.access_patterns[key] = [t for t in self.access_patterns[key] if t > cutoff]
+            
+            self.stats['hits'] += 1
+            return entry.value
+    
+    def put(self, key: str, value: Any, size_hint: Optional[float] = None) -> bool:
+        """
+        Store value in cache.
+        
+        Args:
+            key: Cache key
+            value: Value to cache
+            size_hint: Optional size hint in MB
+            
+        Returns:
+            True if successfully cached, False otherwise
+        """
+        with self.lock:
+            current_time = time.time()
+            
+            # Create cache entry
+            entry = CacheEntry(
+                key=key,
+                value=value,
+                timestamp=current_time,
+                ttl=self.config.ttl_seconds if self.config.eviction_policy == CacheEvictionPolicy.TTL else None
+            )
+            
+            # Override size if hint provided
+            if size_hint:
+                entry.size_bytes = int(size_hint * 1024 * 1024)
+            
+            # Check if we need to evict entries
+            self._ensure_capacity(entry.size_bytes)
+            
+            # Update existing entry or add new one
+            if key in self.cache:
+                old_entry = self.cache[key]
+                self.stats['size_bytes'] -= old_entry.size_bytes
+            else:
+                self.stats['entries_count'] += 1
+            
+            self.cache[key] = entry
+            self.stats['size_bytes'] += entry.size_bytes
+            
+            # Move to end for LRU
+            if self.config.eviction_policy == CacheEvictionPolicy.LRU:
+                self.cache.move_to_end(key)
+            
+            return True
+    
+    def _ensure_capacity(self, new_entry_size: int):
+        """Ensure cache has capacity for new entry."""
+        # Check memory pressure
+        if self._check_memory_pressure():
+            self.stats['memory_pressure_events'] += 1
+            self._adaptive_resize()
+        
+        # Evict entries based on policy
+        max_size_bytes = self.config.max_size_mb * 1024 * 1024
+        
+        while (len(self.cache) >= self.config.max_entries or 
+               self.stats['size_bytes'] + new_entry_size > max_size_bytes):
+            
+            if not self.cache:
+                break
+                
+            self._evict_based_on_policy()
+    
+    def _evict_based_on_policy(self):
+        """Evict entries based on configured policy."""
+        if not self.cache:
+            return
+        
+        evicted_key = None
+        
+        if self.config.eviction_policy == CacheEvictionPolicy.LRU:
+            # Remove least recently used (first item in OrderedDict)
+            evicted_key = next(iter(self.cache))
+        
+        elif self.config.eviction_policy == CacheEvictionPolicy.LFU:
+            # Remove least frequently used
+            evicted_key = min(self.cache.keys(), 
+                            key=lambda k: self.cache[k].access_count)
+        
+        elif self.config.eviction_policy == CacheEvictionPolicy.TTL:
+            # Remove expired entries first, then oldest
+            current_time = time.time()
+            expired_keys = [k for k, v in self.cache.items() 
+                          if self._is_expired(v)]
+            if expired_keys:
+                evicted_key = expired_keys[0]
+            else:
+                evicted_key = min(self.cache.keys(), 
+                                key=lambda k: self.cache[k].timestamp)
+        
+        elif self.config.eviction_policy == CacheEvictionPolicy.ADAPTIVE:
+            # Adaptive policy based on access patterns
+            evicted_key = self._adaptive_eviction()
+        
+        elif self.config.eviction_policy == CacheEvictionPolicy.SIZE_BASED:
+            # Remove largest entries first
+            evicted_key = max(self.cache.keys(), 
+                            key=lambda k: self.cache[k].size_bytes)
+        
+        if evicted_key:
+            entry = self.cache[evicted_key]
+            del self.cache[evicted_key]
+            self.stats['evictions'] += 1
+            self.stats['entries_count'] -= 1
+            self.stats['size_bytes'] -= entry.size_bytes
+            
+            # Clean up tracking data
+            if evicted_key in self.access_patterns:
+                del self.access_patterns[evicted_key]
+            if evicted_key in self.frequency_counter:
+                del self.frequency_counter[evicted_key]
+    
+    def _adaptive_eviction(self) -> Optional[str]:
+        """Adaptive eviction based on access patterns and value prediction."""
+        if not self.cache:
+            return None
+        
+        current_time = time.time()
+        scores = {}
+        
+        for key, entry in self.cache.items():
+            # Calculate eviction score (higher = more likely to evict)
+            score = 0
+            
+            # Recency factor (older = higher score)
+            age = current_time - entry.last_access
+            score += age / 3600  # Normalize to hours
+            
+            # Frequency factor (less frequent = higher score)
+            if entry.access_count > 0:
+                score += 1.0 / entry.access_count
+            else:
+                score += 1.0
+            
+            # Size factor for memory efficiency
+            score += entry.size_bytes / (1024 * 1024)  # MB
+            
+            # Access pattern analysis
+            if key in self.access_patterns:
+                accesses = self.access_patterns[key]
+                if len(accesses) > 1:
+                    # Calculate access frequency trend
+                    recent_accesses = [t for t in accesses if t > current_time - 1800]  # Last 30 min
+                    if len(recent_accesses) < len(accesses) / 2:
+                        score += 2.0  # Declining access pattern
+            
+            scores[key] = score
+        
+        # Return key with highest eviction score
+        return max(scores.keys(), key=lambda k: scores[k])
+    
+    def _is_expired(self, entry: CacheEntry) -> bool:
+        """Check if cache entry is expired."""
+        if not entry.ttl:
+            return False
+        return time.time() - entry.timestamp > entry.ttl
+    
+    def _check_memory_pressure(self) -> bool:
+        """Check if system is under memory pressure."""
+        current_time = time.time()
+        
+        # Check memory usage every 30 seconds
+        if current_time - self.last_memory_check < 30:
+            return False
+        
+        self.last_memory_check = current_time
+        
+        try:
+            memory_percent = psutil.virtual_memory().percent / 100.0
+            return memory_percent > self.config.memory_pressure_threshold
+        except:
+            return False
+    
+    def _adaptive_resize(self):
+        """Adaptively resize cache based on memory pressure."""
+        # Reduce cache size under memory pressure
+        new_max_size = max(10.0, self.config.max_size_mb * 0.8)
+        new_max_entries = max(100, self.config.max_entries // 2)
+        
+        if new_max_size != self.config.max_size_mb:
+            logger.info(f"Reducing cache size due to memory pressure: "
+                       f"{self.config.max_size_mb}MB -> {new_max_size}MB")
+            self.config.max_size_mb = new_max_size
+            self.config.max_entries = new_max_entries
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get comprehensive cache statistics."""
+        with self.lock:
+            total_requests = self.stats['hits'] + self.stats['misses']
+            hit_rate = (self.stats['hits'] / total_requests * 100) if total_requests > 0 else 0
+            
+            return {
+                'hit_rate_percent': hit_rate,
+                'total_requests': total_requests,
+                'hits': self.stats['hits'],
+                'misses': self.stats['misses'],
+                'evictions': self.stats['evictions'],
+                'entries_count': self.stats['entries_count'],
+                'size_mb': self.stats['size_bytes'] / (1024 * 1024),
+                'max_size_mb': self.config.max_size_mb,
+                'utilization_percent': (self.stats['entries_count'] / self.config.max_entries * 100),
+                'memory_pressure_events': self.stats['memory_pressure_events'],
+                'policy_switches': self.stats['policy_switches'],
+                'eviction_policy': self.config.eviction_policy.value,
+                'average_entry_size_kb': (self.stats['size_bytes'] / self.stats['entries_count'] / 1024) 
+                                        if self.stats['entries_count'] > 0 else 0
+            }
+    
+    def clear(self):
+        """Clear all cache entries."""
+        with self.lock:
+            self.cache.clear()
+            self.access_patterns.clear()
+            self.frequency_counter.clear()
+            self.stats.update({
+                'entries_count': 0,
+                'size_bytes': 0
+            })
+    
+    def optimize_policy(self):
+        """Dynamically optimize eviction policy based on performance."""
+        stats = self.get_statistics()
+        
+        # Switch to more aggressive policy if hit rate is low
+        if stats['hit_rate_percent'] < 50 and self.config.eviction_policy != CacheEvictionPolicy.ADAPTIVE:
+            logger.info(f"Switching to adaptive eviction policy due to low hit rate: {stats['hit_rate_percent']:.1f}%")
+            self.config.eviction_policy = CacheEvictionPolicy.ADAPTIVE
+            self.stats['policy_switches'] += 1
+        
+        # Switch to LRU if memory pressure is high
+        elif stats['memory_pressure_events'] > 10 and self.config.eviction_policy != CacheEvictionPolicy.LRU:
+            logger.info("Switching to LRU policy due to memory pressure")
+            self.config.eviction_policy = CacheEvictionPolicy.LRU
+            self.stats['policy_switches'] += 1
+
+# Global smart cache instance
+_global_smart_cache: Optional[SmartCache] = None
+_cache_lock = threading.Lock()
+
+def get_smart_cache() -> SmartCache:
+    """Get global smart cache instance."""
+    global _global_smart_cache
+    if _global_smart_cache is None:
+        with _cache_lock:
+            if _global_smart_cache is None:
+                _global_smart_cache = SmartCache()
+    return _global_smart_cache
+
+def clear_smart_cache():
+    """Clear global smart cache."""
+    global _global_smart_cache
+    if _global_smart_cache:
+        _global_smart_cache.clear()
+
+def get_cache_stats() -> Dict[str, Any]:
+    """Get global cache statistics."""
+    cache = get_smart_cache()
+    return cache.get_statistics()
+
 @dataclass
 class PerformanceMetrics:
-    """Container for performance metrics."""
+    """Container for performance metrics with enhanced cache tracking."""
     operation_name: str
     execution_time: float
     memory_used_mb: float
     cpu_usage: float
     cache_hits: int = 0
     cache_misses: int = 0
+    cache_hit_rate: float = 0.0
+    cache_size_mb: float = 0.0
+    cache_evictions: int = 0
     row_count: int = 0
     pattern_complexity: int = 0
     parallel_efficiency: float = 0.0  # Ratio of parallel speedup vs theoretical maximum
     thread_count: int = 1
     partition_count: int = 1
+    cache_policy: str = "unknown"
+    pattern_cache_hits: int = 0
+    compilation_cache_hits: int = 0
+    data_cache_hits: int = 0
 
 @dataclass
 class ParallelExecutionConfig:
@@ -877,28 +1285,234 @@ class PatternOptimizer:
 # Factory function for easy access
 def create_performance_context() -> Dict[str, Any]:
     """Create a performance monitoring context for operations."""
+    cache_stats = get_cache_stats()
     return {
         "start_time": time.time(),
         "start_memory": psutil.Process().memory_info().rss / 1024 / 1024,
         "cache_hits": 0,
         "cache_misses": 0,
-        "operations_count": 0
+        "operations_count": 0,
+        "initial_cache_hits": cache_stats.get('hits', 0),
+        "initial_cache_misses": cache_stats.get('misses', 0),
+        "cache_policy": cache_stats.get('eviction_policy', 'unknown')
     }
 
 def finalize_performance_context(context: Dict[str, Any], operation_name: str):
-    """Finalize and record performance metrics from context."""
+    """Finalize and record performance metrics from context with enhanced cache tracking."""
     end_time = time.time()
     end_memory = psutil.Process().memory_info().rss / 1024 / 1024
+    
+    # Get final cache statistics
+    final_cache_stats = get_cache_stats()
+    cache_hits = final_cache_stats.get('hits', 0) - context.get("initial_cache_hits", 0)
+    cache_misses = final_cache_stats.get('misses', 0) - context.get("initial_cache_misses", 0)
     
     metrics = PerformanceMetrics(
         operation_name=operation_name,
         execution_time=end_time - context["start_time"],
         memory_used_mb=end_memory - context["start_memory"],
         cpu_usage=0,  # CPU usage tracking can be added if needed
-        cache_hits=context.get("cache_hits", 0),
-        cache_misses=context.get("cache_misses", 0),
+        cache_hits=cache_hits + context.get("cache_hits", 0),
+        cache_misses=cache_misses + context.get("cache_misses", 0),
+        cache_hit_rate=final_cache_stats.get('hit_rate_percent', 0.0),
+        cache_size_mb=final_cache_stats.get('size_mb', 0.0),
+        cache_evictions=final_cache_stats.get('evictions', 0),
+        cache_policy=context.get("cache_policy", "unknown"),
         row_count=context.get("operations_count", 0)
     )
     
     _global_monitor.record_operation(metrics)
     return metrics
+
+# Smart caching utility functions for pattern compilation and data processing
+class PatternCompilationCache:
+    """Specialized cache for pattern compilation results."""
+    
+    @staticmethod
+    def generate_pattern_key(pattern: str, define_conditions: Dict[str, str], 
+                           options: Dict[str, Any]) -> str:
+        """Generate cache key for pattern compilation."""
+        # Include pattern, define conditions, and relevant options
+        key_components = [
+            f"pattern:{pattern}",
+            f"defines:{hash(str(sorted(define_conditions.items())))}",
+            f"options:{hash(str(sorted(options.items())))}"
+        ]
+        return hashlib.sha256("_".join(key_components).encode()).hexdigest()[:16]
+    
+    @staticmethod
+    def cache_compiled_pattern(pattern: str, define_conditions: Dict[str, str], 
+                             options: Dict[str, Any], compiled_result: Any) -> bool:
+        """Cache compiled pattern result."""
+        cache = get_smart_cache()
+        key = PatternCompilationCache.generate_pattern_key(pattern, define_conditions, options)
+        
+        # Estimate size for large compiled objects
+        size_hint = len(pattern) * 0.001  # Rough estimate in MB
+        
+        return cache.put(key, compiled_result, size_hint)
+    
+    @staticmethod
+    def get_compiled_pattern(pattern: str, define_conditions: Dict[str, str], 
+                           options: Dict[str, Any]) -> Optional[Any]:
+        """Retrieve cached compiled pattern."""
+        cache = get_smart_cache()
+        key = PatternCompilationCache.generate_pattern_key(pattern, define_conditions, options)
+        return cache.get(key)
+
+class DataSubsetCache:
+    """Specialized cache for data subset preprocessing results."""
+    
+    @staticmethod
+    def generate_data_key(data_hash: str, partition_columns: List[str], 
+                         order_columns: List[str], filters: Dict[str, Any]) -> str:
+        """Generate cache key for data subset."""
+        key_components = [
+            f"data:{data_hash}",
+            f"partitions:{','.join(sorted(partition_columns))}",
+            f"order:{','.join(order_columns)}",
+            f"filters:{hash(str(sorted(filters.items())))}"
+        ]
+        return hashlib.sha256("_".join(key_components).encode()).hexdigest()[:16]
+    
+    @staticmethod
+    def cache_preprocessed_data(data_hash: str, partition_columns: List[str],
+                              order_columns: List[str], filters: Dict[str, Any],
+                              preprocessed_result: Any, data_size_mb: float) -> bool:
+        """Cache preprocessed data result."""
+        cache = get_smart_cache()
+        key = DataSubsetCache.generate_data_key(data_hash, partition_columns, order_columns, filters)
+        
+        return cache.put(key, preprocessed_result, data_size_mb)
+    
+    @staticmethod
+    def get_preprocessed_data(data_hash: str, partition_columns: List[str],
+                            order_columns: List[str], filters: Dict[str, Any]) -> Optional[Any]:
+        """Retrieve cached preprocessed data."""
+        cache = get_smart_cache()
+        key = DataSubsetCache.generate_data_key(data_hash, partition_columns, order_columns, filters)
+        return cache.get(key)
+
+class CacheInvalidationManager:
+    """Manages cache invalidation based on data changes or pattern modifications."""
+    
+    def __init__(self):
+        self.data_checksums: Dict[str, str] = {}
+        self.pattern_dependencies: Dict[str, Set[str]] = defaultdict(set)
+        self.lock = threading.Lock()
+    
+    def register_data_dependency(self, cache_key: str, data_identifier: str, 
+                               data_checksum: str):
+        """Register cache dependency on data."""
+        with self.lock:
+            self.data_checksums[data_identifier] = data_checksum
+            self.pattern_dependencies[data_identifier].add(cache_key)
+    
+    def invalidate_data_caches(self, data_identifier: str, new_checksum: str):
+        """Invalidate caches when data changes."""
+        with self.lock:
+            old_checksum = self.data_checksums.get(data_identifier)
+            if old_checksum and old_checksum != new_checksum:
+                # Data has changed, invalidate dependent caches
+                cache = get_smart_cache()
+                for cache_key in self.pattern_dependencies[data_identifier]:
+                    cache.cache.pop(cache_key, None)
+                
+                # Update checksum
+                self.data_checksums[data_identifier] = new_checksum
+                
+                logger.info(f"Invalidated {len(self.pattern_dependencies[data_identifier])} "
+                           f"cache entries due to data change in {data_identifier}")
+    
+    def get_invalidation_stats(self) -> Dict[str, Any]:
+        """Get cache invalidation statistics."""
+        with self.lock:
+            return {
+                'tracked_data_sources': len(self.data_checksums),
+                'total_dependencies': sum(len(deps) for deps in self.pattern_dependencies.values()),
+                'dependency_breakdown': {
+                    data_id: len(deps) for data_id, deps in self.pattern_dependencies.items()
+                }
+            }
+
+# Global instances
+_global_invalidation_manager = CacheInvalidationManager()
+
+def get_cache_invalidation_manager() -> CacheInvalidationManager:
+    """Get global cache invalidation manager."""
+    return _global_invalidation_manager
+
+def generate_comprehensive_cache_report() -> Dict[str, Any]:
+    """Generate comprehensive cache performance report."""
+    cache_stats = get_cache_stats()
+    invalidation_stats = get_cache_invalidation_manager().get_invalidation_stats()
+    
+    # Calculate cache effectiveness metrics
+    hit_rate = cache_stats.get('hit_rate_percent', 0)
+    total_requests = cache_stats.get('total_requests', 0)
+    
+    effectiveness = "excellent" if hit_rate >= 80 else \
+                   "good" if hit_rate >= 60 else \
+                   "fair" if hit_rate >= 40 else "poor"
+    
+    return {
+        'cache_statistics': cache_stats,
+        'invalidation_statistics': invalidation_stats,
+        'effectiveness_rating': effectiveness,
+        'performance_impact': {
+            'estimated_time_saved_percent': min(hit_rate * 0.8, 60),  # Conservative estimate
+            'memory_efficiency': cache_stats.get('utilization_percent', 0),
+            'eviction_efficiency': cache_stats.get('evictions', 0) / max(total_requests, 1) * 100
+        },
+        'recommendations': _generate_cache_recommendations(cache_stats)
+    }
+
+def _generate_cache_recommendations(cache_stats: Dict[str, Any]) -> List[str]:
+    """Generate cache optimization recommendations."""
+    recommendations = []
+    
+    hit_rate = cache_stats.get('hit_rate_percent', 0)
+    utilization = cache_stats.get('utilization_percent', 0)
+    memory_pressure = cache_stats.get('memory_pressure_events', 0)
+    
+    if hit_rate < 60:
+        recommendations.append("Consider increasing cache size or optimizing cache keys")
+    
+    if utilization > 90:
+        recommendations.append("Cache is highly utilized - consider increasing max_entries")
+    
+    if memory_pressure > 5:
+        recommendations.append("Frequent memory pressure detected - consider reducing cache size")
+    
+    if cache_stats.get('evictions', 0) > cache_stats.get('hits', 1):
+        recommendations.append("High eviction rate - consider optimizing eviction policy")
+    
+    if not recommendations:
+        recommendations.append("Cache performance is optimal")
+    
+    return recommendations
+
+# Global performance monitor instance
+_global_monitor = PerformanceMonitor()
+
+def get_global_monitor() -> PerformanceMonitor:
+    """Get global performance monitor instance."""
+    return _global_monitor
+
+# Smart cache compatibility functions for legacy interface
+def get_smart_cache_stats():
+    """Get comprehensive smart cache statistics."""
+    cache = get_smart_cache()
+    return cache.get_statistics()
+
+def is_smart_caching_enabled():
+    """Check if smart caching is enabled."""
+    return True  # Smart caching is always enabled
+
+def get_cache_stats():
+    """Compatibility function that returns smart cache stats."""
+    return get_smart_cache_stats()
+
+def is_caching_enabled():
+    """Compatibility function that returns smart caching status."""
+    return is_smart_caching_enabled()

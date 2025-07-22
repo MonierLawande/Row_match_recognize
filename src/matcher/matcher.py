@@ -2410,6 +2410,14 @@ class EnhancedMatcher:
                 start_idx += 1
                 continue
 
+            # Check start anchor constraint - patterns with start anchor can only match at start_idx=0
+            has_start_anchor = (self._anchor_metadata.get("has_start_anchor", False) or 
+                              self.dfa.metadata.get("has_start_anchor", False))
+            if has_start_anchor and start_idx != 0:
+                logger.debug(f"Skipping start_idx={start_idx} due to start anchor constraint (^)")
+                start_idx += 1
+                continue
+
             # Find next match using optimized transitions
             context = RowContext(rows=rows, defined_variables=self.defined_variables)
             context.subsets = self.subsets.copy() if self.subsets else {}

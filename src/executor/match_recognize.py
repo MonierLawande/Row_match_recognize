@@ -4,6 +4,7 @@ import pandas as pd
 import re
 import time
 import itertools
+import hashlib
 from typing import List, Dict, Any, Optional, Set, Tuple, Union
 from src.parser.match_recognize_extractor import parse_full_query
 from src.matcher.pattern_tokenizer import tokenize_pattern, PermuteHandler
@@ -14,16 +15,20 @@ from src.matcher.row_context import RowContext
 from src.matcher.condition_evaluator import compile_condition, validate_navigation_conditions
 from src.matcher.measure_evaluator import MeasureEvaluator
 from src.utils.logging_config import get_logger, PerformanceTimer
-from src.utils.pattern_cache import (
-    get_cache_key, get_cached_pattern, cache_pattern, CACHE_STATS,
-    get_cache_stats, is_caching_enabled
-)
 from src.config.production_config import MatchRecognizeConfig
 
 # Phase 1: Parallel execution optimization imports
 from src.utils.performance_optimizer import (
     get_parallel_execution_manager, ParallelWorkItem, 
     ParallelExecutionConfig, get_performance_monitor
+)
+
+# Phase 2: Smart caching system imports (unified caching solution)
+from src.utils.performance_optimizer import (
+    get_smart_cache, PatternCompilationCache, DataSubsetCache,
+    get_cache_invalidation_manager, create_performance_context,
+    finalize_performance_context, generate_comprehensive_cache_report,
+    get_smart_cache_stats, is_smart_caching_enabled
 )
 
 # Module logger
@@ -857,24 +862,36 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             app_config = MatchRecognizeConfig.from_env()
             caching_enabled = app_config.performance.enable_caching
         except Exception:
-            caching_enabled = is_caching_enabled()
+            caching_enabled = is_smart_caching_enabled()
         
-        # Generate cache key using centralized utility
-        cache_key = get_cache_key(pattern_text, define, subset_dict)
+        # Phase 2: Enhanced pattern compilation caching with smart cache
+        compilation_options = {
+            'rows_per_match': rows_per_match,
+            'skip_mode': skip_mode.value if hasattr(skip_mode, 'value') else str(skip_mode),
+            'show_empty': show_empty,
+            'include_unmatched': include_unmatched,
+            'partition_by': partition_by,
+            'order_by': order_by
+        }
         
         try:
-            # Try to get compiled pattern from cache first
-            cached_pattern = get_cached_pattern(cache_key) if caching_enabled else None
+            # Try to get compiled pattern from smart cache first
+            cached_pattern = None
+            if caching_enabled:
+                cached_pattern = PatternCompilationCache.get_compiled_pattern(
+                    pattern_text, define, compilation_options
+                )
+            
             if cached_pattern:
                 # Cache hit - use cached DFA and NFA
-                dfa, nfa, cached_time = cached_pattern
-                logger.info(f"Pattern compilation cache HIT for pattern: {pattern_text}")
+                dfa, nfa, cached_metadata = cached_pattern
+                logger.info(f"Smart cache HIT for pattern: {pattern_text}")
                 
-                # Log cache statistics for monitoring
-                cache_stats = get_cache_stats()
-                logger.debug(f"Cache efficiency: {cache_stats.get('cache_efficiency', 0):.2f}%, "
-                           f"Memory used: {cache_stats.get('memory_used_mb', 0):.2f} MB, "
-                           f"Cache size: {cache_stats.get('size', 0)}/{cache_stats.get('max_size', 0)}")
+                # Update cache hit statistics
+                cache_stats = get_smart_cache_stats()
+                logger.debug(f"Smart cache efficiency: {cache_stats.get('hit_rate_percent', 0):.1f}%, "
+                           f"Memory used: {cache_stats.get('size_mb', 0):.2f} MB, "
+                           f"Entries: {cache_stats.get('entries_count', 0)}")
                 
                 # Create matcher with cached automata
                 matcher = EnhancedMatcher(
@@ -892,7 +909,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 )
             else:
                 # Cache miss - compile pattern and cache the result
-                logger.info(f"Pattern compilation cache MISS for pattern: {pattern_text}")
+                logger.info(f"Smart cache MISS for pattern: {pattern_text}")
                 compilation_start = time.time()
                 
                 # Build pattern matching automata
@@ -904,13 +921,24 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 compilation_time = time.time() - compilation_start
                 
-                # Cache the compiled pattern using centralized utility if caching is enabled
+                # Cache the compiled pattern using smart cache
                 if caching_enabled:
-                    cache_pattern(cache_key, dfa, nfa, compilation_time)
+                    compiled_result = (dfa, nfa, {
+                        'compilation_time': compilation_time,
+                        'pattern_complexity': len(pattern_text) + len(define),
+                        'timestamp': time.time()
+                    })
+                    
+                    # Estimate cache size (rough approximation)
+                    estimated_size_mb = (len(pattern_text) + len(str(define))) * 0.001
+                    
+                    PatternCompilationCache.cache_compiled_pattern(
+                        pattern_text, define, compilation_options, compiled_result
+                    )
                     
                     # Log cache statistics for monitoring
-                    cache_stats = get_cache_stats()
-                    logger.debug(f"Cache size after adding new pattern: {cache_stats.get('size', 0)}")
+                    cache_stats = get_smart_cache_stats()
+                    logger.debug(f"Cached new pattern compilation. Cache size: {cache_stats.get('size_mb', 0):.2f} MB")
                 
                 # Create matcher with newly compiled automata
                 matcher = EnhancedMatcher(
@@ -954,6 +982,28 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             # Create partitions - use sort=True to ensure consistent partition ordering
             partitions = [group for _, group in df.groupby(partition_by, sort=True)] if partition_by else [df]
             metrics["partition_count"] = len(partitions)
+            
+            # Phase 2: Data subset preprocessing caching
+            data_hash = hashlib.sha256(str(df.values.tobytes()).encode()).hexdigest()[:16] if not df.empty else "empty"
+            
+            # Check for cached preprocessing results
+            cached_partitions = None
+            if caching_enabled and len(df) > 100:  # Only cache for larger datasets
+                cached_partitions = DataSubsetCache.get_preprocessed_data(
+                    data_hash, partition_by, order_by, {}
+                )
+                
+                if cached_partitions:
+                    logger.debug(f"Data preprocessing cache HIT for {len(df)} rows")
+                    partitions = cached_partitions
+                else:
+                    logger.debug(f"Data preprocessing cache MISS for {len(df)} rows")
+                    # Cache the partitioned data for future use
+                    data_size_mb = df.memory_usage(deep=True).sum() / (1024 * 1024)
+                    if data_size_mb < 50:  # Only cache datasets smaller than 50MB
+                        DataSubsetCache.cache_preprocessed_data(
+                            data_hash, partition_by, order_by, {}, partitions, data_size_mb
+                        )
             
             # Phase 1: Parallel Execution Optimization
             # Check if parallel execution is beneficial
@@ -1751,28 +1801,62 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         metrics["total_time"] = time.time() - start_time
         logger.info(f"Query execution metrics: {metrics}")
         
-        # Display cache statistics
-        total_requests = CACHE_STATS['hits'] + CACHE_STATS['misses']
-        cache_stats = {
-            'total_hits': CACHE_STATS['hits'],
-            'total_misses': CACHE_STATS['misses'], 
-            'total_compilation_time_saved': CACHE_STATS['compilation_time_saved'],
-            'memory_used_mb': CACHE_STATS['memory_used_mb']
-        }
-        logger.info(f"Pattern cache statistics: {cache_stats}")
+        # Phase 2: Enhanced cache statistics reporting
+        if caching_enabled:
+            try:
+                # Get comprehensive cache report
+                cache_report = generate_comprehensive_cache_report()
+                
+                # Log detailed cache statistics
+                cache_stats = cache_report['cache_statistics']
+                logger.info(f"Smart Cache Performance Report:")
+                logger.info(f"  Hit Rate: {cache_stats.get('hit_rate_percent', 0):.1f}%")
+                logger.info(f"  Total Requests: {cache_stats.get('total_requests', 0)}")
+                logger.info(f"  Cache Size: {cache_stats.get('size_mb', 0):.2f} MB / {cache_stats.get('max_size_mb', 0):.1f} MB")
+                logger.info(f"  Entries: {cache_stats.get('entries_count', 0)}")
+                logger.info(f"  Evictions: {cache_stats.get('evictions', 0)}")
+                logger.info(f"  Policy: {cache_stats.get('eviction_policy', 'unknown')}")
+                
+                # Log performance impact
+                performance_impact = cache_report['performance_impact']
+                logger.info(f"  Estimated Time Saved: {performance_impact['estimated_time_saved_percent']:.1f}%")
+                logger.info(f"  Memory Efficiency: {performance_impact['memory_efficiency']:.1f}%")
+                
+                # Log effectiveness rating and recommendations
+                logger.info(f"  Cache Effectiveness: {cache_report['effectiveness_rating']}")
+                if cache_report['recommendations']:
+                    logger.info(f"  Recommendations: {'; '.join(cache_report['recommendations'])}")
+                
+                # Update cache metrics in global performance tracking
+                metrics.update({
+                    'smart_cache_hit_rate': cache_stats.get('hit_rate_percent', 0),
+                    'smart_cache_size_mb': cache_stats.get('size_mb', 0),
+                    'smart_cache_entries': cache_stats.get('entries_count', 0),
+                    'smart_cache_effectiveness': cache_report['effectiveness_rating']
+                })
+                
+            except Exception as cache_error:
+                logger.warning(f"Failed to generate cache report: {cache_error}")
         
-        # Calculate cache effectiveness
-        if total_requests > 0:
-            hit_rate = (CACHE_STATS['hits'] / total_requests) * 100
-            logger.info(f"Cache hit rate: {hit_rate:.1f}% ({CACHE_STATS['hits']}/{total_requests})")
-            
-            if CACHE_STATS['compilation_time_saved'] > 0:
-                logger.info(f"Compilation time saved: {CACHE_STATS['compilation_time_saved']:.3f}s")
-        
-        # Display memory usage
-        if cache_stats['memory_used_mb'] > 0:
-            memory_mb = cache_stats['memory_used_mb']
-            logger.info(f"Cache memory usage: {memory_mb:.2f} MB")
+        # Enhanced smart cache statistics summary
+        try:
+            smart_cache_stats = get_smart_cache_stats()
+            if smart_cache_stats.get('total_requests', 0) > 0:
+                logger.info(f"Smart Cache Performance Summary:")
+                logger.info(f"  Total Requests: {smart_cache_stats.get('total_requests', 0)}")
+                logger.info(f"  Hit Rate: {smart_cache_stats.get('hit_rate_percent', 0):.1f}%")
+                logger.info(f"  Memory Usage: {smart_cache_stats.get('size_mb', 0):.2f} MB / {smart_cache_stats.get('max_size_mb', 100):.1f} MB")
+                logger.info(f"  Cache Entries: {smart_cache_stats.get('entries_count', 0)}")
+                logger.info(f"  Evictions: {smart_cache_stats.get('eviction_count', 0)}")
+                
+                if smart_cache_stats.get('hit_rate_percent', 0) >= 80:
+                    logger.info(f"  Status: Excellent cache performance")
+                elif smart_cache_stats.get('hit_rate_percent', 0) >= 60:
+                    logger.info(f"  Status: Good cache performance")
+                else:
+                    logger.info(f"  Status: Cache warming up")
+        except Exception as e:
+            logger.debug(f"Could not retrieve smart cache statistics: {e}")
 
 
 def get_unmatched_rows(all_rows: List[Dict[str, Any]], matched_indices: Set[int]) -> List[int]:
