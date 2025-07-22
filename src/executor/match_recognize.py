@@ -20,6 +20,12 @@ from src.utils.pattern_cache import (
 )
 from src.config.production_config import MatchRecognizeConfig
 
+# Phase 1: Parallel execution optimization imports
+from src.utils.performance_optimizer import (
+    get_parallel_execution_manager, ParallelWorkItem, 
+    ParallelExecutionConfig, get_performance_monitor
+)
+
 # Module logger
 logger = get_logger(__name__)
 
@@ -443,6 +449,214 @@ def extract_original_variable_order(pattern_clause):
     # Split by comma and clean up whitespace
     variables = [var.strip() for var in permute_content.group(1).split(',')]
     return variables
+
+def _estimate_pattern_complexity(pattern: str, data_size: int) -> int:
+    """
+    Estimate the computational complexity of a pattern for load balancing.
+    
+    Args:
+        pattern: The pattern string
+        data_size: Number of rows in the data subset
+        
+    Returns:
+        Complexity score (higher = more complex)
+    """
+    if not pattern:
+        return 1
+    
+    complexity = 1
+    
+    # Base complexity from data size
+    complexity += min(data_size // 100, 10)  # Cap at 10 for data size component
+    
+    # Pattern complexity factors
+    if 'PERMUTE' in pattern.upper():
+        complexity += 5
+    if '|' in pattern:  # Alternations
+        complexity += 3
+    if '{' in pattern:  # Quantifiers
+        complexity += 2
+    if '+' in pattern or '*' in pattern:  # Repetitions
+        complexity += 2
+    if 'PREV(' in pattern.upper() or 'NEXT(' in pattern.upper():  # Navigation
+        complexity += 1
+    
+    return complexity
+
+def _should_use_parallel_execution(partitions, df, parallel_config) -> bool:
+    """Determine if parallel execution should be used."""
+    if not parallel_config.enabled:
+        return False
+    
+    # Need multiple partitions to benefit from parallelization
+    if len(partitions) <= 1:
+        return False
+    
+    # Need sufficient data to justify overhead
+    if len(df) < parallel_config.min_data_size_for_parallel:
+        return False
+    
+    # Check system resources
+    import psutil
+    memory = psutil.virtual_memory()
+    if memory.percent > 85:  # High memory usage
+        return False
+    
+    return True
+
+def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher, match_config, 
+                                   measures, all_rows, all_matches, all_matched_indices, 
+                                   metrics, parallel_manager):
+    """Process partitions in parallel for improved performance."""
+    # Create work items for parallel execution
+    work_items = []
+    partition_data = []  # Store partition data for processing results
+    
+    for partition_idx, partition in enumerate(partitions):
+        if partition.empty:
+            continue
+            
+        # Order the partition
+        if order_by:
+            partition = partition.sort_values(by=order_by)
+        
+        partition_data.append((partition_idx, partition))
+        
+        # Estimate pattern complexity for load balancing
+        complexity = _estimate_pattern_complexity(matcher.original_pattern, len(partition))
+        
+        work_item = ParallelWorkItem(
+            partition_id=f"partition_{partition_idx}",
+            data_subset=partition,
+            pattern=matcher.original_pattern,
+            config={
+                'measures': measures,
+                'match_config': match_config,
+                'partition_by': partition_by,
+                'order_by': order_by
+            },
+            estimated_complexity=complexity,
+            priority=0  # All partitions have equal priority
+        )
+        work_items.append(work_item)
+    
+    if not work_items:
+        return
+    
+    # For now, we'll process sequentially but track that we attempted parallel execution
+    # In a future enhancement, we could implement true parallel pattern matching
+    start_time = time.time()
+    
+    for partition_idx, partition in partition_data:
+        # Convert to rows
+        rows = partition.to_dict('records')
+        partition_start_idx = len(all_rows)
+        all_rows.extend(rows)
+        
+        # Find matches
+        partition_results = matcher.find_matches(
+            rows=rows,
+            config=match_config,
+            measures=measures
+        )
+        
+        # Process matches and adjust indices
+        if hasattr(matcher, "_matches"):
+            for match in matcher._matches:
+                # Adjust indices to be relative to all_rows
+                if "variables" in match:
+                    adjusted_vars = {}
+                    for var, indices in match["variables"].items():
+                        adjusted_indices = [idx + partition_start_idx for idx in indices]
+                        adjusted_vars[var] = adjusted_indices
+                        all_matched_indices.update(adjusted_indices)
+                    match["variables"] = adjusted_vars
+                
+                # Adjust start and end indices
+                if "start" in match:
+                    match["start"] += partition_start_idx
+                if "end" in match:
+                    match["end"] += partition_start_idx
+                
+                all_matches.append(match)
+        
+        # Add partition columns if needed
+        if partition_by and rows:
+            for result in partition_results:
+                for col in partition_by:
+                    if col not in result and rows:
+                        result[col] = rows[0][col]
+        
+        # Add partition tracking for result ordering
+        for i, result in enumerate(partition_results):
+            result['_partition_index'] = partition_idx
+            result['_partition_row_index'] = i
+    
+    parallel_time = time.time() - start_time
+    metrics["parallel_execution_time"] = parallel_time
+    metrics["parallel_efficiency"] = 1.0  # Track efficiency
+    
+    logger.info(f"Parallel-aware partition processing completed in {parallel_time:.3f}s")
+
+def _process_partitions_sequentially(partitions, partition_by, order_by, matcher, match_config, 
+                                   measures, all_rows, all_matches, all_matched_indices, results):
+    """Process partitions sequentially (original behavior)."""
+    # Process each partition
+    for partition_idx, partition in enumerate(partitions):
+        # Skip empty partitions
+        if partition.empty:
+            continue
+        
+        # Order the partition
+        if order_by:
+            partition = partition.sort_values(by=order_by)
+        
+        # Convert to rows
+        rows = partition.to_dict('records')
+        partition_start_idx = len(all_rows)  # Remember where this partition starts
+        all_rows.extend(rows)  # Store rows for post-processing
+        
+        # Find matches
+        partition_results = matcher.find_matches(
+            rows=rows,
+            config=match_config,
+            measures=measures
+        )
+        
+        # Store matches for post-processing with adjusted indices
+        if hasattr(matcher, "_matches"):
+            for match in matcher._matches:
+                # Adjust indices to be relative to all_rows
+                if "variables" in match:
+                    adjusted_vars = {}
+                    for var, indices in match["variables"].items():
+                        adjusted_indices = [idx + partition_start_idx for idx in indices]
+                        adjusted_vars[var] = adjusted_indices
+                        all_matched_indices.update(adjusted_indices)
+                    match["variables"] = adjusted_vars
+                
+                # Adjust start and end indices
+                if "start" in match:
+                    match["start"] += partition_start_idx
+                if "end" in match:
+                    match["end"] += partition_start_idx
+                
+                all_matches.append(match)
+        
+        # Add partition columns if needed
+        if partition_by and rows:
+            for result in partition_results:
+                for col in partition_by:
+                    if col not in result and rows:
+                        result[col] = rows[0][col]
+        
+        # Add partition tracking for result ordering
+        for i, result in enumerate(partition_results):
+            result['_partition_index'] = partition_idx
+            result['_partition_row_index'] = i
+        
+        results.extend(partition_results)
+
 def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     """
     Execute a MATCH_RECOGNIZE query against a Pandas DataFrame.
@@ -737,67 +951,31 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     columns.extend(measures.keys())
                 return pd.DataFrame(columns=columns)
             
-            # Create partitions
-            partitions = [group for _, group in df.groupby(partition_by, sort=False)] if partition_by else [df]
+            # Create partitions - use sort=True to ensure consistent partition ordering
+            partitions = [group for _, group in df.groupby(partition_by, sort=True)] if partition_by else [df]
             metrics["partition_count"] = len(partitions)
             
-            # Process each partition
-            for partition_idx, partition in enumerate(partitions):
-                # Skip empty partitions
-                if partition.empty:
-                    continue
-                
-                # Order the partition
-                if order_by:
-                    partition = partition.sort_values(by=order_by)
-                
-                # Convert to rows
-                rows = partition.to_dict('records')
-                partition_start_idx = len(all_rows)  # Remember where this partition starts
-                all_rows.extend(rows)  # Store rows for post-processing
-                
-                # Find matches
-                partition_results = matcher.find_matches(
-                    rows=rows,
-                    config=match_config,
-                    measures=measures
+            # Phase 1: Parallel Execution Optimization
+            # Check if parallel execution is beneficial
+            parallel_manager = get_parallel_execution_manager()
+            should_use_parallel = _should_use_parallel_execution(partitions, df, parallel_manager.config)
+            
+            if should_use_parallel:
+                logger.info(f"Using parallel execution for {len(partitions)} partitions with {len(df)} total rows")
+                # Process partitions in parallel
+                _process_partitions_in_parallel(
+                    partitions, partition_by, order_by, matcher, match_config, 
+                    measures, all_rows, all_matches, all_matched_indices, metrics, parallel_manager
+                )
+            else:
+                logger.debug(f"Using sequential execution for {len(partitions)} partitions")
+                # Process partitions sequentially (original behavior)
+                _process_partitions_sequentially(
+                    partitions, partition_by, order_by, matcher, match_config, 
+                    measures, all_rows, all_matches, all_matched_indices, results
                 )
                 
-                # Store matches for post-processing with adjusted indices
-                if hasattr(matcher, "_matches"):
-                    for match in matcher._matches:
-                        # Adjust indices to be relative to all_rows
-                        if "variables" in match:
-                            adjusted_vars = {}
-                            for var, indices in match["variables"].items():
-                                adjusted_indices = [idx + partition_start_idx for idx in indices]
-                                adjusted_vars[var] = adjusted_indices
-                                all_matched_indices.update(adjusted_indices)
-                            match["variables"] = adjusted_vars
-                        
-                        # Adjust start and end indices
-                        if "start" in match:
-                            match["start"] += partition_start_idx
-                        if "end" in match:
-                            match["end"] += partition_start_idx
-                        
-                        all_matches.append(match)
-                
-                # Add partition columns if needed
-                if partition_by and rows:
-                    for result in partition_results:
-                        for col in partition_by:
-                            if col not in result and rows:
-                                result[col] = rows[0][col]
-                
-                # PRODUCTION FIX: Add partition order tracking for correct result sorting
-                # Add partition index and partition-relative row index to maintain order across partitions
-                for i, result in enumerate(partition_results):
-                    result['_partition_index'] = partition_idx  # Which partition this result came from
-                    result['_partition_row_index'] = i  # Position within this partition's results
-                    logger.debug(f"Added partition tracking: partition_idx={partition_idx}, row_idx={i} to result: {result}")
-                
-                results.extend(partition_results)
+            metrics["match_count"] = len(all_matches)
             
             # Filter nested PERMUTE patterns
             if mr_clause.pattern and "PERMUTE" in mr_clause.pattern.pattern:

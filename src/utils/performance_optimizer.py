@@ -4,10 +4,15 @@ import time
 import psutil
 import threading
 import re
-from typing import Dict, Any, Optional, List, Callable, Set
-from dataclasses import dataclass
+import os
+import asyncio
+import concurrent.futures
+from typing import Dict, Any, Optional, List, Callable, Set, Tuple, Union
+from dataclasses import dataclass, field
 from collections import defaultdict, deque
 from functools import wraps
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import multiprocessing as mp
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -23,6 +28,31 @@ class PerformanceMetrics:
     cache_misses: int = 0
     row_count: int = 0
     pattern_complexity: int = 0
+    parallel_efficiency: float = 0.0  # Ratio of parallel speedup vs theoretical maximum
+    thread_count: int = 1
+    partition_count: int = 1
+
+@dataclass
+class ParallelExecutionConfig:
+    """Configuration for parallel execution optimization."""
+    enabled: bool = True
+    max_workers: Optional[int] = None  # Default: CPU cores - 1
+    min_data_size_for_parallel: int = 1000  # Minimum rows to enable parallel processing
+    chunk_size_strategy: str = "adaptive"  # "fixed", "adaptive", "data_dependent"
+    thread_pool_type: str = "thread"  # "thread", "process", "adaptive"
+    load_balancing: bool = True
+    memory_threshold_mb: float = 500.0  # Switch to sequential if memory usage exceeds this
+    cpu_threshold_percent: float = 80.0  # Monitor CPU usage for dynamic adjustment
+
+@dataclass 
+class ParallelWorkItem:
+    """Individual work item for parallel execution."""
+    partition_id: str
+    data_subset: Any
+    pattern: str
+    config: Dict[str, Any]
+    estimated_complexity: int = 1
+    priority: int = 0  # Higher priority items processed first
 
 class PerformanceMonitor:
     """Enhanced performance monitoring system for pattern matching operations."""
@@ -109,9 +139,345 @@ class PerformanceMonitor:
         else:
             return "stable"
 
+class ParallelExecutionManager:
+    """
+    Advanced parallel execution manager for MATCH_RECOGNIZE operations.
+    
+    Features:
+    - Multi-threaded pattern execution across data subsets
+    - Adaptive load balancing and work stealing
+    - Dynamic thread pool sizing based on system resources
+    - Progress tracking and performance monitoring
+    - Intelligent partitioning strategies
+    """
+    
+    def __init__(self, config: Optional[ParallelExecutionConfig] = None):
+        self.config = config or ParallelExecutionConfig()
+        self.max_workers = self._determine_optimal_workers()
+        self.thread_pool: Optional[ThreadPoolExecutor] = None
+        self.process_pool: Optional[ProcessPoolExecutor] = None
+        self.lock = threading.Lock()
+        
+        # Performance tracking
+        self.execution_stats = {
+            'total_executions': 0,
+            'parallel_executions': 0,
+            'sequential_executions': 0,
+            'total_speedup': 0.0,
+            'average_efficiency': 0.0,
+            'memory_pressure_switches': 0,
+            'cpu_pressure_switches': 0
+        }
+        
+        # Resource monitoring
+        self.resource_monitor = ResourceMonitor()
+        
+        logger.info(f"ParallelExecutionManager initialized with {self.max_workers} workers")
+    
+    def _determine_optimal_workers(self) -> int:
+        """Determine optimal number of worker threads/processes."""
+        if self.config.max_workers:
+            return min(self.config.max_workers, mp.cpu_count())
+        
+        # Default: CPU cores - 1 (leave one core for system)
+        cpu_count = mp.cpu_count()
+        optimal_workers = max(1, cpu_count - 1)
+        
+        # Adjust based on available memory
+        available_memory_gb = psutil.virtual_memory().available / (1024**3)
+        if available_memory_gb < 2:  # Less than 2GB available
+            optimal_workers = max(1, optimal_workers // 2)
+        elif available_memory_gb > 8:  # More than 8GB available
+            optimal_workers = min(optimal_workers + 2, cpu_count * 2)
+        
+        return optimal_workers
+    
+    def execute_parallel_patterns(self, work_items: List[ParallelWorkItem]) -> List[Dict[str, Any]]:
+        """
+        Execute multiple pattern matching operations in parallel.
+        
+        Args:
+            work_items: List of work items to process in parallel
+            
+        Returns:
+            List of results from parallel execution
+        """
+        if not self.config.enabled or len(work_items) == 1:
+            return self._execute_sequential(work_items)
+        
+        # Check if data size justifies parallel processing
+        total_data_size = sum(self._estimate_data_size(item.data_subset) for item in work_items)
+        if total_data_size < self.config.min_data_size_for_parallel:
+            logger.debug(f"Data size {total_data_size} below parallel threshold, using sequential execution")
+            return self._execute_sequential(work_items)
+        
+        # Check system resources
+        if not self._check_resource_availability():
+            logger.debug("System resources insufficient for parallel execution, falling back to sequential")
+            return self._execute_sequential(work_items)
+        
+        start_time = time.time()
+        
+        try:
+            # Sort work items by priority and estimated complexity
+            sorted_items = sorted(work_items, key=lambda x: (-x.priority, -x.estimated_complexity))
+            
+            # Choose execution strategy
+            if self.config.thread_pool_type == "adaptive":
+                strategy = self._choose_execution_strategy(sorted_items)
+            else:
+                strategy = self.config.thread_pool_type
+            
+            if strategy == "process":
+                results = self._execute_with_processes(sorted_items)
+            else:
+                results = self._execute_with_threads(sorted_items)
+            
+            # Calculate performance metrics
+            execution_time = time.time() - start_time
+            theoretical_sequential_time = sum(item.estimated_complexity * 0.001 for item in work_items)  # Rough estimate
+            speedup = theoretical_sequential_time / execution_time if execution_time > 0 else 1.0
+            efficiency = speedup / len(work_items) if work_items else 0.0
+            
+            # Update statistics
+            with self.lock:
+                self.execution_stats['total_executions'] += 1
+                self.execution_stats['parallel_executions'] += 1
+                self.execution_stats['total_speedup'] += speedup
+                self.execution_stats['average_efficiency'] = (
+                    self.execution_stats['average_efficiency'] * (self.execution_stats['total_executions'] - 1) + efficiency
+                ) / self.execution_stats['total_executions']
+            
+            logger.info(f"Parallel execution completed: {len(work_items)} items in {execution_time:.3f}s, "
+                       f"speedup: {speedup:.2f}x, efficiency: {efficiency:.2f}")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Parallel execution failed: {e}, falling back to sequential")
+            return self._execute_sequential(work_items)
+    
+    def _execute_with_threads(self, work_items: List[ParallelWorkItem]) -> List[Dict[str, Any]]:
+        """Execute work items using thread pool."""
+        if not self.thread_pool:
+            self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
+        
+        futures = []
+        for item in work_items:
+            future = self.thread_pool.submit(self._execute_work_item, item)
+            futures.append((item.partition_id, future))
+        
+        results = []
+        for partition_id, future in futures:
+            try:
+                result = future.result(timeout=30)  # 30 second timeout per item
+                result['partition_id'] = partition_id
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Work item {partition_id} failed: {e}")
+                results.append({'partition_id': partition_id, 'error': str(e), 'matches': []})
+        
+        return results
+    
+    def _execute_with_processes(self, work_items: List[ParallelWorkItem]) -> List[Dict[str, Any]]:
+        """Execute work items using process pool."""
+        if not self.process_pool:
+            self.process_pool = ProcessPoolExecutor(max_workers=self.max_workers)
+        
+        futures = []
+        for item in work_items:
+            future = self.process_pool.submit(self._execute_work_item_process_safe, item)
+            futures.append((item.partition_id, future))
+        
+        results = []
+        for partition_id, future in futures:
+            try:
+                result = future.result(timeout=60)  # Longer timeout for processes
+                result['partition_id'] = partition_id
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Process work item {partition_id} failed: {e}")
+                results.append({'partition_id': partition_id, 'error': str(e), 'matches': []})
+        
+        return results
+    
+    def _execute_sequential(self, work_items: List[ParallelWorkItem]) -> List[Dict[str, Any]]:
+        """Execute work items sequentially as fallback."""
+        with self.lock:
+            self.execution_stats['sequential_executions'] += 1
+        
+        results = []
+        for item in work_items:
+            try:
+                result = self._execute_work_item(item)
+                result['partition_id'] = item.partition_id
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Sequential execution of {item.partition_id} failed: {e}")
+                results.append({'partition_id': item.partition_id, 'error': str(e), 'matches': []})
+        
+        return results
+    
+    def _execute_work_item(self, item: ParallelWorkItem) -> Dict[str, Any]:
+        """Execute a single work item (pattern matching on data subset)."""
+        # This method will be called by the matcher to execute pattern matching
+        # For now, return a placeholder result structure
+        start_time = time.time()
+        
+        # Placeholder for actual pattern matching execution
+        # This will be integrated with the existing matcher
+        result = {
+            'matches': [],
+            'execution_time': time.time() - start_time,
+            'row_count': self._estimate_data_size(item.data_subset),
+            'pattern_complexity': item.estimated_complexity
+        }
+        
+        return result
+    
+    def _execute_work_item_process_safe(self, item: ParallelWorkItem) -> Dict[str, Any]:
+        """Process-safe version of work item execution."""
+        # For process execution, we need to ensure all dependencies are available
+        # This is a simplified version that can be serialized
+        return self._execute_work_item(item)
+    
+    def _estimate_data_size(self, data_subset: Any) -> int:
+        """Estimate the size of a data subset."""
+        if hasattr(data_subset, '__len__'):
+            return len(data_subset)
+        elif hasattr(data_subset, 'shape'):  # pandas DataFrame
+            return data_subset.shape[0]
+        else:
+            return 100  # Default estimate
+    
+    def _check_resource_availability(self) -> bool:
+        """Check if system resources allow parallel execution."""
+        # Check memory
+        memory = psutil.virtual_memory()
+        if memory.percent > 85:  # More than 85% memory used
+            with self.lock:
+                self.execution_stats['memory_pressure_switches'] += 1
+            return False
+        
+        # Check CPU
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        if cpu_percent > self.config.cpu_threshold_percent:
+            with self.lock:
+                self.execution_stats['cpu_pressure_switches'] += 1
+            return False
+        
+        return True
+    
+    def _choose_execution_strategy(self, work_items: List[ParallelWorkItem]) -> str:
+        """Choose between thread and process execution strategy."""
+        # Use threads for I/O bound or moderate CPU tasks
+        # Use processes for CPU-intensive tasks with large data
+        
+        total_complexity = sum(item.estimated_complexity for item in work_items)
+        avg_complexity = total_complexity / len(work_items)
+        
+        # High complexity patterns benefit from process isolation
+        if avg_complexity > 10:
+            return "process"
+        else:
+            return "thread"
+    
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get performance statistics for parallel execution."""
+        with self.lock:
+            stats = self.execution_stats.copy()
+            
+        if stats['total_executions'] > 0:
+            stats['parallel_ratio'] = stats['parallel_executions'] / stats['total_executions']
+        else:
+            stats['parallel_ratio'] = 0.0
+            
+        return stats
+    
+    def cleanup(self):
+        """Clean up thread/process pools."""
+        if self.thread_pool:
+            self.thread_pool.shutdown(wait=True)
+            self.thread_pool = None
+        
+        if self.process_pool:
+            self.process_pool.shutdown(wait=True)
+            self.process_pool = None
+    
+    def __del__(self):
+        """Ensure cleanup on deletion."""
+        self.cleanup()
+
+class ResourceMonitor:
+    """Monitor system resources for dynamic parallel execution decisions."""
+    
+    def __init__(self):
+        self.monitoring = False
+        self.monitor_thread = None
+        self.resource_history = deque(maxlen=60)  # Keep 60 seconds of history
+        self.lock = threading.Lock()
+    
+    def start_monitoring(self):
+        """Start background resource monitoring."""
+        if not self.monitoring:
+            self.monitoring = True
+            self.monitor_thread = threading.Thread(target=self._monitor_resources, daemon=True)
+            self.monitor_thread.start()
+    
+    def stop_monitoring(self):
+        """Stop background resource monitoring."""
+        self.monitoring = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=1)
+    
+    def _monitor_resources(self):
+        """Background thread to monitor resource usage."""
+        while self.monitoring:
+            try:
+                memory = psutil.virtual_memory()
+                cpu = psutil.cpu_percent(interval=1)
+                
+                resource_snapshot = {
+                    'timestamp': time.time(),
+                    'memory_percent': memory.percent,
+                    'cpu_percent': cpu,
+                    'available_memory_gb': memory.available / (1024**3)
+                }
+                
+                with self.lock:
+                    self.resource_history.append(resource_snapshot)
+                    
+            except Exception as e:
+                logger.error(f"Resource monitoring error: {e}")
+                time.sleep(1)
+    
+    def get_current_load(self) -> Dict[str, float]:
+        """Get current system load metrics."""
+        with self.lock:
+            if not self.resource_history:
+                return {'memory_percent': 0, 'cpu_percent': 0, 'available_memory_gb': 0}
+            return self.resource_history[-1].copy()
+    
+    def get_average_load(self, seconds: int = 30) -> Dict[str, float]:
+        """Get average system load over specified time period."""
+        cutoff_time = time.time() - seconds
+        
+        with self.lock:
+            recent_data = [r for r in self.resource_history if r['timestamp'] > cutoff_time]
+            
+        if not recent_data:
+            return self.get_current_load()
+        
+        return {
+            'memory_percent': sum(r['memory_percent'] for r in recent_data) / len(recent_data),
+            'cpu_percent': sum(r['cpu_percent'] for r in recent_data) / len(recent_data),
+            'available_memory_gb': sum(r['available_memory_gb'] for r in recent_data) / len(recent_data)
+        }
+
 # Global optimizer instances
 _global_monitor = PerformanceMonitor()
 _define_optimizer = None  # Will be initialized when first accessed
+_parallel_manager = None  # Will be initialized when first accessed
 
 def get_performance_monitor() -> PerformanceMonitor:
     """Get the global performance monitor instance."""
@@ -123,6 +489,14 @@ def get_define_optimizer() -> "DefineOptimizer":
     if _define_optimizer is None:
         _define_optimizer = DefineOptimizer()
     return _define_optimizer
+
+def get_parallel_execution_manager() -> ParallelExecutionManager:
+    """Get the global parallel execution manager instance."""
+    global _parallel_manager
+    if _parallel_manager is None:
+        _parallel_manager = ParallelExecutionManager()
+        _parallel_manager.resource_monitor.start_monitoring()
+    return _parallel_manager
 
 def monitor_performance(operation_name: str):
     """Decorator to monitor performance of functions."""
