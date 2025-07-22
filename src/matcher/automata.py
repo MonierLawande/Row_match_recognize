@@ -35,6 +35,8 @@ from src.matcher.pattern_tokenizer import (
 )
 from src.matcher.condition_evaluator import compile_condition
 from src.utils.logging_config import get_logger, PerformanceTimer
+from src.utils.memory_management import get_resource_manager, ObjectPool
+from src.utils.pattern_cache import get_pattern_cache
 
 # Module logger with enhanced configuration
 logger = get_logger(__name__)
@@ -187,6 +189,9 @@ class NFAState:
         # Validation flags
         self._validated: bool = False
         self._lock = threading.RLock()
+        
+        # Phase 3: Memory management - get resource manager for pooling
+        self._resource_manager = get_resource_manager()
     
     def add_transition(self, condition: ConditionFunction, target: int, 
                       variable: Optional[str] = None, priority: int = 0, 
@@ -1160,12 +1165,64 @@ class NFABuilder:
         self.exclusion_ranges: List[Tuple[int, int]] = []
         self.metadata: Dict[str, Any] = {}
         self.subset_vars: Dict[str, List[str]] = {}
+        
+        # Phase 3: Memory management and optimization
+        self._resource_manager = get_resource_manager()
+        
+        # Initialize object pools for frequently allocated objects
+        self._state_pool = self._resource_manager.get_pool(
+            "nfa_states", 
+            factory=lambda: NFAState(),
+            reset_func=self._reset_nfa_state,
+            max_size=200
+        )
+        
+        self._transition_pool = self._resource_manager.get_pool(
+            "transitions",
+            factory=lambda: None,  # Will create Transition objects
+            reset_func=None,
+            max_size=500
+        )
+        
+        # Pattern compilation cache from Phase 2
+        self._pattern_cache = get_pattern_cache()
+        
+        # Thread safety
+        self._lock = threading.RLock()
+    
+    def _reset_nfa_state(self, state: NFAState) -> None:
+        """Reset an NFA state for reuse in object pool."""
+        state.state_id = None
+        state.transitions.clear()
+        state.epsilon.clear()
+        state.variable = None
+        state.is_excluded = False
+        state.is_anchor = False
+        state.anchor_type = None
+        state.subset_vars.clear()
+        state.permute_data.clear()
+        state.is_empty_match = False
+        state.can_accept = False
+        state.is_accept = False
+        state.subset_parent = None
+        state.priority = 0
+        state.epsilon_priorities.clear()
+        state._validated = False
     
     def new_state(self) -> int:
-        """Create a new NFA state and return its index."""
-        state = NFAState()
-        self.states.append(state)
-        return len(self.states) - 1
+        """Create a new NFA state using object pool and return its index."""
+        with self._lock:
+            # Try to get state from pool first
+            try:
+                state = self._state_pool.acquire()
+                # Set unique state ID for debugging
+                state.state_id = len(self.states)
+            except Exception:
+                # Fallback to direct creation if pool fails
+                state = NFAState(state_id=len(self.states))
+            
+            self.states.append(state)
+            return len(self.states) - 1
     
     def add_epsilon(self, from_state: int, to_state: int, priority: int = 0):
         """
@@ -1271,6 +1328,40 @@ class NFABuilder:
             cache_pattern(cache_key, None, nfa, timer.elapsed)
             
             return nfa
+
+    def cleanup(self) -> None:
+        """
+        Phase 3: Cleanup method to release pooled objects and free memory.
+        
+        This method should be called when the NFABuilder is no longer needed
+        to ensure proper resource cleanup and prevent memory leaks.
+        """
+        with self._lock:
+            # Release all states back to the pool
+            for state in self.states:
+                try:
+                    self._state_pool.release(state)
+                except Exception as e:
+                    logger.debug(f"Failed to release state to pool: {e}")
+            
+            # Clear internal state
+            self.states.clear()
+            self.exclusion_ranges.clear()
+            self.metadata.clear()
+            self.subset_vars.clear()
+            
+            # Force garbage collection for any remaining references
+            import gc
+            gc.collect()
+    
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get memory usage statistics for this builder."""
+        return {
+            "active_states": len(self.states),
+            "pool_stats": self._resource_manager.get_stats(),
+            "state_pool_size": self._state_pool.size(),
+            "transition_pool_size": self._transition_pool.size()
+        }
 
     def _generate_pattern_signature(self, tokens: List[PatternToken], define: Dict[str, str], 
                                   subset_vars: Dict[str, List[str]] = None) -> str:
