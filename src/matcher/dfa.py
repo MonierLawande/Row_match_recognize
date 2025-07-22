@@ -655,101 +655,141 @@ class DFA:
         self.states = new_states
 
     def _merge_equivalent_states(self) -> None:
-        """Merge states that are functionally equivalent."""
+        """Merge states that are functionally equivalent using enhanced algorithm."""
         if len(self.states) <= 1:
             return
         
-        # Find equivalent state pairs
-        equivalences = []
+        logger.debug("Starting enhanced state minimization...")
         
-        for i in range(len(self.states)):
-            for j in range(i + 1, len(self.states)):
-                if self._are_equivalent(i, j):
-                    equivalences.append((i, j))
+        # Use partition refinement algorithm for better performance
+        partitions = self._compute_initial_partitions()
         
-        if not equivalences:
+        changed = True
+        iterations = 0
+        max_iterations = len(self.states)
+        
+        while changed and iterations < max_iterations:
+            changed = False
+            iterations += 1
+            
+            new_partitions = []
+            
+            for partition in partitions:
+                if len(partition) <= 1:
+                    new_partitions.append(partition)
+                    continue
+                
+                # Try to split this partition
+                split_result = self._split_partition(partition, partitions)
+                
+                if len(split_result) > 1:
+                    changed = True
+                    new_partitions.extend(split_result)
+                else:
+                    new_partitions.append(partition)
+            
+            partitions = new_partitions
+        
+        # Apply merging based on final partitions
+        self._apply_partition_merging(partitions)
+        
+        logger.info(f"State minimization completed in {iterations} iterations, "
+                   f"final partitions: {len(partitions)}")
+    
+    def _compute_initial_partitions(self) -> List[List[int]]:
+        """Compute initial partitions based on state properties."""
+        # Group states by their basic properties
+        property_groups = defaultdict(list)
+        
+        for i, state in enumerate(self.states):
+            # Create property signature
+            signature = (
+                state.is_accept,
+                frozenset(state.variables) if state.variables else frozenset(),
+                state.is_anchor,
+                state.anchor_type if hasattr(state, 'anchor_type') else None,
+                len(state.transitions)
+            )
+            property_groups[signature].append(i)
+        
+        return list(property_groups.values())
+    
+    def _split_partition(self, partition: List[int], all_partitions: List[List[int]]) -> List[List[int]]:
+        """Split a partition based on transition compatibility."""
+        if len(partition) <= 1:
+            return [partition]
+        
+        # Create partition index mapping for efficient lookup
+        state_to_partition = {}
+        for part_idx, part in enumerate(all_partitions):
+            for state_idx in part:
+                state_to_partition[state_idx] = part_idx
+        
+        # Group states by their transition signatures
+        signature_groups = defaultdict(list)
+        
+        for state_idx in partition:
+            state = self.states[state_idx]
+            
+            # Create transition signature based on target partitions
+            signature = []
+            for trans in sorted(state.transitions, key=lambda t: (t.variable or "", t.target)):
+                target_partition = state_to_partition.get(trans.target, -1)
+                signature.append((trans.variable, target_partition))
+            
+            signature_key = tuple(signature)
+            signature_groups[signature_key].append(state_idx)
+        
+        return list(signature_groups.values())
+    
+    def _apply_partition_merging(self, partitions: List[List[int]]) -> None:
+        """Apply state merging based on computed partitions."""
+        if len(partitions) >= len(self.states):
+            return  # No merging possible
+        
+        # Create state mapping
+        state_mapping = {}
+        new_states = []
+        states_merged = 0
+        
+        for partition in partitions:
+            if not partition:
+                continue
+                
+            representative = min(partition)
+            new_states.append(self.states[representative])
+            
+            for state_idx in partition:
+                state_mapping[state_idx] = len(new_states) - 1
+                if state_idx != representative:
+                    states_merged += 1
+        
+        if states_merged == 0:
             return
         
-        logger.info(f"Merging {len(equivalences)} equivalent state pairs")
+        logger.info(f"Merged {states_merged} states, reduced from {len(self.states)} to {len(new_states)}")
         
-        # Build equivalence classes
-        equiv_classes = {}
-        for i, j in equivalences:
-            # Find existing class or create new one
-            class_id = None
-            for existing_id, members in equiv_classes.items():
-                if i in members or j in members:
-                    class_id = existing_id
-                    break
-            
-            if class_id is None:
-                class_id = min(i, j)
-                equiv_classes[class_id] = set()
-            
-            equiv_classes[class_id].update([i, j])
-        
-        # Merge states within each equivalence class
-        state_mapping = {}
-        states_to_remove = set()
-        
-        for class_id, members in equiv_classes.items():
-            representative = min(members)
-            state_mapping[representative] = representative
-            
-            for member in members:
-                if member != representative:
-                    state_mapping[member] = representative
-                    states_to_remove.add(member)
-        
-        # Update transitions to point to representative states
-        for state in self.states:
+        # Update state references in transitions
+        for state in new_states:
             updated_transitions = []
             for trans in state.transitions:
-                if trans.target in state_mapping:
-                    # Create new transition with updated target
+                new_target = state_mapping.get(trans.target, trans.target)
+                if new_target < len(new_states):  # Valid target after merging
                     updated_trans = Transition(
                         condition=trans.condition,
-                        target=state_mapping[trans.target],
+                        target=new_target,
                         variable=trans.variable,
                         priority=trans.priority,
                         metadata=trans.metadata
                     )
                     updated_transitions.append(updated_trans)
-                else:
-                    updated_transitions.append(trans)
             state.transitions = updated_transitions
         
-        # Remove merged states and update indices
-        if states_to_remove:
-            new_states = []
-            old_to_new = {}
-            
-            for i, state in enumerate(self.states):
-                if i not in states_to_remove:
-                    old_to_new[i] = len(new_states)
-                    new_states.append(state)
-            
-            # Final index update
-            for state in new_states:
-                updated_transitions = []
-                for trans in state.transitions:
-                    new_target = old_to_new.get(trans.target, trans.target)
-                    if new_target != trans.target:
-                        # Create new transition with updated target
-                        updated_trans = Transition(
-                            condition=trans.condition,
-                            target=new_target,
-                            variable=trans.variable,
-                            priority=trans.priority,
-                            metadata=trans.metadata
-                        )
-                        updated_transitions.append(updated_trans)
-                    else:
-                        updated_transitions.append(trans)
-                state.transitions = updated_transitions
-            
-            self.start = old_to_new[self.start]
-            self.states = new_states
+        # Update start state
+        self.start = state_mapping.get(self.start, self.start)
+        
+        # Update states list
+        self.states = new_states
 
     def _are_equivalent(self, state1: int, state2: int) -> bool:
         """
@@ -1222,13 +1262,14 @@ class DFABuilder:
         dfa = DFA(
             states=dfa_states,
             start=0,
-            metadata=final_metadata,
-            exclusion_ranges=list(self.nfa.exclusion_ranges)
+            metadata=final_metadata
         )
         
         # Apply post-construction optimizations
-        if not self._early_termination:
-            self._apply_post_construction_optimizations(dfa)
+        self._apply_post_construction_optimizations(dfa)
+        
+        logger.info(f"[DFA_ENHANCED] Standard DFA construction completed: "
+                   f"{len(dfa_states)} states, {self._iteration_count} iterations")
         
         return dfa
 
@@ -1350,6 +1391,192 @@ class DFABuilder:
                                   state_map: Dict[FrozenSet[int], int],
                                   dfa_states: List[DFAState], 
                                   queue: deque) -> Optional[int]:
+        """
+        Get existing DFA state or create new one with enhanced deduplication.
+        
+        Args:
+            target_closure: NFA states closure for the target DFA state
+            state_map: Mapping from NFA state sets to DFA state indices
+            dfa_states: List of existing DFA states
+            queue: Construction queue for new states
+            
+        Returns:
+            DFA state index or None if creation fails
+        """
+        # Check if state already exists
+        if target_closure in state_map:
+            self._cache_hits += 1
+            return state_map[target_closure]
+        
+        # Check deduplication cache for equivalent states
+        closure_hash = hash(target_closure)
+        if closure_hash in self._state_dedup_cache:
+            equivalent_closure = self._state_dedup_cache[closure_hash]
+            if equivalent_closure in state_map:
+                logger.debug(f"[DFA_ENHANCED] Found equivalent state via deduplication")
+                state_map[target_closure] = state_map[equivalent_closure]
+                self._cache_hits += 1
+                self._states_merged += 1
+                return state_map[equivalent_closure]
+        
+        # Enforce state limits
+        if len(dfa_states) >= self.MAX_DFA_STATES:
+            logger.warning(f"[DFA_ENHANCED] Reached DFA state limit: {self.MAX_DFA_STATES}")
+            self._early_termination = True
+            return None
+        
+        # Create new DFA state
+        try:
+            new_dfa_state = self._create_enhanced_dfa_state(target_closure)
+            new_state_idx = len(dfa_states)
+            
+            # Add to structures
+            dfa_states.append(new_dfa_state)
+            state_map[target_closure] = new_state_idx
+            queue.append((target_closure, new_state_idx))
+            
+            # Update deduplication cache
+            self._state_dedup_cache[closure_hash] = target_closure
+            
+            # Limit cache size
+            if len(self._state_dedup_cache) > 5000:
+                # Remove oldest 1000 entries
+                keys_to_remove = list(self._state_dedup_cache.keys())[:1000]
+                for key in keys_to_remove:
+                    del self._state_dedup_cache[key]
+            
+            self._cache_misses += 1
+            self._states_created += 1
+            
+            logger.debug(f"[DFA_ENHANCED] Created new DFA state {new_state_idx} from closure {sorted(target_closure)}")
+            
+            return new_state_idx
+            
+        except Exception as e:
+            logger.error(f"[DFA_ENHANCED] Failed to create DFA state: {e}")
+            return None
+    
+    def _create_enhanced_dfa_state(self, nfa_states: FrozenSet[int]) -> DFAState:
+        """
+        Create DFA state with enhanced optimization and metadata propagation.
+        
+        Args:
+            nfa_states: Set of NFA state indices
+            
+        Returns:
+            DFAState: Optimized DFA state with comprehensive metadata
+        """
+        # Check subset cache first
+        cache_key = nfa_states
+        if cache_key in self._subset_cache:
+            cached_state = self._subset_cache[cache_key]
+            # Create new state based on cached data but with unique ID
+            new_state = DFAState(nfa_states=nfa_states)
+            new_state.is_accept = cached_state.is_accept
+            new_state.variables = cached_state.variables.copy()
+            new_state.excluded_variables = cached_state.excluded_variables.copy()
+            new_state.subset_vars = cached_state.subset_vars.copy()
+            new_state.is_anchor = cached_state.is_anchor
+            new_state.anchor_type = cached_state.anchor_type
+            new_state.permute_data = cached_state.permute_data.copy() if cached_state.permute_data else None
+            new_state.priority = cached_state.priority
+            self._cache_hits += 1
+            return new_state
+        
+        # Create new state
+        state = DFAState(nfa_states=nfa_states)
+        
+        # Aggregate properties from constituent NFA states
+        all_variables = set()
+        excluded_variables = set()
+        subset_vars = set()
+        anchor_states = []
+        permute_data_merged = {}
+        is_accept = False
+        min_priority = float('inf')
+        
+        for nfa_state_idx in nfa_states:
+            if nfa_state_idx >= len(self.nfa.states):
+                continue
+                
+            nfa_state = self.nfa.states[nfa_state_idx]
+            
+            # Check if this is an accept state
+            if nfa_state_idx == self.nfa.accept:
+                is_accept = True
+            
+            # Update minimum priority
+            if hasattr(nfa_state, 'priority'):
+                min_priority = min(min_priority, nfa_state.priority)
+            
+            # Collect variables
+            if hasattr(nfa_state, 'variable') and nfa_state.variable:
+                all_variables.add(nfa_state.variable)
+                
+                # Check if variable is excluded
+                if hasattr(nfa_state, 'is_excluded') and nfa_state.is_excluded:
+                    excluded_variables.add(nfa_state.variable)
+            
+            # Collect anchor information
+            if hasattr(nfa_state, 'is_anchor') and nfa_state.is_anchor:
+                anchor_states.append((nfa_state_idx, getattr(nfa_state, 'anchor_type', None)))
+            
+            # Collect subset variables
+            if hasattr(nfa_state, 'subset_vars') and nfa_state.subset_vars:
+                subset_vars.update(nfa_state.subset_vars)
+            
+            # Merge PERMUTE metadata
+            if hasattr(nfa_state, 'permute_data') and nfa_state.permute_data:
+                for key, value in nfa_state.permute_data.items():
+                    if key in permute_data_merged:
+                        # Handle conflicts by preferring more specific data
+                        if isinstance(value, list) and isinstance(permute_data_merged[key], list):
+                            permute_data_merged[key].extend(value)
+                        elif value != permute_data_merged[key]:
+                            logger.warning(f"PERMUTE metadata conflict for key '{key}': "
+                                         f"{permute_data_merged[key]} vs {value}")
+                    else:
+                        permute_data_merged[key] = value
+        
+        # Assign aggregated properties
+        state.is_accept = is_accept
+        state.variables = all_variables
+        state.excluded_variables = excluded_variables
+        state.subset_vars = subset_vars
+        
+        # Handle anchor states (prefer START anchors over END if both present)
+        if anchor_states:
+            state.is_anchor = True
+            # Prioritize START anchor over END anchor
+            start_anchors = [a for a in anchor_states if a[1] == PatternTokenType.ANCHOR_START]
+            if start_anchors:
+                state.anchor_type = PatternTokenType.ANCHOR_START
+            else:
+                state.anchor_type = anchor_states[0][1]
+        
+        # Assign PERMUTE data if any
+        if permute_data_merged:
+            state.permute_data = permute_data_merged
+        
+        # Set priority
+        state.priority = min_priority if min_priority != float('inf') else 0
+        
+        # Cache the result to speed up future lookups
+        self._subset_cache[cache_key] = state
+        
+        # Limit cache size
+        if len(self._subset_cache) > 2000:
+            # Remove oldest entries
+            keys_to_remove = list(self._subset_cache.keys())[:500]
+            for key in keys_to_remove:
+                del self._subset_cache[key]
+        
+        self._cache_misses += 1
+        
+        logger.debug(f"Created enhanced DFA state from NFA states {sorted(nfa_states)}: "
+                    f"accept={is_accept}, variables={all_variables}, anchor={state.is_anchor}")
+        
+        return state
         """Get existing or create new target state with limits."""
         # Check cache first
         if target_closure in state_map:
@@ -2135,3 +2362,94 @@ class DFABuilder:
             if variable == base_token:
                 return True
         return False
+    
+    def _create_enhanced_condition(self, transitions: List[Transition]) -> Callable:
+        """Create optimized combined condition from multiple transitions."""
+        if not transitions:
+            return lambda row, ctx: False
+        
+        if len(transitions) == 1:
+            return transitions[0].condition
+        
+        # Cache key for condition combination
+        condition_ids = tuple(id(t.condition) for t in transitions)
+        if condition_ids in self._transition_cache:
+            self._cache_hits += 1
+            return self._transition_cache[condition_ids]
+        
+        # Create combined condition with short-circuit evaluation
+        conditions = [t.condition for t in transitions]
+        
+        def combined_condition(row, ctx):
+            # Use short-circuit OR evaluation for performance
+            for condition in conditions:
+                try:
+                    if condition(row, ctx):
+                        return True
+                except Exception as e:
+                    logger.debug(f"Condition evaluation error: {e}")
+                    continue
+            return False
+        
+        # Cache the combined condition
+        self._transition_cache[condition_ids] = combined_condition
+        self._cache_misses += 1
+        
+        # Limit cache size
+        if len(self._transition_cache) > 3000:
+            # Remove oldest entries
+            keys_to_remove = list(self._transition_cache.keys())[:600]
+            for key in keys_to_remove:
+                del self._transition_cache[key]
+        
+        return combined_condition
+    
+    def _compute_enhanced_priority(self, transitions: List[Transition]) -> int:
+        """Compute optimized priority from multiple transitions."""
+        if not transitions:
+            return 0
+        
+        # Use minimum priority for deterministic behavior
+        return min(t.priority for t in transitions)
+    
+    def _create_enhanced_metadata(self, transitions: List[Transition]) -> Dict[str, Any]:
+        """Create optimized metadata from multiple transitions."""
+        if not transitions:
+            return {}
+        
+        combined_metadata = {}
+        
+        # Merge metadata from all transitions
+        for trans in transitions:
+            if trans.metadata:
+                for key, value in trans.metadata.items():
+                    if key in combined_metadata:
+                        # Handle conflicts by creating lists
+                        if not isinstance(combined_metadata[key], list):
+                            combined_metadata[key] = [combined_metadata[key]]
+                        if value not in combined_metadata[key]:
+                            combined_metadata[key].append(value)
+                    else:
+                        combined_metadata[key] = value
+        
+        return combined_metadata
+    
+    def _create_final_enhanced_metadata(self) -> Dict[str, Any]:
+        """Create final DFA metadata with construction statistics."""
+        build_time = time.time() - self._build_start_time
+        
+        enhanced_metadata = self.metadata.copy()
+        enhanced_metadata.update({
+            'construction_stats': {
+                'build_time': build_time,
+                'iterations': self._iteration_count,
+                'states_created': self._states_created,
+                'states_merged': self._states_merged,
+                'cache_hits': self._cache_hits,
+                'cache_misses': self._cache_misses,
+                'early_termination': self._early_termination,
+                'cache_hit_ratio': self._cache_hits / max(self._cache_hits + self._cache_misses, 1)
+            }
+        })
+        
+        return enhanced_metadata

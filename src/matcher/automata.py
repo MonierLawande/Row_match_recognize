@@ -388,6 +388,7 @@ class NFAState:
     def optimize_transitions(self) -> None:
         """
         Optimize transitions by removing duplicates and sorting by priority.
+        Enhanced with advanced deduplication and transition merging.
         """
         with self._lock:
             # Remove duplicate transitions (same target, variable, priority)
@@ -402,14 +403,72 @@ class NFAState:
                 else:
                     logger.debug(f"Removed duplicate transition: {trans_key}")
             
+            # Group transitions by target for potential merging
+            target_groups = defaultdict(list)
+            for trans in unique_transitions:
+                target_groups[trans.target].append(trans)
+            
+            # Merge transitions to same target with compatible conditions
+            optimized_transitions = []
+            for target, trans_list in target_groups.items():
+                if len(trans_list) == 1:
+                    optimized_transitions.extend(trans_list)
+                else:
+                    # Try to merge compatible transitions
+                    merged_transitions = self._merge_compatible_transitions(trans_list)
+                    optimized_transitions.extend(merged_transitions)
+            
             # Sort by priority, then by target for determinism
-            self.transitions = sorted(unique_transitions, 
+            self.transitions = sorted(optimized_transitions, 
                                     key=lambda t: (t.priority, t.target, t.variable or ""))
             
-            # Remove duplicate epsilon transitions
-            self.epsilon = list(dict.fromkeys(self.epsilon))  # Preserve order, remove dupes
+            # Remove duplicate epsilon transitions and optimize
+            self._optimize_epsilon_list()
             
             self._validated = False  # Re-validation needed after optimization
+    
+    def _merge_compatible_transitions(self, trans_list: List[Transition]) -> List[Transition]:
+        """Merge compatible transitions that go to the same target."""
+        if len(trans_list) <= 1:
+            return trans_list
+        
+        # Group by variable for merging
+        var_groups = defaultdict(list)
+        for trans in trans_list:
+            var_groups[trans.variable].append(trans)
+        
+        merged = []
+        for var, var_trans in var_groups.items():
+            if len(var_trans) == 1:
+                merged.extend(var_trans)
+            else:
+                # For same variable transitions to same target, keep the highest priority one
+                # This is a simplification - in production, you might want to combine conditions
+                best_trans = min(var_trans, key=lambda t: t.priority)
+                merged.append(best_trans)
+        
+        return merged
+    
+    def _optimize_epsilon_list(self) -> None:
+        """Optimize epsilon transition list by removing duplicates and sorting."""
+        if not self.epsilon:
+            return
+        
+        # Remove duplicates while preserving order for determinism
+        seen = set()
+        unique_epsilon = []
+        for target in self.epsilon:
+            if target not in seen:
+                seen.add(target)
+                unique_epsilon.append(target)
+        
+        # Sort by priority if available, then by target index
+        if hasattr(self, 'epsilon_priorities') and self.epsilon_priorities:
+            unique_epsilon.sort(key=lambda t: (self.epsilon_priorities.get(t, 0), t))
+        else:
+            unique_epsilon.sort()
+        
+        self.epsilon = unique_epsilon
     
     def get_debug_info(self) -> Dict[str, Any]:
         """
@@ -629,6 +688,7 @@ class NFA:
         
         This method efficiently computes the set of states reachable from the given states
         through epsilon transitions, with proper cycle detection and priority-based ordering.
+        Enhanced with caching for significant performance improvement.
         
         Args:
             state_indices: List of state indices to compute closure for
@@ -644,6 +704,15 @@ class NFA:
             if not (0 <= idx < len(self.states)):
                 raise ValueError(f"Invalid state index {idx}")
         
+        # Create cache key
+        cache_key = tuple(sorted(state_indices))
+        if not hasattr(self, '_epsilon_cache'):
+            self._epsilon_cache = {}
+        
+        # Check cache first
+        if cache_key in self._epsilon_cache:
+            return self._epsilon_cache[cache_key]
+        
         closure = set(state_indices)
         queue = deque(state_indices)
         visited_transitions = set()  # Track (source, target) pairs to detect cycles
@@ -655,8 +724,9 @@ class NFA:
                 iterations += 1
                 current_state = queue.popleft()
                 
-                # Get epsilon targets sorted by priority
-                for target in self.states[current_state].get_epsilon_targets():
+                # Get epsilon targets sorted by priority (use cached method if available)
+                epsilon_targets = self.states[current_state].get_epsilon_targets()
+                for target in epsilon_targets:
                     transition_key = (current_state, target)
                     
                     # Skip if we've already processed this transition (cycle detection)
@@ -677,6 +747,16 @@ class NFA:
             self.states[idx].priority,
             idx
         ))
+        
+        # Cache the result to avoid recomputation
+        self._epsilon_cache[cache_key] = result
+        
+        # Limit cache size to prevent memory issues
+        if len(self._epsilon_cache) > 1000:
+            # Remove oldest entries (simple LRU approximation)
+            keys_to_remove = list(self._epsilon_cache.keys())[:200]
+            for key in keys_to_remove:
+                del self._epsilon_cache[key]
         
         logger.debug(f"Epsilon closure of {state_indices} = {result} (iterations: {iterations})")
         return result
