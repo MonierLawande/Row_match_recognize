@@ -428,6 +428,7 @@ def tokenize_pattern(pattern: str, validation_level: PatternValidationLevel = Pa
     - Alternation patterns with priority handling
     - Thread-safe operation with proper context management
     - Comprehensive error reporting with suggestions
+    - Performance optimization through intelligent caching
     
     Args:
         pattern: Pattern string to tokenize
@@ -452,12 +453,24 @@ def tokenize_pattern(pattern: str, validation_level: PatternValidationLevel = Pa
             0, pattern, "Break pattern into smaller parts", "PATTERN_001"
         )
     
+    # Check pattern cache first (Phase 2 optimization)
+    from ..utils.pattern_cache import get_cached_pattern, cache_pattern
+    cache_key = f"tokenize:{pattern}:{validation_level.value}"
+    
+    cached_result = get_cached_pattern(cache_key)
+    if cached_result is not None:
+        # Extract just the tokenization result (first element)
+        return cached_result[0] if isinstance(cached_result, tuple) else cached_result
+    
     # Use thread-safe context
     with _tokenization_context(pattern):
         try:
             # Performance timing for large patterns
             with PerformanceTimer("pattern_tokenization") as timer:
                 tokens = _tokenize_pattern_internal(pattern, validation_level)
+                
+                # Cache successful tokenization results
+                cache_pattern(cache_key, tokens, None, timer.elapsed)
                 
                 if len(pattern) > 1000:  # Log performance for large patterns
                     logger.info(f"Tokenized large pattern ({len(pattern)} chars) in {timer.elapsed:.3f}s")

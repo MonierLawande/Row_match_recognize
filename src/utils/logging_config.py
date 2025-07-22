@@ -137,6 +137,7 @@ class PerformanceTimer:
         self.operation_name = operation_name
         self.logger = logger or get_performance_logger()
         self.start_time = None
+        self.elapsed = 0.0
         
     def __enter__(self):
         import time
@@ -147,12 +148,12 @@ class PerformanceTimer:
     def __exit__(self, exc_type, exc_val, exc_tb):
         import time
         end_time = time.perf_counter()
-        duration = end_time - self.start_time
+        self.elapsed = end_time - self.start_time
         
         if exc_type is None:
-            self.logger.info(f"{self.operation_name} completed in {duration:.4f}s")
+            self.logger.info(f"{self.operation_name} completed in {self.elapsed:.4f}s")
         else:
-            self.logger.warning(f"{self.operation_name} failed after {duration:.4f}s: {exc_val}")
+            self.logger.warning(f"{self.operation_name} failed after {self.elapsed:.4f}s: {exc_val}")
 
 
 # Initialize default logging if not already configured

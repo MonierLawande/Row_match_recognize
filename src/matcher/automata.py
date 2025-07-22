@@ -1248,6 +1248,117 @@ class NFABuilder:
         Returns:
             NFA: The constructed NFA with full SQL:2016 compliance
         """
+        # Phase 2 optimization: Check cache for compiled pattern (including DEFINE context)
+        from ..utils.pattern_cache import get_cached_pattern, cache_pattern
+        
+        # Create comprehensive cache key including all compilation context
+        pattern_signature = self._generate_pattern_signature(tokens, define, subset_vars)
+        cache_key = f"nfa_build:{pattern_signature}"
+        
+        cached_result = get_cached_pattern(cache_key)
+        if cached_result is not None:
+            # Extract NFA from cached result (second element)
+            cached_nfa = cached_result[1] if len(cached_result) > 1 else cached_result[0]
+            if cached_nfa:
+                # Clone cached NFA to avoid state sharing
+                return self._clone_cached_nfa(cached_nfa)
+        
+        # Performance timing for pattern compilation
+        with PerformanceTimer("nfa_compilation") as timer:
+            nfa = self._build_nfa_internal(tokens, define, subset_vars)
+            
+            # Cache successful compilation results
+            cache_pattern(cache_key, None, nfa, timer.elapsed)
+            
+            return nfa
+
+    def _generate_pattern_signature(self, tokens: List[PatternToken], define: Dict[str, str], 
+                                  subset_vars: Dict[str, List[str]] = None) -> str:
+        """Generate a unique signature for pattern compilation caching."""
+        # Convert tokens to a string representation that captures structure
+        token_repr = []
+        for token in tokens:
+            token_data = {
+                'type': token.type.name,
+                'value': token.value,
+                'quantifier': token.quantifier,
+                'metadata_keys': list(token.metadata.keys()) if token.metadata else []
+            }
+            token_repr.append(str(token_data))
+        
+        # Include DEFINE context in signature
+        define_signature = sorted(define.items()) if define else []
+        subset_signature = sorted(subset_vars.items()) if subset_vars else []
+        
+        import hashlib
+        signature_data = {
+            'tokens': token_repr,
+            'define': define_signature,
+            'subset_vars': subset_signature
+        }
+        
+        signature_str = str(signature_data)
+        return hashlib.md5(signature_str.encode()).hexdigest()
+
+    def _clone_cached_nfa(self, nfa) -> 'NFA':
+        """Create a deep clone of a cached NFA to avoid state sharing."""
+        # Create new states with same structure
+        new_states = []
+        for state in nfa.states:
+            if state is None:
+                new_states.append(None)
+                continue
+                
+            new_state = NFAState()
+            new_state.is_accept = state.is_accept
+            new_state.is_excluded = getattr(state, 'is_excluded', False)
+            new_state.variable = getattr(state, 'variable', None)
+            new_state.subset_vars = getattr(state, 'subset_vars', set()).copy()
+            
+            # Clone transitions
+            for transition in state.transitions:
+                new_state.add_transition(
+                    transition.condition, 
+                    transition.target, 
+                    transition.variable,
+                    transition.priority
+                )
+            
+            # Clone epsilon transitions
+            new_state.epsilon = state.epsilon.copy()
+            new_states.append(new_state)
+        
+        # Create cloned NFA
+        cloned_nfa = NFA(
+            nfa.start, 
+            nfa.accept, 
+            new_states, 
+            nfa.exclusion_ranges.copy() if hasattr(nfa, 'exclusion_ranges') else [],
+            nfa.metadata.copy() if hasattr(nfa, 'metadata') else {}
+        )
+        
+        return cloned_nfa
+
+    def _estimate_pattern_complexity(self, tokens: List[PatternToken]) -> int:
+        """Estimate pattern complexity for cache prioritization."""
+        complexity = len(tokens)
+        
+        for token in tokens:
+            # Add complexity for special patterns
+            if token.type == PatternTokenType.PERMUTE:
+                complexity += 50  # PERMUTE patterns are expensive
+            elif token.type == PatternTokenType.ALTERNATION:
+                complexity += 20  # Alternations increase complexity
+            elif token.quantifier and token.quantifier in ['+', '*']:
+                complexity += 10  # Unbounded quantifiers
+            elif token.type == PatternTokenType.EXCLUSION_START:
+                complexity += 15  # Exclusions require complex processing
+        
+        return complexity
+
+    def _build_nfa_internal(self, tokens: List[PatternToken], define: Dict[str, str], 
+                           subset_vars: Dict[str, List[str]] = None) -> 'NFA':
+        """Internal NFA building logic (original build method content)."""
         # Store subset variables
         self.subset_vars = subset_vars or {}
         

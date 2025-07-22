@@ -46,38 +46,89 @@ class LRUPatternCache:
         }
     
     def get(self, key: str) -> Optional[Tuple[Any, Any, float]]:
-        """Get an item from the cache with LRU tracking."""
+        """Get an item from the cache with enhanced LRU tracking."""
         if not ENABLE_CACHING:
             return None
             
         with self.lock:
             if key in self.cache:
                 # Move the accessed item to the end (most recently used)
-                value = self.cache.pop(key)
-                self.cache[key] = value
+                dfa, nfa, comp_time, metadata = self.cache.pop(key)
+                
+                # Update access statistics
+                metadata['access_count'] += 1
+                metadata['last_access'] = time.time()
+                
+                # Put back at the end
+                self.cache[key] = (dfa, nfa, comp_time, metadata)
+                
                 self.stats['hits'] += 1
-                self.stats['compilation_time_saved'] += value[2]  # Add compilation time
-                return value
+                self.stats['compilation_time_saved'] += comp_time
+                return (dfa, nfa, comp_time)
             
             self.stats['misses'] += 1
             return None
     
     def put(self, key: str, dfa: Any, nfa: Any, compilation_time: float) -> None:
-        """Add an item to the cache with LRU eviction policy."""
+        """Add an item to the cache with enhanced LRU eviction policy."""
         if not ENABLE_CACHING:
             return
             
         with self.lock:
-            # Remove oldest item if we're at capacity
-            if len(self.cache) >= self.max_size:
-                self.cache.popitem(last=False)  # Remove first item (least recently used)
+            # Smart eviction based on usage patterns and memory pressure
+            while len(self.cache) >= self.max_size:
+                self._smart_eviction()
                 self.stats['evictions'] += 1
             
-            # Store the new item
-            self.cache[key] = (dfa, nfa, compilation_time)
+            # Store the new item with timestamp and access count
+            entry_metadata = {
+                'timestamp': time.time(),
+                'access_count': 0,
+                'compilation_time': compilation_time,
+                'estimated_size': self._estimate_entry_size(dfa, nfa)
+            }
+            self.cache[key] = (dfa, nfa, compilation_time, entry_metadata)
             
             # Update memory usage statistics
             self._update_memory_usage()
+    
+    def _smart_eviction(self) -> None:
+        """Enhanced eviction policy considering access patterns and memory usage."""
+        if not self.cache:
+            return
+            
+        # Calculate eviction score for each entry
+        current_time = time.time()
+        eviction_scores = []
+        
+        for key, (dfa, nfa, comp_time, metadata) in self.cache.items():
+            # Score based on: recency, access frequency, size, and compilation time
+            age = current_time - metadata['timestamp']
+            access_frequency = metadata['access_count'] / max(age / 3600, 1)  # accesses per hour
+            size_penalty = metadata['estimated_size']
+            compilation_value = comp_time  # Higher compilation time = more valuable to keep
+            
+            # Lower score = better candidate for eviction
+            score = (age / 3600) + size_penalty - (access_frequency * 10) - (compilation_value * 5)
+            eviction_scores.append((score, key))
+        
+        # Remove the entry with the highest eviction score
+        eviction_scores.sort(reverse=True)
+        key_to_evict = eviction_scores[0][1]
+        self.cache.pop(key_to_evict, None)
+    
+    def _estimate_entry_size(self, dfa: Any, nfa: Any) -> float:
+        """Estimate the memory size of a cache entry in MB."""
+        # Simplified size estimation - in production, use more sophisticated tracking
+        try:
+            dfa_states = len(dfa.states) if hasattr(dfa, 'states') else 10
+            nfa_states = len(nfa.states) if hasattr(nfa, 'states') else 10
+            
+            # Rough estimation: each state ~1KB, transitions ~500B each
+            estimated_size_bytes = (dfa_states * 1024) + (nfa_states * 512)
+            return estimated_size_bytes / (1024 * 1024)  # Convert to MB
+        except:
+            return 0.5  # Default estimate
     
     def _update_memory_usage(self) -> None:
         """Estimate and update memory usage statistics."""
@@ -186,6 +237,15 @@ def clear_pattern_cache() -> None:
     Useful for memory management in long-running applications.
     """
     _PATTERN_CACHE.clear()
+
+def get_pattern_cache():
+    """
+    Get the global pattern cache instance.
+    
+    Returns:
+        LRUPatternCache: The global cache instance
+    """
+    return _PATTERN_CACHE
 
 def resize_cache(new_size: int) -> None:
     """
