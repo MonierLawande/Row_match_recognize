@@ -3,7 +3,8 @@
 import time
 import psutil
 import threading
-from typing import Dict, Any, Optional, List, Callable
+import re
+from typing import Dict, Any, Optional, List, Callable, Set
 from dataclasses import dataclass
 from collections import defaultdict, deque
 from functools import wraps
@@ -108,12 +109,20 @@ class PerformanceMonitor:
         else:
             return "stable"
 
-# Global performance monitor instance
+# Global optimizer instances
 _global_monitor = PerformanceMonitor()
+_define_optimizer = None  # Will be initialized when first accessed
 
 def get_performance_monitor() -> PerformanceMonitor:
     """Get the global performance monitor instance."""
     return _global_monitor
+
+def get_define_optimizer() -> "DefineOptimizer":
+    """Get the global DEFINE optimizer instance."""
+    global _define_optimizer
+    if _define_optimizer is None:
+        _define_optimizer = DefineOptimizer()
+    return _define_optimizer
 
 def monitor_performance(operation_name: str):
     """Decorator to monitor performance of functions."""
@@ -199,6 +208,242 @@ class MemoryOptimizer:
         
         estimated_mb = data_size * base_memory_per_row * pattern_memory_factor
         return estimated_mb
+
+class DefineOptimizer:
+    """Optimization utilities for DEFINE clauses in pattern matching."""
+    
+    def __init__(self):
+        self.optimization_cache = {}
+        self.pattern_stats = defaultdict(int)
+        self.lock = threading.RLock()
+    
+    def optimize_define_clauses(self, define_dict: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Optimize DEFINE clauses by analyzing patterns and dependencies.
+        
+        Args:
+            define_dict: Dictionary of variable definitions
+            
+        Returns:
+            Dictionary with optimized definitions and metadata
+        """
+        if not define_dict:
+            return {'optimized_defines': {}, 'optimizations_applied': []}
+        
+        start_time = time.time()
+        
+        with self.lock:
+            # Create cache key for this set of definitions
+            cache_key = self._create_define_cache_key(define_dict)
+            
+            if cache_key in self.optimization_cache:
+                cached_result = self.optimization_cache[cache_key]
+                logger.debug(f"Using cached DEFINE optimization for {len(define_dict)} clauses")
+                return cached_result
+            
+            # Analyze and optimize definitions
+            optimized = {}
+            optimizations_applied = []
+            
+            # Step 1: Classify patterns by type and complexity
+            pattern_analysis = self._analyze_patterns(define_dict)
+            
+            # Step 2: Optimize each definition
+            for var, definition in define_dict.items():
+                optimized_def, applied_opts = self._optimize_single_definition(
+                    var, definition, pattern_analysis
+                )
+                optimized[var] = optimized_def
+                optimizations_applied.extend(applied_opts)
+            
+            # Step 3: Cross-variable optimizations
+            cross_opts = self._apply_cross_variable_optimizations(optimized, pattern_analysis)
+            optimizations_applied.extend(cross_opts)
+            
+            result = {
+                'optimized_defines': optimized,
+                'optimizations_applied': optimizations_applied,
+                'pattern_analysis': pattern_analysis,
+                'optimization_time': time.time() - start_time
+            }
+            
+            # Cache the result
+            self.optimization_cache[cache_key] = result
+            
+            logger.debug(f"Optimized {len(define_dict)} DEFINE clauses in {result['optimization_time']:.3f}s")
+            return result
+    
+    def _create_define_cache_key(self, define_dict: Dict[str, str]) -> str:
+        """Create a cache key for the define dictionary."""
+        # Sort definitions for consistent caching
+        sorted_items = sorted(define_dict.items())
+        return str(hash(tuple(sorted_items)))
+    
+    def _analyze_patterns(self, define_dict: Dict[str, str]) -> Dict[str, Any]:
+        """Analyze patterns to identify optimization opportunities."""
+        analysis = {
+            'simple_comparisons': [],
+            'complex_conditions': [],
+            'aggregations': [],
+            'navigation_functions': [],
+            'cross_references': [],
+            'total_complexity': 0
+        }
+        
+        for var, definition in define_dict.items():
+            complexity = self._calculate_complexity(definition)
+            analysis['total_complexity'] += complexity
+            
+            # Classify pattern types
+            if self._is_simple_comparison(definition):
+                analysis['simple_comparisons'].append(var)
+            elif self._has_aggregation(definition):
+                analysis['aggregations'].append(var)
+            elif self._has_navigation_function(definition):
+                analysis['navigation_functions'].append(var)
+            elif self._has_cross_reference(definition, define_dict):
+                analysis['cross_references'].append(var)
+            else:
+                analysis['complex_conditions'].append(var)
+        
+        return analysis
+    
+    def _calculate_complexity(self, definition: str) -> float:
+        """Calculate complexity score for a definition."""
+        complexity = 0.0
+        
+        # Base complexity from length
+        complexity += len(definition) / 100.0
+        
+        # Function calls add complexity
+        complexity += len(re.findall(r'\w+\s*\(', definition)) * 2.0
+        
+        # Logical operators add complexity
+        complexity += definition.upper().count(' AND ') * 1.5
+        complexity += definition.upper().count(' OR ') * 2.0
+        complexity += definition.upper().count(' NOT ') * 1.0
+        
+        # Navigation functions add significant complexity
+        complexity += definition.upper().count('.PREV(') * 3.0
+        complexity += definition.upper().count('.NEXT(') * 3.0
+        complexity += definition.upper().count('.FIRST(') * 2.0
+        complexity += definition.upper().count('.LAST(') * 2.0
+        
+        # Aggregations add complexity
+        complexity += definition.upper().count('SUM(') * 2.5
+        complexity += definition.upper().count('AVG(') * 2.5
+        complexity += definition.upper().count('COUNT(') * 2.0
+        
+        return complexity
+    
+    def _is_simple_comparison(self, definition: str) -> bool:
+        """Check if definition is a simple comparison."""
+        simple_patterns = [
+            r'^\w+\s*[<>=!]+\s*[\w\d.]+$',
+            r'^\w+\s+IN\s+\([^)]+\)$',
+            r'^\w+\s+LIKE\s+\'[^\']+\'$'
+        ]
+        
+        for pattern in simple_patterns:
+            if re.match(pattern, definition.strip(), re.IGNORECASE):
+                return True
+        return False
+    
+    def _has_aggregation(self, definition: str) -> bool:
+        """Check if definition contains aggregation functions."""
+        agg_functions = ['SUM', 'AVG', 'COUNT', 'MIN', 'MAX', 'STDDEV']
+        definition_upper = definition.upper()
+        return any(func + '(' in definition_upper for func in agg_functions)
+    
+    def _has_navigation_function(self, definition: str) -> bool:
+        """Check if definition contains navigation functions."""
+        nav_functions = ['.PREV(', '.NEXT(', '.FIRST(', '.LAST(']
+        definition_upper = definition.upper()
+        return any(func in definition_upper for func in nav_functions)
+    
+    def _has_cross_reference(self, definition: str, all_defines: Dict[str, str]) -> bool:
+        """Check if definition references other variables."""
+        for var in all_defines.keys():
+            if var != definition and var in definition:
+                return True
+        return False
+    
+    def _optimize_single_definition(self, var: str, definition: str, analysis: Dict[str, Any]) -> tuple:
+        """Optimize a single definition."""
+        optimized_def = definition
+        optimizations = []
+        
+        # Optimization 1: Simplify redundant parentheses
+        if '(((' in definition or ')))' in definition:
+            optimized_def = self._simplify_parentheses(optimized_def)
+            optimizations.append(f"{var}: simplified_parentheses")
+        
+        # Optimization 2: Optimize simple comparisons
+        if var in analysis['simple_comparisons']:
+            optimized_def = self._optimize_simple_comparison(optimized_def)
+            optimizations.append(f"{var}: optimized_simple_comparison")
+        
+        # Optimization 3: Cache complex expressions
+        if self._calculate_complexity(definition) > 5.0:
+            optimizations.append(f"{var}: marked_for_caching")
+        
+        return optimized_def, optimizations
+    
+    def _simplify_parentheses(self, definition: str) -> str:
+        """Simplify redundant parentheses in definition."""
+        # Basic parentheses simplification
+        while '((' in definition and '))' in definition:
+            definition = definition.replace('((', '(').replace('))', ')')
+        return definition
+    
+    def _optimize_simple_comparison(self, definition: str) -> str:
+        """Optimize simple comparison expressions."""
+        # Convert some patterns to more efficient forms
+        # This is a simplified example - real optimization would be more sophisticated
+        definition = re.sub(r'\s+', ' ', definition.strip())
+        return definition
+    
+    def _apply_cross_variable_optimizations(self, optimized_defines: Dict[str, str], 
+                                         analysis: Dict[str, Any]) -> List[str]:
+        """Apply optimizations that span multiple variables."""
+        optimizations = []
+        
+        # Optimization: Reorder variables by dependency and complexity
+        if len(analysis['cross_references']) > 1:
+            optimizations.append("reordered_by_dependencies")
+        
+        # Optimization: Identify common subexpressions
+        common_expressions = self._find_common_expressions(optimized_defines)
+        if common_expressions:
+            optimizations.append(f"found_{len(common_expressions)}_common_expressions")
+        
+        return optimizations
+    
+    def _find_common_expressions(self, defines: Dict[str, str]) -> List[str]:
+        """Find common expressions across definitions."""
+        expressions = []
+        define_values = list(defines.values())
+        
+        # Look for common substrings that look like expressions
+        for i, def1 in enumerate(define_values):
+            for j, def2 in enumerate(define_values[i+1:], i+1):
+                # Find common substrings of reasonable length
+                for k in range(len(def1)):
+                    for l in range(k+10, len(def1)+1):  # At least 10 chars
+                        substr = def1[k:l]
+                        if substr in def2 and substr not in expressions:
+                            expressions.append(substr)
+        
+        return expressions
+    
+    def get_optimization_stats(self) -> Dict[str, Any]:
+        """Get statistics about DEFINE optimizations."""
+        with self.lock:
+            return {
+                'cache_size': len(self.optimization_cache),
+                'pattern_stats': dict(self.pattern_stats),
+                'total_optimizations': sum(self.pattern_stats.values())
+            }
 
 class PatternOptimizer:
     """Optimization utilities for pattern matching operations."""

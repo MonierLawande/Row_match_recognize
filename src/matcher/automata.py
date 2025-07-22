@@ -38,6 +38,13 @@ from src.utils.logging_config import get_logger, PerformanceTimer
 from src.utils.memory_management import get_resource_manager, ObjectPool
 from src.utils.pattern_cache import get_pattern_cache
 
+# Phase 2: Enhanced pattern compilation imports
+from src.utils.pattern_cache import (
+    get_cached_condition, cache_condition, get_cached_tokens, 
+    cache_tokenization, get_all_cache_stats
+)
+from src.utils.performance_optimizer import get_define_optimizer
+
 # Module logger with enhanced configuration
 logger = get_logger(__name__)
 
@@ -1735,6 +1742,9 @@ class NFABuilder:
         # Pattern compilation cache from Phase 2
         self._pattern_cache = get_pattern_cache()
         
+        # Phase 2: Enhanced compilation optimizations (using existing modules)
+        self._define_optimizer = get_define_optimizer()
+        
         # Thread safety
         self._lock = threading.RLock()
     
@@ -1853,11 +1863,20 @@ class NFABuilder:
         Returns:
             NFA: The constructed NFA with full SQL:2016 compliance
         """
-        # Phase 2 optimization: Check cache for compiled pattern (including DEFINE context)
+        # Phase 2 optimization: Optimize DEFINE clauses before processing
+        define_opt_result = self._define_optimizer.optimize_define_clauses(define) if define else {'optimized_defines': {}, 'optimizations_applied': []}
+        optimized_define = define_opt_result['optimized_defines']
+        define_analysis = define_opt_result
+        
+        # Log optimization results
+        if define and len(optimized_define) != len(define):
+            logger.debug(f"DEFINE optimization: {len(define)} -> {len(optimized_define)} clauses")
+        
+        # Phase 2 optimization: Check cache for compiled pattern (including optimized DEFINE context)
         from ..utils.pattern_cache import get_cached_pattern, cache_pattern
         
         # Create comprehensive cache key including all compilation context
-        pattern_signature = self._generate_pattern_signature(tokens, define, subset_vars)
+        pattern_signature = self._generate_pattern_signature(tokens, optimized_define, subset_vars)
         cache_key = f"nfa_build:{pattern_signature}"
         
         cached_result = get_cached_pattern(cache_key)
@@ -1866,11 +1885,20 @@ class NFABuilder:
             cached_nfa = cached_result[1] if len(cached_result) > 1 else cached_result[0]
             if cached_nfa:
                 # Clone cached NFA to avoid state sharing
-                return self._clone_cached_nfa(cached_nfa)
+                cloned_nfa = self._clone_cached_nfa(cached_nfa)
+                # Add DEFINE optimization metadata
+                cloned_nfa.metadata['define_optimizations'] = define_analysis
+                cloned_nfa.metadata['phase2_cache_hit'] = True
+                return cloned_nfa
         
         # Performance timing for pattern compilation
         with PerformanceTimer("nfa_compilation") as timer:
-            nfa = self._build_nfa_internal(tokens, define, subset_vars)
+            nfa = self._build_nfa_internal(tokens, optimized_define, subset_vars)
+            
+            # Add Phase 2 metadata
+            nfa.metadata['define_optimizations'] = define_analysis
+            nfa.metadata['phase2_cache_hit'] = False
+            nfa.metadata['phase2_optimized'] = True
             
             # Cache successful compilation results
             cache_pattern(cache_key, None, nfa, timer.elapsed)
@@ -1898,6 +1926,9 @@ class NFABuilder:
             self.metadata.clear()
             self.subset_vars.clear()
             
+            # Phase 2: Clear optimization caches periodically
+            # Note: We don't clear global caches here as they're shared
+            
             # Force garbage collection for any remaining references
             import gc
             gc.collect()
@@ -1908,7 +1939,17 @@ class NFABuilder:
             "active_states": len(self.states),
             "pool_stats": self._resource_manager.get_stats(),
             "state_pool_size": self._state_pool.size(),
-            "transition_pool_size": self._transition_pool.size()
+            "transition_pool_size": self._transition_pool.size(),
+            # Phase 2: Include optimization cache stats
+            "phase2_stats": self.get_phase2_optimization_stats()
+        }
+    
+    def get_phase2_optimization_stats(self) -> Dict[str, Any]:
+        """Get Phase 2 optimization statistics."""
+        return {
+            "define_optimizer": self._define_optimizer.get_optimization_stats(),
+            "pattern_cache": self._pattern_cache.get_stats(),
+            "all_cache_stats": get_all_cache_stats()
         }
 
     def _generate_pattern_signature(self, tokens: List[PatternToken], define: Dict[str, str], 
@@ -2655,9 +2696,18 @@ class NFABuilder:
         else:
             # Default to TRUE if no definition exists
             condition_str = "TRUE"
-            
-        # Compile the condition with DEFINE evaluation mode for pattern variables
-        condition_fn = compile_condition(condition_str, evaluation_mode='DEFINE')
+        
+        # Phase 2 optimization: Use enhanced condition cache for compilation (disabled for compatibility)
+        cached_condition = None  # Temporarily disabled: get_cached_condition(condition_str)
+        
+        if cached_condition:
+            # Use pre-compiled condition
+            condition_fn = cached_condition.compiled_func
+            logger.debug(f"Used cached condition for variable {var_base}")
+        else:
+            # Fall back to regular compilation
+            # Compile the condition with DEFINE evaluation mode for pattern variables
+            condition_fn = compile_condition(condition_str, evaluation_mode='DEFINE')
         
         # Create transition with condition, variable tracking, and priority
         self.states[start].add_transition(condition_fn, end, var_base, priority)
