@@ -681,8 +681,6 @@ def quick_debug_setup(enable_file_logging: bool = False, debug_file: str = "debu
         enable_performance=True,
         debug_config=debug_config
     )
-    
-    print("Debug logging enabled with full tracing")
 
 
 def production_logging_setup(log_file: str = "production.log"):

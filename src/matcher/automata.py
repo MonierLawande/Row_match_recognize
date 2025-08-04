@@ -2816,14 +2816,6 @@ class NFABuilder:
         variables = token.metadata.get("variables", [])
         original_pattern = token.metadata.get("original", "")
         
-        print(f"DEBUG: _process_permute called with variables: {variables}")
-        print(f"DEBUG: Token metadata: {token.metadata}")
-        print(f"DEBUG: Token type: {token.type}")
-        
-        # Add debug output to stdout
-        import sys
-        sys.stdout.flush()
-        
         # Create states for the permutation
         perm_start = self.new_state()
         perm_end = self.new_state()

@@ -1171,7 +1171,6 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                         col not in ['MATCH_NUMBER']):  # Skip auto-generated measure columns
                                         ordered_cols.append(col)
                         else:
-                            print(f"DEBUG: Taking ALL ROWS PER MATCH path, rows_per_match={rows_per_match}")
                             # For ALL ROWS PER MATCH, include all table columns + pattern navigation columns
                             # 1. PARTITION BY columns
                             # 2. ORDER BY columns  
