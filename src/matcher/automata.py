@@ -24,6 +24,7 @@ from typing import (
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 import itertools
+import logging
 import re
 import time
 from collections import defaultdict, deque
@@ -2815,6 +2816,12 @@ class NFABuilder:
         # Extract permute variables
         variables = token.metadata.get("variables", [])
         original_pattern = token.metadata.get("original", "")
+        
+        # Debug logging for pattern processing
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Processing PERMUTE pattern: {original_pattern}")
+            logger.debug(f"Variables extracted: {variables}")
+            logger.debug(f"Token metadata: {token.metadata}")
         
         # Create states for the permutation
         perm_start = self.new_state()

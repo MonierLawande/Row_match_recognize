@@ -22,6 +22,7 @@ Version: 3.0.0
 """
 
 import re
+import logging
 import threading
 from enum import Enum
 from dataclasses import dataclass, field
@@ -1198,6 +1199,12 @@ def _process_permute_variable(var_text: str) -> Union[str, PatternToken]:
                 # Extract variables from inside the parentheses
                 inner_content = var_text[start_paren + 1:end_paren]
                 nested_variables, _ = process_permute_variables(inner_content, 0)
+                
+                # Debug logging for nested PERMUTE processing
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"Processing nested PERMUTE: {var_text}")
+                    logger.debug(f"Inner content: {inner_content}")
+                    logger.debug(f"Extracted nested variables: {nested_variables}")
                 
                 return PatternToken(
                     PatternTokenType.PERMUTE,
