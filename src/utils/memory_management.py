@@ -24,7 +24,9 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import time
 
-logger = logging.getLogger(__name__)
+from src.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 T = TypeVar('T')
 

@@ -27,7 +27,9 @@ from src.parser.error_listeners import ParserError, CustomErrorListener
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
+from src.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 from typing import List, Optional, Dict
 

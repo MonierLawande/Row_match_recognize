@@ -129,6 +129,63 @@ def get_performance_logger() -> logging.Logger:
     return logging.getLogger("row_match_recognize.performance")
 
 
+def set_log_level(level: str, verbose: bool = True):
+    """
+    Dynamically change the logging level for all row_match_recognize loggers.
+    
+    Args:
+        level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        verbose: Whether to print confirmation message
+    """
+    level = level.upper()
+    
+    # Update root logger first to prevent any issues
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    
+    # Update main logger
+    main_logger = logging.getLogger("row_match_recognize")
+    main_logger.setLevel(level)
+    
+    # Update performance logger  
+    perf_logger = logging.getLogger("row_match_recognize.performance")
+    perf_logger.setLevel(level)
+    
+    # Update all handlers for main logger
+    for handler in main_logger.handlers:
+        handler.setLevel(level)
+        
+    # Update all handlers for root logger
+    for handler in root_logger.handlers:
+        handler.setLevel(level)
+    
+    # Update ALL existing loggers that start with row_match_recognize
+    for logger_name in list(logging.Logger.manager.loggerDict.keys()):
+        if logger_name.startswith("row_match_recognize"):
+            child_logger = logging.getLogger(logger_name)
+            child_logger.setLevel(level)
+            for handler in child_logger.handlers:
+                handler.setLevel(level)
+    
+    if verbose:
+        print(f"Logging level set to {level} for all loggers")
+
+
+def enable_debug_logging():
+    """Enable detailed debug logging."""
+    set_log_level('DEBUG')
+
+
+def enable_quiet_logging():
+    """Enable only warnings and errors."""
+    set_log_level('WARNING', verbose=False)
+
+
+def enable_normal_logging():
+    """Enable info, warnings and errors."""
+    set_log_level('INFO')
+
+
 # Context manager for performance timing
 class PerformanceTimer:
     """Context manager for timing operations and logging performance metrics."""
@@ -160,8 +217,8 @@ class PerformanceTimer:
 def init_default_logging():
     """Initialize default logging configuration if not already set up."""
     if not logging.getLogger().handlers:
-        # Determine log level from environment
-        log_level = os.getenv('ROW_MATCH_LOG_LEVEL', 'INFO').upper()
+        # Determine log level from environment - default to WARNING for production
+        log_level = os.getenv('ROW_MATCH_LOG_LEVEL', 'WARNING').upper()
         
         # Determine if we should enable performance logging
         enable_perf = os.getenv('ROW_MATCH_ENABLE_PERFORMANCE_LOGGING', 'false').lower() == 'true'
@@ -172,7 +229,14 @@ def init_default_logging():
             enable_console=True,
             enable_performance=enable_perf
         )
+        
+    # ALWAYS apply quiet logging by default unless explicitly overridden
+    env_level = os.getenv('ROW_MATCH_LOG_LEVEL', 'WARNING').upper()
+    if env_level == 'WARNING':
+        # Set root logger level to WARNING to prevent any other loggers from being more verbose
+        logging.getLogger().setLevel(logging.WARNING)
+        enable_quiet_logging()
 
 
-# Auto-initialize on import
+# Auto-initialize on import and apply quiet logging by default
 init_default_logging()

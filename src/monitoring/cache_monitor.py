@@ -16,7 +16,9 @@ from src.utils.pattern_cache import (
 from src.config.production_config import MatchRecognizeConfig
 
 # Module logger
-logger = logging.getLogger(__name__)
+from src.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 class CacheMonitor:
     """

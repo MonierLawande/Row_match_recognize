@@ -801,17 +801,17 @@ class EnhancedMatcher:
         
         # Debug DFA metadata for PERMUTE patterns
         if hasattr(self.dfa, 'metadata'):
-            print(f"DEBUG: DFA metadata keys: {list(self.dfa.metadata.keys())}")
-            print(f"DEBUG: has_permute: {self.dfa.metadata.get('has_permute', False)}")
-            print(f"DEBUG: has_alternations: {self.dfa.metadata.get('has_alternations', False)}")
+            logger.debug(f"DFA metadata keys: {list(self.dfa.metadata.keys())}")
+            logger.debug(f"has_permute: {self.dfa.metadata.get('has_permute', False)}")
+            logger.debug(f"has_alternations: {self.dfa.metadata.get('has_alternations', False)}")
             if 'alternation_combinations' in self.dfa.metadata:
-                print(f"DEBUG: alternation_combinations: {self.dfa.metadata['alternation_combinations']}")
+                logger.debug(f"alternation_combinations: {self.dfa.metadata['alternation_combinations']}")
             else:
-                print("DEBUG: No alternation_combinations in DFA metadata")
+                logger.debug("No alternation_combinations in DFA metadata")
         else:
-            print("DEBUG: No DFA metadata available")
+            logger.debug("No DFA metadata available")
         
-        print(f"DEBUG: Parsed alternation_order: {self.alternation_order}")
+        logger.debug(f"Parsed alternation_order: {self.alternation_order}")
         
         # Initialize exclusion handler
         self.exclusion_handler = PatternExclusionHandler(self.original_pattern) if self.original_pattern else None
@@ -1249,14 +1249,14 @@ class EnhancedMatcher:
             backtrack_count = 0
             stack = [state]
             
-            print(f"DEBUG: Starting backtracking search with {len(rows)} rows, max_iterations={self.max_iterations}")
+            logger.debug(f"Starting backtracking search with {len(rows)} rows, max_iterations={self.max_iterations}")
             
             while stack and explored_states < self.max_iterations:
                 current_state = stack.pop()
                 explored_states += 1
                 
                 if explored_states % 100 == 0:
-                    print(f"DEBUG: Explored {explored_states} states, stack size: {len(stack)}")
+                    logger.debug(f"Explored {explored_states} states, stack size: {len(stack)}")
                 
                 # Check depth limit
                 if current_state.depth > self.max_depth:
@@ -1280,7 +1280,7 @@ class EnhancedMatcher:
                 if not successors:
                     backtrack_count += 1
                     if explored_states <= 10:  # Only log for first few states
-                        print(f"DEBUG: No successors from state {current_state.state_id} at row {current_state.row_index}")
+                        logger.debug(f"No successors from state {current_state.state_id} at row {current_state.row_index}")
                     continue
                 
                 # Add successors to stack (reverse order for DFS)
@@ -1379,32 +1379,32 @@ class EnhancedMatcher:
                     if state.path:
                         current_vars.add(state.path[-1][2])
                     
-                    print(f"DEBUG: Checking priority for vars {current_vars} against combinations {combinations}")
+                    logger.debug(f"Checking priority for vars {current_vars} against combinations {combinations}")
                     
                     # Find which combination this state belongs to
                     for i, combination in enumerate(combinations):
                         if current_vars.issubset(set(combination)):
-                            print(f"DEBUG: Found exact subset match for combination {i}: {combination}")
+                            logger.debug(f"Found exact subset match for combination {i}: {combination}")
                             return i
                     
                     # Fallback to checking partial matches
                     for i, combination in enumerate(combinations):
                         if current_vars & set(combination):
-                            print(f"DEBUG: Found partial match for combination {i}: {combination}")
+                            logger.debug(f"Found partial match for combination {i}: {combination}")
                             return i
                     
-                    print(f"DEBUG: No matching combination found for vars {current_vars}")
+                    logger.debug(f"No matching combination found for vars {current_vars}")
                     return 999  # No matching combination found
                 else:
                     # Use individual variable priority for non-PERMUTE patterns
                     var_priority = self.parent.alternation_order.get(state.path[-1][2] if state.path else '', 999)
-                    print(f"DEBUG: Using individual variable priority {var_priority} for non-PERMUTE")
+                    logger.debug(f"Using individual variable priority {var_priority} for non-PERMUTE")
                     return var_priority
             
             # Sort before returning to ensure proper exploration order
-            print(f"DEBUG: Before sorting, {len(successors)} successors found")
+            logger.debug(f"Before sorting, {len(successors)} successors found")
             for i, s in enumerate(successors):
-                print(f"DEBUG: Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, row={s.row_index}")
+                logger.debug(f"Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, row={s.row_index}")
             
             successors.sort(key=lambda s: (
                 not self.dfa.states[s.state_id].is_accept,
@@ -1412,10 +1412,10 @@ class EnhancedMatcher:
                 s.path[-1][2] if s.path else ''
             ))
             
-            print(f"DEBUG: After sorting, successors order:")
+            logger.debug(f"After sorting, successors order:")
             for i, s in enumerate(successors):
                 priority = get_combination_priority(s)
-                print(f"DEBUG: Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, priority={priority}")
+                logger.debug(f"Successor {i}: vars={list(s.variable_assignments.keys())}, last_var={s.path[-1][2] if s.path else 'None'}, priority={priority}")
             
             return successors
         
@@ -1692,17 +1692,17 @@ class EnhancedMatcher:
         """Find a single match using optimized transitions with backtracking support."""
         match_start_time = time.time()
         
-        print(f"DEBUG: _find_single_match called with start_idx={start_idx}")
+        logger.debug(f"_find_single_match called with start_idx={start_idx}")
         
         # PRODUCTION FIX: Special handling for PERMUTE patterns with alternations
         # These patterns require testing all combinations in lexicographical order
         has_permute_alternations = (hasattr(self.dfa, 'metadata') and 
             self.dfa.metadata.get('has_permute', False) and 
             self._has_alternations_in_permute())
-        print(f"DEBUG: has_permute_alternations: {has_permute_alternations}")
+        logger.debug(f"has_permute_alternations: {has_permute_alternations}")
         
         if has_permute_alternations:
-            print("DEBUG: PERMUTE pattern with alternations detected - using specialized handler")
+            logger.debug("PERMUTE pattern with alternations detected - using specialized handler")
             match = self._handle_permute_with_alternations(rows, start_idx, context, config)
             if match:
                 self.timing["find_match"] += time.time() - match_start_time
@@ -1710,10 +1710,10 @@ class EnhancedMatcher:
 
         # Check if backtracking is needed for this pattern
         needs_backtracking = self._needs_backtracking(rows, start_idx, context)
-        print(f"DEBUG: _needs_backtracking returned: {needs_backtracking}")
+        logger.debug(f"_needs_backtracking returned: {needs_backtracking}")
         
         if needs_backtracking:
-            print("DEBUG: Using backtracking matcher for complex pattern")
+            logger.debug("Using backtracking matcher for complex pattern")
             self.backtracking_stats['patterns_requiring_backtracking'] += 1
             
             backtracking_matcher = self._get_backtracking_matcher()
@@ -1739,10 +1739,10 @@ class EnhancedMatcher:
         # PRODUCTION FIX: Special handling for complex back-reference patterns
         # These patterns require constraint satisfaction and backtracking
         has_complex_back_refs = self._has_complex_back_references()
-        print(f"DEBUG: has_complex_back_references: {has_complex_back_refs}")
+        logger.debug(f"has_complex_back_references: {has_complex_back_refs}")
         
         if has_complex_back_refs:
-            print("DEBUG: Complex back-reference pattern detected - using constraint-based handler")
+            logger.debug("Complex back-reference pattern detected - using constraint-based handler")
             match = self._handle_complex_back_references(rows, start_idx, context, config)
             if match:
                 self.timing["find_match"] += time.time() - match_start_time
@@ -1841,7 +1841,7 @@ class EnhancedMatcher:
             row = rows[current_idx]
             context.current_idx = current_idx
             
-            print(f"DEBUG: Processing row {current_idx} with value {row.get('value', 'N/A')}")
+            logger.debug(f"Processing row {current_idx} with value {row.get('value', 'N/A')}")
             
             # Update context with current variable assignments for condition evaluation
             context.variables = var_assignments
@@ -1941,7 +1941,7 @@ class EnhancedMatcher:
             
             # Choose the best transition from valid ones with enhanced back reference support
             if valid_transitions:
-                print(f"DEBUG: Found {len(valid_transitions)} valid transitions: {[v[0] for v in valid_transitions]}")
+                logger.debug(f"Found {len(valid_transitions)} valid transitions: {[v[0] for v in valid_transitions]}")
                 
                 # PRODUCTION FIX: Implement proper transition selection for back references
                 # For patterns with back references, we need to select transitions that enable
@@ -1974,7 +1974,7 @@ class EnhancedMatcher:
                     else:
                         categorized_transitions['dependent'].append((var, target, is_excluded))
                 
-                print(f"DEBUG: Categorized transitions: {categorized_transitions}")
+                logger.debug(f"Categorized transitions: {categorized_transitions}")
                 
                 # Try transitions in order of priority for back reference satisfaction:
                 # PRODUCTION FIX: Prioritize variables that lead to accepting states
@@ -1985,7 +1985,7 @@ class EnhancedMatcher:
                 
                 for category in ['accepting', 'prerequisite', 'dependent', 'simple']:
                     if categorized_transitions[category]:
-                        print(f"DEBUG: Processing category '{category}' with {len(categorized_transitions[category])} transitions")
+                        logger.debug(f"Processing category '{category}' with {len(categorized_transitions[category])} transitions")
                         # PRODUCTION FIX: Within each category, prefer transitions that advance the state,
                         # then use alternation order (left-to-right) instead of alphabetical order
                         def transition_sort_key(x):
@@ -2000,7 +2000,7 @@ class EnhancedMatcher:
                                 # For any PERMUTE pattern with alternations, use strict alphabetical order
                                 # This ensures A < B < C < D in all cases
                                 alphabetical_priority = ord(var_name[0]) if var_name else 999
-                                print(f"DEBUG: PERMUTE pattern: {var_name} gets alphabetical priority {alphabetical_priority}")
+                                logger.debug(f"PERMUTE pattern: {var_name} gets alphabetical priority {alphabetical_priority}")
                                 return (state_advance, alphabetical_priority, var_name)
                             
                             # For non-PERMUTE patterns, use standard logic
@@ -2015,7 +2015,7 @@ class EnhancedMatcher:
                             key=transition_sort_key
                         )
                         best_transition = sorted_transitions[0]
-                        print(f"DEBUG: Selected {category} transition: {best_transition[0]} -> state {best_transition[1]} (alternation priority: {self.alternation_order.get(best_transition[0], 'N/A')})")
+                        logger.debug(f"Selected {category} transition: {best_transition[0]} -> state {best_transition[1]} (alternation priority: {self.alternation_order.get(best_transition[0], 'N/A')})")
                         break
                 
                 if best_transition:
