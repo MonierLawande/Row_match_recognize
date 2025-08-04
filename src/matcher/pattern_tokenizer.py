@@ -1188,11 +1188,58 @@ def _process_permute_variable(var_text: str) -> Union[str, PatternToken]:
     
     # Check for nested PERMUTE
     elif var_text.upper().startswith('PERMUTE'):
-        return PatternToken(
-            PatternTokenType.PERMUTE,
-            var_text,
-            metadata={"nested": True, "original": var_text}
-        )
+        # Parse the nested PERMUTE to extract its variables
+        try:
+            # Find the parentheses content
+            start_paren = var_text.find('(')
+            end_paren = var_text.rfind(')')
+            
+            if start_paren != -1 and end_paren != -1 and end_paren > start_paren:
+                # Extract variables from inside the parentheses
+                inner_content = var_text[start_paren + 1:end_paren]
+                nested_variables, _ = process_permute_variables(inner_content, 0)
+                
+                return PatternToken(
+                    PatternTokenType.PERMUTE,
+                    var_text,
+                    metadata={
+                        "nested": True, 
+                        "original": var_text,
+                        "variables": nested_variables,
+                        "variable_count": len(nested_variables),
+                        "depth": 1,
+                        "has_alternations": any(isinstance(v, PatternToken) and v.type == PatternTokenType.ALTERNATION 
+                                              for v in nested_variables)
+                    }
+                )
+            else:
+                # Malformed PERMUTE
+                return PatternToken(
+                    PatternTokenType.PERMUTE,
+                    var_text,
+                    metadata={
+                        "nested": True, 
+                        "original": var_text,
+                        "variables": [],
+                        "variable_count": 0,
+                        "depth": 0,
+                        "has_alternations": False
+                    }
+                )
+        except Exception as e:
+            # If parsing fails, create empty nested PERMUTE
+            return PatternToken(
+                PatternTokenType.PERMUTE,
+                var_text,
+                metadata={
+                    "nested": True, 
+                    "original": var_text,
+                    "variables": [],
+                    "variable_count": 0,
+                    "depth": 0,
+                    "has_alternations": False
+                }
+            )
     
     # Simple variable
     return var_text

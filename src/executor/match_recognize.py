@@ -693,6 +693,13 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     }
     start_time = time.time()
     
+    # Initialize caching configuration early to avoid UnboundLocalError
+    try:
+        app_config = MatchRecognizeConfig.from_env()
+        caching_enabled = app_config.performance.enable_caching
+    except Exception:
+        caching_enabled = is_smart_caching_enabled()
+    
     try:
         # --- PARSE QUERY ---
         parsing_start = time.time()
@@ -856,13 +863,6 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         # --- BUILD PATTERN MATCHING AUTOMATA ---
         
         automata_start = time.time()
-        
-        # Try to load configuration
-        try:
-            app_config = MatchRecognizeConfig.from_env()
-            caching_enabled = app_config.performance.enable_caching
-        except Exception:
-            caching_enabled = is_smart_caching_enabled()
         
         # Phase 2: Enhanced pattern compilation caching with smart cache
         compilation_options = {
