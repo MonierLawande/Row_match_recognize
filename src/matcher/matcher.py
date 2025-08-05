@@ -2828,11 +2828,34 @@ class EnhancedMatcher:
         context.current_idx = match["end"]  # Use the last row for FINAL semantics
         context.subsets = self.subsets.copy() if self.subsets else {}
         
+        # Set PERMUTE pattern information
+        context.is_permute_pattern = self.is_permute_pattern
+        
         # Set pattern_variables from the original_pattern string
         if isinstance(self.original_pattern, str) and 'PERMUTE' in self.original_pattern:
             permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', self.original_pattern, re.IGNORECASE)
             if permute_match:
-                context.pattern_variables = [v.strip() for v in permute_match.group(1).split(',')]
+                # Extract variables and their requirements (required vs optional)
+                var_text = permute_match.group(1)
+                variables = [v.strip() for v in var_text.split(',')]
+                context.pattern_variables = variables
+                context.original_permute_variables = variables.copy()
+                
+                # Determine variable requirements (required vs optional)
+                variable_requirements = {}
+                for var in variables:
+                    # Check if variable has optional quantifier (?, *, etc.)
+                    if var.endswith('?') or var.endswith('*'):
+                        clean_var = var.rstrip('?*+')
+                        variable_requirements[clean_var] = False  # Optional
+                        # Update the variables list with clean names
+                        idx = context.pattern_variables.index(var)
+                        context.pattern_variables[idx] = clean_var
+                        context.original_permute_variables[idx] = clean_var
+                    else:
+                        variable_requirements[var] = True  # Required
+                
+                context.variable_requirements = variable_requirements
         elif hasattr(self.original_pattern, 'metadata'):
             context.pattern_variables = self.original_pattern.metadata.get('base_variables', [])
         

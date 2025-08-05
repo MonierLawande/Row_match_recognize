@@ -1151,9 +1151,12 @@ class MeasureEvaluator:
         if hasattr(self.context, '_empty_pattern_rows') and current_idx in self.context._empty_pattern_rows:
             return None
         
-        # For ONE ROW PER MATCH with FINAL semantics, we need to return the variable
-        # that matched the row based on the DEFINE conditions, not just the last variable
+        # For ONE ROW PER MATCH with FINAL semantics, we need special handling for PERMUTE patterns
         if not running and var_name is None:
+            # Special handling for PERMUTE patterns with optional variables
+            if hasattr(self.context, 'is_permute_pattern') and self.context.is_permute_pattern:
+                return self._get_permute_pattern_classifier()
+            
             # Use optimized row-to-variable index for deterministic behavior
             if hasattr(self.context, '_row_var_index') and current_idx in self.context._row_var_index:
                 vars_for_row = self.context._row_var_index[current_idx]
@@ -1244,6 +1247,228 @@ class MeasureEvaluator:
             # No match found
             return None
 
+    def _get_permute_pattern_classifier(self) -> Optional[str]:
+        """
+        Get the CLASSIFIER for PERMUTE patterns following Trino's behavior.
+        
+        For PERMUTE patterns with optional variables like PERMUTE(A, B?, C?):
+        1. Find the variable that matched the last row in the sequence
+        2. If that variable is required, return it
+        3. Otherwise, return the "most significant" optional variable that participated
+        
+        Returns:
+            Pattern variable name that best represents this PERMUTE match
+        """
+        if not self.context.variables:
+            return None
+            
+        # Get pattern variables and their characteristics from context
+        pattern_vars = getattr(self.context, 'pattern_variables', [])
+        original_permute_vars = getattr(self.context, 'original_permute_variables', pattern_vars)
+        
+        # Find which variables actually participated in this match
+        participating_vars = set()
+        for var, indices in self.context.variables.items():
+            if indices:  # Variable has matched rows
+                participating_vars.add(var)
+        
+        if not participating_vars:
+            return None
+        
+        # For PERMUTE patterns, determine the representative variable
+        # following Trino's precedence rules
+        
+        # Rule 1: If only one variable participated, return it
+        if len(participating_vars) == 1:
+            var = next(iter(participating_vars))
+            return self.context._apply_case_sensitivity_rule(var)
+        
+        # Rule 2: Find which variable matched the last row in the sequence
+        last_row_idx = -1
+        last_row_variable = None
+        
+        for var, indices in self.context.variables.items():
+            if indices:  # Variable has matched rows
+                max_idx = max(indices)
+                if max_idx > last_row_idx:
+                    last_row_idx = max_idx
+                    last_row_variable = var
+        
+        # Rule 3: Check if the last row variable is required
+        required_vars = set()
+        optional_vars = set()
+        
+        # Extract variable requirements from original pattern
+        if hasattr(self.context, 'variable_requirements'):
+            for var, is_required in self.context.variable_requirements.items():
+                if var in participating_vars:
+                    if is_required:
+                        required_vars.add(var)
+                    else:
+                        optional_vars.add(var)
+        else:
+            # Fallback: assume first variable in PERMUTE is required if no explicit info
+            if original_permute_vars:
+                first_var = original_permute_vars[0]
+                if first_var in participating_vars:
+                    required_vars.add(first_var)
+                    optional_vars = participating_vars - required_vars
+                else:
+                    optional_vars = participating_vars
+        
+        # Rule 4: Apply Trino's precedence logic
+        if last_row_variable and last_row_variable in required_vars:
+            # If the last row was matched by a required variable, return it
+            return self.context._apply_case_sensitivity_rule(last_row_variable)
+        
+        # Otherwise, return the most significant optional variable
+        if optional_vars and original_permute_vars:
+            # Return the last optional variable in pattern order that participated
+            for var in reversed(original_permute_vars):
+                if var in optional_vars:
+                    return self.context._apply_case_sensitivity_rule(var)
+        
+        # Fallback logic
+        if required_vars:
+            # Only required variables participated
+            if len(required_vars) == 1:
+                var = next(iter(required_vars))
+                return self.context._apply_case_sensitivity_rule(var)
+            # Multiple required variables - use pattern order
+            if original_permute_vars:
+                for var in original_permute_vars:
+                    if var in required_vars:
+                        return self.context._apply_case_sensitivity_rule(var)
+            # Fallback to alphabetical
+            return self.context._apply_case_sensitivity_rule(min(required_vars))
+            
+        elif optional_vars:
+            # Only optional variables participated
+            # Return the last optional in pattern order
+            if original_permute_vars:
+                for var in reversed(original_permute_vars):
+                    if var in optional_vars:
+                        return self.context._apply_case_sensitivity_rule(var)
+            # Fallback to alphabetical last
+            return self.context._apply_case_sensitivity_rule(max(optional_vars))
+        
+        # Final fallback
+        if participating_vars:
+            return self.context._apply_case_sensitivity_rule(min(participating_vars))
+        
+        return None
+
+    def _is_permute_pattern(self) -> bool:
+        """Check if the current pattern is a PERMUTE pattern."""
+        return getattr(self.context, 'is_permute_pattern', False)
+    
+    def _is_optional_variable(self, var_name: str) -> bool:
+        """Check if a variable is optional in the PERMUTE pattern."""
+        if not hasattr(self.context, 'variable_requirements'):
+            return False
+        
+        # In variable_requirements, True = required, False = optional
+        return not self.context.variable_requirements.get(var_name, True)
+    
+    def _is_variable_in_canonical_match(self, var_name: str) -> bool:
+        """
+        Check if an optional variable is part of the canonical/essential match in PERMUTE patterns.
+        
+        This implements Trino's logic where optional variables that are not needed for the
+        minimal valid match should be excluded from navigation functions.
+        
+        For PERMUTE(A, B?, C?), the canonical match prioritizes:
+        1. Required variables (A)
+        2. Optional variables that form the earliest valid sequence
+        
+        Args:
+            var_name: The variable to check
+            
+        Returns:
+            True if the variable is part of the canonical match, False otherwise
+        """
+        if not self._is_permute_pattern() or not self._is_optional_variable(var_name):
+            return True  # Required variables are always canonical
+        
+        # Get all participating variables and their row indices
+        participating_vars = {}
+        for var, indices in self.context.variables.items():
+            if indices:  # Variable has matched rows
+                participating_vars[var] = indices
+        
+        if var_name not in participating_vars:
+            return False  # Variable didn't participate
+        
+        # For PERMUTE patterns, determine the canonical match based on sequence order
+        # and minimal valid pattern requirements
+        
+        # Get the PERMUTE variable order and requirements
+        permute_vars = getattr(self.context, 'original_permute_variables', [])
+        variable_requirements = getattr(self.context, 'variable_requirements', {})
+        
+        # Find required variables that participated
+        required_vars = []
+        for var in permute_vars:
+            if var in participating_vars and variable_requirements.get(var, True):  # True = required by default
+                required_vars.append(var)
+        
+        # If we have required variables, the canonical match includes:
+        # 1. All required variables
+        # 2. Optional variables that form part of the essential sequence
+        if required_vars:
+            # Special logic for different sequences:
+            # - If required variable is the LAST in sequence: include all preceding optional variables
+            # - If required variable is NOT last: only include earlier optional variables
+            
+            # Find the latest (last) required variable index
+            latest_required_idx = -1
+            for var in required_vars:
+                if participating_vars[var]:
+                    max_var_idx = max(participating_vars[var])
+                    if max_var_idx > latest_required_idx:
+                        latest_required_idx = max_var_idx
+            
+            # Check if this optional variable should be included
+            if not variable_requirements.get(var_name, True):  # var_name is optional
+                var_indices = participating_vars[var_name]
+                if not var_indices:
+                    return False
+                
+                var_latest_idx = max(var_indices)
+                
+                # If the required variable is the last in the sequence,
+                # include all optional variables that appear before it
+                if var_latest_idx < latest_required_idx:
+                    return True  # Optional variable appears before the last required variable
+                
+                # If the optional variable appears after the last required variable,
+                # it's only canonical if it's the earliest among such optional variables
+                if var_latest_idx > latest_required_idx:
+                    # Check if there are other optional variables after the required variable
+                    # that appear earlier than this one
+                    var_earliest_idx = min(var_indices)
+                    
+                    for other_var in permute_vars:
+                        if (other_var != var_name and 
+                            not variable_requirements.get(other_var, True) and  # other_var is optional
+                            other_var in participating_vars):
+                            
+                            other_indices = participating_vars[other_var]
+                            if other_indices:
+                                other_latest_idx = max(other_indices)
+                                
+                                # If other optional variable also comes after required variable
+                                # but appears earlier, then current variable is not canonical
+                                if (other_latest_idx > latest_required_idx and 
+                                    other_latest_idx < var_latest_idx):
+                                    return False
+                    
+                    return True  # This is the earliest optional variable after required variables
+                
+                return True  # Include optional variables that are at the same position as required
+        
+        # Fallback: if no special logic applies, include the variable
+        return True
 
 
     def _format_classifier_output(self, value: Optional[str]) -> str:
@@ -1390,11 +1615,27 @@ class MeasureEvaluator:
                         
                 elif func_name == 'LAST':
                     semantics = 'RUNNING' if is_running else 'FINAL'
-                    row = self.context.last(var_name, occurrence, semantics)
-                    if row and field_name in row:
-                        result = row.get(field_name)
+                    
+                    # Special handling for PERMUTE patterns with optional variables
+                    if self._is_permute_pattern() and self._is_optional_variable(var_name):
+                        # For optional variables in PERMUTE patterns, check if this variable
+                        # is part of the canonical/essential match
+                        is_canonical = self._is_variable_in_canonical_match(var_name)
+                        
+                        if not is_canonical:
+                            result = None
+                        else:
+                            row = self.context.last(var_name, occurrence, semantics)
+                            if row and field_name in row:
+                                result = row.get(field_name)
+                            else:
+                                result = None
                     else:
-                        result = None
+                        row = self.context.last(var_name, occurrence, semantics)
+                        if row and field_name in row:
+                            result = row.get(field_name)
+                        else:
+                            result = None
         
         else:
             # Handle simple field references (no variable prefix) for all functions
