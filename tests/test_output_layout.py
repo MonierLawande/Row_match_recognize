@@ -90,12 +90,15 @@ class TestOutputLayout:
         result = match_recognize(query, df)
         
         if result is not None and not result.empty:
-            # For ONE ROW PER MATCH, original table columns might be excluded
-            # depending on implementation, but partition/order/measures should be present
-            required_cols = ['part', 'id', 'match_num', 'first_val', 'last_val', 'row_count']
+            # For ONE ROW PER MATCH with SELECT *, Trino behavior:
+            # Only PARTITION BY + MEASURES columns are included (ORDER BY columns excluded)
+            required_cols = ['part', 'match_num', 'first_val', 'last_val', 'row_count']
             
             for col in required_cols:
                 assert col in result.columns, f"Missing required column: {col}"
+            
+            # ORDER BY columns should NOT be included in ONE ROW PER MATCH output
+            assert 'id' not in result.columns, "ORDER BY column 'id' should not be included in ONE ROW PER MATCH output"
             
             # Check that we have the right number of matches
             # Should have one row per match, not per input row
