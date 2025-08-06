@@ -819,30 +819,15 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     # For ALL ROWS mode, apply SQL:2016 default semantics
                     expr_upper = expr.upper().strip()
                     
-                    # Navigation functions in ALL ROWS PER MATCH semantics assignment
-                    # FIRST(var.field) and LAST(var.field) should use FINAL semantics for variable references
-                    # PREV() and NEXT() should use RUNNING semantics for relative positioning
-                    # This aligns with Trino behavior and SQL:2016 standard
-                    if re.match(r'^(FIRST|LAST)\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*', expr_upper):
-                        # FIRST(var.field) or LAST(var.field) - use FINAL semantics to access full match
-                        measure_semantics[alias] = "FINAL"
-                        logger.debug(f"Variable-specific navigation function: FINAL semantics for measure {alias}: {expr}")
-                    elif re.match(r'^(PREV|NEXT)\s*\(', expr_upper):
-                        # PREV() and NEXT() - use RUNNING semantics for relative positioning
+                    # Navigation functions in ALL ROWS PER MATCH default to RUNNING semantics
+                    # when no explicit RUNNING/FINAL is specified (SQL:2016 compliance)
+                    if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
                         measure_semantics[alias] = "RUNNING"
-                        logger.debug(f"Relative navigation function: RUNNING semantics for measure {alias}: {expr}")
-                    elif re.match(r'^(FIRST|LAST)\s*\(', expr_upper):
-                        # FIRST(field) or LAST(field) without variable prefix - use RUNNING semantics
-                        measure_semantics[alias] = "RUNNING"
-                        logger.debug(f"Field-only navigation function: RUNNING semantics for measure {alias}: {expr}")
+                        logger.debug(f"Navigation function: RUNNING semantics for measure {alias}: {expr}")
                     elif re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        # Expressions containing navigation functions - determine based on function type
-                        if re.search(r'\b(FIRST|LAST)\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*', expr_upper):
-                            measure_semantics[alias] = "FINAL"
-                            logger.debug(f"Expression with variable navigation: FINAL semantics for measure {alias}: {expr}")
-                        else:
-                            measure_semantics[alias] = "RUNNING"
-                            logger.debug(f"Expression with relative navigation: RUNNING semantics for measure {alias}: {expr}")
+                        # Expressions containing navigation functions also use RUNNING by default
+                        measure_semantics[alias] = "RUNNING" 
+                        logger.debug(f"Expression with navigation function: RUNNING semantics for measure {alias}: {expr}")
                     elif explicit_semantics_found:
                         # In mixed semantics queries, implicit measures default to FINAL per SQL:2016
                         measure_semantics[alias] = "FINAL"
@@ -1381,32 +1366,20 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             context = RowContext()
                             context.rows = all_rows
                             
-                            # Check if any measure requires FINAL semantics
+                            # For RUNNING semantics, only include variables up to current row
                             full_variables = match.get("variables", {})
-                            has_final_measures = any(
-                                measure_semantics.get(alias, "FINAL") == "FINAL" 
-                                for alias in measures.keys()
-                            )
+                            running_variables = {}
+                            for var_name, var_indices in full_variables.items():
+                                # Include only indices up to and including current row
+                                running_indices = [i for i in var_indices if i <= idx]
+                                if running_indices:
+                                    running_variables[var_name] = running_indices
                             
-                            if has_final_measures:
-                                # If any measure needs FINAL semantics, provide full variables
-                                context.variables = full_variables
-                                logger.debug(f"DEBUG: Row {idx} - Using FINAL context with full variables: {full_variables}")
-                            else:
-                                # All measures use RUNNING semantics, filter variables up to current row
-                                running_variables = {}
-                                for var_name, var_indices in full_variables.items():
-                                    # Include only indices up to and including current row
-                                    running_indices = [i for i in var_indices if i <= idx]
-                                    if running_indices:
-                                        running_variables[var_name] = running_indices
-                                
-                                context.variables = running_variables
-                                logger.debug(f"DEBUG: Row {idx} - Using RUNNING context with filtered variables: {running_variables}")
-                            
+                            context.variables = running_variables
                             context.match_number = match_num
                             context.current_idx = idx
                             context.subsets = subset_dict.copy() if subset_dict else {}
+                            logger.debug(f"DEBUG: Row {idx} - Full variables: {full_variables}, Running variables: {running_variables}")
                             
                             # Create evaluator and process measures
                             evaluator = MeasureEvaluator(context, final=True)  # Use FINAL semantics by default per SQL:2016
