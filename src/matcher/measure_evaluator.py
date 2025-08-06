@@ -1743,16 +1743,10 @@ class MeasureEvaluator:
                 
                 # Use appropriate variables based on semantics, pattern type, and expression type
                 if hasattr(self.context, '_progressive_variables'):
-                    # For PERMUTE patterns, navigation functions like FIRST/LAST should use full variables
-                    # but simple variable references should use progressive variables
-                    if func_name in ('FIRST', 'LAST'):
-                        # Navigation functions in PERMUTE patterns use FINAL semantics (full match)
-                        variables_to_use = getattr(self.context, '_full_match_variables', None) or self.context.variables
-                        logger.debug(f"PERMUTE navigation {func_name}: using full variables {list(variables_to_use.keys())}")
-                    else:
-                        # Simple variable references use progressive variables
-                        variables_to_use = self.context._progressive_variables
-                        logger.debug(f"PERMUTE other function {func_name}: using progressive variables {list(variables_to_use.keys())}")
+                    # For PERMUTE patterns, ALL functions should use progressive variables for running semantics
+                    # This ensures that measures reflect the state at each step of the pattern progression
+                    variables_to_use = self.context._progressive_variables
+                    logger.debug(f"PERMUTE {func_name}: using progressive variables {list(variables_to_use.keys())}")
                 elif is_running:
                     # For RUNNING semantics, use running variables if available
                     variables_to_use = getattr(self.context, '_running_variables', None) or self.context.variables
