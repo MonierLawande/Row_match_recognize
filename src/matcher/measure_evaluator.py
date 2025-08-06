@@ -843,6 +843,7 @@ class MeasureEvaluator:
         # Handle other aggregate functions using the comprehensive _evaluate_aggregate method
         # Check if this is a standalone aggregate function call (not part of a larger expression)
         # Only match if the entire expression is an aggregate function to avoid breaking complex expressions like "AVG(value) * 0.9"
+        # NOTE: FIRST and LAST are navigation functions, not aggregate functions, so they should NOT be included here
         agg_match = re.match(r'^(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\(([^)]+)\)$', expr, re.IGNORECASE)
         if agg_match:
             func_name = agg_match.group(1).lower()
@@ -860,9 +861,14 @@ class MeasureEvaluator:
             is_permute = True
         
         # Try optimized pattern variable reference evaluation with PERMUTE support
+        # For PERMUTE patterns, use progressive variables for simple references
+        variables_for_simple_refs = self.context.variables
+        if hasattr(self.context, '_progressive_variables'):
+            variables_for_simple_refs = self.context._progressive_variables
+        
         handled, value = evaluate_pattern_variable_reference(
             expr, 
-            self.context.variables, 
+            variables_for_simple_refs, 
             self.context.rows,
             self._var_ref_cache,
             getattr(self.context, 'subsets', None),
@@ -887,6 +893,7 @@ class MeasureEvaluator:
         is_nested_nav = re.match(nested_nav_pattern, expr, re.IGNORECASE) is not None
         
         if is_simple_nav or is_nested_nav:
+            print(f"DEBUG: Navigation function detected: {expr}, is_simple_nav={is_simple_nav}, is_nested_nav={is_nested_nav}")
             return self._evaluate_navigation(expr, is_running)
         
         # Try AST-based evaluation for complex expressions (arithmetic, etc.)
@@ -1686,8 +1693,24 @@ class MeasureEvaluator:
                 # Collect all row indices from all matched variables
                 all_indices = []
                 
-                # Use full variables if available for FIRST/LAST navigation
-                variables_to_use = getattr(self.context, '_full_match_variables', None) or self.context.variables
+                # Use appropriate variables based on semantics, pattern type, and expression type
+                if hasattr(self.context, '_progressive_variables'):
+                    # For PERMUTE patterns, navigation functions like FIRST/LAST should use full variables
+                    # but simple variable references should use progressive variables
+                    if func_name in ('FIRST', 'LAST'):
+                        # Navigation functions in PERMUTE patterns use FINAL semantics (full match)
+                        variables_to_use = getattr(self.context, '_full_match_variables', None) or self.context.variables
+                        logger.debug(f"PERMUTE navigation {func_name}: using full variables {list(variables_to_use.keys())}")
+                    else:
+                        # Simple variable references use progressive variables
+                        variables_to_use = self.context._progressive_variables
+                        logger.debug(f"PERMUTE other function {func_name}: using progressive variables {list(variables_to_use.keys())}")
+                elif is_running:
+                    # For RUNNING semantics, use running variables if available
+                    variables_to_use = getattr(self.context, '_running_variables', None) or self.context.variables
+                else:
+                    # For FINAL semantics, use full variables if available
+                    variables_to_use = getattr(self.context, '_full_match_variables', None) or self.context.variables
                 
                 for var_name in variables_to_use:
                     var_indices = variables_to_use[var_name]
@@ -1882,7 +1905,17 @@ class MeasureEvaluator:
         if var_col_match:
             # Pattern variable prefixed column
             var_name, col_name = var_col_match.groups()
+            
+            # CRITICAL FIX: For PERMUTE patterns with optional variables, 
+            # check if the variable exists in the current match
             indices_to_use = self._get_var_indices(var_name)
+            
+            # If variable doesn't exist in current match, return empty list
+            # This will cause the aggregate function to return None (NULL)
+            if not indices_to_use:
+                logger.debug(f"Variable {var_name} not found in current match - returning empty values for aggregate")
+                return []
+                
         else:
             # Direct column reference
             col_name = args_str

@@ -819,15 +819,15 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     # For ALL ROWS mode, apply SQL:2016 default semantics
                     expr_upper = expr.upper().strip()
                     
-                    # Navigation functions in ALL ROWS PER MATCH default to RUNNING semantics
-                    # when no explicit RUNNING/FINAL is specified (SQL:2016 compliance)
+                    # CRITICAL FIX: Navigation functions in ALL ROWS PER MATCH default to FINAL semantics
+                    # when no explicit RUNNING/FINAL is specified (SQL:2016 compliance & Trino compatibility)
                     if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        measure_semantics[alias] = "RUNNING"
-                        logger.debug(f"Navigation function: RUNNING semantics for measure {alias}: {expr}")
+                        measure_semantics[alias] = "FINAL"
+                        logger.debug(f"Navigation function: FINAL semantics for measure {alias}: {expr}")
                     elif re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
-                        # Expressions containing navigation functions also use RUNNING by default
-                        measure_semantics[alias] = "RUNNING" 
-                        logger.debug(f"Expression with navigation function: RUNNING semantics for measure {alias}: {expr}")
+                        # Expressions containing navigation functions also use FINAL by default
+                        measure_semantics[alias] = "FINAL" 
+                        logger.debug(f"Expression with navigation function: FINAL semantics for measure {alias}: {expr}")
                     elif explicit_semantics_found:
                         # In mixed semantics queries, implicit measures default to FINAL per SQL:2016
                         measure_semantics[alias] = "FINAL"
@@ -1366,19 +1366,49 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             context = RowContext()
                             context.rows = all_rows
                             
-                            # For RUNNING semantics, only include variables up to current row
+                            # CRITICAL FIX: For ALL ROWS PER MATCH, use different variable sets based on semantics
                             full_variables = match.get("variables", {})
+                            
+                            # Create timeline for PERMUTE pattern progression
+                            timeline = []
+                            for var_name, var_indices in full_variables.items():
+                                for var_idx in var_indices:
+                                    timeline.append((var_idx, var_name))
+                            timeline.sort()  # Sort by row index to get chronological order
+                            
+                            # For PERMUTE patterns, create progressive variables (variables seen up to current row)
+                            is_permute_pattern = "PERMUTE" in pattern_text  # Use the actual pattern text
+                            if is_permute_pattern:
+                                # For PERMUTE patterns, determine which variables are "visible" at current row
+                                progressive_variables = {}
+                                for timeline_idx, timeline_var in timeline:
+                                    if timeline_idx <= idx:  # Only include variables matched up to current row
+                                        if timeline_var not in progressive_variables:
+                                            progressive_variables[timeline_var] = []
+                                        # Include ALL indices for this variable (not just up to current row)
+                                        progressive_variables[timeline_var] = full_variables[timeline_var]
+                                
+                                logger.debug(f"DEBUG: PERMUTE Row {idx} - Timeline: {timeline}, Progressive variables: {progressive_variables}")
+                                context.variables = progressive_variables  # Use progressive variables for PERMUTE
+                                context._progressive_variables = progressive_variables
+                            else:
+                                context.variables = full_variables  # Use full variables for non-PERMUTE patterns
+                            
+                            # For navigation function evaluation, provide both full and running contexts
+                            context._full_match_variables = full_variables  # Always available for FINAL semantics
+                            
+                            # For RUNNING semantics evaluation, create running variables 
                             running_variables = {}
                             for var_name, var_indices in full_variables.items():
                                 # Include only indices up to and including current row
                                 running_indices = [i for i in var_indices if i <= idx]
                                 if running_indices:
                                     running_variables[var_name] = running_indices
-                            
-                            context.variables = running_variables
+                            context._running_variables = running_variables  # Available for RUNNING semantics
                             context.match_number = match_num
                             context.current_idx = idx
                             context.subsets = subset_dict.copy() if subset_dict else {}
+                            context._timeline = timeline  # Store timeline for reference
                             logger.debug(f"DEBUG: Row {idx} - Full variables: {full_variables}, Running variables: {running_variables}")
                             
                             # Create evaluator and process measures
