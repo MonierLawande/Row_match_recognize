@@ -893,7 +893,6 @@ class MeasureEvaluator:
         is_nested_nav = re.match(nested_nav_pattern, expr, re.IGNORECASE) is not None
         
         if is_simple_nav or is_nested_nav:
-            print(f"DEBUG: Navigation function detected: {expr}, is_simple_nav={is_simple_nav}, is_nested_nav={is_nested_nav}")
             return self._evaluate_navigation(expr, is_running)
         
         # Try AST-based evaluation for complex expressions (arithmetic, etc.)
@@ -1614,35 +1613,84 @@ class MeasureEvaluator:
                 # Leverage the enhanced RowContext methods with semantics support
                 if func_name == 'FIRST':
                     semantics = 'RUNNING' if is_running else 'FINAL'
-                    row = self.context.first(var_name, occurrence, semantics)
-                    if row and field_name in row:
-                        result = row.get(field_name)
+                    
+                    # For PERMUTE patterns, FIRST functions use FINAL semantics (access to full match)
+                    # This matches Trino's behavior where FIRST(C.value) returns 350 even in early steps
+                    if hasattr(self.context, '_progressive_variables'):
+                        # Always use full variables for FIRST functions in PERMUTE patterns
+                        original_variables = self.context.variables
+                        self.context.variables = self.context._full_match_variables
+                        try:
+                            row = self.context.first(var_name, occurrence, semantics)
+                            if row and field_name in row:
+                                result = row.get(field_name)
+                            else:
+                                result = None
+                        finally:
+                            self.context.variables = original_variables
                     else:
-                        result = None
+                        row = self.context.first(var_name, occurrence, semantics)
+                        if row and field_name in row:
+                            result = row.get(field_name)
+                        else:
+                            result = None
                         
                 elif func_name == 'LAST':
                     semantics = 'RUNNING' if is_running else 'FINAL'
                     
-                    # Special handling for PERMUTE patterns with optional variables
-                    if self._is_permute_pattern() and self._is_optional_variable(var_name):
-                        # For optional variables in PERMUTE patterns, check if this variable
-                        # is part of the canonical/essential match
-                        is_canonical = self._is_variable_in_canonical_match(var_name)
-                        
-                        if not is_canonical:
-                            result = None
+                    # For PERMUTE patterns, LAST functions use progressive semantics (timeline-aware)
+                    # Check if the variable is available in the progressive context
+                    if hasattr(self.context, '_progressive_variables'):
+                        if var_name not in self.context._progressive_variables:
+                            result = None  # Variable not yet available in progression
+                        else:
+                            # Temporarily use full variables but only for this specific variable
+                            original_variables = self.context.variables
+                            self.context.variables = self.context._full_match_variables
+                            try:
+                                # Special handling for PERMUTE patterns with optional variables
+                                if self._is_permute_pattern() and self._is_optional_variable(var_name):
+                                    # For optional variables in PERMUTE patterns, check if this variable
+                                    # is part of the canonical/essential match
+                                    is_canonical = self._is_variable_in_canonical_match(var_name)
+                                    
+                                    if not is_canonical:
+                                        result = None
+                                    else:
+                                        row = self.context.last(var_name, occurrence, semantics)
+                                        if row and field_name in row:
+                                            result = row.get(field_name)
+                                        else:
+                                            result = None
+                                else:
+                                    row = self.context.last(var_name, occurrence, semantics)
+                                    if row and field_name in row:
+                                        result = row.get(field_name)
+                                    else:
+                                        result = None
+                            finally:
+                                self.context.variables = original_variables
+                    else:
+                        # Special handling for PERMUTE patterns with optional variables
+                        if self._is_permute_pattern() and self._is_optional_variable(var_name):
+                            # For optional variables in PERMUTE patterns, check if this variable
+                            # is part of the canonical/essential match
+                            is_canonical = self._is_variable_in_canonical_match(var_name)
+                            
+                            if not is_canonical:
+                                result = None
+                            else:
+                                row = self.context.last(var_name, occurrence, semantics)
+                                if row and field_name in row:
+                                    result = row.get(field_name)
+                                else:
+                                    result = None
                         else:
                             row = self.context.last(var_name, occurrence, semantics)
                             if row and field_name in row:
                                 result = row.get(field_name)
                             else:
                                 result = None
-                    else:
-                        row = self.context.last(var_name, occurrence, semantics)
-                        if row and field_name in row:
-                            result = row.get(field_name)
-                        else:
-                            result = None
         
         else:
             # Handle simple field references (no variable prefix) for all functions
