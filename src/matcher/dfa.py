@@ -230,8 +230,9 @@ class DFA:
         self._optimization_level = 0
         self._lock = threading.RLock()
         
-        # Memory monitoring
-        self._memory_monitor = MemoryMonitor()
+        # Memory monitoring (use resource manager for proper lifecycle)
+        self._resource_manager = get_resource_manager()
+        self._pattern_cache = get_pattern_cache()
         
         # Validate on creation
         if not self.validate_pattern():
@@ -317,7 +318,8 @@ class DFA:
                 iterations += 1
                 
                 # Check memory pressure during optimization
-                if hasattr(self, '_memory_monitor') and self._memory_monitor.is_under_pressure():
+                pressure_info = self._resource_manager.get_memory_pressure_info()
+                if pressure_info.is_under_pressure:
                     logger.warning("Memory pressure detected during optimization, stopping early")
                     break
             
