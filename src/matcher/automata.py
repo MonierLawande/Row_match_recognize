@@ -3052,8 +3052,8 @@ class NFABuilder:
             return perm_start, perm_end
         
         if len(variables) > 1 and not has_alternations:
-            print(f"[PERMUTE_FIX] Entering the PERMUTE fix code path!")
-            logger.info(f"[PERMUTE_FIX] Processing PERMUTE with {len(variables)} variables: {variables}")
+            #print(f"[PERMUTE_FIX] Entering the PERMUTE fix code path!")
+            #logger.info(f"[PERMUTE_FIX] Processing PERMUTE with {len(variables)} variables: {variables}")
             # CRITICAL FIX: For PERMUTE patterns with optional variables, generate subset permutations
             # Pre-process variables to handle nested PERMUTE and identify optional variables
             processed_vars = []
@@ -3118,15 +3118,7 @@ class NFABuilder:
                 return (optional_count, lex_position)
             
             all_perms.sort(key=permutation_priority)
-            
-            print(f"[PERMUTE_FIX] Generated {len(all_perms)} subset permutations (prioritized for minimal matching):")
-            for i, perm in enumerate(all_perms[:10]):  # Show first 10
-                perm_vars = [variables[idx] for idx in perm]
-                optional_count = sum(1 for idx in perm if not variable_requirements[idx])
-                print(f"  {i+1}. {perm} -> {perm_vars} (optional_count={optional_count})")
-            if len(all_perms) > 10:
-                print(f"  ... and {len(all_perms) - 10} more")
-            
+                      
             logger.debug(f"Generated {len(all_perms)} subset permutations for PERMUTE pattern")
             logger.debug(f"First few permutations: {all_perms[:5]}")
             
@@ -3164,7 +3156,7 @@ class NFABuilder:
                 # Lower perm_idx = higher priority (minimal matching first)
                 if hasattr(self, 'add_epsilon_with_priority'):
                     self.add_epsilon_with_priority(perm_start, branch_start, perm_idx)
-                    print(f"[PERMUTE_FIX] Added branch {perm_idx} with priority {perm_idx}")
+                    #print(f"[PERMUTE_FIX] Added branch {perm_idx} with priority {perm_idx}")
                 else:
                     # Fallback to regular epsilon if priority method doesn't exist
                     self.add_epsilon(perm_start, branch_start)

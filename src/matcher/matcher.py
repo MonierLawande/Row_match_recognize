@@ -847,12 +847,12 @@ class EnhancedMatcher:
                    f"measures={len(self.measures)}, "
                    f"permute={getattr(self, 'is_permute_pattern', False)}")
         
-        # Memory monitoring using existing utility
-        self._memory_monitor = MemoryMonitor()
+        # Memory monitoring using existing utility (use resource manager for proper lifecycle)
         self._resource_manager = get_resource_manager()
         try:
-            initial_memory = self._memory_monitor.get_memory_usage_mb()
-            logger.debug(f"EnhancedMatcher initial memory usage: {initial_memory:.1f} MB")
+            # Get memory stats from resource manager instead of creating new monitor
+            memory_stats = self._resource_manager.get_stats()
+            logger.debug(f"EnhancedMatcher initialized with resource manager stats: {memory_stats}")
         except Exception:
             logger.debug("Memory monitoring not available")
     
