@@ -821,13 +821,20 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     
                     # CRITICAL FIX: Navigation functions in ALL ROWS PER MATCH default to FINAL semantics
                     # when no explicit RUNNING/FINAL is specified (SQL:2016 compliance & Trino compatibility)
-                    if re.match(r'^(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
+                    if re.match(r'^(FIRST|PREV|NEXT)\s*\(', expr_upper):
                         measure_semantics[alias] = "FINAL"
-                        logger.debug(f"Navigation function: FINAL semantics for measure {alias}: {expr}")
-                    elif re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper):
+                        logger.debug(f"Navigation function (FIRST/PREV/NEXT): FINAL semantics for measure {alias}: {expr}")
+                    elif re.match(r'^LAST\s*\(', expr_upper):
+                        measure_semantics[alias] = "RUNNING"  # LAST defaults to RUNNING per SQL:2016
+                        logger.debug(f"LAST function: RUNNING semantics for measure {alias}: {expr}")
+                    elif re.search(r'\b(FIRST|PREV|NEXT)\s*\(', expr_upper):
                         # Expressions containing navigation functions also use FINAL by default
                         measure_semantics[alias] = "FINAL" 
                         logger.debug(f"Expression with navigation function: FINAL semantics for measure {alias}: {expr}")
+                    elif re.search(r'\bLAST\s*\(', expr_upper):
+                        # Expressions containing LAST function use RUNNING by default  
+                        measure_semantics[alias] = "RUNNING"
+                        logger.debug(f"Expression with LAST function: RUNNING semantics for measure {alias}: {expr}")
                     elif explicit_semantics_found:
                         # In mixed semantics queries, implicit measures default to FINAL per SQL:2016
                         measure_semantics[alias] = "FINAL"

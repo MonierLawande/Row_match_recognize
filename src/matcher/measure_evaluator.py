@@ -1323,9 +1323,10 @@ class MeasureEvaluator:
                     optional_vars = participating_vars
         
         # Rule 4: Apply Trino's precedence logic
-        if last_row_variable and last_row_variable in required_vars:
-            # If the last row was matched by a required variable, return it
-            return self.context._apply_case_sensitivity_rule(last_row_variable)
+        # For nested PERMUTE patterns, return the last variable in the actual sequence
+        if last_row_variable:
+            result = self.context._apply_case_sensitivity_rule(last_row_variable)
+            return result
         
         # Otherwise, return the most significant optional variable
         if optional_vars and original_permute_vars:
@@ -1339,14 +1340,17 @@ class MeasureEvaluator:
             # Only required variables participated
             if len(required_vars) == 1:
                 var = next(iter(required_vars))
-                return self.context._apply_case_sensitivity_rule(var)
+                result = self.context._apply_case_sensitivity_rule(var)
+                return result
             # Multiple required variables - use pattern order
             if original_permute_vars:
                 for var in original_permute_vars:
                     if var in required_vars:
-                        return self.context._apply_case_sensitivity_rule(var)
+                        result = self.context._apply_case_sensitivity_rule(var)
+                        return result
             # Fallback to alphabetical
-            return self.context._apply_case_sensitivity_rule(min(required_vars))
+            result = self.context._apply_case_sensitivity_rule(min(required_vars))
+            return result
             
         elif optional_vars:
             # Only optional variables participated
