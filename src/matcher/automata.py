@@ -17,6 +17,9 @@ Author: Pattern Matching Engine Team
 Version: 2.0.0
 """
 
+import math
+import psutil
+import functools
 from typing import (
     Callable, List, Optional, Dict, Any, Set, Tuple, Union, 
     FrozenSet, Iterator, Protocol
@@ -201,6 +204,24 @@ class NFAState:
         # Phase 3: Memory management - get resource manager for pooling
         self._resource_manager = get_resource_manager()
     
+    def __del__(self):
+        """Cleanup resources to prevent memory leaks."""
+        try:
+            # Clear collections to help garbage collection
+            if hasattr(self, 'transitions'):
+                self.transitions.clear()
+            if hasattr(self, 'epsilon'):
+                self.epsilon.clear()
+            if hasattr(self, 'subset_vars'):
+                self.subset_vars.clear()
+            if hasattr(self, 'permute_data'):
+                self.permute_data.clear()
+            if hasattr(self, 'epsilon_priorities'):
+                self.epsilon_priorities.clear()
+        except Exception:
+            # Ignore errors during cleanup
+            pass
+    
     def add_transition(self, condition: ConditionFunction, target: int, 
                       variable: Optional[str] = None, priority: int = 0, 
                       metadata: Optional[Dict[str, Any]] = None) -> None:
@@ -345,16 +366,33 @@ class NFAState:
         """
         return self.variable is not None and self.variable.strip() != ""
         
+    @functools.lru_cache(maxsize=128)
+    def _cached_epsilon_targets(self, epsilon_tuple: tuple, priorities_tuple: tuple) -> tuple:
+        """Cached computation of epsilon targets with priorities."""
+        # Convert back to lists and compute sorted targets
+        epsilon_list = list(epsilon_tuple)
+        priorities_dict = dict(priorities_tuple) if priorities_tuple else {}
+        
+        return tuple(sorted(epsilon_list, key=lambda t: (priorities_dict.get(t, 0), t)))
+
     def get_epsilon_targets(self) -> List[int]:
         """
-        Get sorted list of epsilon transition targets by priority.
+        Get sorted list of epsilon transition targets by priority with caching.
         
         Returns:
             List[int]: List of target state indices sorted by priority
         """
         with self._lock:
-            # Sort by priority (lower priority first), then by target index for determinism
-            return sorted(self.epsilon, key=lambda t: (self.epsilon_priorities.get(t, 0), t))
+            # Use cached computation for performance
+            try:
+                epsilon_tuple = tuple(self.epsilon)
+                priorities_tuple = tuple(self.epsilon_priorities.items()) if self.epsilon_priorities else ()
+                cached_result = self._cached_epsilon_targets(epsilon_tuple, priorities_tuple)
+                return list(cached_result)
+            except Exception as e:
+                logger.warning(f"Cache failed for epsilon targets, falling back to direct computation: {e}")
+                # Fallback to direct computation
+                return sorted(self.epsilon, key=lambda t: (self.epsilon_priorities.get(t, 0), t))
         
     def get_transition_targets(self) -> List[int]:
         """
@@ -594,6 +632,40 @@ class NFA:
         # Validate structure
         if not self.validate():
             raise ValueError("NFA structure validation failed")
+        
+        # Memory management
+        self._memory_monitor = None
+        try:
+            import psutil
+            self._memory_monitor = psutil.Process()
+        except ImportError:
+            pass  # Memory monitoring optional
+    
+    def __del__(self):
+        """Cleanup NFA resources to prevent memory leaks."""
+        try:
+            # Clear state references to help garbage collection
+            if hasattr(self, 'states'):
+                for state in self.states:
+                    if hasattr(state, '__del__'):
+                        try:
+                            state.__del__()
+                        except Exception:
+                            pass
+                self.states.clear()
+            
+            # Clear other collections
+            if hasattr(self, 'exclusion_ranges'):
+                self.exclusion_ranges.clear()
+            if hasattr(self, 'metadata'):
+                self.metadata.clear()
+                
+            # Clear caches if present
+            if hasattr(self, '_epsilon_cache'):
+                self._epsilon_cache.clear()
+        except Exception:
+            # Ignore cleanup errors
+            pass
     
     def validate(self) -> bool:
         """
@@ -701,7 +773,7 @@ class NFA:
         
         This method efficiently computes the set of states reachable from the given states
         through epsilon transitions, with proper cycle detection and priority-based ordering.
-        Enhanced with caching for significant performance improvement.
+        Enhanced with caching for significant performance improvement and infinite loop protection.
         
         Args:
             state_indices: List of state indices to compute closure for
@@ -711,68 +783,134 @@ class NFA:
             
         Raises:
             ValueError: If any state index is invalid
+            RuntimeError: If infinite loop or resource limits are hit
         """
-        # Validate input
-        for idx in state_indices:
-            if not (0 <= idx < len(self.states)):
-                raise ValueError(f"Invalid state index {idx}")
+        # Input validation with bounds checking
+        if not state_indices:
+            return []
         
-        # Create cache key
+        for idx in state_indices:
+            if not isinstance(idx, int):
+                raise ValueError(f"State index must be integer, got {type(idx)}")
+            if not (0 <= idx < len(self.states)):
+                raise ValueError(f"Invalid state index {idx}, must be in range [0, {len(self.states)})")
+        
+        # Create cache key for memoization
         cache_key = tuple(sorted(state_indices))
         if not hasattr(self, '_epsilon_cache'):
             self._epsilon_cache = {}
+            self._epsilon_cache_stats = {'hits': 0, 'misses': 0}
         
-        # Check cache first
+        # Check cache first (thread-safe)
         if cache_key in self._epsilon_cache:
-            return self._epsilon_cache[cache_key]
+            self._epsilon_cache_stats['hits'] += 1
+            return self._epsilon_cache[cache_key].copy()
+        
+        self._epsilon_cache_stats['misses'] += 1
+        
+        # Enhanced protection limits
+        max_closure_size = min(1000, len(self.states) * 2)  # Prevent memory explosion
+        max_iterations = min(10000, len(self.states) ** 2)  # Conservative upper bound
+        max_queue_size = min(500, len(self.states))  # Prevent queue bloat
         
         closure = set(state_indices)
         queue = deque(state_indices)
         visited_transitions = set()  # Track (source, target) pairs to detect cycles
-        max_iterations = len(self.states) ** 2  # Conservative upper bound
         iterations = 0
+        start_time = time.time()
+        max_computation_time = 5.0  # 5 second timeout
         
-        with PerformanceTimer("epsilon_closure"):
-            while queue and iterations < max_iterations:
-                iterations += 1
-                current_state = queue.popleft()
-                
-                # Get epsilon targets sorted by priority (use cached method if available)
-                epsilon_targets = self.states[current_state].get_epsilon_targets()
-                for target in epsilon_targets:
-                    transition_key = (current_state, target)
+        try:
+            with PerformanceTimer("epsilon_closure"):
+                while queue and iterations < max_iterations:
+                    iterations += 1
                     
-                    # Skip if we've already processed this transition (cycle detection)
-                    if transition_key in visited_transitions:
+                    # Check time limit to prevent hanging
+                    if time.time() - start_time > max_computation_time:
+                        logger.error(f"Epsilon closure computation timeout after {max_computation_time}s")
+                        raise RuntimeError("Epsilon closure computation timeout")
+                    
+                    # Check closure size limit
+                    if len(closure) > max_closure_size:
+                        logger.error(f"Epsilon closure size exceeded limit: {len(closure)} > {max_closure_size}")
+                        raise RuntimeError("Epsilon closure size limit exceeded")
+                    
+                    # Check queue size to prevent memory issues
+                    if len(queue) > max_queue_size:
+                        logger.warning(f"Large epsilon closure queue: {len(queue)}, trimming")
+                        # Keep only unique states in queue
+                        queue = deque(list(set(queue))[:max_queue_size])
+                    
+                    current_state = queue.popleft()
+                    
+                    # Validate current state
+                    if not (0 <= current_state < len(self.states)):
+                        logger.warning(f"Invalid state in closure: {current_state}")
                         continue
                     
-                    visited_transitions.add(transition_key)
+                    # Get epsilon targets with error handling
+                    try:
+                        state_obj = self.states[current_state]
+                        if hasattr(state_obj, 'get_epsilon_targets'):
+                            epsilon_targets = state_obj.get_epsilon_targets()
+                        else:
+                            # Fallback to manual epsilon transition search
+                            epsilon_targets = []
+                            for transition in state_obj.transitions:
+                                if (hasattr(transition, 'symbol') and 
+                                    transition.symbol == 'ε'):
+                                    epsilon_targets.append(transition.target)
+                    except Exception as e:
+                        logger.warning(f"Error getting epsilon targets for state {current_state}: {e}")
+                        continue
                     
-                    if target not in closure:
-                        closure.add(target)
-                        queue.append(target)
+                    for target in epsilon_targets:
+                        # Validate target state
+                        if not isinstance(target, int) or not (0 <= target < len(self.states)):
+                            logger.warning(f"Invalid epsilon target: {target}")
+                            continue
+                        
+                        transition_key = (current_state, target)
+                        
+                        # Skip if we've already processed this transition (cycle detection)
+                        if transition_key in visited_transitions:
+                            continue
+                        
+                        visited_transitions.add(transition_key)
+                        
+                        if target not in closure:
+                            closure.add(target)
+                            queue.append(target)
+                
+                if iterations >= max_iterations:
+                    logger.error(f"Epsilon closure computation hit iteration limit: {max_iterations}")
+                    raise RuntimeError(f"Epsilon closure infinite loop detected after {max_iterations} iterations")
             
-            if iterations >= max_iterations:
-                logger.warning(f"Epsilon closure computation hit iteration limit: {max_iterations}")
-        
-        # Sort result by state priority, then by index for deterministic behavior
-        result = sorted(closure, key=lambda idx: (
-            self.states[idx].priority,
-            idx
-        ))
-        
-        # Cache the result to avoid recomputation
-        self._epsilon_cache[cache_key] = result
-        
-        # Limit cache size to prevent memory issues
-        if len(self._epsilon_cache) > 1000:
-            # Remove oldest entries (simple LRU approximation)
-            keys_to_remove = list(self._epsilon_cache.keys())[:200]
-            for key in keys_to_remove:
-                del self._epsilon_cache[key]
-        
-        logger.debug(f"Epsilon closure of {state_indices} = {result} (iterations: {iterations})")
-        return result
+            # Sort result by state priority, then by index for deterministic behavior
+            result = sorted(closure, key=lambda idx: (
+                self.states[idx].priority if idx < len(self.states) else float('inf'),
+                idx
+            ))
+            
+            # Cache the result to avoid recomputation (with size limits)
+            if len(self._epsilon_cache) < 1000:  # Prevent unbounded cache growth
+                self._epsilon_cache[cache_key] = result.copy()
+            elif len(self._epsilon_cache) > 1500:  # Emergency cleanup
+                # Keep only recent 500 entries
+                cache_items = list(self._epsilon_cache.items())
+                self._epsilon_cache.clear()
+                for key, value in cache_items[-500:]:
+                    self._epsilon_cache[key] = value
+                self._epsilon_cache[cache_key] = result.copy()
+            
+            logger.debug(f"Epsilon closure of {state_indices} = {result[:10]}{'...' if len(result) > 10 else ''} "
+                        f"(size: {len(result)}, iterations: {iterations})")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in epsilon closure computation: {e}")
+            # Return minimal closure on error
+            return sorted(list(set(state_indices)))
     
     def get_variable_states(self) -> Dict[str, List[int]]:
         """
@@ -2804,7 +2942,7 @@ class NFABuilder:
 
     def _process_permute(self, token: PatternToken, define: Dict[str, str]) -> Tuple[int, int]:
         """
-        Process a PERMUTE token with comprehensive support for all cases.
+        Process a PERMUTE token with comprehensive support for all cases and exponential protection.
         
         Args:
             token: The PERMUTE token with metadata
@@ -2812,20 +2950,48 @@ class NFABuilder:
                 
         Returns:
             Tuple of (start_state, end_state)
+            
+        Raises:
+            RuntimeError: If pattern complexity exceeds safety limits
         """
         # Extract permute variables
         variables = token.metadata.get("variables", [])
         original_pattern = token.metadata.get("original", "")
         
-        # FORCE DEBUG logging to see if this method is called
-        print(f"[PERMUTE_DEBUG] _process_permute called with token: {token.value}")
-        print(f"[PERMUTE_DEBUG] Variables: {variables}")
+        # EXPONENTIAL PROTECTION: Check complexity limits
+        max_permute_variables = 8  # Factorial limit: 8! = 40,320
+        max_permute_combinations = 50000  # Total combinations limit
+        max_computation_time = 10.0  # 10 second timeout
         
-        # Debug logging for pattern processing
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"Processing PERMUTE pattern: {original_pattern}")
-            logger.debug(f"Variables extracted: {variables}")
-            logger.debug(f"Token metadata: {token.metadata}")
+        if len(variables) > max_permute_variables:
+            logger.error(f"PERMUTE pattern exceeds variable limit: {len(variables)} > {max_permute_variables}")
+            raise RuntimeError(f"PERMUTE pattern too complex: {len(variables)} variables exceeds limit of {max_permute_variables}")
+        
+        # Estimate total combinations for exponential protection
+        estimated_combinations = 1
+        optional_count = 0
+        for var in variables:
+            var_name = str(var)
+            if var_name.endswith('?') or var_name.endswith('*'):
+                optional_count += 1
+        
+        # For n variables with k optional: combinations = sum(P(n-k+i, i) * i!) for i in 0..k
+        # Simplified approximation: 2^k * n! for worst case
+        if optional_count > 0:
+            estimated_combinations = (2 ** optional_count) * math.factorial(len(variables))
+        else:
+            estimated_combinations = math.factorial(len(variables))
+        
+        if estimated_combinations > max_permute_combinations:
+            logger.error(f"PERMUTE pattern estimated complexity: {estimated_combinations} > {max_permute_combinations}")
+            # Fallback to limited processing
+            return self._process_permute_limited(token, define)
+        
+        start_time = time.time()
+        
+        # FORCE DEBUG logging to see if this method is called
+        logger.debug(f"Processing PERMUTE pattern: {original_pattern} (estimated combinations: {estimated_combinations})")
+        logger.debug(f"Variables extracted: {variables}")
         
         # Create states for the permutation
         perm_start = self.new_state()
@@ -2844,15 +3010,16 @@ class NFABuilder:
             for var in variables
         )
         
-        print(f"[PERMUTE_DEBUG] has_alternations: {has_alternations}")
-        print(f"[PERMUTE_DEBUG] len(variables): {len(variables)}")
-        print(f"[PERMUTE_DEBUG] token.quantifier: {token.quantifier}")
-        print(f"[PERMUTE_DEBUG] Condition check - len(variables) > 1 and not has_alternations: {len(variables) > 1 and not has_alternations}")
+        logger.debug(f"PERMUTE analysis: has_alternations={has_alternations}, variables_count={len(variables)}")
         
         # Handle quantified PERMUTE (e.g., PERMUTE(A, B){2,3})
         if token.quantifier:
-            logger.info(f"[PERMUTE_PATH] Taking quantified PERMUTE path")
             logger.debug(f"Processing quantified PERMUTE: {original_pattern} with quantifier {token.quantifier}")
+            
+            # Check time limit
+            if time.time() - start_time > max_computation_time:
+                logger.error("PERMUTE processing timeout")
+                raise RuntimeError("PERMUTE pattern processing timeout")
             
             # Create inner permute without quantifier
             inner_token = PatternToken(

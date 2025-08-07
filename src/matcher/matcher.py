@@ -19,6 +19,10 @@ Author: Pattern Matching Engine Team
 Version: 2.1.0
 """
 
+import math
+import pandas as pd
+import psutil
+import functools
 from collections import defaultdict
 import time
 import threading
@@ -34,6 +38,8 @@ from src.matcher.row_context import RowContext
 from src.matcher.measure_evaluator import MeasureEvaluator
 from src.matcher.pattern_tokenizer import PatternTokenType
 from src.utils.logging_config import get_logger, PerformanceTimer
+from src.utils.memory_management import get_resource_manager, MemoryMonitor
+from src.utils.pattern_cache import get_pattern_cache
 import re
 
 # Module logger
@@ -783,7 +789,8 @@ class EnhancedMatcher:
         # Initialize match storage
         self._matches = []
         
-        # Initialize caching structures
+        # Initialize caching structures using existing utilities
+        self._pattern_cache = get_pattern_cache()
         self._transition_cache = {}
         self._condition_cache = {}
         
@@ -839,6 +846,43 @@ class EnhancedMatcher:
                    f"states={len(dfa.states)}, "
                    f"measures={len(self.measures)}, "
                    f"permute={getattr(self, 'is_permute_pattern', False)}")
+        
+        # Memory monitoring using existing utility
+        self._memory_monitor = MemoryMonitor()
+        self._resource_manager = get_resource_manager()
+        try:
+            initial_memory = self._memory_monitor.get_memory_usage_mb()
+            logger.debug(f"EnhancedMatcher initial memory usage: {initial_memory:.1f} MB")
+        except Exception:
+            logger.debug("Memory monitoring not available")
+    
+    def __del__(self):
+        """Cleanup matcher resources to prevent memory leaks."""
+        try:
+            # Clear caches
+            if hasattr(self, '_transition_cache'):
+                self._transition_cache.clear()
+            if hasattr(self, '_condition_cache'):
+                self._condition_cache.clear()
+            
+            # Clear match storage
+            if hasattr(self, '_matches'):
+                self._matches.clear()
+            
+            # Clear pattern analysis
+            if hasattr(self, 'alternation_order'):
+                if isinstance(self.alternation_order, dict):
+                    self.alternation_order.clear()
+            
+            # Clear other collections
+            for attr_name in ['measures', 'measure_semantics', 'subsets', 'defined_variables', 'define_conditions']:
+                if hasattr(self, attr_name):
+                    attr = getattr(self, attr_name)
+                    if hasattr(attr, 'clear'):
+                        attr.clear()
+        except Exception:
+            # Ignore cleanup errors
+            pass
     
     def _analyze_pattern_characteristics(self) -> None:
         """Analyze pattern characteristics for optimization and behavior."""

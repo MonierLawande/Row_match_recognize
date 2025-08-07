@@ -25,12 +25,17 @@ from typing import (
 from dataclasses import dataclass, field
 import time
 import threading
+import math
+import psutil
 from collections import defaultdict, deque
 from abc import ABC, abstractmethod
+from functools import lru_cache
 
 from src.matcher.automata import NFA, NFAState, Transition, NFABuilder
 from src.matcher.pattern_tokenizer import PatternTokenType, PermuteHandler
 from src.utils.logging_config import get_logger, PerformanceTimer
+from src.utils.memory_management import get_resource_manager, MemoryMonitor
+from src.utils.pattern_cache import get_pattern_cache
 
 # Module logger
 logger = get_logger(__name__)
@@ -74,6 +79,22 @@ class DFAState:
         if not self.validate():
             raise ValueError("DFA state validation failed")
 
+    def __del__(self):
+        """Cleanup resources to prevent memory leaks"""
+        try:
+            if hasattr(self, 'transitions'):
+                self.transitions.clear()
+            if hasattr(self, 'permute_data') and self.permute_data:
+                self.permute_data.clear()
+            if hasattr(self, 'variables'):
+                self.variables.clear()
+            if hasattr(self, 'excluded_variables'):
+                self.excluded_variables.clear()
+            if hasattr(self, 'subset_vars'):
+                self.subset_vars.clear()
+        except Exception:
+            pass  # Ignore errors during cleanup
+
     def add_transition(self, condition: Any, target: int, variable: Optional[str] = None, 
                       priority: int = 0, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Add a transition with enhanced validation and priority support."""
@@ -83,6 +104,10 @@ class DFAState:
             
             if not callable(condition):
                 raise TypeError("Condition must be callable")
+            
+            # Validate condition function signature
+            if not self._validate_condition_function(condition):
+                logger.warning("Condition function may have invalid signature")
             
             transition = Transition(
                 condition=condition,
@@ -94,6 +119,16 @@ class DFAState:
             
             self.transitions.append(transition)
             self.access_count += 1
+
+    def _validate_condition_function(self, condition: Callable) -> bool:
+        """Validate condition function safety"""
+        import inspect
+        try:
+            sig = inspect.signature(condition)
+            params = list(sig.parameters.keys())
+            return len(params) >= 2  # At least row, context parameters
+        except Exception:
+            return True  # Allow if we can't validate
 
     def validate(self) -> bool:
         """Validate DFA state integrity."""
@@ -112,6 +147,14 @@ class DFAState:
                     return False
                 if trans.target < 0:
                     return False
+                if not callable(trans.condition):
+                    return False
+            
+            # Validate PERMUTE metadata if present
+            if self.permute_data:
+                required_fields = {'combinations', 'variables'}
+                if not any(field in self.permute_data for field in required_fields):
+                    logger.debug(f"PERMUTE metadata may be incomplete in state {self.state_id}")
             
             self._validated = True
             return True
@@ -187,9 +230,27 @@ class DFA:
         self._optimization_level = 0
         self._lock = threading.RLock()
         
+        # Memory monitoring
+        self._memory_monitor = MemoryMonitor()
+        
         # Validate on creation
         if not self.validate_pattern():
             raise ValueError("DFA validation failed")
+
+    def __del__(self):
+        """Cleanup DFA resources to prevent memory leaks"""
+        try:
+            if hasattr(self, 'states'):
+                for state in self.states:
+                    if hasattr(state, '__del__'):
+                        del state
+                self.states.clear()
+            if hasattr(self, 'metadata'):
+                self.metadata.clear()
+            if hasattr(self, 'exclusion_ranges'):
+                self.exclusion_ranges.clear()
+        except Exception:
+            pass  # Ignore cleanup errors
 
     def validate_pattern(self) -> bool:
         """Comprehensive DFA validation."""
@@ -226,6 +287,13 @@ class DFA:
         with self._lock:
             logger.info("Starting DFA optimization")
             
+            # Check memory pressure before optimization
+            resource_manager = get_resource_manager()
+            pressure_info = resource_manager.get_memory_pressure_info()
+            if pressure_info.is_under_pressure:
+                logger.warning("High memory pressure detected, skipping optimization")
+                return
+            
             # Track optimization iterations
             iterations = 0
             max_iterations = MAX_OPTIMIZATION_ITERATIONS
@@ -233,16 +301,25 @@ class DFA:
             while iterations < max_iterations:
                 initial_state_count = len(self.states)
                 
-                # Apply optimization passes
-                self._remove_unreachable_states()
-                self._merge_equivalent_states()
-                self._optimize_transitions()
+                # Apply optimization passes with error handling
+                try:
+                    self._remove_unreachable_states()
+                    self._merge_equivalent_states()
+                    self._optimize_transitions()
+                except Exception as e:
+                    logger.warning(f"Optimization error at iteration {iterations}: {e}")
+                    break
                 
                 # Check for convergence
                 if len(self.states) == initial_state_count:
                     break
                     
                 iterations += 1
+                
+                # Check memory pressure during optimization
+                if hasattr(self, '_memory_monitor') and self._memory_monitor.is_under_pressure():
+                    logger.warning("Memory pressure detected during optimization, stopping early")
+                    break
             
             self._optimization_level = iterations
             logger.info(f"DFA optimization completed in {iterations} iterations: "
@@ -394,12 +471,14 @@ class DFABuilder:
         
         self.nfa = nfa
         
-        # Exponential protection limits
-        self.MAX_DFA_STATES = 10000
+        # Enhanced limits with memory awareness
+        self.MAX_DFA_STATES = self._calculate_max_states()
         self.MAX_SUBSET_SIZE = 50
         self.MAX_ITERATIONS = 100000
         
-        # Caching and optimization
+        # Caching and optimization with thread safety using existing utilities
+        self._cache_lock = threading.RLock()
+        self._pattern_cache = get_pattern_cache()
         self._subset_cache = {}
         self._transition_cache = {}
         self._state_dedup_cache = {}
@@ -411,6 +490,10 @@ class DFABuilder:
         self._cache_misses = 0
         self._states_created = 0
         self._states_merged = 0
+        
+        # Memory monitoring using existing utility
+        self._memory_monitor = MemoryMonitor()
+        self._resource_manager = get_resource_manager()
         
         # Copy metadata from NFA
         self.metadata = self.nfa.metadata.copy() if self.nfa.metadata else {}
@@ -425,6 +508,32 @@ class DFABuilder:
         self._lock = threading.RLock()
         
         logger.debug(f"DFABuilder initialized for NFA with {len(nfa.states)} states")
+
+    def _calculate_max_states(self) -> int:
+        """Calculate max states based on available memory"""
+        try:
+            memory = psutil.virtual_memory()
+            available_gb = memory.available / (1024**3)
+            if available_gb > 8:
+                return 50000
+            elif available_gb > 4:
+                return 25000
+            else:
+                return 10000
+        except Exception:
+            return 10000  # Safe fallback
+
+    def __del__(self):
+        """Cleanup builder resources to prevent memory leaks"""
+        try:
+            if hasattr(self, '_subset_cache'):
+                self._subset_cache.clear()
+            if hasattr(self, '_transition_cache'):
+                self._transition_cache.clear()
+            if hasattr(self, '_state_dedup_cache'):
+                self._state_dedup_cache.clear()
+        except Exception:
+            pass  # Ignore cleanup errors
 
     def build(self) -> DFA:
         """
@@ -1003,6 +1112,14 @@ class DFABuilder:
             'cache_hit_ratio': self._cache_hits / max(self._cache_hits + self._cache_misses, 1),
             'construction_time': time.time() - self._build_start_time if self._build_start_time else 0
         }
+
+    @lru_cache(maxsize=1000)
+    def _cached_subset_hash(self, nfa_states_tuple: tuple) -> int:
+        """Thread-safe cached subset hashing."""
+        try:
+            return hash(nfa_states_tuple)
+        except Exception:
+            return hash(str(nfa_states_tuple))
 
 
 def build_dfa(nfa: NFA) -> DFA:
