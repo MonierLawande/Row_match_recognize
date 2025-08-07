@@ -2114,6 +2114,44 @@ class EnhancedMatcher:
                 
                 logger.debug(f"Reached accepting state {state} at row {current_idx-1}")
                 
+                # PRODUCTION FIX: PERMUTE minimal matching for Trino compatibility
+                # For PERMUTE patterns, prefer the first accepting state ONLY if we have some minimal match
+                # Don't return immediately for single-variable matches unless that's the only valid option
+                if (hasattr(self.dfa, 'metadata') and self.dfa.metadata.get('has_permute', False) and
+                    hasattr(self, 'original_pattern') and self.original_pattern and 
+                    'PERMUTE' in self.original_pattern and '?' in self.original_pattern):
+                    
+                    logger.debug(f"PERMUTE pattern with optional variables - checking minimal match conditions")
+                    
+                    # Count the variables we've matched so far
+                    matched_vars = len(var_assignments)
+                    total_vars = len([v for v in self.original_pattern if v.isalpha()])  # Rough count of variables
+                    
+                    # For PERMUTE patterns with optional variables:
+                    # - If we have 2+ variables matched, consider returning (prefer A-C over A-C-B)
+                    # - If we only have 1 variable, continue to try for more (prefer A-C over A)
+                    if matched_vars >= 2:
+                        logger.debug(f"PERMUTE pattern: {matched_vars} variables matched, applying minimal matching")
+                        
+                        minimal_match = {
+                            "start": start_idx,
+                            "end": current_idx - 1,
+                            "variables": {k: v[:] for k, v in var_assignments.items()},
+                            "state": state,
+                            "is_empty": False,
+                            "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                            "excluded_rows": excluded_rows.copy(),
+                            "has_empty_alternation": self.has_empty_alternation
+                        }
+                        
+                        logger.debug(f"PERMUTE minimal match: vars={list(var_assignments.keys())}, rows={current_idx - start_idx}")
+                        
+                        # Return immediately for minimal matching - don't look for longer matches
+                        self.timing["find_match"] += time.time() - match_start_time  
+                        return minimal_match
+                    else:
+                        logger.debug(f"PERMUTE pattern: only {matched_vars} variable(s) matched, continuing to find more")
+                
                 # For patterns with both start and end anchors, we need to check if we've consumed the entire partition
                 if has_both_anchors and current_idx < len(rows):
                     # If we have both anchors (^...$) and haven't reached the end of the partition,

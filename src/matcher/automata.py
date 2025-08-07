@@ -2817,6 +2817,10 @@ class NFABuilder:
         variables = token.metadata.get("variables", [])
         original_pattern = token.metadata.get("original", "")
         
+        # FORCE DEBUG logging to see if this method is called
+        print(f"[PERMUTE_DEBUG] _process_permute called with token: {token.value}")
+        print(f"[PERMUTE_DEBUG] Variables: {variables}")
+        
         # Debug logging for pattern processing
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Processing PERMUTE pattern: {original_pattern}")
@@ -2840,8 +2844,14 @@ class NFABuilder:
             for var in variables
         )
         
+        print(f"[PERMUTE_DEBUG] has_alternations: {has_alternations}")
+        print(f"[PERMUTE_DEBUG] len(variables): {len(variables)}")
+        print(f"[PERMUTE_DEBUG] token.quantifier: {token.quantifier}")
+        print(f"[PERMUTE_DEBUG] Condition check - len(variables) > 1 and not has_alternations: {len(variables) > 1 and not has_alternations}")
+        
         # Handle quantified PERMUTE (e.g., PERMUTE(A, B){2,3})
         if token.quantifier:
+            logger.info(f"[PERMUTE_PATH] Taking quantified PERMUTE path")
             logger.debug(f"Processing quantified PERMUTE: {original_pattern} with quantifier {token.quantifier}")
             
             # Create inner permute without quantifier
@@ -2861,6 +2871,7 @@ class NFABuilder:
         
         # For simple sequence without alternations and without quantifiers
         if len(variables) == 1 and not has_alternations:
+            logger.info(f"[PERMUTE_PATH] Taking single variable path")
             # Single variable PERMUTE is just the variable itself
             var = variables[0]
             if isinstance(var, str):
@@ -2874,23 +2885,86 @@ class NFABuilder:
             return perm_start, perm_end
         
         if len(variables) > 1 and not has_alternations:
-            # For simple PERMUTE without alternations, generate all permutations
-            # Pre-process variables to handle nested PERMUTE
+            print(f"[PERMUTE_FIX] Entering the PERMUTE fix code path!")
+            logger.info(f"[PERMUTE_FIX] Processing PERMUTE with {len(variables)} variables: {variables}")
+            # CRITICAL FIX: For PERMUTE patterns with optional variables, generate subset permutations
+            # Pre-process variables to handle nested PERMUTE and identify optional variables
             processed_vars = []
-            for var in variables:
+            variable_requirements = {}  # Track which variables are required vs optional
+            
+            for i, var in enumerate(variables):
                 if isinstance(var, PatternToken) and var.type == PatternTokenType.PERMUTE:
                     # Recursively process nested PERMUTE
                     nested_start, nested_end = self._process_permute(var, define)
                     processed_vars.append((var, nested_start, nested_end))
+                    variable_requirements[i] = True  # Nested PERMUTE treated as required
                 else:
+                    # Check if variable has optional quantifier (ends with ? or *)
+                    var_name = str(var)
+                    is_optional = var_name.endswith('?') or var_name.endswith('*')
+                    base_var = var_name.rstrip('?*+') if is_optional else var_name
+                    
                     # Regular variable
-                    var_start, var_end = self.create_var_states(var, define)
-                    processed_vars.append((var, var_start, var_end))
+                    var_start, var_end = self.create_var_states(base_var, define)
+                    processed_vars.append((base_var, var_start, var_end))
+                    variable_requirements[i] = not is_optional  # True=required, False=optional
             
-            all_perms = list(itertools.permutations(range(len(processed_vars))))
+            logger.debug(f"PERMUTE variable requirements: {variable_requirements}")
+            
+            # Generate ALL VALID SUBSETS and their permutations (Trino compatibility)
+            required_indices = [i for i, required in variable_requirements.items() if required]
+            optional_indices = [i for i, required in variable_requirements.items() if not required]
+            
+            logger.debug(f"Required variable indices: {required_indices}")
+            logger.debug(f"Optional variable indices: {optional_indices}")
+            
+            all_perms = []
+            
+            # Generate all possible subsets of optional variables (power set)
+            for r in range(len(optional_indices) + 1):
+                for optional_subset in itertools.combinations(optional_indices, r):
+                    # Combine required variables with this subset of optional variables
+                    subset_indices = required_indices + list(optional_subset)
+                    
+                    # Generate all permutations of this subset
+                    for perm in itertools.permutations(subset_indices):
+                        all_perms.append(perm)
+            
+            # Sort by lexicographical order for Trino compatibility
+            # BUT CRITICAL: For optional variables, prioritize patterns with fewer optional variables
+            def permutation_priority(perm):
+                """
+                Calculate priority for a permutation to implement Trino's minimal matching.
+                Lower numbers = higher priority.
+                
+                Priority rules:
+                1. Patterns with fewer optional variables first (minimal matching)
+                2. Within same optional count, lexicographical order
+                """
+                # Count optional variables in this permutation
+                optional_count = sum(1 for idx in perm if not variable_requirements[idx])
+                # Calculate lexicographical position
+                lex_position = tuple(perm)
+                
+                # Priority = (optional_count * 1000) + lexicographical_position
+                # This ensures A-C (1 optional) beats A-B-C (2 optional)
+                return (optional_count, lex_position)
+            
+            all_perms.sort(key=permutation_priority)
+            
+            print(f"[PERMUTE_FIX] Generated {len(all_perms)} subset permutations (prioritized for minimal matching):")
+            for i, perm in enumerate(all_perms[:10]):  # Show first 10
+                perm_vars = [variables[idx] for idx in perm]
+                optional_count = sum(1 for idx in perm if not variable_requirements[idx])
+                print(f"  {i+1}. {perm} -> {perm_vars} (optional_count={optional_count})")
+            if len(all_perms) > 10:
+                print(f"  ... and {len(all_perms) - 10} more")
+            
+            logger.debug(f"Generated {len(all_perms)} subset permutations for PERMUTE pattern")
+            logger.debug(f"First few permutations: {all_perms[:5]}")
             
             # For each permutation, create a separate branch in the NFA
-            for perm in all_perms:
+            for perm_idx, perm in enumerate(all_perms):
                 # Create a new start state for this permutation
                 branch_start = self.new_state()
                 current = branch_start
@@ -2919,8 +2993,14 @@ class NFABuilder:
                 # Connect this permutation branch to the main permutation end
                 self.add_epsilon(current, perm_end)
                 
-                # Connect permutation start to this branch
-                self.add_epsilon(perm_start, branch_start)
+                # CRITICAL: Connect permutation start to this branch with priority
+                # Lower perm_idx = higher priority (minimal matching first)
+                if hasattr(self, 'add_epsilon_with_priority'):
+                    self.add_epsilon_with_priority(perm_start, branch_start, perm_idx)
+                    print(f"[PERMUTE_FIX] Added branch {perm_idx} with priority {perm_idx}")
+                else:
+                    # Fallback to regular epsilon if priority method doesn't exist
+                    self.add_epsilon(perm_start, branch_start)
             
         elif has_alternations:
             # For PERMUTE with alternations, we need to handle all combinations
