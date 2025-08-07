@@ -336,10 +336,7 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
                 
                 # Create a SubsetClause object with the raw text
                 subset_clauses.append(SubsetClause(subset_text))
-                
-                # Debug output
-                print(f"Extracted subset definition: {subset_text}")
-        
+              
         return subset_clauses
 
     def _parse_skip_text(self, skip_text: str) -> AfterMatchSkipClause:
