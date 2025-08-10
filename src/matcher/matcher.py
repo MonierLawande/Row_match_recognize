@@ -1221,10 +1221,10 @@ class EnhancedMatcher:
             self._anchor_metadata["has_end_anchor"]):
             self._anchor_metadata["spans_partition"] = True
     def _build_transition_index(self):
-        """Build index of transitions with enhanced metadata support."""
+        """Build index of transitions with enhanced metadata support and performance optimization."""
         index = defaultdict(list)
         
-        # Add anchor information to the index for faster checking
+        # PERFORMANCE OPTIMIZATION: Pre-compute anchor information for faster checking
         anchor_start_states = set()
         anchor_end_accepting_states = set()
         
@@ -1236,13 +1236,24 @@ class EnhancedMatcher:
                 elif state.anchor_type == PatternTokenType.ANCHOR_END and state.is_accept:
                     anchor_end_accepting_states.add(i)
         
-        # Build normal transition index with priority support and full transition objects
+        # PERFORMANCE OPTIMIZATION: Build optimized transition index with priority sorting
         for i, state in enumerate(self.dfa.states):
-            # Sort transitions by priority (lower is higher priority)
-            sorted_transitions = sorted(state.transitions, key=lambda t: t.priority)
+            # Sort transitions by priority (lower is higher priority) once during index building
+            sorted_transitions = sorted(state.transitions, key=lambda t: getattr(t, 'priority', 0))
+            
+            # Pre-compute transition metadata to avoid repeated lookups
             for trans in sorted_transitions:
-                # Store the full transition object to preserve metadata
-                index[i].append((trans.variable, trans.target, trans.condition, trans))
+                is_excluded = (trans.metadata.get('is_excluded', False) if hasattr(trans, 'metadata') 
+                             else trans.variable in getattr(self, 'excluded_vars', set()))
+                
+                # Store enhanced transition tuple with pre-computed metadata
+                index[i].append((
+                    trans.variable, 
+                    trans.target, 
+                    trans.condition, 
+                    trans,
+                    is_excluded  # Pre-computed exclusion status
+                ))
         
         # Store anchor metadata for quick reference
         self._anchor_metadata.update({
@@ -1250,6 +1261,7 @@ class EnhancedMatcher:
             "end_anchor_accepting_states": anchor_end_accepting_states,
         })
         
+        logger.debug(f"Built optimized transition index for {len(index)} states with anchor metadata")
         return index
     
     def _needs_backtracking(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> bool:
@@ -1464,8 +1476,15 @@ class EnhancedMatcher:
             transitions = self.transition_index[state.state_id]
             logger.debug(f"Found {len(transitions)} transitions from state {state.state_id} at row {state.row_index}")
             
-            for var, target_state, condition, transition in transitions:
+            for transition_tuple in transitions:
                 try:
+                    # Handle both old and new transition index formats
+                    if len(transition_tuple) >= 4:
+                        var, target_state, condition = transition_tuple[0], transition_tuple[1], transition_tuple[2]
+                        transition = transition_tuple[3] if len(transition_tuple) > 3 else None
+                    else:
+                        continue  # Skip invalid transition tuples
+                    
                     context.current_var = var
                     
                     # For variables with complex back-reference conditions (like X in our test),
@@ -2018,36 +2037,68 @@ class EnhancedMatcher:
             valid_transitions = []
             
             # Try all transitions and collect those that match the condition
-            for var, target, condition, transition in trans_index:
+            for transition_tuple in trans_index:
+                # Handle both old and new transition index formats for backward compatibility
+                if len(transition_tuple) == 5:
+                    var, target, condition, transition, is_excluded = transition_tuple
+                else:
+                    var, target, condition, transition = transition_tuple
+                    # Fall back to computing exclusion status
+                    is_excluded = False
+                    if transition and hasattr(transition, 'metadata') and transition.metadata.get('is_excluded', False):
+                        is_excluded = True
+                    elif hasattr(self, 'exclusion_handler') and self.exclusion_handler:
+                        is_excluded = self.exclusion_handler.is_excluded(var)
+                    elif hasattr(self, 'excluded_vars'):
+                        is_excluded = var in self.excluded_vars
+                
                 logger.debug(f"  Evaluating condition for var: {var}")
                 try:
-                    # Check if this is an excluded variable using transition metadata
-                    is_excluded = False
-                    if transition and transition.metadata.get('is_excluded', False):
-                        is_excluded = True
-                        logger.debug(f"  Variable {var} marked as excluded in transition metadata")
-                    elif self.exclusion_handler:
-                        is_excluded = self.exclusion_handler.is_excluded(var)
+                    # PERFORMANCE OPTIMIZATION: Cache condition evaluation results
+                    self._cache_stats['evaluations'] += 1
+                    
+                    # Create cache key for condition evaluation
+                    row_hash = hash(tuple(sorted(row.items())) if isinstance(row, dict) else str(row))
+                    cache_key = (var, target, row_hash, current_idx)
+                    
+                    # Check cache first
+                    if cache_key in self._condition_eval_cache:
+                        result = self._condition_eval_cache[cache_key]
+                        self._cache_stats['hits'] += 1
+                        logger.debug(f"    Cache HIT for {var}: {result}")
                     else:
-                        is_excluded = var in self.excluded_vars
-                    
-                    # Set the current variable being evaluated for self-references
-                    context.current_var = var
-                    logger.debug(f"  [DEBUG] Set context.current_var = {var}")
-                    
-                    # First check if target state's START anchor constraints are satisfied
-                    if not self._check_anchors(target, current_idx, len(rows), "start"):
-                        logger.debug(f"  Start anchor check failed for transition to state {target} with var {var}")
-                        continue
+                        self._cache_stats['misses'] += 1
                         
-                    # Then evaluate the condition with the current row and context
-                    logger.debug(f"    DEBUG: Calling condition function with row={row}")
-                    
-                    # Clear any previous navigation context error flag
-                    if hasattr(context, '_navigation_context_error'):
-                        delattr(context, '_navigation_context_error')
-                    
-                    result = condition(row, context)
+                        # Use pre-computed or computed exclusion status
+                        logger.debug(f"  Variable {var} exclusion status: {is_excluded}")
+                        
+                        # Set the current variable being evaluated for self-references
+                        context.current_var = var
+                        logger.debug(f"  [DEBUG] Set context.current_var = {var}")
+                        
+                        # First check if target state's START anchor constraints are satisfied
+                        if not self._check_anchors(target, current_idx, len(rows), "start"):
+                            logger.debug(f"  Start anchor check failed for transition to state {target} with var {var}")
+                            continue
+                            
+                        # Then evaluate the condition with the current row and context
+                        logger.debug(f"    DEBUG: Calling condition function with row={row}")
+                        
+                        # Clear any previous navigation context error flag
+                        if hasattr(context, '_navigation_context_error'):
+                            delattr(context, '_navigation_context_error')
+                        
+                        result = condition(row, context)
+                        
+                        # Cache the result for future use
+                        self._condition_eval_cache[cache_key] = result
+                        
+                        # Limit cache size to prevent memory issues
+                        if len(self._condition_eval_cache) > 10000:
+                            # Remove oldest 20% of entries
+                            keys_to_remove = list(self._condition_eval_cache.keys())[:2000]
+                            for key in keys_to_remove:
+                                del self._condition_eval_cache[key]
                     
                     # Check if condition failed due to navigation context unavailability
                     # NOTE: Only skip rows on actual navigation errors, not on normal boundary conditions
@@ -2601,6 +2652,41 @@ class EnhancedMatcher:
         if not dfa.validate_pattern():
             raise ValueError("DFA validation failed")
 
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get comprehensive performance statistics.
+        
+        Returns:
+            Dictionary containing performance metrics and cache statistics
+        """
+        cache_hit_rate = 0.0
+        if self._cache_stats['evaluations'] > 0:
+            cache_hit_rate = self._cache_stats['hits'] / self._cache_stats['evaluations']
+        
+        return {
+            'timing': dict(self.timing),
+            'match_stats': dict(self.match_stats),
+            'cache_stats': {
+                **self._cache_stats,
+                'hit_rate': cache_hit_rate,
+                'cache_size': len(getattr(self, '_condition_eval_cache', {}))
+            },
+            'optimization_stats': dict(self._optimization_stats),
+            'backtracking_stats': getattr(self, 'backtracking_stats', {})
+        }
+
+    def clear_performance_caches(self) -> None:
+        """Clear performance caches to free memory."""
+        if hasattr(self, '_condition_eval_cache'):
+            self._condition_eval_cache.clear()
+        if hasattr(self, '_transition_cache'):
+            self._transition_cache.clear()
+        if hasattr(self, '_condition_cache'):
+            self._condition_cache.clear()
+        
+        # Reset cache statistics
+        self._cache_stats = {'hits': 0, 'misses': 0, 'evaluations': 0}
+        logger.info("Performance caches cleared")
+
     def _setup_core_configuration(self, dfa, measures, measure_semantics, exclusion_ranges,
                                  after_match_skip, subsets, original_pattern, defined_variables,
                                  define_conditions, partition_columns, order_columns) -> None:
@@ -2660,6 +2746,10 @@ class EnhancedMatcher:
         self._pattern_cache = get_pattern_cache()
         self._transition_cache = {}
         self._condition_cache = {}
+        
+        # PERFORMANCE OPTIMIZATION: Add condition evaluation caching
+        self._condition_eval_cache = {}
+        self._cache_stats = {'hits': 0, 'misses': 0, 'evaluations': 0}
         
         # Pattern analysis for optimizations
         self._analyze_pattern_characteristics()
@@ -4721,11 +4811,14 @@ class EnhancedMatcher:
             # Advance to next state
             trans_index = self.transition_index[state]
             target_state_found = False
-            for var, target, _, _ in trans_index:
-                if var == var_name:
-                    state = target
-                    target_state_found = True
-                    break
+            for transition_tuple in trans_index:
+                # Handle both old and new transition index formats
+                if len(transition_tuple) >= 4:
+                    var, target = transition_tuple[0], transition_tuple[1]
+                    if var == var_name:
+                        state = target
+                        target_state_found = True
+                        break
             
             if not target_state_found:
                 logger.debug(f"Could not find transition for variable {var_name}")
@@ -4762,11 +4855,14 @@ class EnhancedMatcher:
             valid_transitions = []
             
             # Test each possible transition
-            for var_name, target, condition, transition in trans_index:
-                context.current_var = var_name
-                if condition(row, context):
-                    valid_transitions.append((var_name, target, False))
-                context.current_var = None
+            for transition_tuple in trans_index:
+                # Handle both old and new transition index formats
+                if len(transition_tuple) >= 4:
+                    var_name, target, condition = transition_tuple[0], transition_tuple[1], transition_tuple[2]
+                    context.current_var = var_name
+                    if condition(row, context):
+                        valid_transitions.append((var_name, target, False))
+                    context.current_var = None
             
             if not valid_transitions:
                 break
