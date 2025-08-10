@@ -988,6 +988,7 @@ class EnhancedMatcher:
                 self._transition_cache.clear()
             if hasattr(self, '_condition_eval_cache'):
                 self._condition_eval_cache.clear()
+                self._condition_cache_size = 0
             
             # Clear match storage
             if hasattr(self, '_matches'):
@@ -1375,6 +1376,7 @@ class EnhancedMatcher:
                 
             # Caching
             self._condition_eval_cache = {}
+            self._condition_cache_size = 0  # Track size for performance
             self._pruning_cache = {}
         
         def find_match_with_backtracking(self, rows: List[Dict[str, Any]], start_idx: int, 
@@ -1510,6 +1512,7 @@ class EnhancedMatcher:
                         else:
                             condition_result = condition(current_row, context)
                             self._condition_eval_cache[cache_key] = condition_result
+                            self._condition_cache_size += 1
                         
                         if DEBUG_ENABLED:
                             logger.debug(f"  Transition {var} -> {target_state}: condition={condition_result}")
@@ -2079,19 +2082,22 @@ class EnhancedMatcher:
                         # Optimized cache storage
                         if self._condition_cache_pool is None:  # Test mode - simple caching
                             self._condition_eval_cache[cache_key] = result
+                            self._condition_cache_size += 1
                         else:  # Production mode - with object pooling
                             result_obj = self._condition_cache_pool.acquire()
                             result_obj['result'] = result
                             result_obj['timestamp'] = time.time()
                             self._condition_eval_cache[cache_key] = result_obj
+                            self._condition_cache_size += 1
                         
                         # Efficient cache eviction - only check occasionally
-                        cache_size = len(self._condition_eval_cache)
+                        cache_size = self._condition_cache_size
                         if cache_size > 1000 and cache_size % 100 == 0:  # Check every 100 additions
                             # Fast eviction - remove oldest 10%
                             keys_to_remove = list(self._condition_eval_cache.keys())[:cache_size // 10]
                             for key_to_remove in keys_to_remove:
                                 removed_obj = self._condition_eval_cache.pop(key_to_remove, None)
+                                self._condition_cache_size -= 1
                                 if self._condition_cache_pool and isinstance(removed_obj, dict):
                                     self._condition_cache_pool.release(removed_obj)
                     
@@ -2663,7 +2669,7 @@ class EnhancedMatcher:
         condition_cache_memory = 0.0
         if hasattr(self, '_condition_eval_cache'):
             # Estimate memory usage: each cached result is approximately 200 bytes
-            condition_cache_memory = len(self._condition_eval_cache) * 0.0002  # MB
+            condition_cache_memory = self._condition_cache_size * 0.0002  # MB
         
         return {
             'timing': dict(self.timing),
@@ -2671,7 +2677,7 @@ class EnhancedMatcher:
             'cache_stats': {
                 **self._cache_stats,
                 'hit_rate': cache_hit_rate,
-                'cache_size': len(getattr(self, '_condition_eval_cache', {})),
+                'cache_size': getattr(self, '_condition_cache_size', 0),
                 'memory_usage_mb': condition_cache_memory,
                 'pool_efficiency': getattr(self._condition_cache_pool, 'stats', lambda: {'reuse_rate': 0.0})().reuse_rate if hasattr(self, '_condition_cache_pool') else 0.0
             },
@@ -2697,8 +2703,10 @@ class EnhancedMatcher:
                 if isinstance(cached_obj, dict) and 'result' in cached_obj:
                     self._condition_cache_pool.release(cached_obj)
             self._condition_eval_cache.clear()
+            self._condition_cache_size = 0
         elif hasattr(self, '_condition_eval_cache'):
             self._condition_eval_cache.clear()
+            self._condition_cache_size = 0
             
         if hasattr(self, '_transition_cache'):
             self._transition_cache.clear()
@@ -2744,32 +2752,35 @@ class EnhancedMatcher:
                 # Reduce cache sizes aggressively
                 if hasattr(self, '_condition_eval_cache'):
                     # Reduce cache size to minimal
-                    while len(self._condition_eval_cache) > 100:
+                    while self._condition_cache_size > 100:
                         # Remove oldest entries
                         oldest_key = next(iter(self._condition_eval_cache))
                         oldest_obj = self._condition_eval_cache.pop(oldest_key)
+                        self._condition_cache_size -= 1
                         if hasattr(self, '_condition_cache_pool'):
                             self._condition_cache_pool.release(oldest_obj)
                     adaptation_actions.append('reduced_condition_cache_to_100')
                 
             elif memory_info.pressure_level == 'high':
                 # Moderate measures
-                if hasattr(self, '_condition_eval_cache') and len(self._condition_eval_cache) > 1000:
+                if hasattr(self, '_condition_eval_cache') and self._condition_cache_size > 1000:
                     # Reduce cache by 50%
-                    items_to_remove = list(self._condition_eval_cache.items())[:len(self._condition_eval_cache)//2]
+                    items_to_remove = list(self._condition_eval_cache.items())[:self._condition_cache_size//2]
                     for key, obj in items_to_remove:
                         del self._condition_eval_cache[key]
+                        self._condition_cache_size -= 1
                         if hasattr(self, '_condition_cache_pool'):
                             self._condition_cache_pool.release(obj)
                     adaptation_actions.append(f'reduced_condition_cache_by_50_percent')
                 
             elif memory_info.pressure_level == 'medium':
                 # Light cleanup
-                if hasattr(self, '_condition_eval_cache') and len(self._condition_eval_cache) > 2000:
+                if hasattr(self, '_condition_eval_cache') and self._condition_cache_size > 2000:
                     # Remove oldest 25%
-                    items_to_remove = list(self._condition_eval_cache.items())[:len(self._condition_eval_cache)//4]
+                    items_to_remove = list(self._condition_eval_cache.items())[:self._condition_cache_size//4]
                     for key, obj in items_to_remove:
                         del self._condition_eval_cache[key]
+                        self._condition_cache_size -= 1
                         if hasattr(self, '_condition_cache_pool'):
                             self._condition_cache_pool.release(obj)
                     adaptation_actions.append('light_cache_cleanup')
@@ -2788,7 +2799,7 @@ class EnhancedMatcher:
                 'memory_percent': memory_info.memory_percent,
                 'matcher_actions': adaptation_actions,
                 'global_adaptations': global_adaptations,
-                'cache_size_after': len(getattr(self, '_condition_eval_cache', {}))
+                'cache_size_after': getattr(self, '_condition_cache_size', 0)
             }
             
         except Exception as e:
@@ -2954,6 +2965,7 @@ class EnhancedMatcher:
         
         # Minimal cache initialization - OPTIMIZED: Single cache for condition evaluation
         self._condition_eval_cache = {}
+        self._condition_cache_size = 0  # Track size for performance
         self._transition_cache = {}
         
         # Simplified cache stats - only track essentials
