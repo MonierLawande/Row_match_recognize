@@ -908,19 +908,8 @@ class EnhancedMatcher:
             partition_columns, order_columns
         )
         
-        # Performance tracking
-        self.timing = defaultdict(float)
-        self.match_stats = {
-            'total_matches': 0,
-            'permute_matches': 0,
-            'alternation_attempts': 0,
-            'exclusion_checks': 0,
-            'cache_hits': 0,
-            'cache_misses': 0
-        }
-        
-        # Threading support
-        self._lock = threading.RLock()
+        # Performance tracking and threading setup
+        self._setup_performance_tracking()
         
         # Initialize match storage
         self._matches = []
@@ -2664,6 +2653,25 @@ class EnhancedMatcher:
         self.define_conditions = define_conditions or {}
         self.partition_columns = partition_columns or []
         self.order_columns = order_columns or []
+
+    def _setup_performance_tracking(self) -> None:
+        """Setup performance tracking and threading support.
+        
+        Initializes timing statistics, match statistics, and threading lock.
+        """
+        # Performance tracking
+        self.timing = defaultdict(float)
+        self.match_stats = {
+            'total_matches': 0,
+            'permute_matches': 0,
+            'alternation_attempts': 0,
+            'exclusion_checks': 0,
+            'cache_hits': 0,
+            'cache_misses': 0
+        }
+        
+        # Threading support
+        self._lock = threading.RLock()
 
 
     def find_matches(self, rows, config=None, measures=None):
