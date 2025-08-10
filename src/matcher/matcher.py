@@ -914,30 +914,8 @@ class EnhancedMatcher:
         # Initialize match storage
         self._matches = []
         
-        # Initialize caching structures using existing utilities
-        self._pattern_cache = get_pattern_cache()
-        self._transition_cache = {}
-        self._condition_cache = {}
-        
-        # Pattern analysis for optimizations
-        self._analyze_pattern_characteristics()
-        
-        # Initialize greedy optimization statistics for production monitoring
-        self._optimization_stats = {
-            'patterns_optimized': 0,
-            'time_saved': 0.0,
-            'fallback_count': 0,
-            'consecutive_quantifier_optimizations': 0
-        }
-        
-        # Analyze pattern text for specific constructs (e.g., empty alternations)
-        self._analyze_pattern_text()
-        
-        # Extract metadata from DFA for optimization
-        self._extract_dfa_metadata()
-        
-        # Initialize alternation order for variable priority (after DFA metadata is available)
-        self.alternation_order = self._parse_alternation_order(self.original_pattern)
+        # Initialize caching and optimization structures
+        self._setup_caching_and_optimization()
         
         # Debug DFA metadata for PERMUTE patterns
         if hasattr(self.dfa, 'metadata'):
@@ -2672,6 +2650,36 @@ class EnhancedMatcher:
         
         # Threading support
         self._lock = threading.RLock()
+
+    def _setup_caching_and_optimization(self) -> None:
+        """Setup caching structures and optimization components.
+        
+        Initializes pattern caches, runs pattern analysis, and sets up optimization tracking.
+        """
+        # Initialize caching structures using existing utilities
+        self._pattern_cache = get_pattern_cache()
+        self._transition_cache = {}
+        self._condition_cache = {}
+        
+        # Pattern analysis for optimizations
+        self._analyze_pattern_characteristics()
+        
+        # Initialize greedy optimization statistics for production monitoring
+        self._optimization_stats = {
+            'patterns_optimized': 0,
+            'time_saved': 0.0,
+            'fallback_count': 0,
+            'consecutive_quantifier_optimizations': 0
+        }
+        
+        # Analyze pattern text for specific constructs (e.g., empty alternations)
+        self._analyze_pattern_text()
+        
+        # Extract metadata from DFA for optimization
+        self._extract_dfa_metadata()
+        
+        # Initialize alternation order for variable priority (after DFA metadata is available)
+        self.alternation_order = self._parse_alternation_order(self.original_pattern)
 
 
     def find_matches(self, rows, config=None, measures=None):
