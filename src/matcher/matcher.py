@@ -902,18 +902,11 @@ class EnhancedMatcher:
         self._validate_dfa(dfa)
         
         # Core configuration
-        self.dfa = dfa
-        self.start_state = dfa.start
-        self.measures = measures or {}
-        self.measure_semantics = measure_semantics or {}
-        self.exclusion_ranges = exclusion_ranges or dfa.exclusion_ranges
-        self.after_match_skip = after_match_skip
-        self.subsets = subsets or {}
-        self.original_pattern = original_pattern
-        self.defined_variables = set(defined_variables) if defined_variables else set()
-        self.define_conditions = define_conditions or {}
-        self.partition_columns = partition_columns or []
-        self.order_columns = order_columns or []
+        self._setup_core_configuration(
+            dfa, measures, measure_semantics, exclusion_ranges, after_match_skip,
+            subsets, original_pattern, defined_variables, define_conditions,
+            partition_columns, order_columns
+        )
         
         # Performance tracking
         self.timing = defaultdict(float)
@@ -2640,6 +2633,37 @@ class EnhancedMatcher:
         
         if not dfa.validate_pattern():
             raise ValueError("DFA validation failed")
+
+    def _setup_core_configuration(self, dfa, measures, measure_semantics, exclusion_ranges,
+                                 after_match_skip, subsets, original_pattern, defined_variables,
+                                 define_conditions, partition_columns, order_columns) -> None:
+        """Setup core configuration attributes.
+        
+        Args:
+            dfa: The validated DFA instance
+            measures: Dictionary of measure definitions
+            measure_semantics: Dictionary of measure semantics
+            exclusion_ranges: List of exclusion ranges
+            after_match_skip: After match skip mode
+            subsets: Dictionary of subsets
+            original_pattern: The original pattern string
+            defined_variables: Set of defined variables
+            define_conditions: Dictionary of define conditions
+            partition_columns: List of partition columns
+            order_columns: List of order columns
+        """
+        self.dfa = dfa
+        self.start_state = dfa.start
+        self.measures = measures or {}
+        self.measure_semantics = measure_semantics or {}
+        self.exclusion_ranges = exclusion_ranges or dfa.exclusion_ranges
+        self.after_match_skip = after_match_skip
+        self.subsets = subsets or {}
+        self.original_pattern = original_pattern
+        self.defined_variables = set(defined_variables) if defined_variables else set()
+        self.define_conditions = define_conditions or {}
+        self.partition_columns = partition_columns or []
+        self.order_columns = order_columns or []
 
 
     def find_matches(self, rows, config=None, measures=None):
