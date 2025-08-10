@@ -16,7 +16,7 @@ import json
 @dataclass
 class PerformanceConfig:
     """Performance-related configuration settings."""
-    max_partition_size: int = 100_000
+    max_partition_size: int = float('inf')  # Unlimited partition size for production
     execution_timeout_seconds: float = 30.0
     max_memory_mb: int = 1024
     enable_caching: bool = True
@@ -248,8 +248,8 @@ class MatchRecognizeConfig:
         errors = []
         
         # Performance validation
-        if self.performance.max_partition_size <= 0:
-            errors.append("max_partition_size must be positive")
+        if self.performance.max_partition_size <= 0 and self.performance.max_partition_size != float('inf'):
+            errors.append("max_partition_size must be positive or unlimited")
         
         if self.performance.execution_timeout_seconds <= 0:
             errors.append("execution_timeout_seconds must be positive")

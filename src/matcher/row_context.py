@@ -38,7 +38,7 @@ logger = get_logger(__name__)
 
 # Constants for production-ready behavior
 MAX_CACHE_SIZE = 1000           # Maximum cache entries per context
-MAX_PARTITION_SIZE = 1000000    # Maximum rows per partition
+MAX_PARTITION_SIZE = float('inf')  # No row limit for production use
 MAX_VARIABLES = 100             # Maximum pattern variables
 CACHE_STATS_INTERVAL = 1000     # Log cache stats every N operations
 
@@ -178,10 +178,7 @@ class RowContext:
             ContextValidationError: If context state is invalid
         """
         # Validate basic constraints
-        if len(self.rows) > MAX_PARTITION_SIZE:
-            raise ContextValidationError(
-                f"Too many rows: {len(self.rows)} (max: {MAX_PARTITION_SIZE})"
-            )
+        # Row limit removed for production scalability
         
         if len(self.variables) > MAX_VARIABLES:
             raise ContextValidationError(
