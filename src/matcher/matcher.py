@@ -2567,56 +2567,67 @@ class EnhancedMatcher:
             # 3. The pattern structure allows for valid empty matches
             
             if not longest_match and self.dfa.states[self.start_state].is_accept:
-                # For empty matches, also verify end anchor if present
-                if self._check_anchors(self.start_state, start_idx, len(rows), "end"):
-                    # Check if this is a valid empty match by examining the pattern structure
-                    # Empty matches should only be allowed for patterns where all required quantifiers are satisfied
-                    is_valid_empty_match = self._is_valid_empty_match_state(self.start_state)
-                    
-                    if is_valid_empty_match:
-                        logger.debug(f"Creating empty match at index {start_idx} after no real match found")
-                        
-                        # Track which rows are part of empty pattern matches
-                        empty_pattern_rows = [start_idx]
-                        
-                        empty_match = {
-                            "start": start_idx,
-                            "end": start_idx - 1,
-                            "variables": {},
-                            "state": self.start_state,
-                            "is_empty": True,
-                            "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
-                            "excluded_rows": [],
-                            "empty_pattern_rows": empty_pattern_rows,  # Add tracking for empty pattern rows
-                            "has_empty_alternation": self.has_empty_alternation
-                        }
-                    else:
-                        logger.debug(f"Rejecting empty match at index {start_idx} - pattern has unsatisfied required quantifiers")
+                # Handle empty match fallback
+                return self._handle_empty_match_fallback(start_idx, rows, config, match_start_time)
+
+    def _handle_empty_match_fallback(self, start_idx: int, rows: List[Dict[str, Any]], 
+                                   config, match_start_time: float) -> Optional[Dict[str, Any]]:
+        """Handle empty match fallback when no real match is found."""
+        empty_match = None
+        
+        # For empty matches, also verify end anchor if present
+        if self._check_anchors(self.start_state, start_idx, len(rows), "end"):
+            # Check if this is a valid empty match by examining the pattern structure
+            # Empty matches should only be allowed for patterns where all required quantifiers are satisfied
+            is_valid_empty_match = self._is_valid_empty_match_state(self.start_state)
             
-            if empty_match:
-                # PRODUCTION FIX: Distinguish between explicit empty patterns and fallback empty matches
-                is_explicit_empty_pattern = (self.original_pattern and 
-                                           (self.original_pattern.strip() == '()' or 
-                                            self.original_pattern.strip() == '( )'))
+            if is_valid_empty_match:
+                logger.debug(f"Creating empty match at index {start_idx} after no real match found")
                 
-                if is_explicit_empty_pattern:
-                    # For explicit empty patterns like (), always return empty matches regardless of skip mode
-                    logger.debug(f"Explicit empty pattern '()' - returning empty match at position {start_idx}")
-                    self.timing["find_match"] += time.time() - match_start_time
-                    return empty_match
-                elif config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST):
-                    # For fallback empty matches from failed real patterns, apply skip mode suppression
-                    logger.debug(f"{config.skip_mode} mode: not returning fallback empty match, will advance to next position")
-                    self.timing["find_match"] += time.time() - match_start_time
-                    return None
-                else:
-                    logger.debug(f"Using empty match as fallback: {empty_match}")
-                    self.timing["find_match"] += time.time() - match_start_time
-                    return empty_match
+                # Track which rows are part of empty pattern matches
+                empty_pattern_rows = [start_idx]
+                
+                empty_match = {
+                    "start": start_idx,
+                    "end": start_idx - 1,
+                    "variables": {},
+                    "state": self.start_state,
+                    "is_empty": True,
+                    "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                    "excluded_rows": [],
+                    "empty_pattern_rows": empty_pattern_rows,  # Add tracking for empty pattern rows
+                    "has_empty_alternation": self.has_empty_alternation
+                }
             else:
-                logger.debug(f"No match found starting at index {start_idx}")
+                logger.debug(f"Rejecting empty match at index {start_idx} - pattern has unsatisfied required quantifiers")
+        
+        if empty_match:
+            # PRODUCTION FIX: Distinguish between explicit empty patterns and fallback empty matches
+            is_explicit_empty_pattern = (self.original_pattern and 
+                                       (self.original_pattern.strip() == '()' or 
+                                        self.original_pattern.strip() == '( )'))
+            
+            if is_explicit_empty_pattern:
+                # For explicit empty patterns like (), always return empty matches regardless of skip mode
+                logger.debug(f"Explicit empty pattern '()' - returning empty match at position {start_idx}")
+                self.timing["find_match"] += time.time() - match_start_time
+                return empty_match
+            elif config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST):
+                # For fallback empty matches from failed real patterns, apply skip mode suppression
+                logger.debug(f"{config.skip_mode} mode: not returning fallback empty match, will advance to next position")
                 self.timing["find_match"] += time.time() - match_start_time
                 return None
+            else:
+                logger.debug(f"Using empty match as fallback: {empty_match}")
+                self.timing["find_match"] += time.time() - match_start_time
+                return empty_match
+        else:
+            logger.debug(f"No match found starting at index {start_idx}")
+            self.timing["find_match"] += time.time() - match_start_time
+            return None
+
+        # Handle empty match fallback
+        return self._handle_empty_match_fallback(start_idx, rows, config, match_start_time)
 
 
 
