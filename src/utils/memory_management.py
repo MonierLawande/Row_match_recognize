@@ -220,8 +220,9 @@ class ObjectPool(Generic[T]):
         self._lock = threading.RLock()
         self._stats = PoolStats() if enable_stats else None
         
-        # Weak references to track all created objects
+        # Weak references to track all created objects (only for objects that support weak refs)
         self._all_objects: weakref.WeakSet = weakref.WeakSet()
+        self._all_objects_count = 0  # Fallback counter for objects that can't be weak referenced
         
         # Phase 3: Enhanced monitoring
         self._creation_timestamps: deque = deque()
@@ -308,7 +309,13 @@ class ObjectPool(Generic[T]):
     def _create_new_object(self) -> T:
         """Create new object and track statistics."""
         obj = self._factory()
-        self._all_objects.add(obj)
+        
+        # Try to add to weak reference set, fallback to counter for non-weak-referenceable objects
+        try:
+            self._all_objects.add(obj)
+        except TypeError:
+            # Object doesn't support weak references (like dict), use counter instead
+            self._all_objects_count += 1
         
         if self._stats:
             self._stats.created += 1
@@ -380,7 +387,8 @@ class ObjectPool(Generic[T]):
     
     def active_objects(self) -> int:
         """Get count of active objects (not in pool)."""
-        return len(self._all_objects)
+        # Return count from weak references plus counter for non-weak-referenceable objects
+        return len(self._all_objects) + self._all_objects_count
 
 class MemoryMonitor:
     """
