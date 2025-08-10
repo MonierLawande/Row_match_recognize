@@ -899,11 +899,7 @@ class EnhancedMatcher:
             TypeError: If parameters have incorrect types
         """
         # Validate DFA
-        if not isinstance(dfa, DFA):
-            raise TypeError(f"Expected DFA instance, got {type(dfa)}")
-        
-        if not dfa.validate_pattern():
-            raise ValueError("DFA validation failed")
+        self._validate_dfa(dfa)
         
         # Core configuration
         self.dfa = dfa
@@ -2629,6 +2625,21 @@ class EnhancedMatcher:
         # Handle empty match fallback
         return self._handle_empty_match_fallback(start_idx, rows, config, match_start_time)
 
+    def _validate_dfa(self, dfa) -> None:
+        """Validate DFA instance and its properties.
+        
+        Args:
+            dfa: The DFA instance to validate
+            
+        Raises:
+            TypeError: If dfa is not a DFA instance
+            ValueError: If DFA validation fails
+        """
+        if not isinstance(dfa, DFA):
+            raise TypeError(f"Expected DFA instance, got {type(dfa)}")
+        
+        if not dfa.validate_pattern():
+            raise ValueError("DFA validation failed")
 
 
     def find_matches(self, rows, config=None, measures=None):
