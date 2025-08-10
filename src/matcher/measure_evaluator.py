@@ -339,15 +339,104 @@ class MeasureEvaluator:
         Preserve the data type of the original value using shared utility.
         """
         return preserve_data_type(original_value, new_value)
-
-    def _build_row_variable_index(self):
-        """Build an index of which variables each row belongs to for faster lookup."""
-        self._row_to_vars = defaultdict(set)
-        for var, indices in self.context.variables.items():
-            for idx in indices:
-                self._row_to_vars[idx].add(var)
+    
+    def _safe_eval_arithmetic(self, expression: str) -> Any:
+        """
+        Safely evaluate arithmetic expressions using AST parsing instead of eval().
         
-        # Pre-compute subset memberships too
+        This method replaces the security-vulnerable eval() usage with a safe
+        AST-based approach that only allows arithmetic operations.
+        
+        Args:
+            expression: Arithmetic expression string (e.g., "1.5 + 2.3 * 4")
+            
+        Returns:
+            Result of the arithmetic expression
+            
+        Raises:
+            ValueError: If expression contains unsafe operations
+            SyntaxError: If expression has invalid syntax
+        """
+        import ast
+        import operator
+        
+        # Supported operators for safe arithmetic evaluation
+        safe_operators = {
+            ast.Add: operator.add,
+            ast.Sub: operator.sub,
+            ast.Mult: operator.mul,
+            ast.Div: operator.truediv,
+            ast.Mod: operator.mod,
+            ast.Pow: operator.pow,
+            ast.USub: operator.neg,
+            ast.UAdd: operator.pos,
+        }
+        
+        def _eval_node(node):
+            """Recursively evaluate AST nodes safely."""
+            if isinstance(node, ast.Constant):  # Python 3.8+
+                return node.value
+            elif isinstance(node, ast.Num):  # Python < 3.8
+                return node.n
+            elif isinstance(node, ast.BinOp):
+                left = _eval_node(node.left)
+                right = _eval_node(node.right)
+                op = safe_operators.get(type(node.op))
+                if op is None:
+                    raise ValueError(f"Unsupported operation: {type(node.op).__name__}")
+                return op(left, right)
+            elif isinstance(node, ast.UnaryOp):
+                operand = _eval_node(node.operand)
+                op = safe_operators.get(type(node.op))
+                if op is None:
+                    raise ValueError(f"Unsupported unary operation: {type(node.op).__name__}")
+                return op(operand)
+            else:
+                raise ValueError(f"Unsupported node type: {type(node).__name__}")
+        
+        try:
+            # Parse the expression into an AST
+            tree = ast.parse(expression, mode='eval')
+            
+            # Evaluate the AST safely
+            result = _eval_node(tree.body)
+            
+            return result
+            
+        except (SyntaxError, ValueError) as e:
+            logger.warning(f"Failed to safely evaluate arithmetic expression '{expression}': {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error evaluating arithmetic expression '{expression}': {e}")
+            raise ValueError(f"Invalid arithmetic expression: {e}")
+
+    def _build_row_variable_index_optimized(self):
+        """
+        Build an optimized index of which variables each row belongs to for faster lookup.
+        
+        This method consolidates the duplicate _build_row_variable_index methods
+        and provides enhanced performance with error handling.
+        """
+        try:
+            self._row_to_vars = defaultdict(set)
+            for var, indices in self.context.variables.items():
+                for idx in indices:
+                    if isinstance(idx, int) and 0 <= idx < len(self.context.rows):
+                        self._row_to_vars[idx].add(var)
+            
+            # Pre-compute subset memberships for performance
+            if hasattr(self.context, 'subsets') and self.context.subsets:
+                for subset_var, component_vars in self.context.subsets.items():
+                    for component_var in component_vars:
+                        if component_var in self.context.variables:
+                            for idx in self.context.variables[component_var]:
+                                self._row_to_vars[idx].add(subset_var)
+            
+            logger.debug(f"Built row variable index with {len(self._row_to_vars)} row mappings")
+            
+        except Exception as e:
+            logger.warning(f"Error building row variable index: {e}")
+            self._row_to_vars = defaultdict(set)
         if hasattr(self.context, 'subsets') and self.context.subsets:
             for subset_name, components in self.context.subsets.items():
                 for comp in components:
@@ -2207,11 +2296,11 @@ class MeasureEvaluator:
             for placeholder, value in substitutions.items():
                 working_expr = working_expr.replace(placeholder, str(value))
             
-            # Evaluate the arithmetic expression safely
+            # Evaluate the arithmetic expression safely using AST
             try:
                 # Only allow safe arithmetic operations
                 if re.match(r'^[\d\.\+\-\*/\(\)\s]+$', working_expr):
-                    result = eval(working_expr)
+                    result = self._safe_eval_arithmetic(working_expr)
                     logger.debug(f"Arithmetic expression {expr} -> {working_expr} = {result}")
                     return result
                 else:

@@ -1957,17 +1957,36 @@ class EnhancedMatcher:
         if hasattr(self.dfa, 'metadata') and 'subset_vars' in self.dfa.metadata:
             context.subsets.update(self.dfa.metadata['subset_vars'])
 
-        # Optional early filtering based on anchor constraints
-        if hasattr(self, '_anchor_metadata') and not self._can_satisfy_anchors(len(rows)):
-            logger.debug(f"Partition cannot satisfy anchor constraints")
+        # Check anchor constraints
+        if not self._check_match_anchors(start_idx, len(rows), state):
             self.timing["find_match"] += time.time() - match_start_time
             return None
         
-        # Check start anchor constraints for the start state
-        if not self._check_anchors(state, start_idx, len(rows), "start"):
-            logger.debug(f"Start state anchor check failed at index {start_idx}")
+        # Check for empty match patterns
+        empty_match_result = self._handle_empty_matches(rows, start_idx, state, context)
+        if empty_match_result:
             self.timing["find_match"] += time.time() - match_start_time
-            return None
+            return empty_match_result
+        
+        # PRODUCTION FIX: Don't check for empty matches immediately
+        # For patterns with back references, we need to try to build a real match first
+        # Empty matches should only be considered as a last resort
+        empty_match = None
+        
+        longest_match = None
+        trans_index = self.transition_index[state]
+        
+        # Check if we have both start and end anchors in the pattern
+        has_both_anchors = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("spans_partition", False)
+        # Check if we have only end anchor in the pattern
+        has_end_anchor = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("has_end_anchor", False)
+        
+        # Debug anchor detection
+        logger.debug(f"Anchor metadata: has_end_anchor={has_end_anchor}, has_both_anchors={has_both_anchors}")
+        if hasattr(self, '_anchor_metadata'):
+            logger.debug(f"Full anchor metadata: {self._anchor_metadata}")
+        else:
+            logger.debug("No _anchor_metadata found")
         
         # PRODUCTION FIX: Don't check for empty matches immediately
         # For patterns with back references, we need to try to build a real match first
@@ -1997,44 +2016,6 @@ class EnhancedMatcher:
         
         # Track if we're in a pattern with exclusions
         has_exclusions = hasattr(self, 'excluded_vars') and self.excluded_vars
-        
-        # PRODUCTION FIX: For reluctant star patterns, check if we start in an accepting state
-        # If so, prefer empty match immediately instead of trying to build longer matches
-        if self.has_reluctant_star and self.dfa.states[state].is_accept:
-            logger.debug(f"Reluctant star pattern starting in accepting state - preferring empty match at position {start_idx}")
-            # Return empty match immediately to satisfy B*? preference for zero matches
-            empty_match = {
-                "start": start_idx,
-                "end": -1,  # Empty match
-                "variables": {},
-                "state": state,
-                "is_empty": True,
-                "excluded_vars": set(),
-                "excluded_rows": [],
-                "empty_pattern_rows": [start_idx],
-                "has_empty_alternation": True
-            }
-            self.timing["find_match"] += time.time() - match_start_time
-            return empty_match
-        
-        # PRODUCTION FIX: For patterns with empty alternation like (() | A), prefer empty branch
-        # If the start state is accepting and the pattern has empty alternation, prefer empty match
-        if self.has_empty_alternation and self.dfa.states[state].is_accept:
-            logger.debug(f"Empty alternation pattern starting in accepting state - preferring empty match at position {start_idx}")
-            # Return empty match immediately to satisfy (() | A) preference for empty branch
-            empty_match = {
-                "start": start_idx,
-                "end": -1,  # Empty match
-                "variables": {},
-                "state": state,
-                "is_empty": True,
-                "excluded_vars": set(),
-                "excluded_rows": [],
-                "empty_pattern_rows": [start_idx],
-                "has_empty_alternation": True
-            }
-            self.timing["find_match"] += time.time() - match_start_time
-            return empty_match
         
         while current_idx < len(rows):
             row = rows[current_idx]
@@ -4204,6 +4185,81 @@ class EnhancedMatcher:
         
         logger.debug("No complex back-references detected")
         return False
+
+    def _handle_empty_matches(self, rows: List[Dict[str, Any]], start_idx: int, 
+                             state: int, context: RowContext) -> Optional[Dict[str, Any]]:
+        """
+        Handle empty match patterns including reluctant star and empty alternations.
+        
+        This method determines if the current pattern should produce an empty match
+        based on pattern characteristics like reluctant quantifiers and empty alternations.
+        
+        Args:
+            rows: Input rows
+            start_idx: Starting index
+            state: Current DFA state
+            context: Row matching context
+            
+        Returns:
+            Empty match result if applicable, None otherwise
+        """
+        # PRODUCTION FIX: For reluctant star patterns, check if we start in an accepting state
+        # If so, prefer empty match immediately instead of trying to build longer matches
+        if self.has_reluctant_star and self.dfa.states[state].is_accept:
+            logger.debug(f"Reluctant star pattern starting in accepting state - preferring empty match at position {start_idx}")
+            return {
+                "start": start_idx,
+                "end": -1,  # Empty match
+                "variables": {},
+                "state": state,
+                "is_empty": True,
+                "excluded_vars": set(),
+                "excluded_rows": [],
+                "empty_pattern_rows": [start_idx],
+                "has_empty_alternation": True
+            }
+        
+        # PRODUCTION FIX: For patterns with empty alternation like (() | A), prefer empty branch
+        # If the start state is accepting and the pattern has empty alternation, prefer empty match
+        if self.has_empty_alternation and self.dfa.states[state].is_accept:
+            logger.debug(f"Empty alternation pattern starting in accepting state - preferring empty match at position {start_idx}")
+            return {
+                "start": start_idx,
+                "end": -1,  # Empty match
+                "variables": {},
+                "state": state,
+                "is_empty": True,
+                "excluded_vars": set(),
+                "excluded_rows": [],
+                "empty_pattern_rows": [start_idx],
+                "has_empty_alternation": True
+            }
+        
+        return None
+
+    def _check_match_anchors(self, start_idx: int, num_rows: int, state: int) -> bool:
+        """
+        Check if anchor constraints can be satisfied for this match attempt.
+        
+        Args:
+            start_idx: Starting index for the match
+            num_rows: Total number of rows
+            state: Current DFA state
+            
+        Returns:
+            True if anchor constraints are satisfied, False otherwise
+        """
+        # Optional early filtering based on anchor constraints
+        if hasattr(self, '_anchor_metadata') and not self._can_satisfy_anchors(num_rows):
+            logger.debug(f"Partition cannot satisfy anchor constraints")
+            return False
+        
+        # Check start anchor constraints for the start state
+        if not self._check_anchors(state, start_idx, num_rows, "start"):
+            logger.debug(f"Start state anchor check failed at index {start_idx}")
+            return False
+        
+        return True
 
     def _handle_complex_back_references(self, rows: List[Dict[str, Any]], start_idx: int, 
                                       context: RowContext, config=None) -> Optional[Dict[str, Any]]:
