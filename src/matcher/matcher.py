@@ -1879,8 +1879,7 @@ class EnhancedMatcher:
             logger.debug("PERMUTE pattern with alternations detected - using specialized handler")
             match = self._handle_permute_with_alternations(rows, start_idx, context, config)
             if match:
-                self.timing["find_match"] += time.time() - match_start_time
-                return match
+                return self._record_timing_and_return("find_match", match_start_time, match)
 
         # Check if backtracking is needed for this pattern
         needs_backtracking = self._needs_backtracking(rows, start_idx, context)
@@ -1907,8 +1906,7 @@ class EnhancedMatcher:
             else:
                 self.backtracking_stats['backtracking_failures'] += 1
             
-            self.timing["find_match"] += time.time() - match_start_time
-            return result
+            return self._record_timing_and_return("find_match", match_start_time, result)
 
         # PRODUCTION FIX: Special handling for complex back-reference patterns
         # These patterns require constraint satisfaction and backtracking
@@ -1919,8 +1917,7 @@ class EnhancedMatcher:
             logger.debug("Complex back-reference pattern detected - using constraint-based handler")
             match = self._handle_complex_back_references(rows, start_idx, context, config)
             if match:
-                self.timing["find_match"] += time.time() - match_start_time
-                return match
+                return self._record_timing_and_return("find_match", match_start_time, match)
         
         state = self.start_state
         current_idx = start_idx
@@ -1934,34 +1931,12 @@ class EnhancedMatcher:
 
         # Check anchor constraints
         if not self._check_match_anchors(start_idx, len(rows), state):
-            self.timing["find_match"] += time.time() - match_start_time
-            return None
+            return self._record_timing_and_return("find_match", match_start_time, None)
         
         # Check for empty match patterns
         empty_match_result = self._handle_empty_matches(rows, start_idx, state, context)
         if empty_match_result:
-            self.timing["find_match"] += time.time() - match_start_time
-            return empty_match_result
-        
-        # PRODUCTION FIX: Don't check for empty matches immediately
-        # For patterns with back references, we need to try to build a real match first
-        # Empty matches should only be considered as a last resort
-        empty_match = None
-        
-        longest_match = None
-        trans_index = self.transition_index[state]
-        
-        # Check if we have both start and end anchors in the pattern
-        has_both_anchors = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("spans_partition", False)
-        # Check if we have only end anchor in the pattern
-        has_end_anchor = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("has_end_anchor", False)
-        
-        # Debug anchor detection
-        logger.debug(f"Anchor metadata: has_end_anchor={has_end_anchor}, has_both_anchors={has_both_anchors}")
-        if hasattr(self, '_anchor_metadata'):
-            logger.debug(f"Full anchor metadata: {self._anchor_metadata}")
-        else:
-            logger.debug("No _anchor_metadata found")
+            return self._record_timing_and_return("find_match", match_start_time, empty_match_result)
         
         # PRODUCTION FIX: Don't check for empty matches immediately
         # For patterns with back references, we need to try to build a real match first
@@ -2088,15 +2063,15 @@ class EnhancedMatcher:
                         
                         # Set the current variable being evaluated for self-references
                         context.current_var = var
-                        logger.debug(f"  [DEBUG] Set context.current_var = {var}")
+                        logger.debug(f"Set context.current_var = {var}")
                         
                         # First check if target state's START anchor constraints are satisfied
                         if not self._check_anchors(target, current_idx, len(rows), "start"):
-                            logger.debug(f"  Start anchor check failed for transition to state {target} with var {var}")
+                            logger.debug(f"Start anchor check failed for transition to state {target} with var {var}")
                             continue
                             
                         # Then evaluate the condition with the current row and context
-                        logger.debug(f"    DEBUG: Calling condition function with row={row}")
+                        logger.debug(f"Calling condition function with row={row}")
                         
                         # Clear any previous navigation context error flag
                         if hasattr(context, '_navigation_context_error'):
@@ -2139,20 +2114,20 @@ class EnhancedMatcher:
                         delattr(context, '_navigation_context_error')
                         # Do not skip the row - let the condition evaluation proceed normally
                     
-                    logger.debug(f"    Condition {'passed' if result else 'failed'} for {var}")
-                    logger.debug(f"    DEBUG: condition result={result}, type={type(result)}")
+                    logger.debug(f"Condition {'passed' if result else 'failed'} for {var}")
+                    logger.debug(f"condition result={result}, type={type(result)}")
                     
                     if result:
                         # Store this as a valid transition
                         valid_transitions.append((var, target, is_excluded))
                         
                 except Exception as e:
-                    logger.error(f"  Error evaluating condition for {var}: {str(e)}")
+                    logger.error(f"Error evaluating condition for {var}: {str(e)}")
                     logger.debug("Exception details:", exc_info=True)
                     continue
                 finally:
                     # Clear the current variable after evaluation
-                    logger.debug(f"  [DEBUG] Clearing context.current_var (was {getattr(context, 'current_var', 'None')})")
+                    logger.debug(f"Clearing context.current_var (was {getattr(context, 'current_var', 'None')})")
                     context.current_var = None
             
             # Choose the best transition from valid ones with enhanced back reference support
@@ -2402,8 +2377,7 @@ class EnhancedMatcher:
                         logger.debug(f"PERMUTE minimal match: vars={list(var_assignments.keys())}, rows={current_idx - start_idx}")
                         
                         # Return immediately for minimal matching - don't look for longer matches
-                        self.timing["find_match"] += time.time() - match_start_time  
-                        return minimal_match
+                        return self._record_timing_and_return("find_match", match_start_time, minimal_match)
                 
                 # For patterns with both start and end anchors, we need to check if we've consumed the entire partition
                 if has_both_anchors and current_idx < len(rows):
@@ -2535,8 +2509,7 @@ class EnhancedMatcher:
             logger.debug(f"Empty match: {empty_match}")
             if longest_match:
                 logger.debug(f"Non-empty match (rejected): {longest_match}")
-            self.timing["find_match"] += time.time() - match_start_time
-            return empty_match
+            return self._record_timing_and_return("find_match", match_start_time, empty_match)
         
         # Standard precedence: prefer non-empty matches
         if longest_match and longest_match["end"] >= longest_match["start"]:  # Ensure it's a valid match
@@ -2593,8 +2566,7 @@ class EnhancedMatcher:
                     logger.debug(f"Updated excluded_rows: {all_excluded}")
                 else:
                     logger.debug(f"No rows marked for exclusion by complex patterns")
-            self.timing["find_match"] += time.time() - match_start_time
-            return longest_match
+            return self._record_timing_and_return("find_match", match_start_time, longest_match)
         else:
             # PRODUCTION FIX: Only check for empty matches after we've tried to find a real match
             # For patterns with back references, we should only create empty matches if:
@@ -2646,21 +2618,17 @@ class EnhancedMatcher:
             if is_explicit_empty_pattern:
                 # For explicit empty patterns like (), always return empty matches regardless of skip mode
                 logger.debug(f"Explicit empty pattern '()' - returning empty match at position {start_idx}")
-                self.timing["find_match"] += time.time() - match_start_time
-                return empty_match
+                return self._record_timing_and_return("find_match", match_start_time, empty_match)
             elif config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST):
                 # For fallback empty matches from failed real patterns, apply skip mode suppression
                 logger.debug(f"{config.skip_mode} mode: not returning fallback empty match, will advance to next position")
-                self.timing["find_match"] += time.time() - match_start_time
-                return None
+                return self._record_timing_and_return("find_match", match_start_time, None)
             else:
                 logger.debug(f"Using empty match as fallback: {empty_match}")
-                self.timing["find_match"] += time.time() - match_start_time
-                return empty_match
+                return self._record_timing_and_return("find_match", match_start_time, empty_match)
         else:
             logger.debug(f"No match found starting at index {start_idx}")
-            self.timing["find_match"] += time.time() - match_start_time
-            return None
+            return self._record_timing_and_return("find_match", match_start_time, None)
 
         # Handle empty match fallback
         return self._handle_empty_match_fallback(start_idx, rows, config, match_start_time)
@@ -2984,6 +2952,11 @@ class EnhancedMatcher:
         
         # Threading support
         self._lock = threading.RLock()
+
+    def _record_timing_and_return(self, method_name: str, start_time: float, result):
+        """Helper method to record timing and return result."""
+        self.timing[method_name] += time.time() - start_time
+        return result
 
     def _setup_caching_and_optimization(self) -> None:
         """Setup caching structures and optimization components with minimal overhead.
