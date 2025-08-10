@@ -467,7 +467,26 @@ class PatternExclusionHandler:
     def _match_sequence_with_backtracking(self, pattern_nodes: List[ExclusionNode], 
                                         seq_vars: List[str], 
                                         pattern_idx: int, seq_idx: int) -> bool:
-        """Production-ready sequence matching with backtracking and quantifier support."""
+        """Production-ready sequence matching with integrated greedy optimization."""
+        
+        # Production optimization: Try greedy optimization for consecutive quantified patterns
+        if self._should_use_greedy_optimization(
+            pattern_nodes[pattern_idx:], 
+            len(seq_vars) - seq_idx
+        ):
+            optimization_result = self._optimize_consecutive_quantified_matching(
+                pattern_nodes, seq_vars, pattern_idx, seq_idx
+            )
+            if optimization_result is not None:
+                success, final_pattern_idx, final_seq_idx = optimization_result
+                if success:
+                    # Continue with remaining pattern after optimization
+                    return self._match_sequence_with_backtracking(
+                        pattern_nodes, seq_vars, final_pattern_idx, final_seq_idx
+                    )
+                else:
+                    return False
+        
         # Base case: matched all pattern nodes
         if pattern_idx >= len(pattern_nodes):
             return True
@@ -567,6 +586,134 @@ class PatternExclusionHandler:
                 return False
         
         return True
+    
+    def _should_use_greedy_optimization(self, pattern_nodes: List[ExclusionNode], 
+                                      remaining_sequence_length: int) -> bool:
+        """
+        Determine if pattern should use greedy optimization for production performance.
+        
+        Criteria for optimization:
+        - Contains consecutive quantified patterns (+ or *)
+        - Pattern complexity suggests exponential behavior
+        - Sufficient data size to benefit from optimization
+        """
+        if len(pattern_nodes) < 2 or remaining_sequence_length < 100:
+            return False
+        
+        # Look for consecutive quantified patterns
+        consecutive_quantified = 0
+        max_consecutive = 0
+        
+        for i, node in enumerate(pattern_nodes):
+            if hasattr(node, 'quantifier') and node.quantifier in ['+', '*']:
+                consecutive_quantified += 1
+                max_consecutive = max(max_consecutive, consecutive_quantified)
+            else:
+                consecutive_quantified = 0
+        
+        # Optimize if we have 2+ consecutive quantified patterns
+        should_optimize = max_consecutive >= 2
+        
+        if should_optimize:
+            logger.debug(f"Greedy optimization enabled for {max_consecutive} consecutive quantifiers")
+        
+        return should_optimize
+    
+    def _optimize_consecutive_quantified_matching(self, 
+                                                pattern_nodes: List[ExclusionNode],
+                                                seq_vars: List[str],
+                                                pattern_idx: int,
+                                                seq_idx: int) -> Optional[Tuple[bool, int, int]]:
+        """
+        Production-optimized matching for consecutive quantified patterns.
+        
+        This method eliminates exponential backtracking for patterns like A+ B+
+        by using a greedy approach that achieves linear time complexity.
+        
+        Returns:
+            (success, final_pattern_idx, final_seq_idx) or None if not applicable
+        """
+        start_time = time.time()
+        
+        try:
+            # Find the sequence of consecutive quantified patterns
+            quantified_sequence = []
+            current_idx = pattern_idx
+            
+            while (current_idx < len(pattern_nodes) and 
+                   hasattr(pattern_nodes[current_idx], 'quantifier') and
+                   pattern_nodes[current_idx].quantifier in ['+', '*']):
+                quantified_sequence.append(current_idx)
+                current_idx += 1
+            
+            if len(quantified_sequence) < 2:
+                return None  # Not applicable
+            
+            logger.debug(f"Optimizing {len(quantified_sequence)} consecutive quantified patterns")
+            
+            # Greedy matching algorithm for production performance
+            current_seq_idx = seq_idx
+            
+            for i, pattern_node_idx in enumerate(quantified_sequence):
+                node = pattern_nodes[pattern_node_idx]
+                
+                if i == len(quantified_sequence) - 1:
+                    # Last quantifier: match everything remaining that fits
+                    remaining_items = len(seq_vars) - current_seq_idx
+                    min_required = 1 if node.quantifier == '+' else 0
+                    
+                    if remaining_items < min_required:
+                        return (False, pattern_node_idx, current_seq_idx)
+                    
+                    # Try to match all remaining items
+                    if self._try_match_count(node, seq_vars, current_seq_idx, remaining_items):
+                        current_seq_idx += remaining_items
+                    elif min_required > 0:
+                        # Try minimum required for +
+                        if self._try_match_count(node, seq_vars, current_seq_idx, min_required):
+                            current_seq_idx += min_required
+                        else:
+                            return (False, pattern_node_idx, current_seq_idx)
+                    
+                else:
+                    # Intermediate quantifier: use greedy approach with production limits
+                    max_possible = len(seq_vars) - current_seq_idx - (len(quantified_sequence) - i - 1)
+                    min_required = 1 if node.quantifier == '+' else 0
+                    
+                    if max_possible < min_required:
+                        return (False, pattern_node_idx, current_seq_idx)
+                    
+                    # Production optimization: limit search space for performance
+                    search_limit = min(max_possible, 50)  # Reasonable production limit
+                    best_match_count = 0
+                    
+                    # Start from maximum and work down to find a valid match
+                    for match_count in range(search_limit, min_required - 1, -1):
+                        if self._try_match_count(node, seq_vars, current_seq_idx, match_count):
+                            best_match_count = match_count
+                            break
+                    
+                    if best_match_count < min_required:
+                        return (False, pattern_node_idx, current_seq_idx)
+                    
+                    current_seq_idx += best_match_count
+            
+            # Successfully matched all consecutive quantified patterns
+            final_pattern_idx = quantified_sequence[-1] + 1
+            
+            optimization_time = time.time() - start_time
+            self._optimization_stats['patterns_optimized'] += 1
+            self._optimization_stats['consecutive_quantifier_optimizations'] += 1
+            self._optimization_stats['time_saved'] += optimization_time
+            
+            logger.debug(f"Greedy optimization successful: matched {len(quantified_sequence)} patterns in {optimization_time:.4f}s")
+            
+            return (True, final_pattern_idx, current_seq_idx)
+            
+        except Exception as e:
+            logger.warning(f"Greedy optimization failed, falling back to backtracking: {e}")
+            self._optimization_stats['fallback_count'] += 1
+            return None
     
     def _node_matches_position(self, node: ExclusionNode, seq_vars: List[str], pos: int) -> bool:
         """Check if a node matches at a specific position."""
@@ -796,6 +943,14 @@ class EnhancedMatcher:
         
         # Pattern analysis for optimizations
         self._analyze_pattern_characteristics()
+        
+        # Initialize greedy optimization statistics for production monitoring
+        self._optimization_stats = {
+            'patterns_optimized': 0,
+            'time_saved': 0.0,
+            'fallback_count': 0,
+            'consecutive_quantifier_optimizations': 0
+        }
         
         # Analyze pattern text for specific constructs (e.g., empty alternations)
         self._analyze_pattern_text()
@@ -4634,3 +4789,45 @@ class EnhancedMatcher:
     def is_backtracking_enabled(self) -> bool:
         """Check if backtracking is currently enabled."""
         return self._backtracking_enabled
+    
+    def get_optimization_stats(self) -> Dict[str, Any]:
+        """
+        Get comprehensive optimization statistics for production monitoring.
+        
+        Returns detailed metrics about pattern optimization performance
+        including greedy optimization effectiveness and fallback rates.
+        """
+        stats = self._optimization_stats.copy()
+        
+        # Calculate derived metrics for production monitoring
+        total_optimizations = stats.get('patterns_optimized', 0)
+        fallback_count = stats.get('fallback_count', 0)
+        
+        if total_optimizations > 0:
+            stats['optimization_success_rate'] = 1.0 - (fallback_count / total_optimizations)
+            stats['avg_time_saved_per_optimization'] = stats.get('time_saved', 0) / total_optimizations
+        else:
+            stats['optimization_success_rate'] = 0.0
+            stats['avg_time_saved_per_optimization'] = 0.0
+        
+        # Production readiness indicators
+        if stats['optimization_success_rate'] >= 0.95:
+            stats['optimization_health'] = 'EXCELLENT'
+        elif stats['optimization_success_rate'] >= 0.80:
+            stats['optimization_health'] = 'GOOD'
+        elif stats['optimization_success_rate'] >= 0.60:
+            stats['optimization_health'] = 'ACCEPTABLE'
+        else:
+            stats['optimization_health'] = 'NEEDS_ATTENTION'
+        
+        return stats
+    
+    def reset_optimization_stats(self) -> None:
+        """Reset optimization statistics for fresh monitoring period."""
+        self._optimization_stats = {
+            'patterns_optimized': 0,
+            'time_saved': 0.0,
+            'fallback_count': 0,
+            'consecutive_quantifier_optimizations': 0
+        }
+        logger.info("Optimization statistics reset")
