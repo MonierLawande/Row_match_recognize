@@ -21,6 +21,8 @@ Version: 2.1.0
 
 import time
 import threading
+import os
+import logging
 from collections import defaultdict
 from typing import List, Dict, Any, Optional, Set, Tuple, Union, Callable, Iterator, NamedTuple
 from enum import Enum
@@ -39,6 +41,10 @@ from src.utils.pattern_cache import get_pattern_cache
 
 # Module logger
 logger = get_logger(__name__)
+
+# Production optimization: Disable expensive debug logging in production
+PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'false').lower() == 'true'
+DEBUG_ENABLED = not PRODUCTION_MODE and logger.isEnabledFor(logging.DEBUG)
 
 # Type aliases for better readability
 MatchResult = Dict[str, Any]
@@ -1071,35 +1077,7 @@ class EnhancedMatcher:
         if re.search(r'[*+?]|\{[0-9,]+\}', pattern):
             self.has_quantifiers = True
     
-    def _extract_dfa_metadata(self) -> None:
-        """Extract and process metadata from DFA for optimization."""
-        # Initialize anchor metadata
-        self._anchor_metadata = {
-            "has_start_anchor": False,
-            "has_end_anchor": False,
-            "spans_partition": False,
-            "start_anchor_states": set(),
-            "end_anchor_accepting_states": set()
-        }
-        
-        # Extract anchor information from DFA states
-        for i, state in enumerate(self.dfa.states):
-            if state.is_anchor:
-                if state.anchor_type == PatternTokenType.ANCHOR_START:
-                    self._anchor_metadata["has_start_anchor"] = True
-                    self._anchor_metadata["start_anchor_states"].add(i)
-                elif state.anchor_type == PatternTokenType.ANCHOR_END:
-                    self._anchor_metadata["has_end_anchor"] = True
-                    if state.is_accept:
-                        self._anchor_metadata["end_anchor_accepting_states"].add(i)
-        
-        # Check if pattern spans partition
-        if (self._anchor_metadata["has_start_anchor"] and 
-            self._anchor_metadata["has_end_anchor"]):
-            self._anchor_metadata["spans_partition"] = True
-        
-        # Update DFA metadata
-        self.dfa.metadata.update(self._anchor_metadata)
+
     
     def _validate_configuration(self) -> None:
         """Validate matcher configuration for consistency and correctness."""
@@ -1522,7 +1500,8 @@ class EnhancedMatcher:
                     if has_complex_condition:
                         # For complex conditions, always allow the transition but mark for later validation
                         condition_result = True
-                        logger.debug(f"  Transition {var} -> {target_state}: deferred complex condition")
+                        if DEBUG_ENABLED:
+                            logger.debug(f"  Transition {var} -> {target_state}: deferred complex condition")
                     else:
                         # Check condition with caching for simple conditions
                         cache_key = (var, state.row_index, id(current_row))
@@ -1532,7 +1511,8 @@ class EnhancedMatcher:
                             condition_result = condition(current_row, context)
                             self._condition_cache[cache_key] = condition_result
                         
-                        logger.debug(f"  Transition {var} -> {target_state}: condition={condition_result}")
+                        if DEBUG_ENABLED:
+                            logger.debug(f"  Transition {var} -> {target_state}: condition={condition_result}")
                     
                     if not condition_result:
                         continue
@@ -2968,7 +2948,6 @@ class EnhancedMatcher:
         
         # Fast caching setup - avoid expensive imports and initialization
         try:
-            from src.utils.pattern_cache import get_pattern_cache
             self._pattern_cache = get_pattern_cache()
         except ImportError:
             self._pattern_cache = {}
