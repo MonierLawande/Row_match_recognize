@@ -160,6 +160,14 @@ class PatternExclusionHandler:
         self.exclusion_trees: List[ExclusionNode] = []
         self.complex_exclusions: List[Dict[str, Any]] = []
         
+        # Initialize optimization stats for performance tracking
+        self._optimization_stats = {
+            'patterns_optimized': 0,
+            'consecutive_quantifier_optimizations': 0,
+            'time_saved': 0.0,
+            'fallback_count': 0
+        }
+        
         # Parse all exclusions (both simple and complex)
         self._parse_all_exclusions()
     
@@ -903,6 +911,10 @@ class EnhancedMatcher:
             partition_columns, order_columns
         )
         
+        # Analyze pattern for special features like empty alternations
+        if self.original_pattern:
+            self._analyze_pattern_text()
+        
         # Performance tracking and threading setup
         self._setup_performance_tracking()
         
@@ -992,13 +1004,18 @@ class EnhancedMatcher:
     
     def _analyze_pattern_characteristics(self) -> None:
         """Analyze pattern characteristics for optimization and behavior."""
-        # Initialize pattern flags
-        self.has_empty_alternation = False
-        self.has_reluctant_star = False
-        self.has_reluctant_plus = False
+        # Initialize pattern flags (preserve existing analysis if already set)
+        existing_empty_alternation = getattr(self, 'has_empty_alternation', False)
+        existing_reluctant_star = getattr(self, 'has_reluctant_star', False)
+        existing_reluctant_plus = getattr(self, 'has_reluctant_plus', False)
+        existing_quantifiers = getattr(self, 'has_quantifiers', False)
+        
+        self.has_empty_alternation = existing_empty_alternation
+        self.has_reluctant_star = existing_reluctant_star
+        self.has_reluctant_plus = existing_reluctant_plus
         self.is_permute_pattern = False
         self.has_alternations = False
-        self.has_quantifiers = False
+        self.has_quantifiers = existing_quantifiers
         self.has_exclusions = bool(self.exclusion_ranges)
         
         # Analyze DFA metadata
@@ -1016,15 +1033,29 @@ class EnhancedMatcher:
         
         # Check for empty alternation patterns
         if '()' in pattern and '|' in pattern:
+            # More comprehensive patterns to catch empty alternations:
+            # - (() | A) or (A | ()) 
+            # - () | A or A | ()
+            # - Any combination with optional whitespace
             empty_alternation_patterns = [
-                r'\(\)\s*\|',  # () |
-                r'\|\s*\(\)',  # | ()
+                r'\(\s*\(\)\s*\|',      # (() |
+                r'\|\s*\(\)\s*\)',      # | ())
+                r'\(\)\s*\|',           # () |
+                r'\|\s*\(\)',           # | ()
+                r'\(\s*\|\s*\(\)\s*\)', # ( | () )
+                r'\(\s*\(\)\s*\|\s*',   # (() | 
             ]
             for regex_pattern in empty_alternation_patterns:
                 if re.search(regex_pattern, pattern):
                     self.has_empty_alternation = True
-                    logger.debug(f"Pattern contains empty alternation: {pattern}")
+                    logger.debug(f"Pattern contains empty alternation (pattern: {regex_pattern}): {pattern}")
                     break
+            
+            # Additional check: if we have both () and | in the pattern, it's likely an empty alternation
+            if not self.has_empty_alternation:
+                # Simple heuristic: if pattern contains both () and | it's probably empty alternation
+                logger.debug(f"Pattern contains both () and |, assuming empty alternation: {pattern}")
+                self.has_empty_alternation = True
         
         # Check for reluctant quantifiers
         if re.search(r'\*\?', pattern):
@@ -1930,13 +1961,14 @@ class EnhancedMatcher:
         
         # Check for empty match patterns
         empty_match_result = self._handle_empty_matches(rows, start_idx, state, context)
-        if empty_match_result:
-            return self._record_timing_and_return("find_match", match_start_time, empty_match_result)
         
-        # PRODUCTION FIX: Don't check for empty matches immediately
-        # For patterns with back references, we need to try to build a real match first
-        # Empty matches should only be considered as a last resort
-        empty_match = None
+        # For empty alternation patterns like (() | A), we need to preserve the empty match
+        # but also try to find real matches to compare precedence
+        empty_match = empty_match_result
+        
+        # For patterns that require immediate empty match (reluctant star), return immediately
+        if empty_match_result and self.has_reluctant_star:
+            return self._record_timing_and_return("find_match", match_start_time, empty_match_result)
         
         longest_match = None
         trans_index = self.transition_index[state]
@@ -2024,105 +2056,74 @@ class EnhancedMatcher:
                 
                 logger.debug(f"  Evaluating condition for var: {var}")
                 try:
-                    # PERFORMANCE OPTIMIZATION: Lightweight condition evaluation caching
-                    self._cache_stats['evaluations'] += 1
+                    # PERFORMANCE OPTIMIZATION: Fast condition evaluation with minimal overhead
                     
-                    # Simple cache key for condition evaluation
-                    cache_key = (var, target, current_idx, hash(str(row)) if isinstance(row, dict) else str(row))
+                    # Optimized cache key generation - avoid expensive hash operations
+                    if isinstance(row, dict) and len(row) <= 5:  # Fast path for small rows
+                        row_key = tuple(sorted(row.items()))
+                    else:
+                        row_key = id(row)  # Use object id for faster lookup
                     
-                    # Check lightweight cache first
-                    if cache_key in self._condition_eval_cache:
-                        cached_result = self._condition_eval_cache[cache_key]
-                        
-                        # In test mode, simple caching without TTL overhead
+                    cache_key = (var, target, current_idx, row_key)
+                    
+                    # Fast cache lookup without expensive operations
+                    cached_result = self._condition_eval_cache.get(cache_key)
+                    
+                    if cached_result is not None:
+                        # Fast cache hit path
                         if self._condition_cache_pool is None:  # Test mode
                             result = cached_result
-                            self._cache_stats['hits'] += 1
-                            logger.debug(f"    Cache HIT for {var}: {result}")
-                        else:  # Production mode with TTL
-                            if time.time() - cached_result.get('timestamp', 0) < 300:  # 5 minute TTL
+                        else:  # Production mode - simplified TTL check
+                            if 'timestamp' not in cached_result or (time.time() - cached_result['timestamp']) < 300:
                                 result = cached_result['result']
-                                self._cache_stats['hits'] += 1
-                                logger.debug(f"    Cache HIT for {var}: {result}")
                             else:
-                                del self._condition_eval_cache[cache_key]
-                                cached_result = None
-                    else:
-                        cached_result = None
+                                cached_result = None  # Expired
                     
-                    if not cached_result:
-                        self._cache_stats['misses'] += 1
-                        
-                        # Use pre-computed or computed exclusion status
-                        logger.debug(f"  Variable {var} exclusion status: {is_excluded}")
+                    if cached_result is None:
+                        # Cache miss - evaluate condition
+                        logger.debug(f"Variable {var} exclusion status: {is_excluded}")
                         
                         # Set the current variable being evaluated for self-references
                         context.current_var = var
-                        logger.debug(f"Set context.current_var = {var}")
                         
                         # First check if target state's START anchor constraints are satisfied
                         if not self._check_anchors(target, current_idx, len(rows), "start"):
-                            logger.debug(f"Start anchor check failed for transition to state {target} with var {var}")
                             continue
                             
-                        # Then evaluate the condition with the current row and context
-                        logger.debug(f"Calling condition function with row={row}")
-                        
                         # Clear any previous navigation context error flag
                         if hasattr(context, '_navigation_context_error'):
                             delattr(context, '_navigation_context_error')
                         
                         result = condition(row, context)
                         
-                        # Cache the result based on mode
+                        # Optimized cache storage
                         if self._condition_cache_pool is None:  # Test mode - simple caching
                             self._condition_eval_cache[cache_key] = result
                         else:  # Production mode - with object pooling
                             result_obj = self._condition_cache_pool.acquire()
                             result_obj['result'] = result
                             result_obj['timestamp'] = time.time()
-                            result_obj['vars'] = {var: result}
                             self._condition_eval_cache[cache_key] = result_obj
                         
-                        # Lightweight cache size management
-                        if len(self._condition_eval_cache) > 1000:  # Reduced cache size for tests
-                            # Simple LRU eviction - remove oldest 20%
-                            items_to_remove = list(self._condition_eval_cache.keys())[:200]
-                            for key_to_remove in items_to_remove:
-                                removed_obj = self._condition_eval_cache.pop(key_to_remove)
-                                if self._condition_cache_pool and isinstance(removed_obj, dict) and 'result' in removed_obj:
+                        # Efficient cache eviction - only check occasionally
+                        cache_size = len(self._condition_eval_cache)
+                        if cache_size > 1000 and cache_size % 100 == 0:  # Check every 100 additions
+                            # Fast eviction - remove oldest 10%
+                            keys_to_remove = list(self._condition_eval_cache.keys())[:cache_size // 10]
+                            for key_to_remove in keys_to_remove:
+                                removed_obj = self._condition_eval_cache.pop(key_to_remove, None)
+                                if self._condition_cache_pool and isinstance(removed_obj, dict):
                                     self._condition_cache_pool.release(removed_obj)
                     
-                    # Update cache statistics efficiently
-                    self._cache_stats['cache_size'] = len(self._condition_eval_cache)
-                    if self._cache_stats['evaluations'] > 0:
-                        self._cache_stats['hit_rate'] = (self._cache_stats['hits'] / 
-                                                       self._cache_stats['evaluations'] * 100)
-                    
-                    # Check if condition failed due to navigation context unavailability
-                    # NOTE: Only skip rows on actual navigation errors, not on normal boundary conditions
-                    # PREV() returning None on row 0 is normal SQL behavior and should not skip the row
-                    if not result and hasattr(context, '_navigation_context_error'):
-                        logger.debug(f"    Condition failed for {var} due to actual navigation context error (exception occurred)")
-                        # Only skip if there was an actual exception, not normal boundary behavior
-                        # Remove the error flag and continue evaluation - this allows normal SQL NULL semantics
-                        delattr(context, '_navigation_context_error')
-                        # Do not skip the row - let the condition evaluation proceed normally
-                    
-                    logger.debug(f"Condition {'passed' if result else 'failed'} for {var}")
-                    logger.debug(f"condition result={result}, type={type(result)}")
-                    
+                    # Skip redundant navigation error handling in production
                     if result:
-                        # Store this as a valid transition
                         valid_transitions.append((var, target, is_excluded))
                         
                 except Exception as e:
                     logger.error(f"Error evaluating condition for {var}: {str(e)}")
-                    logger.debug("Exception details:", exc_info=True)
                     continue
                 finally:
                     # Clear the current variable after evaluation
-                    logger.debug(f"Clearing context.current_var (was {getattr(context, 'current_var', 'None')})")
                     context.current_var = None
             
             # Choose the best transition from valid ones with enhanced back reference support
@@ -2388,21 +2389,29 @@ class EnhancedMatcher:
                         logger.debug(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
                         continue
                 
-                # For reluctant plus quantifiers, stop at the first valid match (early termination)
+                # PRODUCTION FIX: Proper reluctant quantifier handling
+                # For reluctant quantifiers (+?, *?), we need to find MINIMAL matches
                 if self.has_reluctant_plus:
-                    logger.debug(f"Reluctant plus pattern detected - using early termination at first valid match")
-                    longest_match = {
-                        "start": start_idx,
-                        "end": current_idx - 1,
-                        "variables": {k: v[:] for k, v in var_assignments.items()},
-                        "state": state,
-                        "is_empty": False,
-                        "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
-                        "excluded_rows": excluded_rows.copy(),
-                        "has_empty_alternation": self.has_empty_alternation
-                    }
-                    logger.debug(f"  Reluctant plus match (early termination): {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
-                    break  # Early termination for reluctant plus
+                    # Check if we've found a valid minimal match
+                    is_minimal_match = self._is_valid_minimal_match(
+                        var_assignments, state, start_idx, current_idx - 1, rows, has_end_anchor, has_both_anchors
+                    )
+                    
+                    if is_minimal_match:
+                        logger.debug(f"Reluctant plus: found minimal match at {start_idx}-{current_idx-1}")
+                        longest_match = {
+                            "start": start_idx,
+                            "end": current_idx - 1,
+                            "variables": {k: v[:] for k, v in var_assignments.items()},
+                            "state": state,
+                            "is_empty": False,
+                            "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                            "excluded_rows": excluded_rows.copy(),
+                            "has_empty_alternation": self.has_empty_alternation,
+                            "is_minimal": True
+                        }
+                        logger.debug(f"  Reluctant plus minimal match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                        break  # Take the minimal match
                 
                 # PRODUCTION FIX: For reluctant star quantifiers, prefer empty matches when possible
                 if self.has_reluctant_star:
@@ -2949,112 +2958,93 @@ class EnhancedMatcher:
         self._lock = threading.RLock()
 
     def _record_timing_and_return(self, method_name: str, start_time: float, result):
-        """Helper method to record timing and return result."""
-        self.timing[method_name] += time.time() - start_time
+        """Helper method to record timing and return result - optimized for production."""
+        if hasattr(self, 'timing'):  # Avoid errors during initialization
+            self.timing[method_name] += time.time() - start_time
         return result
 
     def _setup_caching_and_optimization(self) -> None:
-        """Setup caching structures and optimization components with minimal overhead.
+        """Setup caching structures with minimal overhead for production speed."""
         
-        Optimized for test performance while maintaining production benefits.
-        """
-        # Lightweight caching setup for better test performance
-        from src.utils.pattern_cache import get_pattern_cache
+        # Fast caching setup - avoid expensive imports and initialization
+        try:
+            from src.utils.pattern_cache import get_pattern_cache
+            self._pattern_cache = get_pattern_cache()
+        except ImportError:
+            self._pattern_cache = {}
         
-        # Use existing pattern cache (already optimized)
-        self._pattern_cache = get_pattern_cache()
-        
-        # Simplified condition caching with reduced overhead
+        # Minimal cache initialization
+        self._condition_eval_cache = {}
         self._condition_cache = {}
         self._transition_cache = {}
         
-        # Lightweight condition evaluation caching 
-        self._condition_eval_cache = {}
-        self._cache_stats = {
-            'hits': 0, 'misses': 0, 'evaluations': 0,
-            'cache_size': 0, 'hit_rate': 0.0
-        }
+        # Simplified cache stats - only track essentials
+        self._cache_stats = {'hits': 0, 'misses': 0}
         
-        # Only initialize heavy optimizations in production mode
+        # Production optimization loading - defer heavy operations
         if not self._is_test_environment():
             self._setup_advanced_optimizations()
         else:
-            # Lightweight test mode
             self._condition_cache_pool = None
             self._smart_cache = None
             self._resource_manager = None
         
-        # Pattern analysis for optimizations
+        # Lightweight pattern analysis
         self._analyze_pattern_characteristics()
         
-        # Initialize optimization statistics
-        self._optimization_stats = {
-            'patterns_optimized': 0,
-            'time_saved': 0.0,
-            'fallback_count': 0,
-            'cache_efficiency': 0.0
-        }
+        # Skip expensive metadata extraction in simple cases
+        if self.original_pattern and len(self.original_pattern) < 50:
+            self._extract_dfa_metadata()
         
-        # Analyze pattern text for specific constructs
-        self._analyze_pattern_text()
-        
-        # Extract metadata from DFA for optimization
-        self._extract_dfa_metadata()
-        
-        # Initialize alternation order for variable priority
-        self.alternation_order = self._parse_alternation_order(self.original_pattern)
+        # Fast alternation order parsing
+        self.alternation_order = self._parse_alternation_order(self.original_pattern) if self.original_pattern else {}
         
         logger.debug("Caching and optimization setup completed in lightweight mode")
 
     def _is_test_environment(self) -> bool:
-        """Detect if we're running in a test environment."""
-        import sys
-        # Check for pytest or test runner indicators
-        return (
-            'pytest' in sys.modules or
-            'unittest' in sys.modules or
-            any('test' in arg.lower() for arg in sys.argv) or
-            hasattr(sys, '_called_from_test')
-        )
+        """Detect if we're running in a test environment - cached for performance."""
+        if not hasattr(self, '_cached_test_env'):
+            import sys
+            # Cache the result to avoid repeated checks
+            self._cached_test_env = (
+                'pytest' in sys.modules or
+                'unittest' in sys.modules or
+                any('test' in arg.lower() for arg in sys.argv) or
+                hasattr(sys, '_called_from_test')
+            )
+        return self._cached_test_env
 
     def _setup_advanced_optimizations(self) -> None:
-        """Setup heavy optimizations for production use."""
+        """Setup heavy optimizations for production use - streamlined for speed."""
         try:
-            from src.utils.performance_optimizer import get_smart_cache
             from src.utils.memory_management import get_resource_manager
             
-            # Advanced caching only in production
-            self._smart_cache = get_smart_cache()
+            # Simplified resource management for production
             self._resource_manager = get_resource_manager()
             
-            # Object pooling for production
+            # Streamlined object pooling
             def create_condition_result():
-                return {'result': None, 'timestamp': time.time(), 'vars': {}}
+                return {'result': None, 'timestamp': 0.0}
             
             def reset_condition_result(obj):
                 obj['result'] = None
-                obj['timestamp'] = time.time()
-                obj['vars'].clear()
+                obj['timestamp'] = 0.0
             
             self._condition_cache_pool = self._resource_manager.get_pool(
                 name='condition_cache',
                 factory=create_condition_result,
                 reset_func=reset_condition_result,
-                max_size=200,  # Reduced for better performance
-                adaptive=True
+                max_size=100,  # Smaller pool for faster allocation
+                adaptive=False  # Disable adaptive sizing for consistent performance
             )
             
-            # Start monitoring only in production
-            if not self._resource_manager._monitoring_enabled:
-                self._resource_manager.start_monitoring()
-                
-            logger.info("Advanced optimizations enabled for production")
+            # Skip monitoring to reduce overhead
+            logger.debug("Production optimizations enabled (lightweight mode)")
             
         except Exception as e:
             logger.debug(f"Advanced optimizations not available: {e}")
-            # Fallback to basic mode
+            # Fast fallback to basic mode
             self._condition_cache_pool = None
-            self._smart_cache = None
             self._resource_manager = None
 
 
@@ -5321,6 +5311,71 @@ class EnhancedMatcher:
             stats['optimization_health'] = 'NEEDS_ATTENTION'
         
         return stats
+    
+    def _is_valid_minimal_match(self, var_assignments: Dict[str, List[int]], state: int, 
+                               start_idx: int, end_idx: int, rows: List[Dict[str, Any]], 
+                               has_end_anchor: bool, has_both_anchors: bool) -> bool:
+        """
+        Check if the current state represents a valid minimal match for reluctant quantifiers.
+        
+        For reluctant quantifiers like B+?, we want the shortest possible match that satisfies:
+        1. At least one variable is assigned (for +?)
+        2. All constraints are met
+        3. We're in an accepting state
+        4. Anchor constraints are satisfied
+        
+        Args:
+            var_assignments: Current variable assignments
+            state: Current DFA state
+            start_idx: Start index of potential match
+            end_idx: End index of potential match
+            rows: Input rows
+            has_end_anchor: Whether pattern has end anchor
+            has_both_anchors: Whether pattern has both anchors
+            
+        Returns:
+            True if this represents a valid minimal match
+        """
+        # Must be in an accepting state
+        if not self.dfa.states[state].is_accept:
+            return False
+        
+        # For reluctant plus (+?), must have at least one variable assigned
+        if self.has_reluctant_plus:
+            if not var_assignments or not any(assignments for assignments in var_assignments.values()):
+                return False
+        
+        # Check anchor constraints
+        if has_end_anchor and not has_both_anchors:
+            # For patterns with only end anchor, must end at the last row
+            if end_idx != len(rows) - 1:
+                return False
+        
+        if has_both_anchors:
+            # For patterns with both anchors, must span the entire partition
+            if start_idx != 0 or end_idx != len(rows) - 1:
+                return False
+        
+        # For reluctant quantifiers, the minimal valid match is when:
+        # 1. We have sufficient assignments for the quantifier type
+        # 2. We're in an accepting state
+        # 3. All constraints are satisfied
+        
+        # Check if we have a minimal sufficient match
+        if self.has_reluctant_plus:
+            # For B+?, minimal match is exactly one occurrence of the pattern variable
+            # Count total assignments across all variables
+            total_assignments = sum(len(assignments) for assignments in var_assignments.values())
+            
+            # For minimal matching, prefer single-row matches when possible
+            if total_assignments >= 1:  # Minimum for +? is 1
+                return True
+        
+        elif self.has_reluctant_star:
+            # For B*?, minimal match can be empty (0 occurrences) or single occurrence
+            return True  # Always valid for *? since it can match empty
+        
+        return False
     
     def reset_optimization_stats(self) -> None:
         """Reset optimization statistics for fresh monitoring period."""
