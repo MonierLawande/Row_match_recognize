@@ -986,8 +986,8 @@ class EnhancedMatcher:
             # Clear caches
             if hasattr(self, '_transition_cache'):
                 self._transition_cache.clear()
-            if hasattr(self, '_condition_cache'):
-                self._condition_cache.clear()
+            if hasattr(self, '_condition_eval_cache'):
+                self._condition_eval_cache.clear()
             
             # Clear match storage
             if hasattr(self, '_matches'):
@@ -1374,7 +1374,7 @@ class EnhancedMatcher:
             self.max_depth = 25  # Reduced from 50
                 
             # Caching
-            self._condition_cache = {}
+            self._condition_eval_cache = {}
             self._pruning_cache = {}
         
         def find_match_with_backtracking(self, rows: List[Dict[str, Any]], start_idx: int, 
@@ -1505,11 +1505,11 @@ class EnhancedMatcher:
                     else:
                         # Check condition with caching for simple conditions
                         cache_key = (var, state.row_index, id(current_row))
-                        if cache_key in self._condition_cache:
-                            condition_result = self._condition_cache[cache_key]
+                        if cache_key in self._condition_eval_cache:
+                            condition_result = self._condition_eval_cache[cache_key]
                         else:
                             condition_result = condition(current_row, context)
-                            self._condition_cache[cache_key] = condition_result
+                            self._condition_eval_cache[cache_key] = condition_result
                         
                         if DEBUG_ENABLED:
                             logger.debug(f"  Transition {var} -> {target_state}: condition={condition_result}")
@@ -2702,8 +2702,8 @@ class EnhancedMatcher:
             
         if hasattr(self, '_transition_cache'):
             self._transition_cache.clear()
-        if hasattr(self, '_condition_cache'):
-            self._condition_cache.clear()
+        elif hasattr(self, '_condition_eval_cache'):
+            self._condition_eval_cache.clear()
         
         # Trigger memory pressure adaptation if available
         if hasattr(self, '_resource_manager'):
@@ -2952,9 +2952,8 @@ class EnhancedMatcher:
         except ImportError:
             self._pattern_cache = {}
         
-        # Minimal cache initialization
+        # Minimal cache initialization - OPTIMIZED: Single cache for condition evaluation
         self._condition_eval_cache = {}
-        self._condition_cache = {}
         self._transition_cache = {}
         
         # Simplified cache stats - only track essentials
