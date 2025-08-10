@@ -19,19 +19,15 @@ Author: Pattern Matching Engine Team
 Version: 2.1.0
 """
 
-import math
-import pandas as pd
-import psutil
-import functools
-from collections import defaultdict
 import time
 import threading
-from contextlib import contextmanager
+from collections import defaultdict
 from typing import List, Dict, Any, Optional, Set, Tuple, Union, Callable, Iterator, NamedTuple
 from enum import Enum
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 import copy
+import re
 
 from src.matcher.dfa import DFA, FAIL_STATE
 from src.matcher.row_context import RowContext
@@ -40,7 +36,6 @@ from src.matcher.pattern_tokenizer import PatternTokenType
 from src.utils.logging_config import get_logger, PerformanceTimer
 from src.utils.memory_management import get_resource_manager, MemoryMonitor
 from src.utils.pattern_cache import get_pattern_cache
-import re
 
 # Module logger
 logger = get_logger(__name__)
