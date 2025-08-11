@@ -150,8 +150,8 @@ class RowsPerMatch(Enum):
 class ProductionConfig:
     """Production-ready configuration for enterprise deployment."""
     max_memory_mb: int = 1024  # Maximum memory usage
-    timeout_seconds: int = 300  # Query timeout
-    max_pattern_complexity: int = 50  # Pattern complexity limit
+    timeout_seconds: int = 3600  # Increased timeout for unlimited data processing (1 hour)
+    max_pattern_complexity: int = 1000  # Increased pattern complexity limit for unlimited processing
     enable_monitoring: bool = True  # Performance monitoring
     enable_circuit_breaker: bool = True  # Error resilience
     cache_size_limit: int = 10000  # Cache size limit
@@ -741,8 +741,8 @@ class PatternExclusionHandler:
                     if max_possible < min_required:
                         return (False, pattern_node_idx, current_seq_idx)
                     
-                    # Production optimization: limit search space for performance
-                    search_limit = min(max_possible, 50)  # Reasonable production limit
+                    # No artificial search limits - process all possible matches
+                    search_limit = max_possible  # Process all possible matches for unlimited sizes
                     best_match_count = 0
                     
                     # Start from maximum and work down to find a valid match
@@ -1419,9 +1419,9 @@ class EnhancedMatcher:
                 'max_depth_reached': 0
             }
             
-            # Reasonable limits for backtracking - reduced to prevent hanging
-            self.max_iterations = 5000  # Reduced from 10000
-            self.max_depth = 25  # Reduced from 50
+            # Dynamically adjust limits based on dataset size - no artificial limits
+            self.max_iterations = 100000  # Higher limit for unlimited processing
+            self.max_depth = 50  # Keep reasonable depth limit
                 
             # Caching
             self._condition_eval_cache = {}
@@ -3146,8 +3146,9 @@ class EnhancedMatcher:
         if not rows:
             logger.info("Empty input rows - returning empty result")
             return []
-        if len(rows) > 100000:  # Prevent memory issues
-            logger.warning(f"Large dataset detected: {len(rows)} rows")
+        # Log info for large datasets without limiting
+        if len(rows) > 100000:
+            logger.info(f"Large dataset processing: {len(rows)} rows")
         
         logger.info(f"Starting find_matches with {len(rows)} rows")
         start_time = time.time()
@@ -3165,8 +3166,8 @@ class EnhancedMatcher:
 
         logger.info(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
 
-        # Safety counter to prevent infinite loops
-        max_iterations = len(rows) * 3 if (config and config.skip_mode == SkipMode.TO_NEXT_ROW) else len(rows) * 2
+        # Enhanced loop protection without artificial limits
+        max_iterations = len(rows) * 10  # Much higher safety limit for unlimited processing
         iteration_count = 0
         recent_starts = []  # Track recent start positions for TO_NEXT_ROW safety
 

@@ -16,17 +16,24 @@ import json
 @dataclass
 class PerformanceConfig:
     """Performance-related configuration settings."""
-    max_partition_size: int = float('inf')  # Unlimited partition size for production
-    execution_timeout_seconds: float = 30.0
-    max_memory_mb: int = 1024
+    max_partition_size: int = -1  # Unlimited partition size for production (handle any data size)
+    execution_timeout_seconds: float = 300.0  # Increased timeout for large datasets
+    max_memory_mb: int = 8192  # Increased memory limit for large datasets
     enable_caching: bool = True
-    cache_size_limit: int = 10_000
-    cache_memory_limit_mb: int = 500
+    cache_size_limit: int = 50_000  # Increased cache size for large datasets
+    cache_memory_limit_mb: int = 2048  # Increased cache memory
     cache_ttl_seconds: int = 3600
-    cache_clear_threshold_mb: int = 400
+    cache_clear_threshold_mb: int = 1600  # Higher threshold before clearing
     cache_monitoring_interval_seconds: int = 300
-    parallel_processing: bool = False
+    parallel_processing: bool = True  # Enable parallel processing
     max_workers: int = 4
+    # Core algorithm optimizations for unlimited data sizes
+    enable_streaming_processing: bool = True  # Stream data instead of loading all at once
+    enable_early_termination: bool = True  # Stop patterns that won't match
+    enable_pattern_optimization: bool = True  # Optimize pattern compilation
+    enable_memory_mapping: bool = True  # Use memory mapping for very large datasets
+    progress_reporting: bool = True  # Report progress for long-running operations
+    optimize_for_unlimited_size: bool = True  # Enable unlimited size optimizations
 
 
 @dataclass
