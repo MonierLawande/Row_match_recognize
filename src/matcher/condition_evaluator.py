@@ -1934,6 +1934,15 @@ def validate_navigation_conditions(pattern_variables, define_clauses):
                     logger.error(f"Invalid NEXT({ref_var}) reference in condition for {var}: "
                                f"{ref_var} does not appear after {var} in the pattern")
                     return False
+        
+        # SQL:2016 Standard Compliance: Check for NEXT() usage in DEFINE clauses
+        # NEXT() function usage in non-final pattern variables violates SQL:2016 standard
+        if "NEXT(" in condition:
+            var_idx = pattern_variables.index(var)
+            is_final_variable = var_idx == len(pattern_variables) - 1
+            
+            if not is_final_variable:
+                                return False
     
     # If all checks pass
     return True

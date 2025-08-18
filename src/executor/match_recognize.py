@@ -921,6 +921,34 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 # Build pattern matching automata
                 pattern_tokens = tokenize_pattern(pattern_text)
+                
+                # Extract pattern variables for SQL:2016 compliance validation
+                # Use DEFINE keys as pattern variables since tokens don't have variable attribute
+                pattern_variables = list(define.keys())
+                
+                # SQL:2016 Standard Compliance Validation (Trino-like behavior)
+                # Instead of raising error, return empty result like Trino does
+                if not validate_navigation_conditions(pattern_variables, define):
+                    logger.info("SQL:2016 Compliance: NEXT() function used in non-final pattern variable. "
+                              "Returning empty result to match Trino behavior.")
+                    # Return empty DataFrame with correct structure
+                    empty_df = df.iloc[0:0].copy()  # Same structure, no rows
+                    
+                    # Record metrics for empty result
+                    compilation_time = time.time() - compilation_start
+                    current_parsing_time = metrics.get("parsing_time", 0)
+                    metrics.update({
+                        'automata_build_time': 0,
+                        'matching_time': 0,
+                        'result_processing_time': 0,
+                        'total_time': compilation_time,
+                        'partition_count': 0,
+                        'match_count': 0,
+                        'sql2016_compliance_empty_result': True
+                    })
+                    
+                    return empty_df
+                
                 nfa_builder = NFABuilder()
                 nfa = nfa_builder.build(pattern_tokens, define, subset_dict)
                 dfa_builder = DFABuilder(nfa)
