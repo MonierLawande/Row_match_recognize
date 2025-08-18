@@ -839,12 +839,33 @@ def _optimize_token_sequence(tokens: List[PatternToken]) -> List[PatternToken]:
             tokens[i + 1].type == PatternTokenType.LITERAL and 
             not current.quantifier and not tokens[i + 1].quantifier):
             
-            # Don't merge tokens that look like pattern variables (single letters or capitalized words)
+            # Don't merge tokens that look like pattern variables
             # Pattern variables should remain separate for proper matching semantics
-            is_current_var = (len(current.value) == 1 and current.value.isalpha()) or current.value.isupper()
-            is_next_var = (len(tokens[i + 1].value) == 1 and tokens[i + 1].value.isalpha()) or tokens[i + 1].value.isupper()
+            # Pattern variables can be:
+            # 1. Single letters (A, B, C)
+            # 2. Capitalized words (UP, DOWN) 
+            # 3. Valid identifiers with underscores (limit_50, decrease_10, etc.)
+            def is_pattern_variable(value):
+                # Single letter variable
+                if len(value) == 1 and value.isalpha():
+                    return True
+                # All uppercase word
+                if value.isupper() and value.isalpha():
+                    return True
+                # Valid identifier (letters, digits, underscores, starts with letter)
+                if re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', value):
+                    return True
+                return False
             
-            if not (is_current_var or is_next_var):
+            is_current_var = is_pattern_variable(current.value)
+            is_next_var = is_pattern_variable(tokens[i + 1].value)
+            
+            # NEVER merge pattern variables - they must remain separate for proper matching
+            if is_current_var or is_next_var:
+                # Don't merge - keep as separate tokens
+                optimized.append(current)
+                i += 1
+            else:
                 # Merge adjacent literals only if they don't look like pattern variables
                 merged_value = current.value + tokens[i + 1].value
                 merged_token = current.copy_with_modifications(
@@ -854,10 +875,6 @@ def _optimize_token_sequence(tokens: List[PatternToken]) -> List[PatternToken]:
                 )
                 optimized.append(merged_token)
                 i += 2  # Skip both tokens
-            else:
-                # Don't merge - keep as separate tokens
-                optimized.append(current)
-                i += 1
         else:
             optimized.append(current)
             i += 1

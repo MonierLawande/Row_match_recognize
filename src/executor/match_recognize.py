@@ -1315,10 +1315,16 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                 ascending_list.append(sort_item.ordering.upper() == 'ASC')
                         
                         logger.debug(f"Sorting final result by outer ORDER BY: columns={outer_sort_columns}, ascending={ascending_list}")
-                        logger.debug(f"Before sorting: categories={list(result_df['category'])}")
+                        if 'category' in result_df.columns:
+                            logger.debug(f"Before sorting: dataframe shape={result_df.shape}, columns={list(result_df.columns)}")
+                        else:
+                            logger.debug(f"Before sorting: first sort column values={list(result_df[outer_sort_columns[0]]) if outer_sort_columns and outer_sort_columns[0] in result_df.columns else 'N/A'}")
                         result_df = result_df.sort_values(by=outer_sort_columns, ascending=ascending_list)
                         result_df.reset_index(drop=True, inplace=True)
-                        logger.debug(f"After sorting: categories={list(result_df['category'])}")
+                        if 'category' in result_df.columns:
+                            logger.debug(f"After sorting: dataframe shape={result_df.shape}")
+                        else:
+                            logger.debug(f"After sorting: first sort column values={list(result_df[outer_sort_columns[0]]) if outer_sort_columns and outer_sort_columns[0] in result_df.columns else 'N/A'}")
                     else:
                         logger.warning("No valid outer ORDER BY columns found")
                 else:
@@ -1800,10 +1806,16 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                 ascending_list.append(sort_item.ordering.upper() == 'ASC')
                         
                         logger.debug(f"Sorting final result by outer ORDER BY: columns={outer_sort_columns}, ascending={ascending_list}")
-                        logger.debug(f"Before sorting: categories={list(result_df['category'])}")
+                        if 'category' in result_df.columns:
+                            logger.debug(f"Before sorting: dataframe shape={result_df.shape}, columns={list(result_df.columns)}")
+                        else:
+                            logger.debug(f"Before sorting: first sort column values={list(result_df[outer_sort_columns[0]]) if outer_sort_columns and outer_sort_columns[0] in result_df.columns else 'N/A'}")
                         result_df = result_df.sort_values(by=outer_sort_columns, ascending=ascending_list)
                         result_df.reset_index(drop=True, inplace=True)
-                        logger.debug(f"After sorting: categories={list(result_df['category'])}")
+                        if 'category' in result_df.columns:
+                            logger.debug(f"After sorting: dataframe shape={result_df.shape}")
+                        else:
+                            logger.debug(f"After sorting: first sort column values={list(result_df[outer_sort_columns[0]]) if outer_sort_columns and outer_sort_columns[0] in result_df.columns else 'N/A'}")
                     else:
                         logger.warning("No valid outer ORDER BY columns found")
                 else:
