@@ -527,22 +527,25 @@ class PatternExclusionHandler:
                                         pattern_idx: int, seq_idx: int) -> bool:
         """Production-ready sequence matching with integrated greedy optimization."""
         
-        # Production optimization: Try greedy optimization for consecutive quantified patterns
-        if self._should_use_greedy_optimization(
-            pattern_nodes[pattern_idx:], 
-            len(seq_vars) - seq_idx
-        ):
+        # Production optimization: ALWAYS try optimization for patterns with consecutive quantifiers
+        # This is critical for avoiding exponential backtracking in patterns like A+ B+
+        has_consecutive_quantifiers = self._has_consecutive_quantifiers(pattern_nodes[pattern_idx:])
+        
+        if has_consecutive_quantifiers:
+            logger.debug(f"🚀 Forcing optimization for consecutive quantifiers (A+ B+ fix)")
             optimization_result = self._optimize_consecutive_quantified_matching(
                 pattern_nodes, seq_vars, pattern_idx, seq_idx
             )
             if optimization_result is not None:
                 success, final_pattern_idx, final_seq_idx = optimization_result
                 if success:
+                    logger.debug(f"✅ Consecutive quantifier optimization succeeded")
                     # Continue with remaining pattern after optimization
                     return self._match_sequence_with_backtracking(
                         pattern_nodes, seq_vars, final_pattern_idx, final_seq_idx
                     )
                 else:
+                    logger.debug(f"❌ Consecutive quantifier optimization failed")
                     return False
         
         # Base case: matched all pattern nodes
@@ -653,29 +656,60 @@ class PatternExclusionHandler:
         Criteria for optimization:
         - Contains consecutive quantified patterns (+ or *)
         - Pattern complexity suggests exponential behavior
-        - Sufficient data size to benefit from optimization
+        - Any data size benefits from optimization (fixed threshold issue)
         """
-        if len(pattern_nodes) < 2 or remaining_sequence_length < 100:
+        if len(pattern_nodes) < 2:
             return False
         
         # Look for consecutive quantified patterns
         consecutive_quantified = 0
         max_consecutive = 0
+        has_plus_quantifiers = False
         
         for i, node in enumerate(pattern_nodes):
             if hasattr(node, 'quantifier') and node.quantifier in ['+', '*']:
                 consecutive_quantified += 1
                 max_consecutive = max(max_consecutive, consecutive_quantified)
+                if node.quantifier == '+':
+                    has_plus_quantifiers = True
             else:
                 consecutive_quantified = 0
         
-        # Optimize if we have 2+ consecutive quantified patterns
+        # ENHANCED: Optimize for ANY size when we have problematic patterns
+        # Especially important for A+ B+ patterns which cause exponential backtracking
         should_optimize = max_consecutive >= 2
         
+        # Additional optimization for single + quantifiers on larger datasets
+        if not should_optimize and has_plus_quantifiers and remaining_sequence_length >= 50:
+            should_optimize = True
+            logger.debug(f"Greedy optimization enabled for single + quantifiers on {remaining_sequence_length} items")
+        
         if should_optimize:
-            logger.debug(f"Greedy optimization enabled for {max_consecutive} consecutive quantifiers")
+            logger.debug(f"Greedy optimization enabled for {max_consecutive} consecutive quantifiers (threshold: ANY SIZE)")
         
         return should_optimize
+    
+    def _has_consecutive_quantifiers(self, pattern_nodes: List[ExclusionNode]) -> bool:
+        """
+        Check if pattern has consecutive quantifiers that could cause exponential backtracking.
+        
+        This is a critical check to prevent A+ B+ exponential behavior.
+        """
+        if len(pattern_nodes) < 2:
+            return False
+        
+        consecutive_count = 0
+        for i, node in enumerate(pattern_nodes):
+            if hasattr(node, 'quantifier') and node.quantifier in ['+', '*']:
+                consecutive_count += 1
+                # If we have 2+ consecutive quantifiers, optimization needed
+                if consecutive_count >= 2:
+                    logger.debug(f"🔥 Detected consecutive quantifiers: position {i}, count {consecutive_count}")
+                    return True
+            else:
+                consecutive_count = 0
+        
+        return False
     
     def _optimize_consecutive_quantified_matching(self, 
                                                 pattern_nodes: List[ExclusionNode],
