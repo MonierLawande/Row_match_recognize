@@ -3201,7 +3201,7 @@ class EnhancedMatcher:
         condition_matrix = {}
         
         # OPTIMIZATION 1: Enhanced condition caching for large datasets
-        if len(rows) > 10000:
+        if len(rows) > 5000:  # Lower threshold for enhanced caching
             logger.info(f"📈 Large dataset detected ({len(rows)} rows) - enabling enhanced caching")
             self._enable_enhanced_condition_caching()
         
@@ -3210,7 +3210,7 @@ class EnhancedMatcher:
         logger.debug(f"Pattern complexity: {pattern_complexity}")
         
         # OPTIMIZATION 3: For very large datasets, pre-warm common condition paths
-        if len(rows) > 100000:
+        if len(rows) > 50000:  # Lower threshold for pre-warming
             logger.info(f"� Very large dataset ({len(rows)} rows) - pre-warming condition evaluation")
             self._prewarm_condition_evaluation(rows[:1000])  # Sample first 1000 rows
         
@@ -3300,7 +3300,7 @@ class EnhancedMatcher:
             result = bool(condition_func(row, context))
             
             # Cache result with size management
-            if len(self._enhanced_condition_cache) < 100000:  # Larger cache for big datasets
+            if len(self._enhanced_condition_cache) < 500000:  # Much larger cache for big datasets
                 self._enhanced_condition_cache[cache_key] = result
             
             return result
@@ -3572,7 +3572,7 @@ class EnhancedMatcher:
             logger.info("Empty input rows - returning empty result")
             return []
         # Log info for large datasets without limiting
-        if len(rows) > 100000:
+        if len(rows) > 50000:  # Lower threshold for pre-warming
             logger.info(f"Large dataset processing: {len(rows)} rows")
         
         logger.info(f"Starting find_matches with {len(rows)} rows")
@@ -3609,16 +3609,19 @@ class EnhancedMatcher:
         stagnant_iterations = 0
         max_stagnant_iterations = progress_window * 5  # Allow some stagnation for complex patterns
         
-        # For unlimited processing, set reasonable limits based on dataset size
+        # For unlimited processing, use dynamic limits based on dataset size
         # The real protection comes from progress tracking and stagnation detection
-        if len(rows) <= 10000:
-            # For small to medium datasets (up to 10K rows), use conservative limits
-            max_iterations = len(rows) * 100  # Much more reasonable for 1K-10K datasets
+        if len(rows) <= 1000:
+            # For small datasets (up to 1K rows), use conservative limits
+            max_iterations = len(rows) * 100
+        elif len(rows) <= 50000:
+            # For medium datasets (1K-50K rows), scale more aggressively
+            max_iterations = len(rows) * 1000
         else:
-            # For very large datasets, use the unlimited scale approach
+            # For very large datasets (50K+ rows), use unlimited scale approach
             max_iterations = max(
                 len(rows) * 10000,    # Scale dramatically with dataset size
-                100_000_000           # Very high absolute limit for massive datasets
+                500_000_000           # Very high absolute limit for massive datasets
             )
         
         # Smart progress tracking adapted for dataset size
