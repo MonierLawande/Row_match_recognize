@@ -3592,7 +3592,9 @@ class EnhancedMatcher:
             'max_iterations_per_start': max(100, len(rows) // 10)
         }
         
-        print(f"📊 Scale processing: {len(rows)} rows, max_iterations={max_iterations:,}")
+        # Only log for larger datasets to reduce verbosity
+        if len(rows) > 100:
+            print(f"📊 Scale processing: {len(rows)} rows, max_iterations={max_iterations:,}")
         iteration_count = 0
         recent_starts = []  # Track recent start positions for TO_NEXT_ROW safety
 

@@ -146,7 +146,7 @@ class ProductionAggregateEvaluator:
         'STDDEV_SAMP', 'STDDEV_POP', 'VAR_SAMP', 'VAR_POP',
         'ARRAY_AGG', 'STRING_AGG', 'MAX_BY', 'MIN_BY', 'COUNT_IF',
         'SUM_IF', 'AVG_IF', 'BOOL_AND', 'BOOL_OR', 'LISTAGG',
-        'FIRST_VALUE', 'LAST_VALUE', 'COUNT_DISTINCT',
+        'FIRST_VALUE', 'LAST_VALUE', 'COUNT_DISTINCT', 'LAG', 'LEAD',
         'APPROX_DISTINCT', 'APPROX_PERCENTILE', 'PERCENTILE_APPROX', 'GEOMETRIC_MEAN', 'HARMONIC_MEAN'
     }
     
@@ -351,7 +351,7 @@ class ProductionAggregateEvaluator:
                         result = self._evaluate_statistical_functions(func_name, arguments, is_running, filter_condition)
                     elif func_name == "LISTAGG":
                         result = self._evaluate_listagg(arguments, is_running, filter_condition)
-                    elif func_name in ("FIRST_VALUE", "LAST_VALUE"):
+                    elif func_name in ("FIRST_VALUE", "LAST_VALUE", "LAG", "LEAD"):
                         result = self._evaluate_window_functions(func_name, arguments, is_running, filter_condition)
                     elif func_name in ("APPROX_DISTINCT", "APPROX_PERCENTILE", "PERCENTILE_APPROX"):
                         result = self._evaluate_approximate_functions(func_name, arguments, is_running, filter_condition)
@@ -581,6 +581,10 @@ class ProductionAggregateEvaluator:
         elif func_name == "COUNT":
             if effective_arg_count == 0:
                 raise AggregateArgumentError("COUNT requires at least one argument")
+        elif func_name in ("LAG", "LEAD"):
+            # LAG and LEAD can have 1-3 arguments: (expression [, offset [, default]])
+            if effective_arg_count < 1 or effective_arg_count > 3:
+                raise AggregateArgumentError(f"{func_name} requires 1-3 arguments, got {effective_arg_count}")
         elif func_name in ("ARRAY_AGG", "STRING_AGG") and has_order_by:
             # Special case: ARRAY_AGG and STRING_AGG can have ORDER BY as second argument
             if effective_arg_count != 1:
@@ -772,7 +776,7 @@ class ProductionAggregateEvaluator:
             return self._evaluate_statistical_functions(func_name, arguments, is_running, filter_condition)
         elif func_name == "LISTAGG":
             return self._evaluate_listagg(arguments, is_running, filter_condition)
-        elif func_name in ("FIRST_VALUE", "LAST_VALUE"):
+        elif func_name in ("FIRST_VALUE", "LAST_VALUE", "LAG", "LEAD"):
             return self._evaluate_window_functions(func_name, arguments, is_running, filter_condition)
         elif func_name in ("APPROX_DISTINCT", "APPROX_PERCENTILE", "PERCENTILE_APPROX"):
             return self._evaluate_approximate_functions(func_name, arguments, is_running, filter_condition)
@@ -1898,10 +1902,56 @@ class ProductionAggregateEvaluator:
                         sorted_pairs = sorted(paired_values, key=lambda x: x[1] if x[1] is not None else float('inf'))
                     return sorted_pairs[-1][0] if sorted_pairs else None
                     
+                elif func_name == "LAG":
+                    # LAG(expression, offset, default) - get value from offset rows before
+                    offset = 1  # Default offset
+                    default_value = None  # Default value
+                    
+                    # Parse additional arguments for LAG
+                    if len(arguments) > 1:
+                        try:
+                            offset = int(arguments[1])
+                        except (ValueError, IndexError):
+                            offset = 1
+                    if len(arguments) > 2:
+                        default_value = self._parse_literal_value(arguments[2])
+                    
+                    # Sort by order column to get proper sequence
+                    sorted_pairs = sorted(paired_values, key=lambda x: x[1] if x[1] is not None else float('inf'))
+                    
+                    # For LAG, we want the value from 'offset' positions before the current row
+                    if len(sorted_pairs) > offset:
+                        return sorted_pairs[-(offset + 1)][0]  # Get value offset positions back
+                    else:
+                        return default_value
+                        
+                elif func_name == "LEAD":
+                    # LEAD(expression, offset, default) - get value from offset rows after
+                    offset = 1  # Default offset
+                    default_value = None  # Default value
+                    
+                    # Parse additional arguments for LEAD
+                    if len(arguments) > 1:
+                        try:
+                            offset = int(arguments[1])
+                        except (ValueError, IndexError):
+                            offset = 1
+                    if len(arguments) > 2:
+                        default_value = self._parse_literal_value(arguments[2])
+                    
+                    # Sort by order column to get proper sequence
+                    sorted_pairs = sorted(paired_values, key=lambda x: x[1] if x[1] is not None else float('inf'))
+                    
+                    # For LEAD, we want the value from 'offset' positions after the current row
+                    if len(sorted_pairs) > offset:
+                        return sorted_pairs[offset][0]  # Get value offset positions ahead
+                    else:
+                        return default_value
+                    
             except (TypeError, IndexError):
                 return None
         else:
-            # No OVER clause - treat as simple FIRST/LAST value
+            # No OVER clause - treat as simple FIRST/LAST value or LAG/LEAD
             values = self._get_expression_values(expression, is_running)
             if not values:
                 return None
@@ -1910,8 +1960,75 @@ class ProductionAggregateEvaluator:
                 return values[0] if values else None
             elif func_name == "LAST_VALUE":
                 return values[-1] if values else None
+            elif func_name == "LAG":
+                # LAG without OVER clause - use simple offset from current position
+                offset = 1  # Default offset
+                default_value = None  # Default value
+                
+                # Parse additional arguments for LAG
+                if len(arguments) > 1:
+                    try:
+                        offset = int(arguments[1])
+                    except (ValueError, IndexError):
+                        offset = 1
+                if len(arguments) > 2:
+                    default_value = self._parse_literal_value(arguments[2])
+                
+                # Return value from offset positions back
+                if len(values) > offset:
+                    return values[-(offset + 1)]
+                else:
+                    return default_value
+                    
+            elif func_name == "LEAD":
+                # LEAD without OVER clause - use simple offset from current position
+                offset = 1  # Default offset
+                default_value = None  # Default value
+                
+                # Parse additional arguments for LEAD
+                if len(arguments) > 1:
+                    try:
+                        offset = int(arguments[1])
+                    except (ValueError, IndexError):
+                        offset = 1
+                if len(arguments) > 2:
+                    default_value = self._parse_literal_value(arguments[2])
+                
+                # Return value from offset positions ahead
+                if len(values) > offset:
+                    return values[offset]
+                else:
+                    return default_value
         
         return None
+    
+    def _parse_literal_value(self, value_str: str) -> Any:
+        """Parse a literal value from string representation."""
+        if not value_str:
+            return None
+        
+        value_str = value_str.strip()
+        
+        # Handle quoted strings
+        if (value_str.startswith("'") and value_str.endswith("'")) or \
+           (value_str.startswith('"') and value_str.endswith('"')):
+            return value_str[1:-1]
+        
+        # Handle NULL
+        if value_str.upper() == 'NULL':
+            return None
+        
+        # Try to parse as number
+        try:
+            if '.' in value_str:
+                return float(value_str)
+            else:
+                return int(value_str)
+        except ValueError:
+            pass
+        
+        # Return as string if all else fails
+        return value_str
     
     def _evaluate_mathematical_functions(self, func_name: str, arguments: List[str], is_running: bool, filter_condition: str = None) -> float:
         """

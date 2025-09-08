@@ -365,6 +365,10 @@ class ConditionEvaluator(ast.NodeVisitor):
                 else:
                     raise ValueError("_is_null function requires exactly one argument")
             
+            # Handle LAG and LEAD window functions
+            if func_name in ("LAG", "LEAD"):
+                return self._handle_window_function(node, func_name)
+            
             # Handle mathematical and utility functions using shared utilities
             if func_name in MATH_FUNCTIONS:
                 args = [self.visit(arg) for arg in node.args]
@@ -408,7 +412,7 @@ class ConditionEvaluator(ast.NodeVisitor):
             except Exception as e:
                 # More descriptive error
                 raise ValueError(f"Error calling {func_name or 'function'}: {e}")
-        raise ValueError(f"Function {func} not callable")
+        raise ValueError(f"Function {func_name or func} not callable")
     
     def _handle_navigation_function(self, node: ast.Call, func_name: str) -> Any:
         """Handle navigation function calls with comprehensive support."""
@@ -799,6 +803,52 @@ class ConditionEvaluator(ast.NodeVisitor):
         return is_table_prefix(var_name, 
                               getattr(self.context, 'variables', {}),
                               getattr(self.context, 'subsets', {}))
+
+    def _handle_window_function(self, node: ast.Call, func_name: str):
+        """Handle LAG and LEAD window functions"""
+        if not hasattr(self.context, 'rows') or not self.context.rows or not self.current_row:
+            return None
+            
+        args = [self.visit(arg) for arg in node.args]
+        
+        if len(args) == 0:
+            # No arguments - not valid for LAG/LEAD
+            raise ValueError(f"{func_name} function requires at least one argument (column name)")
+        
+        # First argument should be the column name/expression
+        column_expr = args[0]
+        
+        # Second argument is offset (default 1)
+        offset = args[1] if len(args) > 1 else 1
+        
+        # Third argument is default value (default None)
+        default = args[2] if len(args) > 2 else None
+        
+        # Get current row index using context
+        current_idx = self.context.current_idx
+        if current_idx < 0 or current_idx >= len(self.context.rows):
+            return default
+            
+        # Calculate target index
+        if func_name == "LAG":
+            target_idx = current_idx - offset
+        else:  # LEAD
+            target_idx = current_idx + offset
+            
+        # Check bounds
+        if target_idx < 0 or target_idx >= len(self.context.rows):
+            return default
+            
+        # Get value from target row
+        target_row = self.context.rows[target_idx]
+        
+        # If column_expr is a string, treat it as column name
+        if isinstance(column_expr, str):
+            return target_row.get(column_expr, default)
+        else:
+            # For more complex expressions, we'd need to evaluate them in the context of target_row
+            # For now, return the expression value as-is
+            return column_expr
 
         # Updates for src/matcher/condition_evaluator.py
     def _get_variable_column_value(self, var_name: str, col_name: str, ctx: RowContext) -> Any:
