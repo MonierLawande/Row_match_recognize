@@ -6,6 +6,13 @@ import time
 import itertools
 import hashlib
 from typing import List, Dict, Any, Optional, Set, Tuple, Union
+
+# Polars import for performance optimization
+try:
+    import polars as pl
+    POLARS_AVAILABLE = True
+except ImportError:
+    POLARS_AVAILABLE = False
 from src.parser.match_recognize_extractor import parse_full_query
 from src.matcher.pattern_tokenizer import tokenize_pattern, PermuteHandler
 from src.matcher.automata import NFABuilder
@@ -34,6 +41,29 @@ from src.utils.performance_optimizer import (
 # Module logger
 logger = get_logger(__name__)
 
+def _create_dataframe_with_polars_optimization(data, columns=None):
+    """Create DataFrame with Polars optimization for better performance"""
+    if not data:
+        return pd.DataFrame(columns=columns or [])
+    
+    try:
+        if POLARS_AVAILABLE and len(data) > 100:
+            # Use Polars for faster DataFrame creation on larger datasets
+            pl_df = pl.DataFrame(data)
+            if columns:
+                # Ensure column order
+                available_cols = [col for col in columns if col in pl_df.columns]
+                if available_cols:
+                    pl_df = pl_df.select(available_cols)
+            return pl_df.to_pandas()
+        else:
+            # Use pandas for smaller datasets
+            return pd.DataFrame(data, columns=columns)
+    except Exception:
+        # Fallback to pandas
+        return pd.DataFrame(data, columns=columns)
+
+
 # Enable production-ready aggregate functions
 try:
     from src.matcher.production_aggregates import enhance_measure_evaluator_with_production_aggregates
@@ -46,6 +76,9 @@ def _create_dataframe_with_preserved_types(results: List[Dict[str, Any]]) -> pd.
     """
     Create a DataFrame from results while preserving None values and original data types.
     
+    POLARS OPTIMIZATION: Use Polars for faster DataFrame creation when available,
+    with automatic fallback to pandas for compatibility.
+    
     This function addresses pandas' automatic conversion of None to nan and integers to floats
     by using object dtype for columns containing None values and inferring appropriate types
     for others.
@@ -53,6 +86,25 @@ def _create_dataframe_with_preserved_types(results: List[Dict[str, Any]]) -> pd.
     if not results:
         return pd.DataFrame()
     
+    # Try Polars optimization first for better performance
+    try:
+        import polars as pl
+        
+        # Polars handles mixed types and None values better than pandas
+        polars_df = pl.DataFrame(results)
+        
+        # Convert back to pandas for compatibility with existing code
+        # Polars -> pandas conversion preserves types better
+        return polars_df.to_pandas()
+        
+    except ImportError:
+        # Fallback to original pandas implementation
+        pass
+    except Exception as e:
+        # If Polars fails for any reason, fallback to pandas
+        logger.debug(f"Polars optimization failed, falling back to pandas: {e}")
+    
+    # Original pandas implementation (fallback)
     # Get all column names
     all_columns = set()
     for result in results:
@@ -511,7 +563,7 @@ def _should_use_parallel_execution(partitions, df, parallel_config) -> bool:
 
 def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher, match_config, 
                                    measures, all_rows, all_matches, all_matched_indices, 
-                                   metrics, parallel_manager):
+                                   metrics, parallel_manager, results):
     """Process partitions in parallel for improved performance."""
     # Create work items for parallel execution
     work_items = []
@@ -596,6 +648,8 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
         for i, result in enumerate(partition_results):
             result['_partition_index'] = partition_idx
             result['_partition_row_index'] = i
+        
+        results.extend(partition_results)
     
     parallel_time = time.time() - start_time
     metrics["parallel_execution_time"] = parallel_time
@@ -1014,8 +1068,48 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     columns.extend(measures.keys())
                 return pd.DataFrame(columns=columns)
             
-            # Create partitions - use sort=True to ensure consistent partition ordering
-            partitions = [group for _, group in df.groupby(partition_by, sort=True)] if partition_by else [df]
+            # Create partitions - ENHANCED POLARS OPTIMIZATION for faster groupby
+            try:
+                if POLARS_AVAILABLE and partition_by and len(df) > 1000:
+                    # Use Polars for significant performance improvement on 1K+ rows
+                    logger.debug(f"🚀 Using enhanced Polars optimization for {len(df)} rows with partitions: {partition_by}")
+                    
+                    # Convert to Polars DataFrame
+                    polars_df = pl.from_pandas(df)
+                    
+                    # Use Polars lazy evaluation for memory efficiency
+                    lazy_df = polars_df.lazy()
+                    
+                    # Group by partition columns and collect all data
+                    grouped = lazy_df.group_by(partition_by, maintain_order=True).agg(pl.all()).collect()
+                    
+                    # Extract partitions efficiently
+                    partitions = []
+                    for row in grouped.iter_rows(named=True):
+                        # Create partition DataFrame from grouped data
+                        partition_dict = {}
+                        for col in df.columns:
+                            if col in row and row[col] is not None:
+                                partition_dict[col] = row[col]
+                        
+                        if partition_dict:
+                            partition_df = pl.DataFrame(partition_dict).to_pandas()
+                            partitions.append(partition_df)
+                    
+                    logger.debug(f"Polars created {len(partitions)} partitions efficiently")
+                    
+                elif partition_by:
+                    # Use pandas for smaller datasets
+                    partitions = [group for _, group in df.groupby(partition_by, sort=True)]
+                else:
+                    # Single partition case
+                    partitions = [df]
+                    
+            except Exception as e:
+                # Robust fallback to pandas
+                logger.debug(f"Polars optimization failed, using pandas fallback: {e}")
+                partitions = [group for _, group in df.groupby(partition_by, sort=True)] if partition_by else [df]
+                
             metrics["partition_count"] = len(partitions)
             
             # Phase 2: Data subset preprocessing caching
@@ -1050,7 +1144,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 # Process partitions in parallel
                 _process_partitions_in_parallel(
                     partitions, partition_by, order_by, matcher, match_config, 
-                    measures, all_rows, all_matches, all_matched_indices, metrics, parallel_manager
+                    measures, all_rows, all_matches, all_matched_indices, metrics, parallel_manager, results
                 )
             else:
                 logger.debug(f"Using sequential execution for {len(partitions)} partitions")
