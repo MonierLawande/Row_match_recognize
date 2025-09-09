@@ -6933,10 +6933,57 @@ class EnhancedMatcher:
         """
         Basic fallback condition checking for production validation.
         
-        Handles simple conditions like 'price >= 20' and cross-variable references like 'price > A.price'.
+        Handles simple conditions like 'price >= 20', 'value = 10' and cross-variable references like 'price > A.price'.
         """
         try:
             print(f"[VALIDATION] Basic condition check for: {condition_expr}")
+            
+            # Handle modulo operations like 'value % 2 = 1'
+            if '%' in condition_expr and '=' in condition_expr:
+                parts = condition_expr.split('=')
+                if len(parts) == 2:
+                    left_expr = parts[0].strip()
+                    expected_value_str = parts[1].strip()
+                    
+                    # Parse left side: field % divisor
+                    if '%' in left_expr:
+                        mod_parts = left_expr.split('%')
+                        if len(mod_parts) == 2:
+                            field = mod_parts[0].strip().split('.')[-1]  # Remove variable prefix
+                            divisor_str = mod_parts[1].strip()
+                            
+                            try:
+                                divisor = int(divisor_str)
+                                expected_value = int(expected_value_str)
+                                row_value = row.get(field, 0)
+                                mod_result = int(row_value) % divisor
+                                result = mod_result == expected_value
+                                print(f"[VALIDATION] {field}({row_value}) % {divisor} = {mod_result} == {expected_value} = {result}")
+                                return result
+                            except ValueError:
+                                pass
+            
+            # Handle simple equality conditions like 'value = 10'
+            elif '=' in condition_expr and not '>=' in condition_expr and not '<=' in condition_expr:
+                parts = condition_expr.split('=')
+                if len(parts) == 2:
+                    field = parts[0].strip().split('.')[-1]  # Remove variable prefix
+                    value_str = parts[1].strip()
+                    
+                    try:
+                        expected_value = float(value_str)
+                        row_value = row.get(field, 0)
+                        result = float(row_value) == expected_value
+                        print(f"[VALIDATION] {field}({row_value}) = {expected_value} = {result}")
+                        return result
+                    except ValueError:
+                        # Handle string equality
+                        expected_value = value_str.strip('\'"')  # Remove quotes
+                        row_value = str(row.get(field, ''))
+                        result = row_value == expected_value
+                        print(f"[VALIDATION] {field}('{row_value}') = '{expected_value}' = {result}")
+                        return result
+            
             # Handle simple numeric conditions
             if '>=' in condition_expr:
                 parts = condition_expr.split('>=')
