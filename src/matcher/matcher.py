@@ -1606,6 +1606,21 @@ class EnhancedMatcher:
         
         return False
 
+    def _has_quantified_patterns(self) -> bool:
+        """
+        Check if the pattern contains quantified variables (+ or *).
+        
+        Returns:
+            True if pattern has quantified variables
+        """
+        if hasattr(self, 'pattern'):
+            # Check for quantifier operators in pattern
+            return '+' in str(self.pattern) or '*' in str(self.pattern)
+        elif hasattr(self.dfa, 'metadata'):
+            # Check metadata for quantifier information
+            return self.dfa.metadata.get('has_quantifiers', False)
+        return False
+
     def _has_constraint_dependencies(self) -> bool:
         """Check if pattern has complex constraint dependencies."""
         if not self.define_conditions:
@@ -2819,11 +2834,11 @@ class EnhancedMatcher:
                         logger.debug(f"  Reluctant star match (early termination): {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                         break  # Early termination for reluctant star
                 
-                # PRODUCTION FIX: For quantified patterns (A+ B+), use greedy matching even with SKIP TO NEXT ROW
-                # SKIP TO NEXT ROW prevents overlaps by skipping start positions, not by using minimal matching
-                # Each quantifier should match greedily within its own match
+                # PRODUCTION FIX: For SKIP TO NEXT ROW, use minimal matching to align with Trino behavior
+                # SKIP TO NEXT ROW with A+ should produce multiple minimal matches, not one greedy match
+                # This enables patterns like A+ with SKIP TO NEXT ROW to produce separate matches per row
                 if config and config.skip_mode == SkipMode.TO_NEXT_ROW:
-                    # Still collect greedy matches, SKIP TO NEXT ROW only affects start position advancement
+                    # Use minimal matching for SKIP TO NEXT ROW to match Trino behavior
                     longest_match = {
                         "start": start_idx,
                         "end": current_idx - 1,
@@ -2834,8 +2849,9 @@ class EnhancedMatcher:
                         "excluded_rows": excluded_rows.copy(),
                         "has_empty_alternation": self.has_empty_alternation
                     }
-                    logger.debug(f"  Greedy match for SKIP TO NEXT ROW: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
-                    # Don't break - continue to find longer greedy matches
+                    logger.debug(f"  Minimal match for SKIP TO NEXT ROW: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                    # Break early for minimal matching with SKIP TO NEXT ROW
+                    break
                 
                 # For greedy quantifiers, we should continue trying to match as long as possible
                 # Only update longest_match but don't break - continue to find longer matches
@@ -3982,9 +3998,9 @@ class EnhancedMatcher:
                     recent_starts = recent_starts[-10:]
 
             # PRODUCTION FIX: Skip already processed indices 
-            # TO_NEXT_ROW should NOT allow overlaps - it skips to next row after match start
-            # Only TO_FIRST and TO_LAST allow some overlap behavior
-            allow_overlap = config and config.skip_mode in (SkipMode.TO_FIRST, SkipMode.TO_LAST)
+            # TO_NEXT_ROW SHOULD allow overlaps - it creates overlapping matches by advancing only 1 position
+            # TO_FIRST and TO_LAST also allow overlap behavior for variable-based skipping
+            allow_overlap = config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST)
             if start_idx in processed_indices and not allow_overlap:
                 logger.debug(f"Skipping already processed index {start_idx}")
                 start_idx += 1
@@ -6413,8 +6429,50 @@ class EnhancedMatcher:
             # Create a temporary context with current assignments for condition evaluation
             temp_context = RowContext(rows)
             temp_context.variables = assignments_dict
+            temp_context.current_idx = row_index
+            temp_context.partition_boundaries = getattr(self, 'partition_boundaries', None)
             
-            # Evaluate the condition for this specific row
+            # PRODUCTION FIX: Ensure condition evaluator has access to define_conditions
+            temp_context.define_conditions = getattr(self, 'define_conditions', {})
+            
+            # Handle basic conditions like 'TRUE'
+            print(f"[VALIDATION] Basic condition check for: {condition_expr}")
+            if condition_expr == 'TRUE' or condition_expr == 'true':
+                print(f"[VALIDATION] TRUE condition, allowing assignment")
+                return True
+            elif condition_expr == 'FALSE' or condition_expr == 'false':
+                print(f"[VALIDATION] FALSE condition, rejecting assignment")
+                return False
+            
+            # ENHANCED: Handle navigation functions properly
+            if any(nav_func in condition_expr.upper() for nav_func in ['PREV(', 'NEXT(', 'FIRST(', 'LAST(']):
+                # For navigation functions, use proper condition compilation
+                try:
+                    from .condition_evaluator import compile_condition
+                    # Set current variable in the context
+                    temp_context.current_var = var
+                    condition_func = compile_condition(condition_expr, 'DEFINE')
+                    result = condition_func(row, temp_context)
+                    print(f"[VALIDATION] Navigation condition result: {result}")
+                    return bool(result) if result is not None else False
+                except Exception as e:
+                    print(f"[VALIDATION] Navigation condition evaluation failed: {e}")
+                    return False
+            
+            # Enhanced condition parsing for cross-variable references
+            if '.' in condition_expr:
+                # Handle cross-variable conditions like 'B.price > A.price'
+                try:
+                    from .condition_evaluator import compile_condition
+                    # Set current variable in the context
+                    temp_context.current_var = var
+                    condition_func = compile_condition(condition_expr, 'DEFINE')
+                    result = condition_func(row, temp_context)
+                    print(f"[VALIDATION] Cross-variable condition result: {result}")
+                    return bool(result) if result is not None else False
+                except Exception as e:
+                    print(f"[VALIDATION] Cross-variable condition evaluation failed: {e}")
+                    return False
             if hasattr(self, 'condition_evaluator'):
                 evaluator = self.condition_evaluator
                 evaluator.context = temp_context
