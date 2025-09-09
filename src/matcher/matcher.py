@@ -1697,6 +1697,12 @@ class EnhancedMatcher:
             self._condition_eval_cache = {}
             self._condition_cache_size = 0  # Track size for performance
             self._pruning_cache = {}
+            
+        def _validate_row_assignment_production(self, var: str, row_index: int, current_assignments: Dict[str, List[int]], rows: List[Dict[str, Any]] = None) -> bool:
+            """
+            Delegate validation to the parent matcher.
+            """
+            return self.parent._validate_row_assignment_production(var, row_index, current_assignments, rows)
         
         def find_match_with_backtracking(self, rows: List[Dict[str, Any]], start_idx: int, 
                                        context: RowContext, config=None) -> Optional[Dict[str, Any]]:
@@ -1851,12 +1857,18 @@ class EnhancedMatcher:
                     
                     # PRODUCTION FIX: Validate row satisfies DEFINE condition before assignment
                     print(f"[PRODUCTION_FIX] Validating assignment: row {state.row_index} to variable {var}")
-                    if self._validate_row_assignment_production(var, state.row_index, new_state.variable_assignments):
-                        new_state.variable_assignments[var].append(state.row_index)
-                        print(f"[PRODUCTION_FIX] Assignment APPROVED: row {state.row_index} -> {var}")
-                    else:
-                        # Skip this transition if row doesn't satisfy the variable's condition
-                        print(f"[PRODUCTION_FIX] Assignment REJECTED: row {state.row_index} -> {var}")
+                    try:
+                        validation_result = self._validate_row_assignment_production(var, state.row_index, new_state.variable_assignments, rows)
+                        print(f"[PRODUCTION_FIX] Validation result: {validation_result}")
+                        if validation_result:
+                            new_state.variable_assignments[var].append(state.row_index)
+                            print(f"[PRODUCTION_FIX] Assignment APPROVED: row {state.row_index} -> {var}")
+                        else:
+                            # Skip this transition if row doesn't satisfy the variable's condition
+                            print(f"[PRODUCTION_FIX] Assignment REJECTED: row {state.row_index} -> {var}")
+                            continue
+                    except Exception as e:
+                        print(f"[PRODUCTION_FIX] Validation error: {e}")
                         continue
                     
                     # Update path
