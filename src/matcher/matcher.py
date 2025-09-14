@@ -1404,7 +1404,6 @@ class EnhancedMatcher:
         
         Uses pattern analysis to determine optimal matching strategy for each quantifier type.
         """
-        print(f"[GENERALIZED_QUANTIFIER] Starting generalized quantifier matching from row {start_idx}")
         logger.debug(f"Generalized quantifier matching for pattern: {getattr(self, 'original_pattern', 'unknown')}")
         
         # Parse the pattern structure to identify quantifier types and relationships
@@ -1414,11 +1413,8 @@ class EnhancedMatcher:
             logger.warning("No quantifiers found in pattern analysis, falling back to standard matching")
             return None
             
-        print(f"[GENERALIZED_QUANTIFIER] Pattern analysis: {len(pattern_info['quantifiers'])} quantifiers detected")
-        
         # Choose matching strategy based on pattern characteristics
         strategy = self._choose_generalized_strategy(pattern_info, rows, start_idx)
-        print(f"[GENERALIZED_QUANTIFIER] Using strategy: {strategy}")
         
         # Execute the chosen strategy
         if strategy == "GREEDY_SEQUENCE":
@@ -1556,7 +1552,6 @@ class EnhancedMatcher:
                                         context: RowContext, config: Any, 
                                         pattern_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Execute greedy sequence matching for patterns like A+ B+ with cross-references."""
-        print(f"[GREEDY_SEQUENCE] Executing greedy sequence matching")
         # Delegate to existing optimized A+ B+ logic for now, but with generalized detection
         return self._find_single_match_greedy_quantifier(rows, start_idx, context, config)
 
@@ -1564,7 +1559,6 @@ class EnhancedMatcher:
                                 context: RowContext, config: Any,
                                 pattern_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Execute bounded quantifier matching for patterns like A{2,3} B+."""
-        print(f"[BOUNDED_MATCHING] Executing bounded quantifier matching")
         
         quantifiers = pattern_info.get('quantifiers', [])
         if not quantifiers:
@@ -1583,25 +1577,20 @@ class EnhancedMatcher:
             min_matches = first_qt['min_matches']
             max_matches = first_qt['max_matches'] or len(rows) - start_idx
             
-            print(f"[BOUNDED_MATCHING] Trying {var_name} with bounds [{min_matches}, {max_matches}]")
-            
             # Try different numbers of matches within bounds
             for match_count in range(min_matches, min(max_matches + 1, len(rows) - start_idx + 1)):
                 match_attempt = self._try_bounded_quantifier_match(
                     rows, start_idx, var_name, match_count, context, config, pattern_info)
                 
                 if match_attempt:
-                    print(f"[BOUNDED_MATCHING] Success with {var_name}={match_count} matches")
                     return match_attempt
         
-        print(f"[BOUNDED_MATCHING] No valid bounded matches found")
         return None
 
     def _execute_star_plus_matching(self, rows: List[Dict[str, Any]], start_idx: int,
                                   context: RowContext, config: Any,
                                   pattern_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Execute star-plus hybrid matching for patterns like A* B+."""
-        print(f"[STAR_PLUS_HYBRID] Executing star-plus hybrid matching")
         
         quantifiers = pattern_info.get('quantifiers', [])
         star_quantifiers = [qt for qt in quantifiers if qt['type'] in ['STAR', 'STAR_RELUCTANT']]
@@ -1615,24 +1604,19 @@ class EnhancedMatcher:
         star_var = star_quantifiers[0]['variable']
         
         # Try zero matches first for A* (since * allows zero)
-        print(f"[STAR_PLUS_HYBRID] Trying zero matches for {star_var}*")
         match_attempt = self._try_star_zero_matches(rows, start_idx, star_var, context, config, pattern_info)
         if match_attempt:
-            print(f"[STAR_PLUS_HYBRID] Success with zero {star_var} matches")
             return match_attempt
         
         # Try increasing matches for A*
         max_star_attempts = min(10, len(rows) - start_idx)
         for star_count in range(1, max_star_attempts + 1):
-            print(f"[STAR_PLUS_HYBRID] Trying {star_count} matches for {star_var}*")
             match_attempt = self._try_star_multiple_matches(
                 rows, start_idx, star_var, star_count, context, config, pattern_info)
             
             if match_attempt:
-                print(f"[STAR_PLUS_HYBRID] Success with {star_count} {star_var} matches")
                 return match_attempt
         
-        print(f"[STAR_PLUS_HYBRID] No valid star-plus matches found")
         return None
 
     def _try_bounded_quantifier_match(self, rows: List[Dict[str, Any]], start_idx: int,
@@ -1777,11 +1761,9 @@ class EnhancedMatcher:
         - GREEDY A+ when the A sequence naturally ends (maximizes useful A+ length)
         - MINIMAL A+ when multiple A+B+ patterns are possible (finds more matches)
         """
-        print(f"[SMART_QUANTIFIER] Starting smart quantifier matching from row {start_idx}")
         
         # Analyze the data pattern to choose strategy
         strategy = self._choose_matching_strategy(rows, start_idx)
-        print(f"[SMART_QUANTIFIER] Using strategy: {strategy}")
         
         if strategy == "GREEDY_A":
             return self._find_greedy_a_match(rows, start_idx, context, config)
@@ -1835,13 +1817,11 @@ class EnhancedMatcher:
             strategy = "MINIMAL"
             pattern_desc = "scattered pattern"
         
-        print(f"[SMART_QUANTIFIER] Detected {pattern_desc} ({max_consecutive} consecutive, {total_a_count} total, {coverage_ratio:.1%} coverage) - using {strategy}")
         return strategy
     
     def _find_greedy_a_match(self, rows: List[Dict[str, Any]], start_idx: int,
                            context: RowContext, config: Any) -> Optional[Dict[str, Any]]:
         """Find match with GREEDY A+ (maximize A+ length)."""
-        print(f"[GREEDY_A] Starting greedy A+ matching from row {start_idx}")
         
         max_attempts = min(len(rows) - start_idx, 20)
         best_match = None
@@ -1851,30 +1831,20 @@ class EnhancedMatcher:
             if split_point >= len(rows):
                 break
                 
-            print(f"[GREEDY_A] Trying split at row {split_point}")
-            
             match_attempt = self._try_quantifier_split(rows, start_idx, split_point, context, config)
             
             if match_attempt:
                 a_length = len(match_attempt.get('variables', {}).get('A', []))
-                print(f"[GREEDY_A] Valid match found with split at {split_point}, A_len={a_length}")
                 
                 if a_length > best_a_length:
                     best_match = match_attempt
                     best_a_length = a_length
-                    print(f"[GREEDY_A] New best greedy A+ match: A_len={a_length}")
         
-        if best_match:
-            print(f"[GREEDY_A] Final greedy A+ match: A={best_match.get('variables', {}).get('A', [])}, B={best_match.get('variables', {}).get('B', [])}")
-        else:
-            print(f"[GREEDY_A] No valid greedy A+ match found")
-            
         return best_match
     
     def _find_minimal_match(self, rows: List[Dict[str, Any]], start_idx: int,
                           context: RowContext, config: Any) -> Optional[Dict[str, Any]]:
         """Find match with MINIMAL A+B+ (shortest A+ and B+)."""
-        print(f"[MINIMAL] Starting minimal matching from row {start_idx}")
         
         max_attempts = min(len(rows) - start_idx, 20)
         
@@ -1882,20 +1852,12 @@ class EnhancedMatcher:
             if split_point >= len(rows):
                 break
                 
-            print(f"[MINIMAL] Trying split at row {split_point}")
-            
             match_attempt = self._try_quantifier_split(rows, start_idx, split_point, context, config)
             
             if match_attempt:
-                a_len = len(match_attempt.get('variables', {}).get('A', []))
-                print(f"[MINIMAL] Valid match found with split at {split_point}")
-                print(f"[MINIMAL] Minimal match: A_len={a_len}")
-                print(f"[MINIMAL] Final minimal match: A={match_attempt.get('variables', {}).get('A', [])}, B={match_attempt.get('variables', {}).get('B', [])}")
-                
                 # Return the FIRST valid match (minimal A+ length)
                 return match_attempt
         
-        print(f"[MINIMAL] No valid minimal match found")
         return None
     
     def _try_quantifier_split(self, rows: List[Dict[str, Any]], start_idx: int, split_point: int,
@@ -1948,7 +1910,6 @@ class EnhancedMatcher:
             }
             
         except Exception as e:
-            print(f"[MINIMAL_QUANTIFIER] Error in split attempt: {e}")
             return None
     
     def _is_more_greedy_match(self, new_match: Dict[str, Any], current_best: Dict[str, Any]) -> bool:
@@ -2281,19 +2242,14 @@ class EnhancedMatcher:
                         new_state.variable_assignments[var] = []
                     
                     # PRODUCTION FIX: Validate row satisfies DEFINE condition before assignment
-                    print(f"[PRODUCTION_FIX] Validating assignment: row {state.row_index} to variable {var}")
                     try:
                         validation_result = self._validate_row_assignment_production(var, state.row_index, new_state.variable_assignments, rows)
-                        print(f"[PRODUCTION_FIX] Validation result: {validation_result}")
                         if validation_result:
                             new_state.variable_assignments[var].append(state.row_index)
-                            print(f"[PRODUCTION_FIX] Assignment APPROVED: row {state.row_index} -> {var}")
                         else:
                             # Skip this transition if row doesn't satisfy the variable's condition
-                            print(f"[PRODUCTION_FIX] Assignment REJECTED: row {state.row_index} -> {var}")
                             continue
                     except Exception as e:
-                        print(f"[PRODUCTION_FIX] Validation error: {e}")
                         continue
                     
                     # Update path
@@ -2638,7 +2594,6 @@ class EnhancedMatcher:
         
     def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext, config=None) -> Optional[Dict[str, Any]]:
         """Find a single match using optimized transitions with backtracking support."""
-        print(f"[DEBUG] _find_single_match called with start_idx={start_idx}")
         match_start_time = time.time()
         
         logger.debug(f"_find_single_match called with start_idx={start_idx}")
@@ -2651,7 +2606,6 @@ class EnhancedMatcher:
         logger.debug(f"has_permute_alternations: {has_permute_alternations}")
         
         if has_permute_alternations:
-            print(f"[DEBUG] Using PERMUTE pattern handler")
             logger.debug("PERMUTE pattern with alternations detected - using specialized handler")
             match = self._handle_permute_with_alternations(rows, start_idx, context, config)
             if match:
@@ -2660,7 +2614,6 @@ class EnhancedMatcher:
         # PRODUCTION ENHANCEMENT: Generalized quantifier matching system
         # Replaces hardcoded A+ B+ logic with comprehensive SQL:2016 quantifier support
         if self._needs_generalized_quantifier_matching():
-            print(f"[DEBUG] Using generalized quantifier matching for pattern: {getattr(self, 'original_pattern', 'unknown')}")
             logger.debug(f"Using generalized quantifier matching for complex pattern")
             match = self._find_single_match_generalized_quantifiers(rows, start_idx, context, config)
             if match:
@@ -2668,11 +2621,9 @@ class EnhancedMatcher:
         
         # Check if backtracking is needed for this pattern
         needs_backtracking = self._needs_backtracking(rows, start_idx, context)
-        print(f"[DEBUG] needs_backtracking: {needs_backtracking}")
         logger.debug(f"_needs_backtracking returned: {needs_backtracking}")
         
         if needs_backtracking:
-            print(f"[DEBUG] Using backtracking matcher")
             logger.debug("Using backtracking matcher for complex pattern")
             self.backtracking_stats['patterns_requiring_backtracking'] += 1
             
@@ -3029,13 +2980,11 @@ class EnhancedMatcher:
                     var_assignments[matched_var] = []
                 
                 # PRODUCTION FIX: Validate assignment in main DFA loop
-                print(f"[PRODUCTION_FIX_3] Validating excluded row assignment: row {current_idx} to variable {matched_var}")
                 if self._validate_row_assignment_production(matched_var, current_idx, var_assignments):
                     var_assignments[matched_var].append(current_idx)
-                    print(f"[PRODUCTION_FIX_3] Excluded assignment APPROVED: row {current_idx} -> {matched_var}")
                 else:
-                    print(f"[PRODUCTION_FIX_3] Excluded assignment REJECTED: row {current_idx} -> {matched_var}")
                     # For excluded rows, we might still continue even if validation fails
+                    pass
                     
                 logger.debug(f"  Assigned excluded row {current_idx} to variable {matched_var} (for condition evaluation)")
                 
@@ -3103,13 +3052,10 @@ class EnhancedMatcher:
                     var_assignments[matched_var] = []
                 
                 # PRODUCTION FIX: Validate assignment in main DFA loop
-                print(f"[PRODUCTION_FIX_MAIN] Validating assignment: row {current_idx} to variable {matched_var}")
                 if self._validate_row_assignment_production(matched_var, current_idx, var_assignments, rows):
                     var_assignments[matched_var].append(current_idx)
-                    print(f"[PRODUCTION_FIX_MAIN] Assignment APPROVED: row {current_idx} -> {matched_var}")
                     logger.debug(f"  Assigned row {current_idx} to variable {matched_var}")
                 else:
-                    print(f"[PRODUCTION_FIX_MAIN] Assignment REJECTED: row {current_idx} -> {matched_var}")
                     # Skip this invalid assignment - this might break the match
                     # We should continue to see if we can find a valid path
                     # For now, let's just continue without assignment to see what happens
@@ -4307,7 +4253,7 @@ class EnhancedMatcher:
 
     def find_matches(self, rows, config=None, measures=None):
         """Find all matches with optimized processing and enterprise validation."""
-        print(f"[DEBUG] EnhancedMatcher.find_matches called with {len(rows)} rows")
+        logger.debug(f"EnhancedMatcher.find_matches called with {len(rows)} rows")
         
         # UNLIMITED SCALE: Track dataset size for intelligent limit management
         self._current_dataset_size = len(rows)
@@ -4380,7 +4326,7 @@ class EnhancedMatcher:
         
         # Only log for larger datasets to reduce verbosity
         if len(rows) > 100:
-            print(f"📊 Scale processing: {len(rows)} rows, max_iterations={max_iterations:,}")
+            logger.info(f"Scale processing: {len(rows)} rows, max_iterations={max_iterations:,}")
         iteration_count = 0
         recent_starts = []  # Track recent start positions for TO_NEXT_ROW safety
 
@@ -4419,7 +4365,7 @@ class EnhancedMatcher:
                 
                 # Progress reporting for large datasets
                 if len(rows) >= 10000 and iteration_count % (progress_window * 10) == 0:
-                    print(f"🔄 Progress: {iteration_count:,} iterations, {current_matches} matches, processing row {start_idx}/{len(rows)}")
+                    logger.debug(f"Progress: {iteration_count:,} iterations, {current_matches} matches, processing row {start_idx}/{len(rows)}")
 
             # Additional safety for TO_NEXT_ROW to prevent infinite loops
             if config and config.skip_mode == SkipMode.TO_NEXT_ROW:
@@ -4569,7 +4515,7 @@ class EnhancedMatcher:
                         f"This indicates an extremely large dataset or complex pattern. "
                         f"Processing completed successfully with {len(results)} matches found.")
             # For unlimited processing, this is informational only - not an error
-            print(f"ℹ️  UNLIMITED SCALE: Processed {iteration_count:,} iterations successfully with {len(results)} matches found")
+            logger.info(f"UNLIMITED SCALE: Processed {iteration_count:,} iterations successfully with {len(results)} matches found")
 
         # Add unmatched rows only when explicitly requested via WITH UNMATCHED ROWS
         if include_unmatched:
@@ -5776,12 +5722,9 @@ class EnhancedMatcher:
             logger.debug(f"    Variable '{variable}' found at idx {found_idx}")
             
             # PRODUCTION FIX: Validate assignment before accepting
-            print(f"[PRODUCTION_FIX_2] Validating assignment: row {found_idx} to variable {variable}")
             if self._validate_row_assignment_production(variable, found_idx, var_assignments):
                 var_assignments[variable] = [found_idx]
-                print(f"[PRODUCTION_FIX_2] Assignment APPROVED: row {found_idx} -> {variable}")
             else:
-                print(f"[PRODUCTION_FIX_2] Assignment REJECTED: row {found_idx} -> {variable}")
                 return None  # Reject this match if assignment is invalid
             current_idx = found_idx + 1
         
@@ -6803,8 +6746,6 @@ class EnhancedMatcher:
             True if row satisfies the variable's DEFINE condition, False otherwise
         """
         try:
-            print(f"[VALIDATION] Starting validation for var={var}, row_index={row_index}")
-            
             # Handle case where rows is not provided
             if rows is None:
                 if hasattr(self, 'current_rows'):
@@ -6812,42 +6753,28 @@ class EnhancedMatcher:
                 elif hasattr(self, 'rows'):
                     rows = self.rows
                 else:
-                    print(f"[VALIDATION] No rows available, allowing assignment")
                     return True
-            
-            print(f"[VALIDATION] Rows length: {len(rows)}")
             
             # PRODUCTION FIX: Check if row is already assigned to another variable
             if isinstance(current_assignments, dict):
                 for existing_var, existing_rows in current_assignments.items():
                     if existing_var != var and row_index in existing_rows:
-                        print(f"[VALIDATION] CONFLICT: Row {row_index} already assigned to variable {existing_var}")
                         return False  # Reject assignment if row already assigned to different variable
             
             # Get the DEFINE condition for this variable
-            print(f"[VALIDATION] define_conditions type: {type(getattr(self, 'define_conditions', None))}")
-            print(f"[VALIDATION] define_conditions: {getattr(self, 'define_conditions', None)}")
-            
             if not hasattr(self, 'define_conditions') or not self.define_conditions:
-                print(f"[VALIDATION] No define_conditions attribute")
                 return True  # Allow assignment if no conditions defined
             
             if not isinstance(self.define_conditions, dict) or var not in self.define_conditions:
-                print(f"[VALIDATION] No DEFINE condition for variable {var}")
                 return True  # Allow assignment if no condition defined
             
             condition_expr = self.define_conditions[var]
-            print(f"[VALIDATION] DEFINE condition for {var}: {condition_expr}")
             
             # Get the row data
             if row_index >= len(rows):
-                print(f"[VALIDATION] Invalid row index {row_index}, max is {len(rows)-1}")
                 return False
             
             row = rows[row_index]
-            print(f"[VALIDATION] Row {row_index} data: {row}")
-            print(f"[VALIDATION] Current assignments type: {type(current_assignments)}")
-            print(f"[VALIDATION] Current assignments: {current_assignments}")
             
             # Handle different types of current_assignments
             if isinstance(current_assignments, dict):
@@ -6855,11 +6782,9 @@ class EnhancedMatcher:
             elif isinstance(current_assignments, set):
                 # Convert set to dict format
                 assignments_dict = {}
-                print(f"[VALIDATION] Converting set to dict format")
             else:
                 # Create empty dict for other types
                 assignments_dict = {}
-                print(f"[VALIDATION] Using empty assignments dict")
             
             # Create a temporary context with current assignments for condition evaluation
             temp_context = RowContext(rows)
@@ -6871,12 +6796,9 @@ class EnhancedMatcher:
             temp_context.define_conditions = getattr(self, 'define_conditions', {})
             
             # Handle basic conditions like 'TRUE'
-            print(f"[VALIDATION] Basic condition check for: {condition_expr}")
             if condition_expr == 'TRUE' or condition_expr == 'true':
-                print(f"[VALIDATION] TRUE condition, allowing assignment")
                 return True
             elif condition_expr == 'FALSE' or condition_expr == 'false':
-                print(f"[VALIDATION] FALSE condition, rejecting assignment")
                 return False
             
             # ENHANCED: Handle navigation functions properly
@@ -6888,10 +6810,8 @@ class EnhancedMatcher:
                     temp_context.current_var = var
                     condition_func = compile_condition(condition_expr, 'DEFINE')
                     result = condition_func(row, temp_context)
-                    print(f"[VALIDATION] Navigation condition result: {result}")
                     return bool(result) if result is not None else False
                 except Exception as e:
-                    print(f"[VALIDATION] Navigation condition evaluation failed: {e}")
                     return False
             
             # Enhanced condition parsing for cross-variable references
@@ -6903,10 +6823,8 @@ class EnhancedMatcher:
                     temp_context.current_var = var
                     condition_func = compile_condition(condition_expr, 'DEFINE')
                     result = condition_func(row, temp_context)
-                    print(f"[VALIDATION] Cross-variable condition result: {result}")
                     return bool(result) if result is not None else False
                 except Exception as e:
-                    print(f"[VALIDATION] Cross-variable condition evaluation failed: {e}")
                     return False
             if hasattr(self, 'condition_evaluator'):
                 evaluator = self.condition_evaluator
@@ -6915,18 +6833,13 @@ class EnhancedMatcher:
                 # Evaluate the condition
                 result = evaluator.evaluate(condition_expr, row_index, assignments_dict)
                 
-                print(f"[VALIDATION] Variable {var}, row {row_index}: condition '{condition_expr}' = {result}")
                 return bool(result)
             else:
                 # Fallback: basic condition evaluation
                 result = self._basic_condition_check(condition_expr, row, assignments_dict, rows)
-                print(f"[VALIDATION] Basic check result: {result}")
                 return result
                 
         except Exception as e:
-            print(f"[VALIDATION] Error validating {var} assignment for row {row_index}: {e}")
-            import traceback
-            print(f"[VALIDATION] Full traceback: {traceback.format_exc()}")
             return True  # Allow assignment on validation error to maintain compatibility
     
     def _basic_condition_check(self, condition_expr: str, row: Dict, current_assignments: Dict[str, List[int]], rows: List[Dict[str, Any]]) -> bool:
@@ -6936,8 +6849,6 @@ class EnhancedMatcher:
         Handles simple conditions like 'price >= 20', 'value = 10' and cross-variable references like 'price > A.price'.
         """
         try:
-            print(f"[VALIDATION] Basic condition check for: {condition_expr}")
-            
             # Handle modulo operations like 'value % 2 = 1'
             if '%' in condition_expr and '=' in condition_expr:
                 parts = condition_expr.split('=')
@@ -6958,7 +6869,6 @@ class EnhancedMatcher:
                                 row_value = row.get(field, 0)
                                 mod_result = int(row_value) % divisor
                                 result = mod_result == expected_value
-                                print(f"[VALIDATION] {field}({row_value}) % {divisor} = {mod_result} == {expected_value} = {result}")
                                 return result
                             except ValueError:
                                 pass
@@ -6974,14 +6884,12 @@ class EnhancedMatcher:
                         expected_value = float(value_str)
                         row_value = row.get(field, 0)
                         result = float(row_value) == expected_value
-                        print(f"[VALIDATION] {field}({row_value}) = {expected_value} = {result}")
                         return result
                     except ValueError:
                         # Handle string equality
                         expected_value = value_str.strip('\'"')  # Remove quotes
                         row_value = str(row.get(field, ''))
                         result = row_value == expected_value
-                        print(f"[VALIDATION] {field}('{row_value}') = '{expected_value}' = {result}")
                         return result
             
             # Handle simple numeric conditions
@@ -6995,7 +6903,6 @@ class EnhancedMatcher:
                         threshold = float(value_str)
                         row_value = row.get(field, 0)
                         result = float(row_value) >= threshold
-                        print(f"[VALIDATION] {field}({row_value}) >= {threshold} = {result}")
                         return result
                     except ValueError:
                         pass
@@ -7030,13 +6937,10 @@ class EnhancedMatcher:
                                 if ref_values:
                                     max_ref_value = max(ref_values)
                                     result = float(row_value) > max_ref_value
-                                    print(f"[VALIDATION] {left_field}({row_value}) > {ref_var}.{ref_field}({max_ref_value}) = {result}")
                                     return result
             
             # Default: allow assignment for unhandled conditions
-            print(f"[VALIDATION] Unhandled condition, allowing assignment")
             return True
             
         except Exception as e:
-            print(f"[VALIDATION] Basic condition check error: {e}")
             return True
