@@ -441,6 +441,8 @@ class ConditionEvaluator(ast.NodeVisitor):
             # Store current evaluator in context for nested navigation
             original_active_evaluator = getattr(self.context, '_active_evaluator', None)
             self.context._active_evaluator = self
+            # Also store as backup for mode reference
+            self.context._active_evaluator_backup = self
             try:
                 result = evaluate_nested_navigation(
                     navigation_expr, 
@@ -455,7 +457,11 @@ class ConditionEvaluator(ast.NodeVisitor):
                 if original_active_evaluator is not None:
                     self.context._active_evaluator = original_active_evaluator
                 else:
-                    delattr(self.context, '_active_evaluator')
+                    if hasattr(self.context, '_active_evaluator'):
+                        delattr(self.context, '_active_evaluator')
+                # Clean up backup
+                if hasattr(self.context, '_active_evaluator_backup'):
+                    delattr(self.context, '_active_evaluator_backup')
         else:
             # Handle standard navigation function calls
             if len(node.args) == 0:
@@ -762,11 +768,25 @@ class ConditionEvaluator(ast.NodeVisitor):
             if op is None:
                 raise ValueError(f"Unsupported binary operator: {type(node.op).__name__}")
             
+            # Add detailed debugging for addition operations
+            if isinstance(node.op, ast.Add):
+                print(f"\n🎯 [BINOP_ADD] Addition operation detected")
+                print(f"   Left: {left} (type: {type(left)})")
+                print(f"   Right: {right} (type: {type(right)})")
+                print(f"   Evaluation mode: {self.evaluation_mode}")
+                print(f"   Current idx: {getattr(self.context, 'current_idx', 'N/A')}")
+            
             # Handle None values - if either operand is None, result is None (SQL semantics)
             if left is None or right is None:
+                if isinstance(node.op, ast.Add):
+                    print(f"   Result: None (one operand is None)")
                 return None
                 
             result = op(left, right)
+            
+            if isinstance(node.op, ast.Add):
+                print(f"   Result: {left} + {right} = {result}")
+                
             logger.debug(f"[DEBUG] BinOp: {left} {type(node.op).__name__} {right} = {result}")
             return result
             
@@ -2234,23 +2254,32 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
 def _evaluate_complex_arithmetic_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str], recursion_depth: int) -> Any:
     """Evaluate complex arithmetic expressions with multiple navigation functions."""
     try:
-        logger.debug(f"[NESTED_NAV] Evaluating complex arithmetic: {expr}")
+        print(f"\n🔍 [COMPLEX_ARITH] Evaluating: {expr}")
+        print(f"   Current index: {current_idx}")
+        print(f"   Recursion depth: {recursion_depth}")
         
         # Use AST parsing for complex arithmetic
         tree = ast.parse(expr, mode='eval')
+        print(f"   AST: {ast.dump(tree)}")
         
         # Create or reuse evaluator with recursion protection
         if hasattr(context, '_active_evaluator') and context._active_evaluator is not None:
             evaluator = context._active_evaluator
             evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
-            logger.debug(f"[COMPLEX_ARITH] Reusing active evaluator with mode: {evaluator.evaluation_mode}")
+            print(f"   Reusing active evaluator with mode: {evaluator.evaluation_mode}")
         else:
-            logger.debug(f"[COMPLEX_ARITH] Creating new evaluator with MEASURES mode")
-            evaluator = ConditionEvaluator(context, 'MEASURES', recursion_depth + 1)
+            # Navigation functions should always use DEFINE mode for consistency
+            # This ensures that FIRST, LAST, PREV, NEXT always operate on the matched pattern data
+            evaluation_mode = 'DEFINE'
+            print(f"   Using DEFINE mode for navigation function consistency")
+                
+            evaluator = ConditionEvaluator(context, evaluation_mode, recursion_depth + 1)
             evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
             context._active_evaluator = evaluator
         
+        print(f"   About to visit AST tree...")
         result = evaluator.visit(tree.body)
+        print(f"   🎯 Complex arithmetic result: {result}")
         logger.debug(f"[NESTED_NAV] Complex arithmetic result: {result}")
         return result
         
