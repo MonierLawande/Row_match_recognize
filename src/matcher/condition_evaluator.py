@@ -1963,8 +1963,8 @@ def validate_navigation_conditions(pattern_variables, define_clauses):
             if ref_var == var:
                 continue
                 
-            # Find PREV(var) references
-            if f"PREV({ref_var}" in condition:
+            # Find PREV(var) references - must be exact variable references, not column references
+            if f"PREV({ref_var})" in condition:
                 # Ensure the referenced variable appears before this one in the pattern
                 var_idx = pattern_variables.index(var)
                 ref_idx = pattern_variables.index(ref_var)
@@ -1974,8 +1974,8 @@ def validate_navigation_conditions(pattern_variables, define_clauses):
                                f"{ref_var} does not appear before {var} in the pattern")
                     return False
             
-            # Find NEXT(var) references
-            if f"NEXT({ref_var}" in condition:
+            # Find NEXT(var) references - must be exact variable references, not column references  
+            if f"NEXT({ref_var})" in condition:
                 # Ensure the referenced variable appears after this one in the pattern
                 var_idx = pattern_variables.index(var)
                 ref_idx = pattern_variables.index(ref_var)
@@ -1986,13 +1986,37 @@ def validate_navigation_conditions(pattern_variables, define_clauses):
                     return False
         
         # SQL:2016 Standard Compliance: Check for NEXT() usage in DEFINE clauses
-        # NEXT() function usage in non-final pattern variables violates SQL:2016 standard
+        # NEXT() function usage should be restricted, but allow self-references
         if "NEXT(" in condition:
             var_idx = pattern_variables.index(var)
             is_final_variable = var_idx == len(pattern_variables) - 1
             
-            if not is_final_variable:
-                                return False
+            # Allow NEXT() in final variables or when referencing the same variable
+            # Pattern: NEXT(current_var.column) or NEXT(column) should be allowed
+            import re
+            next_calls = re.findall(r'NEXT\(([^)]+)\)', condition)
+            
+            for next_arg in next_calls:
+                # Extract variable name if qualified (e.g., "A.price" -> "A")
+                if '.' in next_arg:
+                    referenced_var = next_arg.split('.')[0]
+                    # Allow self-references (A.price in condition for A)
+                    if referenced_var == var:
+                        continue
+                    # For cross-variable references, check if target appears later
+                    if referenced_var in pattern_variables:
+                        ref_idx = pattern_variables.index(referenced_var)
+                        if ref_idx <= var_idx:
+                            logger.error(f"Invalid NEXT({next_arg}) reference in condition for {var}: "
+                                       f"{referenced_var} does not appear after {var} in the pattern")
+                            return False
+                else:
+                    # Unqualified NEXT(column) - allow for any variable in practical implementation
+                    # This is a column reference, not a variable reference
+                    continue
+            
+            # Additional SQL:2016 compliance can be added here if needed
+            # For now, we allow NEXT() with proper variable ordering validation
     
     # If all checks pass
     return True
