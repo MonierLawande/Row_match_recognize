@@ -1664,26 +1664,57 @@ class ConditionEvaluator(ast.NodeVisitor):
         
         try:
             if self.evaluation_mode == 'DEFINE':
-                # In DEFINE mode, FIRST/LAST refer to boundary values in the current partition
-                # This is similar to physical navigation for PREV/NEXT
+                # In DEFINE mode, handle qualified vs unqualified references differently
                 rows = self.context.rows
                 
                 if not rows:
                     logger.debug(f"[FIRST_LAST] No rows available")
                     return None
                 
-                if nav_type == 'FIRST':
-                    # Get the first row in the partition
-                    target_row = rows[0]
-                    logger.debug(f"[FIRST_LAST] DEFINE mode - FIRST: using row 0")
-                else:  # LAST
-                    # Get the last row in the partition
-                    target_row = rows[-1]
-                    logger.debug(f"[FIRST_LAST] DEFINE mode - LAST: using row {len(rows)-1}")
+                if var_name:
+                    # Qualified reference like FIRST(A.value) or LAST(A.value)
+                    # Find first/last occurrence of the specific variable in the partial match
+                    variable_name = var_name.strip('"')  # Remove quotes if present
+                    
+                    if hasattr(self.context, 'variables') and variable_name in self.context.variables:
+                        var_indices = self.context.variables[variable_name]
+                        if var_indices:
+                            if nav_type == 'FIRST':
+                                # Get the first occurrence of this variable
+                                target_idx = var_indices[0]
+                                logger.debug(f"[FIRST_LAST] DEFINE mode - FIRST({variable_name}): using row {target_idx}")
+                            else:  # LAST
+                                # Get the last occurrence of this variable that's <= current position
+                                current_pos = getattr(self.context, 'current_idx', len(rows) - 1)
+                                valid_indices = [idx for idx in var_indices if idx <= current_pos]
+                                if valid_indices:
+                                    target_idx = valid_indices[-1]
+                                    logger.debug(f"[FIRST_LAST] DEFINE mode - LAST({variable_name}): using row {target_idx} (current_pos={current_pos})")
+                                else:
+                                    logger.debug(f"[FIRST_LAST] DEFINE mode - LAST({variable_name}): no valid indices")
+                                    return None
+                            
+                            if target_idx < len(rows):
+                                result = rows[target_idx].get(column)
+                                logger.debug(f"[FIRST_LAST] DEFINE mode qualified result: {result}")
+                                return result
+                    
+                    logger.debug(f"[FIRST_LAST] DEFINE mode - variable {variable_name} not found in context")
+                    return None
                 
-                result = target_row.get(column)
-                logger.debug(f"[FIRST_LAST] DEFINE mode result: {result}")
-                return result
+                else:
+                    # Unqualified reference like FIRST(value) or LAST(value)
+                    # Use boundary values in the current partition (original behavior)
+                    if nav_type == 'FIRST':
+                        target_row = rows[0]
+                        logger.debug(f"[FIRST_LAST] DEFINE mode - unqualified FIRST: using row 0")
+                    else:  # LAST
+                        target_row = rows[-1]
+                        logger.debug(f"[FIRST_LAST] DEFINE mode - unqualified LAST: using row {len(rows)-1}")
+                    
+                    result = target_row.get(column)
+                    logger.debug(f"[FIRST_LAST] DEFINE mode unqualified result: {result}")
+                    return result
             
             else:
                 # MEASURES mode: Use logical navigation through pattern matches
