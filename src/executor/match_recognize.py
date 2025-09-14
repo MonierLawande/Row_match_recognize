@@ -977,8 +977,16 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 pattern_tokens = tokenize_pattern(pattern_text)
                 
                 # Extract pattern variables for SQL:2016 compliance validation
-                # Use DEFINE keys as pattern variables since tokens don't have variable attribute
-                pattern_variables = list(define.keys())
+                # Extract from pattern tokens (LITERAL tokens contain variable names)
+                pattern_variables = []
+                for token in pattern_tokens:
+                    if token.type.name == 'LITERAL' and token.value not in pattern_variables:
+                        pattern_variables.append(token.value)
+                
+                # Add DEFINE variables that might not appear in pattern (though this shouldn't happen in valid SQL)
+                for var in define.keys():
+                    if var not in pattern_variables:
+                        pattern_variables.append(var)
                 
                 # SQL:2016 Standard Compliance Validation (Trino-like behavior)
                 # Instead of raising error, return empty result like Trino does
