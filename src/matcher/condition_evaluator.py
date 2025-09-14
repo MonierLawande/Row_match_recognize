@@ -271,9 +271,9 @@ class ConditionEvaluator(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name):
         # Check for special functions
         if node.id.upper() == "PREV":
-            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'PREV', steps)
+            return lambda col, steps=1: self.evaluate_navigation_function('PREV', col, steps)
         elif node.id.upper() == "NEXT":
-            return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
+            return lambda col, steps=1: self.evaluate_navigation_function('NEXT', col, steps)
         elif node.id.upper() == "FIRST":
             def first_lambda(var, col, occ=0):
                 logger = get_logger(__name__)
@@ -1672,22 +1672,85 @@ class ConditionEvaluator(ast.NodeVisitor):
     def _logical_navigation(self, nav_type, column, steps, var_name=None):
         """
         Logical navigation for MEASURES expressions.
-        Navigate through pattern match timeline.
+        Navigate through pattern match timeline using the enhanced navigation logic.
         """
-        # This uses the existing complex logic for pattern timeline navigation
-        return self._get_navigation_value(var_name, column, nav_type, steps)
-            
-        # Check partition boundaries if defined
+        # Use the enhanced logical navigation from _get_navigation_value's logic
+        # But implement it directly here for better performance and clarity
+        
+        logger = get_logger(__name__)
+        logger.debug(f"[LOGICAL_NAV] nav_type={nav_type}, column={column}, steps={steps}, var_name={var_name}")
+        
+        # For logical navigation, we need to work with the pattern match timeline
+        if not hasattr(self.context, 'variables') or not self.context.variables:
+            logger.debug("[LOGICAL_NAV] No variables in context")
+            return None
+        
+        # Build timeline of variable assignments
+        timeline = []
+        for var, indices in self.context.variables.items():
+            for idx in indices:
+                timeline.append((idx, var))
+        
+        # Sort by row index for consistent ordering
+        timeline.sort()
+        
+        if not timeline:
+            logger.debug("[LOGICAL_NAV] Empty timeline")
+            return None
+        
+        # Find current position in timeline
+        curr_idx = self.context.current_idx
+        curr_pos = -1
+        current_var = getattr(self.context, 'current_var', None)
+        
+        # Find position in timeline
+        for i, (idx, var) in enumerate(timeline):
+            if idx == curr_idx and (current_var is None or var == current_var or var_name is None):
+                curr_pos = i
+                break
+        
+        if curr_pos < 0:
+            # Try alternative matching
+            for i, (idx, var) in enumerate(timeline):
+                if idx == curr_idx:
+                    curr_pos = i
+                    break
+        
+        if curr_pos < 0:
+            logger.debug(f"[LOGICAL_NAV] Could not find current position for idx {curr_idx}")
+            return None
+        
+        # Calculate target position
+        if nav_type == 'PREV':
+            target_pos = curr_pos - steps
+        else:  # NEXT
+            target_pos = curr_pos + steps
+        
+        # Bounds checking
+        if target_pos < 0 or target_pos >= len(timeline):
+            logger.debug(f"[LOGICAL_NAV] Target position {target_pos} out of bounds [0, {len(timeline)})")
+            return None
+        
+        target_idx, _ = timeline[target_pos]
+        
+        # Check partition boundaries (if defined)
         if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
-            current_partition = self.context.get_partition_for_row(target_idx)
+            current_partition = self.context.get_partition_for_row(curr_idx)
             target_partition = self.context.get_partition_for_row(target_idx)
             
             if (current_partition is None or target_partition is None or
                 current_partition != target_partition):
+                logger.debug(f"[LOGICAL_NAV] Cross-partition navigation not allowed")
                 return None
-                
-        # Get the value from the target row
-        return self.context.rows[target_idx].get(column)
+        
+        # Get value from target row
+        if 0 <= target_idx < len(self.context.rows):
+            result = self.context.rows[target_idx].get(column)
+            logger.debug(f"[LOGICAL_NAV] Returning {result} from row {target_idx}")
+            return result
+        
+        logger.debug(f"[LOGICAL_NAV] Target index {target_idx} out of range")
+        return None
 
     def _handle_first_last_navigation(self, nav_type, column, steps, var_name=None):
         """
@@ -2560,8 +2623,11 @@ def _evaluate_enhanced_function_call(match, context: RowContext, current_idx: in
         evaluator = ConditionEvaluator(context, 'MEASURES', recursion_depth + 1)
         evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
         
-        # Use enhanced navigation function
-        result = evaluator._get_navigation_value(var_name, col_name, func_name, steps)
+        # Use the appropriate navigation function based on type
+        if func_name in ('FIRST', 'LAST'):
+            result = evaluator._handle_first_last_navigation(func_name, col_name, steps, var_name)
+        else:  # PREV, NEXT
+            result = evaluator.evaluate_navigation_function(func_name, col_name, steps, var_name)
         logger.debug(f"[NESTED_NAV] Enhanced function result: {result}")
         return result
         
