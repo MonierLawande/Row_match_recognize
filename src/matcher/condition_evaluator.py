@@ -275,9 +275,17 @@ class ConditionEvaluator(ast.NodeVisitor):
         elif node.id.upper() == "NEXT":
             return lambda col, steps=1: self._get_navigation_value(node.id, col, 'NEXT', steps)
         elif node.id.upper() == "FIRST":
-            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'FIRST', occ)
+            def first_lambda(var, col, occ=0):
+                logger = get_logger(__name__)
+                logger.debug(f"🔍 [FIRST_LAMBDA] Called with var={var}, col={col}, occ={occ}")
+                return self._handle_first_last_navigation('FIRST', col, occ, var)
+            return first_lambda
         elif node.id.upper() == "LAST":
-            return lambda var, col, occ=0: self._get_navigation_value(var, col, 'LAST', occ)
+            def last_lambda(var, col, occ=0):
+                logger = get_logger(__name__)
+                logger.debug(f"🔍 [LAST_LAMBDA] Called with var={var}, col={col}, occ={occ}")
+                return self._handle_first_last_navigation('LAST', col, occ, var)
+            return last_lambda
         elif node.id.upper() == "CLASSIFIER":
             return lambda var=None: self._get_classifier(var)
         elif node.id.upper() == "MATCH_NUMBER":
@@ -471,8 +479,8 @@ class ConditionEvaluator(ast.NodeVisitor):
                         # Logical navigation: use pattern match timeline
                         return self.evaluate_navigation_function(func_name, column, steps)
                 else:
-                    # Use variable-aware navigation for FIRST/LAST
-                    return self._get_navigation_value(var_name, column, func_name, steps)
+                    # Use new navigation handler for FIRST/LAST
+                    return self._handle_first_last_navigation(func_name, column, steps, var_name)
                     
             elif isinstance(first_arg, ast.Attribute) and isinstance(first_arg.value, ast.Constant):
                 # Pattern: NEXT("b".value) - quoted variable.column format
@@ -486,7 +494,8 @@ class ConditionEvaluator(ast.NodeVisitor):
                     else:
                         return self.evaluate_navigation_function(func_name, column, steps)
                 else:
-                    return self._get_navigation_value(var_name, column, func_name, steps)
+                    # Use new navigation handler for FIRST/LAST
+                    return self._handle_first_last_navigation(func_name, column, steps, var_name)
                     
             elif isinstance(first_arg, ast.Name):
                 # Pattern: NEXT(column) - simple column format
@@ -499,7 +508,8 @@ class ConditionEvaluator(ast.NodeVisitor):
                     else:
                         return self.evaluate_navigation_function(func_name, column, steps)
                 else:
-                    return self._get_navigation_value(None, column, func_name, steps)
+                    # Use new navigation handler for FIRST/LAST with simple column format
+                    return self._handle_first_last_navigation(func_name, column, steps, None)
                     
             elif isinstance(first_arg, ast.Call):
                 # Handle nested function calls like NEXT(CLASSIFIER()) and PREV(CLASSIFIER(U))
@@ -523,7 +533,8 @@ class ConditionEvaluator(ast.NodeVisitor):
                             else:
                                 return self.evaluate_navigation_function(func_name, column, steps)
                         else:
-                            return self._get_navigation_value(None, column, func_name, steps)
+                            # Use new navigation handler for FIRST/LAST with nested calls
+                            return self._handle_first_last_navigation(func_name, column, steps, None)
                     else:
                         return None
             else:
@@ -1570,24 +1581,32 @@ class ConditionEvaluator(ast.NodeVisitor):
         Returns:
             The value at the navigated position or None if navigation is invalid
         """
+        logger = get_logger(__name__)
+        logger.debug(f"🔍 [NAV_MAIN] evaluate_navigation_function called: nav_type={nav_type}, column={column}, steps={steps}, var_name={var_name}")
+        
         # Input validation
         if steps < 0:
             raise ValueError(f"Navigation steps must be non-negative: {steps}")
             
-        if nav_type not in ('PREV', 'NEXT'):
+        if nav_type not in ('PREV', 'NEXT', 'FIRST', 'LAST'):
             raise ValueError(f"Invalid navigation type: {nav_type}")
-            
+        
         # Special case for steps=0 (return current row's value)
         if steps == 0:
             if 0 <= self.context.current_idx < len(self.context.rows):
                 return self.context.rows[self.context.current_idx].get(column)
             return None
+
+        # Handle FIRST and LAST functions
+        if nav_type in ('FIRST', 'LAST'):
+            logger.debug(f"🔍 [NAV_MAIN] Routing {nav_type} to _handle_first_last_navigation")
+            return self._handle_first_last_navigation(nav_type, column, steps, var_name)
         
-        # DEFINE Mode: Physical Navigation through input sequence
+        # DEFINE Mode: Physical Navigation through input sequence (PREV/NEXT)
         if self.evaluation_mode == 'DEFINE':
             return self._physical_navigation(nav_type, column, steps)
         
-        # MEASURES Mode: Logical Navigation through pattern matches
+        # MEASURES Mode: Logical Navigation through pattern matches (PREV/NEXT)
         else:
             return self._logical_navigation(nav_type, column, steps, var_name)
     
@@ -1669,6 +1688,80 @@ class ConditionEvaluator(ast.NodeVisitor):
                 
         # Get the value from the target row
         return self.context.rows[target_idx].get(column)
+
+    def _handle_first_last_navigation(self, nav_type, column, steps, var_name=None):
+        """
+        Handle FIRST and LAST navigation functions with mode-aware behavior.
+        
+        DEFINE Mode (Physical Navigation):
+        - FIRST(column) - gets the first value in the current partition
+        - LAST(column) - gets the last value in the current partition
+        
+        MEASURES Mode (Logical Navigation):
+        - FIRST(column) - gets the first value in the pattern match
+        - LAST(column) - gets the last value in the pattern match
+        
+        Args:
+            nav_type: 'FIRST' or 'LAST'
+            column: Column name to retrieve
+            steps: Number of steps (usually 1, but could be > 1)
+            var_name: Optional variable name for qualified references
+            
+        Returns:
+            The first/last value or None if not found
+        """
+        logger = get_logger(__name__)
+        logger.debug(f"🔍 [FIRST_LAST] {nav_type}({column}, {steps}) var_name={var_name} mode={self.evaluation_mode}")
+        
+        try:
+            if self.evaluation_mode == 'DEFINE':
+                # In DEFINE mode, FIRST/LAST refer to boundary values in the current partition
+                # This is similar to physical navigation for PREV/NEXT
+                rows = self.context.rows
+                
+                if not rows:
+                    logger.debug(f"[FIRST_LAST] No rows available")
+                    return None
+                
+                if nav_type == 'FIRST':
+                    # Get the first row in the partition
+                    target_row = rows[0]
+                    logger.debug(f"[FIRST_LAST] DEFINE mode - FIRST: using row 0")
+                else:  # LAST
+                    # Get the last row in the partition
+                    target_row = rows[-1]
+                    logger.debug(f"[FIRST_LAST] DEFINE mode - LAST: using row {len(rows)-1}")
+                
+                result = target_row.get(column)
+                logger.debug(f"[FIRST_LAST] DEFINE mode result: {result}")
+                return result
+            
+            else:
+                # MEASURES mode: Use logical navigation through pattern matches
+                # This is similar to logical navigation for PREV/NEXT
+                logger.debug(f"[FIRST_LAST] MEASURES mode - using logical navigation")
+                
+                if nav_type == 'FIRST':
+                    # For MEASURES, get the first value from the pattern match
+                    if self.context.rows:
+                        result = self.context.rows[0].get(column)
+                        logger.debug(f"[FIRST_LAST] MEASURES FIRST result: {result}")
+                        return result
+                else:  # LAST
+                    # For MEASURES, get the last value from the pattern match
+                    if self.context.rows:
+                        result = self.context.rows[-1].get(column)
+                        logger.debug(f"[FIRST_LAST] MEASURES LAST result: {result}")
+                        return result
+                
+                logger.debug(f"[FIRST_LAST] MEASURES mode - no rows available")
+                return None
+                
+        except Exception as e:
+            logger.debug(f"FIRST/LAST navigation failed: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return None
 
     def visit_Constant(self, node: ast.Constant):
         """Handle all constant types (numbers, strings, booleans, None)"""
@@ -2017,6 +2110,27 @@ def validate_navigation_conditions(pattern_variables, define_clauses):
             
             # Additional SQL:2016 compliance can be added here if needed
             # For now, we allow NEXT() with proper variable ordering validation
+        
+        # Similar validation for FIRST() and LAST() functions
+        for nav_func in ['FIRST', 'LAST']:
+            if f"{nav_func}(" in condition:
+                import re
+                nav_calls = re.findall(f'{nav_func}\\(([^)]+)\\)', condition)
+                
+                for nav_arg in nav_calls:
+                    # Extract variable name if qualified (e.g., "A.value" -> "A")
+                    if '.' in nav_arg:
+                        referenced_var = nav_arg.split('.')[0]
+                        # For FIRST/LAST, the referenced variable should exist in pattern
+                        if referenced_var in pattern_variables:
+                            # FIRST/LAST can reference any variable in the pattern
+                            # This is generally allowed as they refer to boundary values
+                            continue
+                        else:
+                            logger.warning(f"{nav_func}({nav_arg}) references unknown variable {referenced_var}")
+                    else:
+                        # Unqualified FIRST/LAST(column) - allow for any variable
+                        continue
     
     # If all checks pass
     return True
