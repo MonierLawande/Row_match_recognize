@@ -438,13 +438,24 @@ class ConditionEvaluator(ast.NodeVisitor):
         if is_nested:
             # For nested navigation, convert to string representation and use evaluate_nested_navigation
             navigation_expr = self._build_navigation_expr(node)
-            return evaluate_nested_navigation(
-                navigation_expr, 
-                self.context, 
-                self.context.current_idx, 
-                getattr(self.context, 'current_var', None),
-                self.recursion_depth + 1
-            )
+            # Store current evaluator in context for nested navigation
+            original_active_evaluator = getattr(self.context, '_active_evaluator', None)
+            self.context._active_evaluator = self
+            try:
+                result = evaluate_nested_navigation(
+                    navigation_expr, 
+                    self.context, 
+                    self.context.current_idx, 
+                    getattr(self.context, 'current_var', None),
+                    self.recursion_depth + 1
+                )
+                return result
+            finally:
+                # Restore original active evaluator
+                if original_active_evaluator is not None:
+                    self.context._active_evaluator = original_active_evaluator
+                else:
+                    delattr(self.context, '_active_evaluator')
         else:
             # Handle standard navigation function calls
             if len(node.args) == 0:
@@ -2232,7 +2243,9 @@ def _evaluate_complex_arithmetic_navigation(expr: str, context: RowContext, curr
         if hasattr(context, '_active_evaluator') and context._active_evaluator is not None:
             evaluator = context._active_evaluator
             evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
+            logger.debug(f"[COMPLEX_ARITH] Reusing active evaluator with mode: {evaluator.evaluation_mode}")
         else:
+            logger.debug(f"[COMPLEX_ARITH] Creating new evaluator with MEASURES mode")
             evaluator = ConditionEvaluator(context, 'MEASURES', recursion_depth + 1)
             evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
             context._active_evaluator = evaluator
