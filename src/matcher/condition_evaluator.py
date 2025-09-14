@@ -1020,120 +1020,6 @@ class ConditionEvaluator(ast.NodeVisitor):
         
         return None
 
-
-
-    def _get_navigation_value(self, var_name, column, nav_type, steps=1):
-        """
-        Enhanced production-grade navigation function with comprehensive improvements.
-        
-        Key improvements:
-        - Better context-aware navigation for DEFINE vs MEASURES modes
-        - Enhanced nested navigation support with recursion protection
-        - Improved bounds checking and partition boundary enforcement
-        - Advanced caching with invalidation strategies
-        - Superior error handling and recovery mechanisms
-        - Optimized algorithms for large datasets
-        
-        Args:
-            var_name: Variable name or function name
-            column: Column name to retrieve
-            nav_type: Navigation type ('PREV', 'NEXT', 'FIRST', 'LAST')
-            steps: Number of steps to navigate (for PREV/NEXT)
-            
-        Returns:
-            The value at the navigated position or None if navigation is invalid
-        """
-        start_time = time.time()
-        
-        logger.debug(f"[NAV_ENHANCED] _get_navigation_value: var_name={var_name}, column={column}, nav_type={nav_type}, steps={steps}")
-        logger.debug(f"[NAV_ENHANCED] Context state: current_idx={self.context.current_idx}, mode={self.evaluation_mode}")
-        
-        try:
-            # Enhanced input validation
-            if steps < 0:
-                raise ValueError(f"Navigation steps must be non-negative: {steps}")
-            
-            if not isinstance(column, str) or not column.strip():
-                raise TypeError(f"Column name must be a non-empty string, got {type(column)}: '{column}'")
-            
-            # Initialize performance tracking
-            if hasattr(self.context, 'stats'):
-                self.context.stats["navigation_calls"] = self.context.stats.get("navigation_calls", 0) + 1
-                self.context.stats[f"{nav_type.lower()}_calls"] = self.context.stats.get(f"{nav_type.lower()}_calls", 0) + 1
-            
-            # Enhanced cache management with proper invalidation
-            if not hasattr(self.context, 'navigation_cache'):
-                self.context.navigation_cache = {}
-            
-            # Advanced cache key with more context factors
-            current_var = getattr(self.context, 'current_var', None)
-            evaluation_mode = self.evaluation_mode
-            partition_key = getattr(self.context, 'partition_key', None)
-            cache_key = (var_name, column, nav_type, steps, self.context.current_idx, 
-                        current_var, evaluation_mode, partition_key, 
-                        id(getattr(self.context, 'variables', {})))
-            
-            # Smart cache lookup with validity checking
-            if cache_key in self.context.navigation_cache:
-                cached_result = self.context.navigation_cache[cache_key]
-                if hasattr(self.context, 'stats'):
-                    self.context.stats["cache_hits"] = self.context.stats.get("cache_hits", 0) + 1
-                logger.debug(f"[NAV_ENHANCED] Cache hit: {cached_result}")
-                return cached_result
-            
-            if hasattr(self.context, 'stats'):
-                self.context.stats["cache_misses"] = self.context.stats.get("cache_misses", 0) + 1
-            
-            # Get enhanced context state
-            curr_idx = self.context.current_idx
-            is_permute = hasattr(self.context, 'pattern_metadata') and getattr(self.context, 'pattern_metadata', {}).get('permute', False)
-            
-            # Fast path validation with detailed logging
-            if curr_idx < 0 or curr_idx >= len(self.context.rows) or not self.context.rows:
-                logger.debug(f"[NAV_ENHANCED] Fast path exit: invalid curr_idx={curr_idx}, rows_len={len(self.context.rows) if self.context.rows else 0}")
-                self.context.navigation_cache[cache_key] = None
-                return None
-            
-            # Enhanced subset variable support
-            if nav_type in ('FIRST', 'LAST') and hasattr(self.context, 'subsets') and var_name in self.context.subsets:
-                result = self._handle_subset_navigation(var_name, column, nav_type, steps, cache_key)
-                return result
-            
-            # Improved timeline construction with better algorithms
-            timeline = self._build_optimized_timeline()
-            
-            # Route to appropriate navigation handler
-            if nav_type in ('FIRST', 'LAST'):
-                result = self._handle_logical_navigation(var_name, column, nav_type, steps, timeline, cache_key)
-            elif nav_type in ('PREV', 'NEXT'):
-                # Context-aware navigation: different behavior for DEFINE vs MEASURES
-                if self.evaluation_mode == 'DEFINE':
-                    result = self._handle_physical_navigation_define(column, nav_type, steps, cache_key)
-                else:
-                    result = self._handle_logical_timeline_navigation(var_name, column, nav_type, steps, timeline, cache_key, current_var)
-            else:
-                raise ValueError(f"Unknown navigation type: {nav_type}")
-            
-            # Cache the result with expiration tracking
-            self.context.navigation_cache[cache_key] = result
-            logger.debug(f"[NAV_ENHANCED] Returning result: {result}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error in enhanced navigation function: {e}")
-            # Set error flag for debugging
-            if hasattr(self.context, 'stats'):
-                self.context.stats["navigation_errors"] = self.context.stats.get("navigation_errors", 0) + 1
-            return None
-            
-        finally:
-            # Enhanced performance tracking
-            if hasattr(self.context, 'timing'):
-                navigation_time = time.time() - start_time
-                self.context.timing['navigation_total'] = self.context.timing.get('navigation_total', 0) + navigation_time
-                if navigation_time > 0.01:  # Log slow navigation calls
-                    logger.debug(f"[NAV_ENHANCED] Slow navigation call: {navigation_time:.3f}s for {nav_type}({var_name}.{column})")
-
     def _handle_subset_navigation(self, var_name, column, nav_type, steps, cache_key):
         """Handle navigation for subset variables with enhanced logic."""
         logger.debug(f"[NAV_ENHANCED] Processing subset variable: {var_name}")
@@ -1674,8 +1560,8 @@ class ConditionEvaluator(ast.NodeVisitor):
         Logical navigation for MEASURES expressions.
         Navigate through pattern match timeline using the enhanced navigation logic.
         """
-        # Use the enhanced logical navigation from _get_navigation_value's logic
-        # But implement it directly here for better performance and clarity
+        # Use the enhanced logical navigation logic
+        # Implementation moved directly here for better performance and clarity
         
         logger = get_logger(__name__)
         logger.debug(f"[LOGICAL_NAV] nav_type={nav_type}, column={column}, steps={steps}, var_name={var_name}")
