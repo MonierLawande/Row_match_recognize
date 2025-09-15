@@ -441,8 +441,6 @@ class ConditionEvaluator(ast.NodeVisitor):
             # Store current evaluator in context for nested navigation
             original_active_evaluator = getattr(self.context, '_active_evaluator', None)
             self.context._active_evaluator = self
-            # Also store as backup for mode reference
-            self.context._active_evaluator_backup = self
             try:
                 result = evaluate_nested_navigation(
                     navigation_expr, 
@@ -459,9 +457,6 @@ class ConditionEvaluator(ast.NodeVisitor):
                 else:
                     if hasattr(self.context, '_active_evaluator'):
                         delattr(self.context, '_active_evaluator')
-                # Clean up backup
-                if hasattr(self.context, '_active_evaluator_backup'):
-                    delattr(self.context, '_active_evaluator_backup')
         else:
             # Handle standard navigation function calls
             if len(node.args) == 0:
@@ -1678,7 +1673,6 @@ class ConditionEvaluator(ast.NodeVisitor):
             The first/last value or None if not found
         """
         logger = get_logger(__name__)
-        logger.debug(f"🔍 [FIRST_LAST] {nav_type}({column}, {steps}) var_name={var_name} mode={self.evaluation_mode}")
         
         try:
             if self.evaluation_mode == 'DEFINE':
@@ -1686,7 +1680,6 @@ class ConditionEvaluator(ast.NodeVisitor):
                 rows = self.context.rows
                 
                 if not rows:
-                    logger.debug(f"[FIRST_LAST] No rows available")
                     return None
                 
                 if var_name:
@@ -1700,24 +1693,19 @@ class ConditionEvaluator(ast.NodeVisitor):
                             if nav_type == 'FIRST':
                                 # Get the first occurrence of this variable
                                 target_idx = var_indices[0]
-                                logger.debug(f"[FIRST_LAST] DEFINE mode - FIRST({variable_name}): using row {target_idx}")
                             else:  # LAST
                                 # Get the last occurrence of this variable that's <= current position
                                 current_pos = getattr(self.context, 'current_idx', len(rows) - 1)
                                 valid_indices = [idx for idx in var_indices if idx <= current_pos]
                                 if valid_indices:
                                     target_idx = valid_indices[-1]
-                                    logger.debug(f"[FIRST_LAST] DEFINE mode - LAST({variable_name}): using row {target_idx} (current_pos={current_pos})")
                                 else:
-                                    logger.debug(f"[FIRST_LAST] DEFINE mode - LAST({variable_name}): no valid indices")
                                     return None
                             
                             if target_idx < len(rows):
                                 result = rows[target_idx].get(column)
-                                logger.debug(f"[FIRST_LAST] DEFINE mode qualified result: {result}")
                                 return result
                     
-                    logger.debug(f"[FIRST_LAST] DEFINE mode - variable {variable_name} not found in context")
                     return None
                 
                 else:
@@ -1725,18 +1713,14 @@ class ConditionEvaluator(ast.NodeVisitor):
                     # Use boundary values in the current partition (original behavior)
                     if nav_type == 'FIRST':
                         target_row = rows[0]
-                        logger.debug(f"[FIRST_LAST] DEFINE mode - unqualified FIRST: using row 0")
                     else:  # LAST
                         target_row = rows[-1]
-                        logger.debug(f"[FIRST_LAST] DEFINE mode - unqualified LAST: using row {len(rows)-1}")
                     
                     result = target_row.get(column)
-                    logger.debug(f"[FIRST_LAST] DEFINE mode unqualified result: {result}")
                     return result
             
             else:
                 # MEASURES mode: Use logical navigation through pattern matches
-                logger.debug(f"[FIRST_LAST] MEASURES mode - using logical navigation")
                 
                 if var_name:
                     # Qualified reference like FIRST(A.value) or LAST(A.value)
@@ -1749,18 +1733,14 @@ class ConditionEvaluator(ast.NodeVisitor):
                             if nav_type == 'FIRST':
                                 # Get the first occurrence of this variable
                                 target_idx = var_indices[0]
-                                logger.debug(f"[FIRST_LAST] MEASURES mode - FIRST({variable_name}): using row {target_idx}")
                             else:  # LAST
                                 # Get the last occurrence of this variable
                                 target_idx = var_indices[-1]
-                                logger.debug(f"[FIRST_LAST] MEASURES mode - LAST({variable_name}): using row {target_idx}")
                             
                             if target_idx < len(self.context.rows):
                                 result = self.context.rows[target_idx].get(column)
-                                logger.debug(f"[FIRST_LAST] MEASURES mode qualified result: {result}")
                                 return result
                     
-                    logger.debug(f"[FIRST_LAST] MEASURES mode - variable {variable_name} not found in context")
                     return None
                 else:
                     # Unqualified reference like FIRST(value) or LAST(value)
@@ -1768,16 +1748,13 @@ class ConditionEvaluator(ast.NodeVisitor):
                         # For MEASURES, get the first value from the pattern match
                         if self.context.rows:
                             result = self.context.rows[0].get(column)
-                            logger.debug(f"[FIRST_LAST] MEASURES FIRST result: {result}")
                             return result
                     else:  # LAST
                         # For MEASURES, get the last value from the pattern match
                         if self.context.rows:
                             result = self.context.rows[-1].get(column)
-                            logger.debug(f"[FIRST_LAST] MEASURES LAST result: {result}")
                             return result
                 
-                logger.debug(f"[FIRST_LAST] MEASURES mode - no rows available")
                 return None
                 
         except Exception as e:
@@ -2274,12 +2251,8 @@ def _evaluate_complex_arithmetic_navigation(expr: str, context: RowContext, curr
             evaluator = context._active_evaluator
             evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
         else:
-            # Try to determine the correct mode from the original evaluator stored earlier
-            if hasattr(context, '_active_evaluator_backup'):
-                evaluation_mode = context._active_evaluator_backup.evaluation_mode
-            else:
-                evaluation_mode = 'MEASURES'  # Default fallback
-                
+            # Default to MEASURES mode for complex arithmetic in result calculation
+            evaluation_mode = 'MEASURES'
             evaluator = ConditionEvaluator(context, evaluation_mode, recursion_depth + 1)
             evaluator.current_row = context.rows[current_idx] if 0 <= current_idx < len(context.rows) else None
             context._active_evaluator = evaluator
