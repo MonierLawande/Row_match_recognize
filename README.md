@@ -70,60 +70,245 @@ flowchart TD
 ## Example SQL Query
 
 ```sql
-SELECT *
-FROM trade_events
+SELECT customer_id, start_price, bottom_price, final_price, start_date, final_date
+FROM orders
 MATCH_RECOGNIZE (
-  PARTITION BY symbol
-  ORDER BY event_time
-  MEASURES
-    A.event_time AS start_time,
-    B.event_time AS peak_time
-  PATTERN (A+ B)
-  DEFINE
-    A AS A.price < B.price,
-    B AS B.price > PREV(B.price)
-)
+    PARTITION BY customer_id
+    ORDER BY order_date
+    MEASURES
+        START.price AS start_price,
+        LAST(DOWN.price) AS bottom_price,
+        LAST(UP.price) AS final_price,
+        START.order_date AS start_date,
+        LAST(UP.order_date) AS final_date
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP PAST LAST ROW
+    PATTERN (START DOWN+ UP+)
+    DEFINE
+        DOWN AS price < PREV(price),
+        UP AS price > PREV(price)
+);
 ```
 
 ---
 
-## Getting Started
+## 🚀 Installation
 
 ### Prerequisites
 
-* Python 3.8+
-* `pandas`
-* `antlr4-python3-runtime`
-* `lark` (optional, if using alternative parser)
+* **Python 3.8+**
+* **pandas** >= 1.0.0
+* **numpy** >= 1.18.0
+* **antlr4-python3-runtime** >= 4.9.0
 
-### Installation
+### 📦 Install from Source (Development)
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/MonierAshraf/Row_match_recognize.git
+   cd Row_match_recognize
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Install the package in editable mode:**
+   ```bash
+   pip install -e .
+   ```
+
+### 📚 Install from PyPI (Coming Soon)
 
 ```bash
-pip install -r requirements.txt
+pip install match-recognize
+```
+
+### 🔧 Verify Installation
+
+```python
+# Test the installation
+from match_recognize import match_recognize
+print("✅ Installation successful!")
 ```
 
 ---
 
-## Run Example
+## 💡 Quick Start Usage
+
+### Customer Order Pattern Analysis
 
 ```python
-from match_recognize import MatchRecognize
+from match_recognize import match_recognize
+import pandas as pd
 
-sql = """SELECT *
-FROM trades
+# Customer order data
+data = [
+    ('cust_1', '2020-05-11', 100),
+    ('cust_1', '2020-05-12', 200),
+    ('cust_2', '2020-05-13',   8),
+    ('cust_1', '2020-05-14', 100),
+    ('cust_2', '2020-05-15',   4),
+    ('cust_1', '2020-05-16',  50),
+    ('cust_1', '2020-05-17', 100),
+    ('cust_2', '2020-05-18',   6),
+]
+
+# Create DataFrame
+df = pd.DataFrame(data, columns=['customer_id', 'order_date', 'price'])
+df['order_date'] = pd.to_datetime(df['order_date'])
+
+# Find V-shaped price patterns: START → DOWN+ → UP+
+sql = """
+SELECT customer_id, start_price, bottom_price, final_price, start_date, final_date
+FROM orders
 MATCH_RECOGNIZE (
-  PARTITION BY symbol
-  ORDER BY event_time
-  MEASURES A.event_time AS start_time, B.event_time AS peak_time
-  PATTERN (A+ B)
-  DEFINE
-    A AS A.price < B.price,
-    B AS B.price > PREV(B.price)
-)"""
+    PARTITION BY customer_id
+    ORDER BY order_date
+    MEASURES
+        START.price AS start_price,
+        LAST(DOWN.price) AS bottom_price,
+        LAST(UP.price) AS final_price,
+        START.order_date AS start_date,
+        LAST(UP.order_date) AS final_date
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP PAST LAST ROW
+    PATTERN (START DOWN+ UP+)
+    DEFINE
+        DOWN AS price < PREV(price),
+        UP AS price > PREV(price)
+);
+"""
 
-df = load_trade_data()
-result = MatchRecognize(sql).run(df)
+# Execute the query
+result = match_recognize(sql, df)
 print(result)
+```
+
+**Output:**
+```
+  customer_id  start_price  bottom_price  final_price start_date  final_date
+0      cust_1          200            50          100 2020-05-12  2020-05-17
+1      cust_2            8             4            6 2020-05-13  2020-05-18
+```
+
+### Advanced Features
+
+```python
+# Complex pattern with quantifiers and alternation
+sql = """
+SELECT *
+FROM financial_data
+MATCH_RECOGNIZE (
+  PARTITION BY ticker
+  ORDER BY timestamp
+  MEASURES
+    FIRST(A.price) as start_price,
+    LAST(B.price) as end_price,
+    COUNT(*) as pattern_length
+  PATTERN ((A{2,5} | B+) C*)
+  DEFINE
+    A AS price > LAG(price),
+    B AS price < LAG(price),
+    C AS volume > AVG(volume)
+)
+"""
+
+result = match_recognize(sql, financial_df)
+```
+
+---
+
+## 🛠 Development Setup
+
+### For Contributors
+
+1. **Fork and clone:**
+   ```bash
+   git fork https://github.com/MonierAshraf/Row_match_recognize.git
+   git clone https://github.com/YOUR_USERNAME/Row_match_recognize.git
+   cd Row_match_recognize
+   ```
+
+2. **Create virtual environment:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+3. **Install development dependencies:**
+   ```bash
+   pip install -e .
+   pip install -r test_requirements.txt  # Testing dependencies
+   ```
+
+4. **Run tests:**
+   ```bash
+   python -m pytest tests/
+   ```
+
+---
+
+## 🗑 Uninstallation
+
+### Remove pip installation:
+```bash
+pip uninstall match-recognize
+```
+
+### Remove editable installation:
+```bash
+pip uninstall match-recognize row-match-recognize
+```
+
+### Complete removal (including local files):
+```bash
+# Remove package directory if installed from source
+rm -rf match_recognize/
+
+# Remove any remaining configuration
+pip cache purge
+```
+
+### Verify uninstallation:
+```bash
+# Test from different directory
+cd /tmp
+python -c "
+try:
+    from match_recognize import match_recognize
+    print('❌ Package still installed')
+except ImportError:
+    print('✅ Package successfully uninstalled')
+"
+```
+
+---
+
+## 📋 Troubleshooting
+
+### Common Issues
+
+**Import Error:**
+```python
+# If you get ModuleNotFoundError
+import sys
+import os
+sys.path.append(os.path.join(os.getcwd(), 'src'))
+from executor.match_recognize import match_recognize
+```
+
+**Performance Issues:**
+- Limit dataset size to < 1000 rows for optimal performance
+- Use specific `PARTITION BY` clauses to reduce processing overhead
+- Avoid overly complex nested patterns with multiple quantifiers
+
+**Memory Issues:**
+```python
+# Monitor memory usage for large patterns
+import psutil
+print(f"Memory usage: {psutil.virtual_memory().percent}%")
 ```
 
 
