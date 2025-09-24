@@ -52,21 +52,34 @@ Example:
 
 # Import the main function
 try:
-    # Try to import from installed package structure
-    from src.executor.match_recognize import match_recognize
-except ImportError:
-    # Fallback for local development
+    # Try to import from the sibling src package (when properly packaged)
     import sys
     import os
+    
+    # Add the project root to Python path so we can import src
     _current_dir = os.path.dirname(os.path.abspath(__file__))
-    _parent_dir = os.path.dirname(_current_dir)
-    if _parent_dir not in sys.path:
-        sys.path.insert(0, _parent_dir)
+    _project_root = os.path.dirname(_current_dir)
+    
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+    
     from src.executor.match_recognize import match_recognize
+    
+except ImportError as e:
+    # Fallback error message
+    raise ImportError(
+        f"Could not import match_recognize function. "
+        f"This usually means the package wasn't installed correctly. "
+        f"Original error: {e}\n\n"
+        f"Try:\n"
+        f"1. Reinstall: pip uninstall pandas-match-recognize && pip install pandas-match-recognize\n"
+        f"2. Or use development install: pip install -e .\n"
+        f"3. Or import directly: from match_recognize import match_recognize"
+    )
 
 # Package metadata
 # Version information
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 __author__ = "MonierAshraf"
 __description__ = "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 

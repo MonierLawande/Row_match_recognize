@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pandas-match-recognize"
-version = "0.1.4"
+version = "0.1.5"
 description = "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 readme = "README.md"
 authors = [{name = "MonierAshraf", email = "your.email@example.com"}]

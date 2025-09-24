@@ -14,7 +14,7 @@ def read_readme():
 
 setup(
     name="pandas-match-recognize",
-    version="0.1.4", 
+    version="0.1.5", 
     description="SQL MATCH_RECOGNIZE for Pandas DataFrames",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
@@ -25,6 +25,16 @@ setup(
     package_data={
         'pandas_match_recognize': ['*'],
         'match_recognize': ['*'],
+        'src': ['*'],
+        'src.executor': ['*'],
+        'src.parser': ['*'],
+        'src.pattern': ['*'],
+        'src.matcher': ['*'],
+        'src.ast_nodes': ['*'],
+        'src.config': ['*'],
+        'src.utils': ['*'],
+        'src.grammar': ['*'],
+        'src.monitoring': ['*'],
     },
     include_package_data=True,
     python_requires=">=3.7",
