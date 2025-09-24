@@ -333,9 +333,39 @@ pip uninstall pandas-match-recognize -y
 ```bash
 # Uninstall all possible package names
 pip uninstall pandas-match-recognize row-match-recognize match-recognize -y
+```
 
-# Remove development/editable installations
-pip uninstall -e . -y 2>/dev/null || echo "No editable installation found"
+**Remove Development/Editable Installations:**
+```bash
+# For installations that show "Can't uninstall 'pandas-match-recognize'. No files were found to uninstall."
+# This happens with development installs from source
+
+# Step 1: Remove local development files
+rm -rf pandas_match_recognize.egg-info/
+rm -rf build/
+rm -rf dist/
+
+# Step 2: Find and remove from site-packages (if needed)
+python -c "
+import site
+import os
+site_packages = site.getsitepackages()[0]
+dirs_to_remove = [
+    os.path.join(site_packages, 'match_recognize'),
+    os.path.join(site_packages, 'pandas_match_recognize'), 
+    os.path.join(site_packages, 'pandas_match_recognize-0.1.0.dist-info')
+]
+for dir_path in dirs_to_remove:
+    if os.path.exists(dir_path):
+        print(f'Found: {dir_path}')
+        # Uncomment next line to actually remove:
+        # import shutil; shutil.rmtree(dir_path)
+"
+
+# Step 3: Manual removal (if above script found directories)
+# rm -rf /path/to/site-packages/match_recognize
+# rm -rf /path/to/site-packages/pandas_match_recognize  
+# rm -rf /path/to/site-packages/pandas_match_recognize*.dist-info
 ```
 
 **Clean Build Artifacts:**
@@ -413,14 +443,41 @@ print('🎉 Complete uninstallation verified!')
 ### 🔧 Uninstallation Troubleshooting
 
 **If Standard Uninstall Fails:**
-```bash
-# Find installation location
-pip show pandas-match-recognize
 
-# Manual removal (use path from pip show)
+**Error: "Can't uninstall 'pandas-match-recognize'. No files were found to uninstall."**
+```bash
+# This happens with development/editable installations
+# Solution 1: Remove local development files first
+rm -rf pandas_match_recognize.egg-info/ build/ dist/
+
+# Solution 2: Find installation type
+pip show pandas-match-recognize
+# Check if Location points to your project directory (development install)
+
+# Solution 3: Manual removal from site-packages
+# Find installation location
+python -c "import pandas_match_recognize; print(pandas_match_recognize.__file__)" 2>/dev/null || echo "Package not found"
+
+# Remove manually (replace with actual paths)
 rm -rf /path/to/site-packages/pandas_match_recognize/
 rm -rf /path/to/site-packages/match_recognize/
-rm -rf /path/to/site-packages/pandas_match_recognize*.egg-info/
+rm -rf /path/to/site-packages/pandas_match_recognize*.dist-info/
+```
+
+**Multiple Installation Types:**
+```bash
+# Check for different installation types
+pip list | grep pandas-match-recognize   # Check if still listed
+pip show pandas-match-recognize          # Check location type
+
+# Development install (Location shows project directory)
+# → Remove .egg-info, build, dist directories from project
+
+# Site-packages install (Location shows site-packages)  
+# → Use standard pip uninstall
+
+# Editable install (shows -e in pip list or has .egg-link)
+# → Remove .egg-link files manually
 ```
 
 **Multiple Python Environments:**
@@ -435,6 +492,78 @@ sudo pip list | grep pandas-match-recognize  # System installs
 ```bash
 # Nuclear option - reinstall pip itself
 python -m pip install --upgrade --force-reinstall pip
+```
+
+### 🚨 Specific Error Solutions
+
+**Error: "Can't uninstall 'pandas-match-recognize'. No files were found to uninstall."**
+
+This is the **most common issue** with mixed installations (wheel + development). Here's the **exact solution that works**:
+
+```bash
+# STEP 1: Remove from site-packages (if installed there)
+python -c "
+import site, os, glob
+site_packages = site.getsitepackages()[0]
+dirs_to_remove = [
+    os.path.join(site_packages, 'pandas_match_recognize'),
+    os.path.join(site_packages, 'match_recognize'),
+    os.path.join(site_packages, 'pandas_match_recognize-*.dist-info')
+]
+for pattern in dirs_to_remove:
+    for path in glob.glob(pattern):
+        print(f'Remove: {path}')
+"
+# Manually remove the directories shown above:
+# rm -rf /path/to/site-packages/pandas_match_recognize
+# rm -rf /path/to/site-packages/match_recognize  
+# rm -rf /path/to/site-packages/pandas_match_recognize-*.dist-info
+
+# STEP 2: Remove development installation files
+cd /path/to/Row_match_recognize  # Go to your project directory
+rm -rf pandas_match_recognize.egg-info/
+rm -rf build/
+rm -rf dist/
+
+# STEP 3: Verify complete removal
+pip show pandas-match-recognize  # Should show "Package(s) not found"
+
+# STEP 4: Test imports from outside project directory
+cd /tmp
+python -c "
+try:
+    from pandas_match_recognize import match_recognize
+    print('❌ Still installed')
+except ImportError:
+    print('✅ pandas_match_recognize removed')
+    
+try:
+    from match_recognize import match_recognize
+    print('❌ Still installed') 
+except ImportError:
+    print('✅ match_recognize removed')
+    
+print('🎉 Complete uninstall verified!')
+"
+```
+
+**Error: Import works in project directory but not elsewhere**
+```bash
+# This is expected behavior - local imports vs installed packages
+# To test if package is truly uninstalled, always test from outside project directory
+cd /tmp  # or any directory outside your project
+python -c "from pandas_match_recognize import match_recognize"  # Should fail if uninstalled
+```
+
+**Error: Package shows in pip list but can't uninstall**
+```bash
+# Check installation type
+pip show pandas-match-recognize
+# If Location shows your project directory, it's a development install
+
+# Remove manually
+pip uninstall pandas-match-recognize --yes --break-system-packages 2>/dev/null || echo "Standard uninstall failed, using manual cleanup"
+rm -rf $(python -c "import pandas_match_recognize; print(pandas_match_recognize.__file__.split('/__init__')[0])" 2>/dev/null)
 ```
 
 ---
