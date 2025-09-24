@@ -191,7 +191,11 @@ print(result)
   customer_id  start_price  bottom_price  final_price start_date  final_date
 0      cust_1          200            50          100 2020-05-12  2020-05-17
 1      cust_2            8             4            6 2020-05-13  2020-05-18
+```
 
+
+result = match_recognize(sql, financial_df)
+```
 
 ---
 
