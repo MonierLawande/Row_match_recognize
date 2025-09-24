@@ -242,23 +242,40 @@ print(result)
 
 ## 🗑 Uninstallation
 
-### Remove pip installation:
+### 📚 Uninstall PyPI Installation:
 ```bash
 pip uninstall match-recognize
 ```
 
-### Remove editable installation:
+### 🧪 Uninstall TestPyPI Installation:
 ```bash
-pip uninstall match-recognize row-match-recognize
+pip uninstall match-recognize
 ```
 
-### Complete removal (including local files):
+### 📥 Uninstall Local Build Installation:
 ```bash
-# Remove package directory if installed from source
-rm -rf match_recognize/
+pip uninstall match-recognize
+```
 
-# Remove any remaining configuration
+### 📦 Remove Editable/Development Installation:
+```bash
+# For editable installations from source
+pip uninstall match-recognize row-match-recognize
+
+# Remove local development files
+rm -rf match_recognize/
+rm -rf *.egg-info/
+rm -rf build/
+rm -rf dist/
+```
+
+### 🧹 Complete Cleanup:
+```bash
+# Clear pip cache
 pip cache purge
+
+# Remove any remaining configuration files
+rm -rf ~/.cache/pip/wheels/match*
 ```
 
 ### Verify uninstallation:
