@@ -307,9 +307,59 @@ print(result)
 
 4. **Run tests:**
    ```bash
-
    python -m pytest tests/test_anchor_patterns.py tests/test_back_reference.py tests/test_case_sensitivity.py tests/test_complete_java_reference.py tests/test_empty_cycle.py tests/test_empty_matches.py tests/test_exponential_protection.py tests/test_fixed_failing_cases.py tests/test_in_predicate.py tests/test_match_recognize.py tests/test_missing_critical_cases.py tests/test_multiple_match_recognize.py tests/test_navigation_and_conditions.py tests/test_output_layout.py tests/test_pattern_cache.py tests/test_pattern_tokenizer.py tests/test_permute_patterns.py tests/test_production_aggregates.py tests/test_scalar_functions.py tests/test_sql2016_compliance.py tests/test_subqueries.py --tb=short 
    ```
+
+---
+
+## 🔄 Updating & Deploying Changes
+
+### 📈 Making Source Code Updates Available via pip
+
+When you make changes to the source code and want to deploy them for pip installation:
+
+#### 1. **Update Version Numbers**
+```bash
+# Increment version in all files:
+# - setup.py: version="0.1.1"  
+# - pyproject.toml: version = "0.1.1"
+# - pandas_match_recognize/__init__.py: __version__ = "0.1.1"
+# - match_recognize/__init__.py: __version__ = "0.1.1"
+```
+
+#### 2. **Build and Deploy**
+```bash
+# Clean previous builds
+rm -rf build/ dist/ *.egg-info/
+
+# Build new version
+python -m build
+
+# Test locally (optional)
+pip install dist/pandas_match_recognize-0.1.1-py3-none-any.whl --force-reinstall
+
+# Upload to TestPyPI first (testing)
+python -m twine upload --repository testpypi dist/*
+
+# Upload to PyPI (production)  
+python -m twine upload dist/*
+```
+
+#### 3. **Users Install Updates**
+```bash
+# Users can then get your updates:
+pip install --upgrade pandas-match-recognize
+
+# Or install specific version:
+pip install pandas-match-recognize==0.1.1
+```
+
+#### 📋 **Version Strategy**
+- **Patch** (0.1.0 → 0.1.1): Bug fixes, small improvements
+- **Minor** (0.1.0 → 0.2.0): New features (backward compatible)  
+- **Major** (0.1.0 → 1.0.0): Breaking changes
+
+> **📘 See `UPDATE_DEPLOYMENT_GUIDE.md` for complete step-by-step instructions**
 
 ---
 
