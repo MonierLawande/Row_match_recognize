@@ -1,6 +1,9 @@
 from setuptools import setup, find_packages
 import os
 
+
+
+
 # Read README for long description
 def read_readme():
     try:
@@ -11,7 +14,7 @@ def read_readme():
 
 setup(
     name="pandas-match-recognize",
-    version="0.1.1", 
+    version="0.1.4", 
     description="SQL MATCH_RECOGNIZE for Pandas DataFrames",
     long_description=read_readme(),
     long_description_content_type="text/markdown",

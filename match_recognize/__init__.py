@@ -59,7 +59,8 @@ except ImportError:
     from src.executor.match_recognize import match_recognize
 
 # Package metadata
-__version__ = "0.1.0"
+# Version information
+__version__ = "0.1.4"
 __author__ = "MonierAshraf"
 __description__ = "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 

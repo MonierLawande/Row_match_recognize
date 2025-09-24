@@ -4,6 +4,12 @@ SQL MATCH_RECOGNIZE for Pandas DataFrames
 This package provides SQL:2016 MATCH_RECOGNIZE functionality for pandas DataFrames,
 bringing powerful pattern matching capabilities to Python data science workflows.
 
+🚀 Features:
+- Complete SQL:2016 MATCH_RECOGNIZE support
+- High-performance finite automata engine  
+- Advanced pattern constructs (quantifiers, alternation, PERMUTE)
+- Comprehensive measure evaluation
+
 Usage:
     from pandas_match_recognize import match_recognize
     
@@ -59,7 +65,8 @@ except ImportError:
     from src.executor.match_recognize import match_recognize
 
 # Package metadata
-__version__ = "0.1.0"
+# Version information
+__version__ = "0.1.4"
 __author__ = "MonierAshraf"
 __description__ = "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 
