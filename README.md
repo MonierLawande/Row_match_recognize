@@ -191,32 +191,7 @@ print(result)
   customer_id  start_price  bottom_price  final_price start_date  final_date
 0      cust_1          200            50          100 2020-05-12  2020-05-17
 1      cust_2            8             4            6 2020-05-13  2020-05-18
-```
 
-### Advanced Features
-
-```python
-# Complex pattern with quantifiers and alternation
-sql = """
-SELECT *
-FROM financial_data
-MATCH_RECOGNIZE (
-  PARTITION BY ticker
-  ORDER BY timestamp
-  MEASURES
-    FIRST(A.price) as start_price,
-    LAST(B.price) as end_price,
-    COUNT(*) as pattern_length
-  PATTERN ((A{2,5} | B+) C*)
-  DEFINE
-    A AS price > LAG(price),
-    B AS price < LAG(price),
-    C AS volume > AVG(volume)
-)
-"""
-
-result = match_recognize(sql, financial_df)
-```
 
 ---
 
@@ -245,7 +220,6 @@ result = match_recognize(sql, financial_df)
 
 4. **Run tests:**
    ```bash
-   python -m pytest tests/
    python -m pytest tests/test_anchor_patterns.py tests/test_back_reference.py tests/test_case_sensitivity.py tests/test_complete_java_reference.py tests/test_empty_cycle.py tests/test_empty_matches.py tests/test_exponential_protection.py tests/test_fixed_failing_cases.py tests/test_in_predicate.py tests/test_match_recognize.py tests/test_missing_critical_cases.py tests/test_multiple_match_recognize.py tests/test_navigation_and_conditions.py tests/test_output_layout.py tests/test_pattern_cache.py tests/test_pattern_tokenizer.py tests/test_permute_patterns.py tests/test_production_aggregates.py tests/test_scalar_functions.py tests/test_sql2016_compliance.py tests/test_subqueries.py --tb=short 
    ```
 
