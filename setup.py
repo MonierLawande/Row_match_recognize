@@ -1,8 +1,45 @@
-from setuptools import setup, find_packages
+from setuptools import setup, find_packages, Command
+from setuptools.command.build_py import build_py
 import os
+import shutil
+import glob
 
+# Custom build command that ensures src directory is included
+class CustomBuildPy(build_py):
+    def run(self):
+        # Run the standard build first
+        super().run()
+        
+        # Manually copy src directory to build location
+        src_dir = 'src'
+        if os.path.exists(src_dir):
+            build_lib = self.build_lib
+            target_src = os.path.join(build_lib, 'src')
+            
+            # Remove existing src in build if it exists
+            if os.path.exists(target_src):
+                shutil.rmtree(target_src)
+            
+            # Copy src directory
+            shutil.copytree(src_dir, target_src)
+            print(f"✓ Copied src directory to {target_src}")
 
-
+def get_all_packages():
+    """Dynamically find all packages including src subdirectories"""
+    packages = find_packages()
+    
+    # Add src and all its subdirectories
+    src_packages = []
+    if os.path.exists('src'):
+        for root, dirs, files in os.walk('src'):
+            if '__init__.py' in files:
+                # Convert path to package name
+                package = root.replace(os.path.sep, '.')
+                src_packages.append(package)
+    
+    all_packages = packages + src_packages
+    print(f"📦 Found packages: {all_packages}")
+    return all_packages
 
 # Read README for long description
 def read_readme():
@@ -14,20 +51,20 @@ def read_readme():
 
 setup(
     name="pandas-match-recognize",
-    version="0.1.5", 
+    version="0.1.7", 
     description="SQL MATCH_RECOGNIZE for Pandas DataFrames",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
     author="MonierAshraf",
     author_email="your.email@example.com",
     url="https://github.com/MonierAshraf/Row_match_recognize",
-    packages=find_packages(),
+    packages=get_all_packages(),
     package_data={
         'pandas_match_recognize': ['*'],
         'match_recognize': ['*'],
         'src': ['*'],
         'src.executor': ['*'],
-        'src.parser': ['*'],
+        'src.parser': ['*'], 
         'src.pattern': ['*'],
         'src.matcher': ['*'],
         'src.ast_nodes': ['*'],
@@ -37,6 +74,9 @@ setup(
         'src.monitoring': ['*'],
     },
     include_package_data=True,
+    cmdclass={
+        'build_py': CustomBuildPy,
+    },
     python_requires=">=3.7",
     install_requires=[
         "pandas>=1.0.0",
