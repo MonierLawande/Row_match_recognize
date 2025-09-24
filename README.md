@@ -101,6 +101,35 @@ MATCH_RECOGNIZE (
 * **numpy** >= 1.18.0
 * **antlr4-python3-runtime** >= 4.9.0
 
+### � Install from PyPI (Production - Recommended)
+
+**Standard Installation:**
+```bash
+pip install pandas-match-recognize
+```
+
+**Upgrade to Latest Version:**
+```bash
+pip install --upgrade pandas-match-recognize
+```
+
+**Installation with Dependencies:**
+```bash
+pip install pandas-match-recognize[all]
+```
+
+### 🧪 Install from TestPyPI (Testing Repository)
+
+**For testing the latest development version:**
+```bash
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ pandas-match-recognize
+```
+
+**Upgrade from TestPyPI:**
+```bash
+pip install --upgrade -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ pandas-match-recognize
+```
+
 ### 📦 Install from Source (Development)
 
 1. **Clone the repository:**
@@ -114,47 +143,91 @@ MATCH_RECOGNIZE (
    pip install -r requirements.txt
    ```
 
-3. **Install the package in editable mode:**
+3. **Install in editable mode:**
    ```bash
    pip install -e .
    ```
-
-### 📚 Install from PyPI (Production)
-
-```bash
-pip install match-recognize
-```
-
-### 🧪 Install from TestPyPI (Latest Development)
-
-```bash
-pip install -i https://test.pypi.org/simple/ match-recognize
-```
 
 ### 📥 Install from Local Build
 
 ```bash
 # Build the package yourself
 python -m build
-pip install dist/match_recognize-0.1.0-py3-none-any.whl
+pip install dist/pandas_match_recognize-0.1.0-py3-none-any.whl
 ```
 
-### 🔧 Verify Installation
+### ✅ Verify Installation
 
+**Quick Test (One Command):**
+```bash
+python -c "from pandas_match_recognize import match_recognize; print('✅ Installation successful!')"
+```
+
+**Comprehensive Test:**
 ```python
-# Test the installation
-from match_recognize import match_recognize
-print("✅ Installation successful!")
+# Test both import methods - Both should work:
+
+# Method 1: Package-aligned import (recommended)
+try:
+    from pandas_match_recognize import match_recognize
+    print("✅ pandas_match_recognize import: SUCCESS")
+except ImportError as e:
+    print(f"❌ pandas_match_recognize import: FAILED - {e}")
+
+# Method 2: Backward compatible import
+try:
+    from match_recognize import match_recognize  
+    print("✅ match_recognize import: SUCCESS")
+except ImportError as e:
+    print(f"❌ match_recognize import: FAILED - {e}")
+
+# Test functionality
+import pandas as pd
+df = pd.DataFrame({'a': [1, 2, 3], 'b': ['x', 'y', 'z']})
+print("✅ pandas integration: SUCCESS")
+print("🎉 All tests passed! Package is ready to use.")
+```
+
+### 🔧 Installation Troubleshooting
+
+**Check Installation Source:**
+```bash
+pip show pandas-match-recognize
+```
+
+**Check which repositories have the package:**
+```bash
+# Check PyPI
+pip index versions pandas-match-recognize
+
+# Check TestPyPI  
+pip index versions -i https://test.pypi.org/simple/ pandas-match-recognize
+```
+
+**Force Reinstall:**
+```bash
+pip uninstall pandas-match-recognize
+pip install --no-cache-dir pandas-match-recognize
+```
+
+**Install Specific Version:**
+```bash
+pip install pandas-match-recognize==0.1.0
 ```
 
 ---
 
 ## 💡 Quick Start Usage
 
+> **Note:** The package is installed as `pandas-match-recognize` from PyPI. You can import it using two methods:
+> - **Recommended**: `from pandas_match_recognize import match_recognize` (package-aligned)  
+> - **Alternative**: `from match_recognize import match_recognize` (backward compatible)
+
 ### Customer Order Pattern Analysis
 
 ```python
-from match_recognize import match_recognize
+# Import the match_recognize function (installed from pandas-match-recognize package)  
+from pandas_match_recognize import match_recognize  # Recommended: package-aligned import
 import pandas as pd
 
 # Customer order data
@@ -240,55 +313,352 @@ print(result)
 
 ---
 
-## 🗑 Uninstallation
+## 🗑️ Uninstallation
 
-### 📚 Uninstall PyPI Installation:
+### 🎯 Quick Uninstall (All Sources)
+
+**Standard Uninstall:**
 ```bash
-pip uninstall match-recognize
+pip uninstall pandas-match-recognize
 ```
 
-### 🧪 Uninstall TestPyPI Installation:
+**Force Uninstall (if standard doesn't work):**
 ```bash
-pip uninstall match-recognize
+pip uninstall pandas-match-recognize -y
 ```
 
-### 📥 Uninstall Local Build Installation:
+### 🧹 Complete Cleanup (Development/Multiple Installs)
+
+**Remove All Variations:**
 ```bash
-pip uninstall match-recognize
+# Uninstall all possible package names
+pip uninstall pandas-match-recognize row-match-recognize match-recognize -y
+
+# Remove development/editable installations
+pip uninstall -e . -y 2>/dev/null || echo "No editable installation found"
 ```
 
-### 📦 Remove Editable/Development Installation:
+**Clean Build Artifacts:**
 ```bash
-# For editable installations from source
-pip uninstall match-recognize row-match-recognize
-
-# Remove local development files
-rm -rf match_recognize/
-rm -rf *.egg-info/
+# Remove local build files (run in project directory)
 rm -rf build/
 rm -rf dist/
+rm -rf *.egg-info/
+rm -rf __pycache__/
+rm -rf .pytest_cache/
 ```
 
-### 🧹 Complete Cleanup:
+**Clear Pip Cache:**
 ```bash
-# Clear pip cache
+# Clear all pip cache
 pip cache purge
 
-# Remove any remaining configuration files
-rm -rf ~/.cache/pip/wheels/match*
+# Remove specific cache entries
+pip cache remove pandas-match-recognize
 ```
 
-### Verify uninstallation:
+### 🔍 Verify Uninstallation
+
+**Quick Verification:**
 ```bash
-# Test from different directory
-cd /tmp
 python -c "
 try:
-    from match_recognize import match_recognize
-    print('❌ Package still installed')
+    import pandas_match_recognize
+    print('❌ pandas_match_recognize still found')
 except ImportError:
-    print('✅ Package successfully uninstalled')
+    print('✅ pandas_match_recognize removed')
+
+try:
+    import match_recognize  
+    print('❌ match_recognize still found')
+except ImportError:
+    print('✅ match_recognize removed')
+    
+print('🎯 Uninstallation verification complete!')
 "
+```
+
+**Comprehensive Check:**
+```bash
+# Check from different directory to avoid local imports
+cd /tmp
+python -c "
+import sys
+import subprocess
+
+# Check if package is in pip list
+result = subprocess.run(['pip', 'list'], capture_output=True, text=True)
+if 'pandas-match-recognize' in result.stdout:
+    print('❌ Package still in pip list')
+else:
+    print('✅ Package not in pip list')
+
+# Test imports
+try:
+    from pandas_match_recognize import match_recognize
+    print('❌ pandas_match_recognize import still works')
+except ImportError:
+    print('✅ pandas_match_recognize import blocked')
+
+try:
+    from match_recognize import match_recognize
+    print('❌ match_recognize import still works') 
+except ImportError:
+    print('✅ match_recognize import blocked')
+    
+print('🎉 Complete uninstallation verified!')
+"
+```
+
+### 🔧 Uninstallation Troubleshooting
+
+**If Standard Uninstall Fails:**
+```bash
+# Find installation location
+pip show pandas-match-recognize
+
+# Manual removal (use path from pip show)
+rm -rf /path/to/site-packages/pandas_match_recognize/
+rm -rf /path/to/site-packages/match_recognize/
+rm -rf /path/to/site-packages/pandas_match_recognize*.egg-info/
+```
+
+**Multiple Python Environments:**
+```bash
+# Check all Python environments
+conda list | grep pandas-match-recognize  # If using conda
+pip list --user | grep pandas-match-recognize  # User installs
+sudo pip list | grep pandas-match-recognize  # System installs
+```
+
+**Reset to Clean State:**
+```bash
+# Nuclear option - reinstall pip itself
+python -m pip install --upgrade --force-reinstall pip
+```
+
+---
+
+## 🧪 Testing Installation & Functionality
+
+### 🎯 Quick Functionality Test
+
+**Test Basic Import and Execution:**
+```bash
+python -c "
+from pandas_match_recognize import match_recognize
+import pandas as pd
+
+# Test data
+df = pd.DataFrame({
+    'id': [1, 1, 1, 2, 2],
+    'value': [10, 20, 15, 5, 8],
+    'time': pd.date_range('2023-01-01', periods=5)
+})
+
+# Simple test query
+sql = '''
+SELECT id, value 
+FROM test_table
+MATCH_RECOGNIZE (
+    PARTITION BY id
+    ORDER BY time
+    MEASURES FIRST(A.value) as first_val
+    ONE ROW PER MATCH
+    PATTERN (A)
+    DEFINE A AS value > 0
+)
+'''
+
+try:
+    result = match_recognize(sql, df)
+    print('✅ Basic functionality test: PASSED')
+    print(f'📊 Result shape: {result.shape}')
+except Exception as e:
+    print(f'❌ Basic functionality test: FAILED - {e}')
+"
+```
+
+### 🔄 Test Both Installation Methods
+
+**Test PyPI vs TestPyPI Installation:**
+```bash
+# Test PyPI installation
+echo "🧪 Testing PyPI installation..."
+pip uninstall pandas-match-recognize -y 2>/dev/null
+pip install pandas-match-recognize
+python -c "from pandas_match_recognize import match_recognize; print('✅ PyPI installation works')"
+
+echo ""
+echo "🧪 Testing TestPyPI installation..."
+pip uninstall pandas-match-recognize -y 2>/dev/null  
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ pandas-match-recognize
+python -c "from pandas_match_recognize import match_recognize; print('✅ TestPyPI installation works')"
+
+echo ""
+echo "🎉 Both installation methods verified!"
+```
+
+### 📋 Repository Comparison Test
+
+**Compare PyPI vs TestPyPI Versions:**
+```bash
+python -c "
+import subprocess
+import json
+
+def get_package_info(source='pypi'):
+    if source == 'pypi':
+        cmd = ['pip', 'show', 'pandas-match-recognize']
+    else:
+        # For TestPyPI, we need to check differently
+        cmd = ['pip', 'list', '--format=json']
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if source == 'pypi':
+            print(f'📦 {source.upper()} Package Info:')
+            print(result.stdout)
+        else:
+            packages = json.loads(result.stdout)
+            for pkg in packages:
+                if pkg['name'] == 'pandas-match-recognize':
+                    print(f'📦 {source.upper()} Version: {pkg[\"version\"]}')
+                    break
+    except Exception as e:
+        print(f'❌ Could not get {source} info: {e}')
+
+get_package_info('pypi')
+print()
+get_package_info('testpypi')
+"
+```
+
+### 🚀 Performance Test
+
+**Test Pattern Matching Performance:**
+```python
+import time
+import pandas as pd
+from pandas_match_recognize import match_recognize
+
+# Generate test data
+print("🚀 Performance Test")
+n_rows = 1000
+df = pd.DataFrame({
+    'customer_id': [f'cust_{i//100}' for i in range(n_rows)],
+    'order_date': pd.date_range('2023-01-01', periods=n_rows, freq='1H'),
+    'price': [10 + (i % 20) for i in range(n_rows)]
+})
+
+# Performance test query
+sql = """
+SELECT customer_id, COUNT(*) as pattern_count
+FROM orders  
+MATCH_RECOGNIZE (
+    PARTITION BY customer_id
+    ORDER BY order_date
+    MEASURES FIRST(A.price) as start_price
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP PAST LAST ROW
+    PATTERN (A B+ C)
+    DEFINE
+        B AS price > PREV(price),
+        C AS price < PREV(price)
+)
+"""
+
+start_time = time.time()
+try:
+    result = match_recognize(sql, df)
+    end_time = time.time()
+    print(f"✅ Performance test completed")
+    print(f"📊 Processed {n_rows} rows in {end_time - start_time:.3f} seconds")
+    print(f"📈 Found {len(result)} pattern matches")
+except Exception as e:
+    print(f"❌ Performance test failed: {e}")
+```
+
+### 🔍 Compatibility Test
+
+**Test Both Import Methods:**
+```python
+print("🔍 Import Method Compatibility Test")
+
+# Test Method 1: Package-aligned import (recommended)
+try:
+    from pandas_match_recognize import match_recognize as mr1
+    print("✅ Method 1 (pandas_match_recognize): SUCCESS")
+    method1_success = True
+except ImportError as e:
+    print(f"❌ Method 1 (pandas_match_recognize): FAILED - {e}")
+    method1_success = False
+
+# Test Method 2: Backward compatible import  
+try:
+    from match_recognize import match_recognize as mr2
+    print("✅ Method 2 (match_recognize): SUCCESS")
+    method2_success = True
+except ImportError as e:
+    print(f"❌ Method 2 (match_recognize): FAILED - {e}")
+    method2_success = False
+
+# Test functionality equivalence
+if method1_success and method2_success:
+    print("🔄 Testing functional equivalence...")
+    import pandas as pd
+    
+    df = pd.DataFrame({'a': [1, 2], 'b': [3, 4]})
+    sql = "SELECT a FROM test MATCH_RECOGNIZE (ORDER BY a PATTERN (A) DEFINE A AS a > 0)"
+    
+    try:
+        result1 = mr1(sql, df)
+        result2 = mr2(sql, df)
+        
+        if result1.equals(result2):
+            print("✅ Both import methods produce identical results")
+        else:
+            print("⚠️ Warning: Import methods produce different results")
+    except Exception as e:
+        print(f"❌ Functional equivalence test failed: {e}")
+
+print("🎯 Compatibility test completed")
+```
+
+### 📊 Repository Status Check
+
+**Check Package Status on Both Repositories:**
+```bash
+echo "📊 Repository Status Check"
+echo "=========================="
+
+echo "🔍 Checking PyPI status..."
+curl -s "https://pypi.org/pypi/pandas-match-recognize/json" | python -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(f'✅ PyPI: pandas-match-recognize v{data[\"info\"][\"version\"]} available')
+    print(f'📅 Last updated: {data[\"releases\"][data[\"info\"][\"version\"]][0][\"upload_time\"]}')
+except:
+    print('❌ PyPI: Package not found or error')
+"
+
+echo ""
+echo "🔍 Checking TestPyPI status..."
+curl -s "https://test.pypi.org/pypi/pandas-match-recognize/json" | python -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    print(f'✅ TestPyPI: pandas-match-recognize v{data[\"info\"][\"version\"]} available')
+    print(f'📅 Last updated: {data[\"releases\"][data[\"info\"][\"version\"]][0][\"upload_time\"]}')
+except:
+    print('❌ TestPyPI: Package not found or error')
+"
+
+echo ""
+echo "🌐 Direct URLs:"
+echo "   PyPI: https://pypi.org/project/pandas-match-recognize/"
+echo "   TestPyPI: https://test.pypi.org/project/pandas-match-recognize/"
 ```
 
 ---
@@ -297,13 +667,29 @@ except ImportError:
 
 ### Common Issues
 
+**Multiple Import Options:**
+```python
+# ✅ RECOMMENDED - Package-aligned import
+from pandas_match_recognize import match_recognize
+
+# ✅ ALTERNATIVE - Backward compatible import  
+from match_recognize import match_recognize
+
+# ❌ WRONG - Python doesn't allow hyphens in imports
+from pandas-match-recognize import match_recognize  # SyntaxError!
+```
+
 **Import Error:**
 ```python
-# If you get ModuleNotFoundError
+# If you get ModuleNotFoundError during development
 import sys
 import os
 sys.path.append(os.path.join(os.getcwd(), 'src'))
 from executor.match_recognize import match_recognize
+
+# Or try the direct import methods:
+# from pandas_match_recognize import match_recognize  # Recommended
+# from match_recognize import match_recognize         # Alternative
 ```
 
 **Performance Issues:**

@@ -10,7 +10,7 @@ def read_readme():
         return "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 
 setup(
-    name="match-recognize",
+    name="pandas-match-recognize",
     version="0.1.0", 
     description="SQL MATCH_RECOGNIZE for Pandas DataFrames",
     long_description=read_readme(),
@@ -19,6 +19,10 @@ setup(
     author_email="your.email@example.com",
     url="https://github.com/MonierAshraf/Row_match_recognize",
     packages=find_packages(),
+    package_data={
+        'pandas_match_recognize': ['*'],
+        'match_recognize': ['*'],
+    },
     include_package_data=True,
     python_requires=">=3.7",
     install_requires=[
