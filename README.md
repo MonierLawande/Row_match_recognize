@@ -119,10 +119,24 @@ MATCH_RECOGNIZE (
    pip install -e .
    ```
 
-### 📚 Install from PyPI (Coming Soon)
+### 📚 Install from PyPI (Production)
 
 ```bash
 pip install match-recognize
+```
+
+### 🧪 Install from TestPyPI (Latest Development)
+
+```bash
+pip install -i https://test.pypi.org/simple/ match-recognize
+```
+
+### 📥 Install from Local Build
+
+```bash
+# Build the package yourself
+python -m build
+pip install dist/match_recognize-0.1.0-py3-none-any.whl
 ```
 
 ### 🔧 Verify Installation
