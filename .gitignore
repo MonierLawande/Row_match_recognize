@@ -1,6 +1,9 @@
 # Byte-compiled / optimized / DLL files
-__pycache__/
-__pycache__
+___pycache__/
+*/___pycache__/
+../*/___pycache__/
+# Ignore Python bytecode files
+
 *.py[cod]
 *$py.class
 amz_uk_processed_data.csv
