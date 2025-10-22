@@ -2,7 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+amz_uk_processed_data.csv
+*.pyc
 # C extensions
 *.so
 
