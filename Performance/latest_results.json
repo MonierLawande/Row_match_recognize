@@ -1,0 +1,452 @@
+[
+  {
+    "pattern_name": "simple_sequence",
+    "pattern": "A+ B+",
+    "description": "Simple sequence: A followed by B",
+    "dataset_size": 25000,
+    "success": true,
+    "error": null,
+    "execution_time": 1.9189035892486572,
+    "num_matches": 1915,
+    "total_matched_rows": 6906,
+    "coverage_percent": 27.624,
+    "throughput_rows_per_sec": 13028.273093068057,
+    "memory_used_mb": 14.9375,
+    "result_shape": [
+      1915,
+      5
+    ]
+  },
+  {
+    "pattern_name": "alternation",
+    "pattern": "A (B|C)+ D",
+    "description": "Alternation: A followed by (B or C) followed by D",
+    "dataset_size": 25000,
+    "success": true,
+    "error": null,
+    "execution_time": 2.1331093311309814,
+    "num_matches": 277,
+    "total_matched_rows": 1275,
+    "coverage_percent": 5.1,
+    "throughput_rows_per_sec": 11719.980610063207,
+    "memory_used_mb": 2.35546875,
+    "result_shape": [
+      277,
+      3
+    ]
+  },
+  {
+    "pattern_name": "quantified",
+    "pattern": "A{2,5} B* C+",
+    "description": "Quantified: 2-5 A's, optional B's, one or more C's",
+    "dataset_size": 25000,
+    "success": true,
+    "error": null,
+    "execution_time": 3.3380017280578613,
+    "num_matches": 1023,
+    "total_matched_rows": 2924,
+    "coverage_percent": 11.696,
+    "throughput_rows_per_sec": 7489.510802184536,
+    "memory_used_mb": 1.26171875,
+    "result_shape": [
+      1023,
+      6
+    ]
+  },
+  {
+    "pattern_name": "optional_pattern",
+    "pattern": "A+ B? C*",
+    "description": "Optional patterns: A's, optional B, optional C's",
+    "dataset_size": 25000,
+    "success": true,
+    "error": null,
+    "execution_time": 1.9663338661193848,
+    "num_matches": 3174,
+    "total_matched_rows": 7781,
+    "coverage_percent": 31.124000000000002,
+    "throughput_rows_per_sec": 12714.01588039482,
+    "memory_used_mb": 6.5078125,
+    "result_shape": [
+      3174,
+      2
+    ]
+  },
+  {
+    "pattern_name": "complex_nested",
+    "pattern": "(A|B)+ (C{1,3} D*)+",
+    "description": "Complex nested: (A or B)+ followed by (1-3 C's, optional D's)+",
+    "dataset_size": 25000,
+    "success": true,
+    "error": null,
+    "execution_time": 3.4937877655029297,
+    "num_matches": 1669,
+    "total_matched_rows": 10641,
+    "coverage_percent": 42.564,
+    "throughput_rows_per_sec": 7155.557714995106,
+    "memory_used_mb": 0.5078125,
+    "result_shape": [
+      1669,
+      2
+    ]
+  },
+  {
+    "pattern_name": "simple_sequence",
+    "pattern": "A+ B+",
+    "description": "Simple sequence: A followed by B",
+    "dataset_size": 35000,
+    "success": true,
+    "error": null,
+    "execution_time": 2.791597843170166,
+    "num_matches": 3588,
+    "total_matched_rows": 14242,
+    "coverage_percent": 40.691428571428574,
+    "throughput_rows_per_sec": 12537.622525260893,
+    "memory_used_mb": 10.9453125,
+    "result_shape": [
+      3588,
+      5
+    ]
+  },
+  {
+    "pattern_name": "alternation",
+    "pattern": "A (B|C)+ D",
+    "description": "Alternation: A followed by (B or C) followed by D",
+    "dataset_size": 35000,
+    "success": true,
+    "error": null,
+    "execution_time": 3.2442286014556885,
+    "num_matches": 326,
+    "total_matched_rows": 1509,
+    "coverage_percent": 4.311428571428571,
+    "throughput_rows_per_sec": 10788.388951473848,
+    "memory_used_mb": 2.140625,
+    "result_shape": [
+      326,
+      3
+    ]
+  },
+  {
+    "pattern_name": "quantified",
+    "pattern": "A{2,5} B* C+",
+    "description": "Quantified: 2-5 A's, optional B's, one or more C's",
+    "dataset_size": 35000,
+    "success": true,
+    "error": null,
+    "execution_time": 5.4275383949279785,
+    "num_matches": 1516,
+    "total_matched_rows": 4188,
+    "coverage_percent": 11.965714285714284,
+    "throughput_rows_per_sec": 6448.595560872939,
+    "memory_used_mb": 2.703125,
+    "result_shape": [
+      1516,
+      6
+    ]
+  },
+  {
+    "pattern_name": "optional_pattern",
+    "pattern": "A+ B? C*",
+    "description": "Optional patterns: A's, optional B, optional C's",
+    "dataset_size": 35000,
+    "success": true,
+    "error": null,
+    "execution_time": 3.0742170810699463,
+    "num_matches": 5276,
+    "total_matched_rows": 15594,
+    "coverage_percent": 44.55428571428571,
+    "throughput_rows_per_sec": 11385.012533929012,
+    "memory_used_mb": 10.80859375,
+    "result_shape": [
+      5276,
+      2
+    ]
+  },
+  {
+    "pattern_name": "complex_nested",
+    "pattern": "(A|B)+ (C{1,3} D*)+",
+    "description": "Complex nested: (A or B)+ followed by (1-3 C's, optional D's)+",
+    "dataset_size": 35000,
+    "success": true,
+    "error": null,
+    "execution_time": 5.360158681869507,
+    "num_matches": 2262,
+    "total_matched_rows": 18815,
+    "coverage_percent": 53.75714285714286,
+    "throughput_rows_per_sec": 6529.657436893783,
+    "memory_used_mb": -9.8984375,
+    "result_shape": [
+      2262,
+      2
+    ]
+  },
+  {
+    "pattern_name": "simple_sequence",
+    "pattern": "A+ B+",
+    "description": "Simple sequence: A followed by B",
+    "dataset_size": 50000,
+    "success": true,
+    "error": null,
+    "execution_time": 3.80973219871521,
+    "num_matches": 4322,
+    "total_matched_rows": 16250,
+    "coverage_percent": 32.5,
+    "throughput_rows_per_sec": 13124.28207338614,
+    "memory_used_mb": 10.0,
+    "result_shape": [
+      4322,
+      5
+    ]
+  },
+  {
+    "pattern_name": "alternation",
+    "pattern": "A (B|C)+ D",
+    "description": "Alternation: A followed by (B or C) followed by D",
+    "dataset_size": 50000,
+    "success": true,
+    "error": null,
+    "execution_time": 4.418031930923462,
+    "num_matches": 612,
+    "total_matched_rows": 2742,
+    "coverage_percent": 5.484,
+    "throughput_rows_per_sec": 11317.256367033306,
+    "memory_used_mb": 1.640625,
+    "result_shape": [
+      612,
+      3
+    ]
+  },
+  {
+    "pattern_name": "quantified",
+    "pattern": "A{2,5} B* C+",
+    "description": "Quantified: 2-5 A's, optional B's, one or more C's",
+    "dataset_size": 50000,
+    "success": true,
+    "error": null,
+    "execution_time": 7.135993242263794,
+    "num_matches": 2219,
+    "total_matched_rows": 6215,
+    "coverage_percent": 12.43,
+    "throughput_rows_per_sec": 7006.7330927205585,
+    "memory_used_mb": -1.1015625,
+    "result_shape": [
+      2219,
+      6
+    ]
+  },
+  {
+    "pattern_name": "optional_pattern",
+    "pattern": "A+ B? C*",
+    "description": "Optional patterns: A's, optional B, optional C's",
+    "dataset_size": 50000,
+    "success": true,
+    "error": null,
+    "execution_time": 4.215284585952759,
+    "num_matches": 7081,
+    "total_matched_rows": 18757,
+    "coverage_percent": 37.513999999999996,
+    "throughput_rows_per_sec": 11861.595339641526,
+    "memory_used_mb": 4.75390625,
+    "result_shape": [
+      7081,
+      2
+    ]
+  },
+  {
+    "pattern_name": "complex_nested",
+    "pattern": "(A|B)+ (C{1,3} D*)+",
+    "description": "Complex nested: (A or B)+ followed by (1-3 C's, optional D's)+",
+    "dataset_size": 50000,
+    "success": true,
+    "error": null,
+    "execution_time": 7.375643730163574,
+    "num_matches": 3800,
+    "total_matched_rows": 24366,
+    "coverage_percent": 48.732,
+    "throughput_rows_per_sec": 6779.069302862208,
+    "memory_used_mb": -0.9765625,
+    "result_shape": [
+      3800,
+      2
+    ]
+  },
+  {
+    "pattern_name": "simple_sequence",
+    "pattern": "A+ B+",
+    "description": "Simple sequence: A followed by B",
+    "dataset_size": 75000,
+    "success": true,
+    "error": null,
+    "execution_time": 6.000389099121094,
+    "num_matches": 6718,
+    "total_matched_rows": 24543,
+    "coverage_percent": 32.724,
+    "throughput_rows_per_sec": 12499.18942939644,
+    "memory_used_mb": 31.33984375,
+    "result_shape": [
+      6718,
+      5
+    ]
+  },
+  {
+    "pattern_name": "alternation",
+    "pattern": "A (B|C)+ D",
+    "description": "Alternation: A followed by (B or C) followed by D",
+    "dataset_size": 75000,
+    "success": true,
+    "error": null,
+    "execution_time": 7.092073440551758,
+    "num_matches": 1100,
+    "total_matched_rows": 5124,
+    "coverage_percent": 6.832000000000001,
+    "throughput_rows_per_sec": 10575.186597921786,
+    "memory_used_mb": 7.73046875,
+    "result_shape": [
+      1100,
+      3
+    ]
+  },
+  {
+    "pattern_name": "quantified",
+    "pattern": "A{2,5} B* C+",
+    "description": "Quantified: 2-5 A's, optional B's, one or more C's",
+    "dataset_size": 75000,
+    "success": true,
+    "error": null,
+    "execution_time": 11.59246826171875,
+    "num_matches": 3756,
+    "total_matched_rows": 10982,
+    "coverage_percent": 14.642666666666667,
+    "throughput_rows_per_sec": 6469.7179502029685,
+    "memory_used_mb": -4.1484375,
+    "result_shape": [
+      3756,
+      6
+    ]
+  },
+  {
+    "pattern_name": "optional_pattern",
+    "pattern": "A+ B? C*",
+    "description": "Optional patterns: A's, optional B, optional C's",
+    "dataset_size": 75000,
+    "success": true,
+    "error": null,
+    "execution_time": 7.280454635620117,
+    "num_matches": 10982,
+    "total_matched_rows": 27377,
+    "coverage_percent": 36.50266666666667,
+    "throughput_rows_per_sec": 10301.554470658662,
+    "memory_used_mb": 17.73828125,
+    "result_shape": [
+      10982,
+      2
+    ]
+  },
+  {
+    "pattern_name": "complex_nested",
+    "pattern": "(A|B)+ (C{1,3} D*)+",
+    "description": "Complex nested: (A or B)+ followed by (1-3 C's, optional D's)+",
+    "dataset_size": 75000,
+    "success": true,
+    "error": null,
+    "execution_time": 12.105485439300537,
+    "num_matches": 6333,
+    "total_matched_rows": 38112,
+    "coverage_percent": 50.815999999999995,
+    "throughput_rows_per_sec": 6195.538409101052,
+    "memory_used_mb": 6.3828125,
+    "result_shape": [
+      6333,
+      2
+    ]
+  },
+  {
+    "pattern_name": "simple_sequence",
+    "pattern": "A+ B+",
+    "description": "Simple sequence: A followed by B",
+    "dataset_size": 100000,
+    "success": true,
+    "error": null,
+    "execution_time": 8.397891998291016,
+    "num_matches": 9067,
+    "total_matched_rows": 32177,
+    "coverage_percent": 32.177,
+    "throughput_rows_per_sec": 11907.750185445366,
+    "memory_used_mb": 26.0,
+    "result_shape": [
+      9067,
+      5
+    ]
+  },
+  {
+    "pattern_name": "alternation",
+    "pattern": "A (B|C)+ D",
+    "description": "Alternation: A followed by (B or C) followed by D",
+    "dataset_size": 100000,
+    "success": true,
+    "error": null,
+    "execution_time": 9.935091495513916,
+    "num_matches": 1828,
+    "total_matched_rows": 8576,
+    "coverage_percent": 8.576,
+    "throughput_rows_per_sec": 10065.332568417103,
+    "memory_used_mb": 29.3203125,
+    "result_shape": [
+      1828,
+      3
+    ]
+  },
+  {
+    "pattern_name": "quantified",
+    "pattern": "A{2,5} B* C+",
+    "description": "Quantified: 2-5 A's, optional B's, one or more C's",
+    "dataset_size": 100000,
+    "success": true,
+    "error": null,
+    "execution_time": 15.079188346862793,
+    "num_matches": 5643,
+    "total_matched_rows": 16752,
+    "coverage_percent": 16.752,
+    "throughput_rows_per_sec": 6631.656671415268,
+    "memory_used_mb": -24.57421875,
+    "result_shape": [
+      5643,
+      6
+    ]
+  },
+  {
+    "pattern_name": "optional_pattern",
+    "pattern": "A+ B? C*",
+    "description": "Optional patterns: A's, optional B, optional C's",
+    "dataset_size": 100000,
+    "success": true,
+    "error": null,
+    "execution_time": 9.045127868652344,
+    "num_matches": 15247,
+    "total_matched_rows": 36264,
+    "coverage_percent": 36.264,
+    "throughput_rows_per_sec": 11055.675657894182,
+    "memory_used_mb": 14.66015625,
+    "result_shape": [
+      15247,
+      2
+    ]
+  },
+  {
+    "pattern_name": "complex_nested",
+    "pattern": "(A|B)+ (C{1,3} D*)+",
+    "description": "Complex nested: (A or B)+ followed by (1-3 C's, optional D's)+",
+    "dataset_size": 100000,
+    "success": true,
+    "error": null,
+    "execution_time": 16.080222129821777,
+    "num_matches": 9420,
+    "total_matched_rows": 52318,
+    "coverage_percent": 52.318,
+    "throughput_rows_per_sec": 6218.81956559193,
+    "memory_used_mb": 9.078125,
+    "result_shape": [
+      9420,
+      2
+    ]
+  }
+]
