@@ -29,7 +29,7 @@ def get_memory_usage():
 def load_amazon_dataset(sample_size: int = None) -> pd.DataFrame:
     """Load Amazon UK dataset with optional sampling."""
     
-    dataset_path = "Performance/amz_uk_processed_data.csv"
+    dataset_path = "amz_uk_processed_data.csv"
     
     if not os.path.exists(dataset_path):
         print(f"❌ Dataset not found: {dataset_path}")
@@ -326,7 +326,7 @@ def run_comprehensive_evaluation(dataset_sizes: List[int] = None):
     
     # Load full dataset info first
     print("📏 Checking full dataset size...")
-    dataset_path = "Performance/amz_uk_processed_data.csv"
+    dataset_path = "amz_uk_processed_data.csv"
     if os.path.exists(dataset_path):
         with open(dataset_path, 'r') as f:
             total_lines = sum(1 for line in f) - 1
