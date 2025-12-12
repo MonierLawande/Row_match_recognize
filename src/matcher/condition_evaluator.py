@@ -2933,8 +2933,10 @@ def _sql_to_python_condition(condition: str) -> str:
         - FUNC1(FUNC2(col)) IS NULL
         - table.column IS NULL
         - simple_column IS NULL
+        - PREV(A.price)IS NULL (no space before IS)
         """
-        keyword = r'\s+IS\s+NOT\s+NULL\b' if is_not_null else r'\s+IS\s+NULL\b'
+        # Allow optional whitespace before IS NULL for better robustness
+        keyword = r'\s*IS\s+NOT\s+NULL\b' if is_not_null else r'\s*IS\s+NULL\b'
         result = text
         
         # Find all IS NULL occurrences
