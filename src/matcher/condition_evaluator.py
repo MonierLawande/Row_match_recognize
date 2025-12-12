@@ -483,7 +483,9 @@ class ConditionEvaluator(ast.NodeVisitor):
                                    f"In MATCH_RECOGNIZE, use pattern variable references instead of table references")
                 
                 if func_name in ("PREV", "NEXT"):
-                    # Context-aware navigation: physical for DEFINE, logical for MEASURES
+                    # In DEFINE mode, PREV(A.price) means "get A.price from the previous physical row"
+                    # not "get price from the previous A-matched row"
+                    # The variable prefix is just specifying which column to access
                     if self.evaluation_mode == 'DEFINE':
                         # Physical navigation: use direct row indexing
                         return self.evaluate_physical_navigation(func_name, column, steps)
@@ -1457,6 +1459,107 @@ class ConditionEvaluator(ast.NodeVisitor):
         # Get the value from the target row
         result = self.context.rows[target_idx].get(column)
         logger.debug(f"PHYSICAL_NAV: returning value from row {target_idx}: {result}")
+        return result
+
+    def evaluate_variable_aware_navigation(self, nav_type, var_name, column, steps=1):
+        """
+        Variable-aware navigation for DEFINE conditions with pattern variable references.
+        
+        This method implements the correct SQL:2016 semantics for navigation functions
+        like PREV(A.price) in DEFINE conditions. PREV(A.price) means "the previous row
+        that was assigned to variable A", not just "the previous physical row".
+        
+        For example, in the condition:
+            A AS A.price > PREV(A.price) OR PREV(A.price) IS NULL
+        
+        When evaluating the first row for variable A, there are no previous A assignments,
+        so PREV(A.price) returns NULL, making the condition TRUE.
+        
+        Args:
+            nav_type: Type of navigation ('PREV' or 'NEXT')
+            var_name: Variable name to navigate within (e.g., 'A')
+            column: Column name to retrieve
+            steps: Number of steps to navigate (default: 1)
+            
+        Returns:
+            The value at the navigated position or None if navigation is invalid
+        """
+        logger = get_logger(__name__)
+        logger.debug(f"[VAR_NAV] {nav_type}({var_name}.{column}, {steps}) at current_idx={self.context.current_idx}")
+        
+        # Input validation
+        if steps < 0:
+            raise ValueError(f"Navigation steps must be non-negative: {steps}")
+            
+        if nav_type not in ('PREV', 'NEXT'):
+            raise ValueError(f"Invalid navigation type: {nav_type}")
+        
+        # Get currently assigned indices for this variable
+        var_indices = self.context.variables.get(var_name, [])
+        
+        # If no rows assigned to this variable yet, return None
+        if not var_indices:
+            logger.debug(f"[VAR_NAV] No rows assigned to {var_name} yet, returning None")
+            return None
+        
+        # Sort indices to ensure consistent ordering
+        sorted_indices = sorted(var_indices)
+        
+        # Find the current position in the variable's assignment sequence
+        curr_idx = self.context.current_idx
+        
+        # If current row is not yet assigned to this variable, we're evaluating
+        # whether it should be assigned. In this case, look at the last assigned row.
+        if curr_idx not in var_indices:
+            if nav_type == 'PREV':
+                # For PREV, use the last assigned row
+                if sorted_indices:
+                    target_idx = sorted_indices[-1]
+                    result = self.context.rows[target_idx].get(column)
+                    logger.debug(f"[VAR_NAV] Current row not in {var_name}, using last assigned row {target_idx}: {result}")
+                    return result
+                else:
+                    logger.debug(f"[VAR_NAV] No previous {var_name} rows, returning None")
+                    return None
+            else:  # NEXT
+                # For NEXT, there's no "next" row since we're at evaluation boundary
+                logger.debug(f"[VAR_NAV] NEXT navigation not valid during evaluation, returning None")
+                return None
+        
+        # Current row is in the variable's assignment, find its position
+        try:
+            pos = sorted_indices.index(curr_idx)
+        except ValueError:
+            logger.debug(f"[VAR_NAV] Current row {curr_idx} not found in {var_name} indices")
+            return None
+        
+        # Calculate target position
+        if nav_type == 'PREV':
+            target_pos = pos - steps
+        else:  # NEXT
+            target_pos = pos + steps
+        
+        # Check bounds
+        if target_pos < 0 or target_pos >= len(sorted_indices):
+            logger.debug(f"[VAR_NAV] Target position {target_pos} out of bounds [0, {len(sorted_indices)})")
+            return None
+        
+        # Get target row index
+        target_idx = sorted_indices[target_pos]
+        
+        # Check partition boundaries if defined
+        if hasattr(self.context, 'partition_boundaries') and self.context.partition_boundaries:
+            current_partition = self.context.get_partition_for_row(curr_idx)
+            target_partition = self.context.get_partition_for_row(target_idx)
+            
+            if (current_partition is None or target_partition is None or
+                current_partition != target_partition):
+                logger.debug(f"[VAR_NAV] Partition boundary violation")
+                return None
+        
+        # Get the value from the target row
+        result = self.context.rows[target_idx].get(column)
+        logger.debug(f"[VAR_NAV] Returning value from {var_name} row {target_idx}: {result}")
         return result
 
     def evaluate_navigation_function(self, nav_type, column, steps=1, var_name=None):
@@ -2801,8 +2904,106 @@ def _sql_to_python_condition(condition: str) -> str:
     
     # Handle IS NULL and IS NOT NULL
     # Use a helper function for null checking that handles both None and NaN
-    condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NULL\b', r'_is_null(\1)', condition, flags=re.IGNORECASE)
-    condition = re.sub(r'(\w+(?:\.\w+)?)\s+IS\s+NOT\s+NULL\b', r'(not _is_null(\1))', condition, flags=re.IGNORECASE)
+    # Enhanced to support function calls like PREV(A.price) IS NULL
+    # Uses a callback function to properly handle nested parentheses
+    def convert_is_null(match):
+        """Convert IS NULL with proper handling of nested function calls."""
+        expr = match.group(1).strip()
+        return f'_is_null({expr})'
+    
+    def convert_is_not_null(match):
+        """Convert IS NOT NULL with proper handling of nested function calls."""
+        expr = match.group(1).strip()
+        return f'(not _is_null({expr}))'
+    
+    # Pattern explanation:
+    # - Matches simple identifiers: column_name
+    # - Matches dot-notation: table.column or A.price
+    # - Matches function calls with balanced parentheses: FUNC(args)
+    # The pattern uses a non-greedy approach to find the expression before IS NULL
+    # Step 1: Try to match function calls first (most specific)
+    # Match: FUNCTION_NAME(...) where ... can contain nested parentheses
+    # We use a helper to find balanced parentheses
+    def find_expression_before_is_null(text, is_not_null=False):
+        """
+        Find and replace expressions before IS [NOT] NULL with proper parenthesis balancing.
+        
+        This handles complex cases like:
+        - PREV(A.price) IS NULL
+        - FUNC1(FUNC2(col)) IS NULL
+        - table.column IS NULL
+        - simple_column IS NULL
+        """
+        keyword = r'\s+IS\s+NOT\s+NULL\b' if is_not_null else r'\s+IS\s+NULL\b'
+        result = text
+        
+        # Find all IS NULL occurrences
+        pattern = re.compile(keyword, re.IGNORECASE)
+        matches = list(pattern.finditer(result))
+        
+        # Process from right to left to maintain correct positions
+        for match in reversed(matches):
+            is_null_start = match.start()
+            
+            # Work backwards from IS NULL to find the complete expression
+            pos = is_null_start - 1
+            paren_count = 0
+            expr_start = 0
+            found_function = False
+            
+            # Skip trailing whitespace
+            while pos >= 0 and result[pos].isspace():
+                pos -= 1
+            
+            if pos < 0:
+                continue
+                
+            # If we find a closing paren, we need to find its matching opening paren
+            if result[pos] == ')':
+                paren_count = 1
+                found_function = True
+                pos -= 1
+                
+                # Find the matching opening parenthesis
+                while pos >= 0 and paren_count > 0:
+                    if result[pos] == ')':
+                        paren_count += 1
+                    elif result[pos] == '(':
+                        paren_count -= 1
+                    pos -= 1
+                
+                # Now find the function name
+                while pos >= 0 and (result[pos].isalnum() or result[pos] == '_'):
+                    pos -= 1
+                
+                expr_start = pos + 1
+            else:
+                # Not a function call, find identifier with optional dot-notation
+                while pos >= 0 and (result[pos].isalnum() or result[pos] in '_.'):
+                    pos -= 1
+                expr_start = pos + 1
+            
+            # Extract the expression
+            expr = result[expr_start:is_null_start].strip()
+            
+            if not expr:
+                continue
+            
+            # Create replacement
+            if is_not_null:
+                replacement = f'(not _is_null({expr}))'
+            else:
+                replacement = f'_is_null({expr})'
+            
+            # Replace in result
+            result = result[:expr_start] + replacement + result[match.end():]
+        
+        return result
+    
+    # Process IS NOT NULL first (more specific)
+    condition = find_expression_before_is_null(condition, is_not_null=True)
+    # Then process IS NULL
+    condition = find_expression_before_is_null(condition, is_not_null=False)
     
     # Handle IN predicates - convert SQL IN to Python in
     # Pattern: expression IN (value1, value2, ...) -> expression in [value1, value2, ...]
