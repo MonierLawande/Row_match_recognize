@@ -105,17 +105,17 @@ MATCH_RECOGNIZE (
 
 **Standard Installation:**
 ```bash
-pip install pandas-match-recognize
+pip install pandas_match_recognize
 ```
 
 **Upgrade to Latest Version:**
 ```bash
-pip install --upgrade pandas-match-recognize
+pip install --upgrade pandas_match_recognize
 ```
 
 **Installation with Dependencies:**
 ```bash
-pip install pandas-match-recognize[all]
+pip install pandas_match_recognize[all]
 ```
 
 ### 🧪 Install from TestPyPI (Testing Repository)
@@ -212,7 +212,7 @@ pip install --no-cache-dir pandas-match-recognize
 
 **Install Specific Version:**
 ```bash
-pip install pandas-match-recognize==0.1.0
+pip install pandas_match_recognize==0.1.0
 ```
 
 ---
@@ -348,10 +348,10 @@ python -m twine upload dist/*
 #### 3. **Users Install Updates**
 ```bash
 # Users can then get your updates:
-pip install --upgrade pandas-match-recognize
+pip install --upgrade pandas_match_recognize
 
 # Or install specific version:
-pip install pandas-match-recognize==0.1.1
+pip install pandas_match_recognize==0.1.1
 ```
 
 #### 📋 **Version Strategy**
@@ -664,8 +664,8 @@ except Exception as e:
 ```bash
 # Test PyPI installation
 echo "🧪 Testing PyPI installation..."
-pip uninstall pandas-match-recognize -y 2>/dev/null
-pip install pandas-match-recognize
+pip uninstall pandas_match_recognize -y 2>/dev/null
+pip install pandas_match_recognize
 python -c "from pandas_match_recognize import match_recognize; print('✅ PyPI installation works')"
 
 echo ""
