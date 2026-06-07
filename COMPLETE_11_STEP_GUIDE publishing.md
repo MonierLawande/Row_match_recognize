@@ -336,7 +336,7 @@ https://pypi.org/project/pandas-match-recognize/0.1.4/
 ### **Final Verification:**
 ```bash
 # Install from production PyPI (with dependencies)
-pip install pandas-match-recognize==0.1.4 --force-reinstall
+pip install pandas_match_recognize==0.1.4 --force-reinstall
 
 # Final test
 python -c "
@@ -408,7 +408,7 @@ python -c "import pandas_match_recognize; print('✅ TestPyPI works:', pandas_ma
 
 # Step 11: Production PyPI
 python -m twine upload dist/pandas_match_recognize-0.1.4*
-pip install pandas-match-recognize==0.1.4 --force-reinstall
+pip install pandas_match_recognize==0.1.4 --force-reinstall
 python -c "import pandas_match_recognize; print('🎉 Production PyPI works:', pandas_match_recognize.__version__)"
 ```
 
@@ -464,7 +464,7 @@ python -m build
 
 Following these 11 steps successfully:
 - ✅ Published version 0.1.4 to both TestPyPI and PyPI
-- ✅ Package available worldwide: `pip install pandas-match-recognize==0.1.4`
+- ✅ Package available worldwide: `pip install pandas_match_recognize==0.1.4`
 - ✅ Links: 
   - TestPyPI: https://test.pypi.org/project/pandas-match-recognize/0.1.4/
   - Production: https://pypi.org/project/pandas-match-recognize/0.1.4/

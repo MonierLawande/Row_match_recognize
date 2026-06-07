@@ -51,12 +51,12 @@ def read_readme():
 
 setup(
     name="pandas_match_recognize",
-    version="0.2.2", 
+    version="0.2.3", 
     description="SQL MATCH_RECOGNIZE for Pandas DataFrames",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
-    author="MonierAshraf",
-    author_email="your.email@example.com",
+    author="Monier Lawande",
+    author_email="MonierAshraf50@gmail.com",
     url="https://github.com/MonierAshraf/Row_match_recognize",
     packages=get_all_packages(),
     package_data={

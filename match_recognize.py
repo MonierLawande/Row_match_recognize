@@ -21,8 +21,8 @@ from src.executor.match_recognize import match_recognize
 
 # Package metadata
 __version__ = "0.1.0"
-__author__ = "MonierAshraf"
-__email__ = "your.email@example.com"
+__author__ = "Monier Lawande"
+__email__ = "MonierAshraf50@gmail.com"
 __description__ = "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 
 # Export the main function
