@@ -3,8 +3,8 @@ requires = ["setuptools>=45", "wheel", "setuptools_scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pandas-match-recognize"
-version = "0.1.7"
+name = "pandas_match_recognize"
+version = "0.2.1"
 description = "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 readme = "README.md"
 authors = [{name = "MonierAshraf", email = "your.email@example.com"}]
@@ -28,8 +28,8 @@ classifiers = [
 ]
 requires-python = ">=3.7"
 dependencies = [
-    "pandas>=1.0.0",
-    "numpy>=1.18.0", 
+    "pandas>=1.0.0,<3.0",
+    "numpy>=1.18.0,<2.2",
     "antlr4-python3-runtime>=4.9.0",
 ]
 

@@ -50,8 +50,8 @@ def read_readme():
         return "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 
 setup(
-    name="pandas-match-recognize",
-    version="0.1.7", 
+    name="pandas_match_recognize",
+    version="0.2.1", 
     description="SQL MATCH_RECOGNIZE for Pandas DataFrames",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
@@ -79,8 +79,8 @@ setup(
     },
     python_requires=">=3.7",
     install_requires=[
-        "pandas>=1.0.0",
-        "numpy>=1.18.0",
+        "pandas>=1.0.0,<3.0",
+        "numpy>=1.18.0,<2.2",
         "antlr4-python3-runtime>=4.9.0",
     ],
     extras_require={
