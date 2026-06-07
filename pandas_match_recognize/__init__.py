@@ -72,7 +72,7 @@ except ImportError as e:
         f"This usually means the package wasn't installed correctly. "
         f"Original error: {e}\n\n"
         f"Try:\n"
-        f"1. Reinstall: pip uninstall pandas-match-recognize && pip install pandas-match-recognize\n"
+        f"1. Reinstall: pip uninstall pandas_match_recognize && pip install pandas_match_recognize\n"
         f"2. Or use development install: pip install -e .\n"
         f"3. Or import directly: from match_recognize import match_recognize"
     )
