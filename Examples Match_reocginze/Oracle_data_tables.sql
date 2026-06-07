@@ -467,7 +467,7 @@ MATCH_RECOGNIZE (
 );
 
 SELECT *
-FROM  orders
+FROM  memory.default.orders
 MATCH_RECOGNIZE (
     PARTITION BY customer_id
     ORDER BY order_date
@@ -487,7 +487,7 @@ MATCH_RECOGNIZE (
 
 
 SELECT *
-FROM orders
+FROM memory.default.orders
 MATCH_RECOGNIZE (
     PARTITION BY customer_id
     ORDER BY order_date
@@ -521,7 +521,7 @@ MATCH_RECOGNIZE (
 
 
 SELECT *
-FROM orders
+FROM memory.default.orders
 MATCH_RECOGNIZE (
     PARTITION BY customer_id
     ORDER BY order_date
@@ -539,7 +539,7 @@ MATCH_RECOGNIZE (
 
 
 SELECT *
-FROM orders
+FROM memory.default.orders
 MATCH_RECOGNIZE (
     PARTITION BY customer_id
     ORDER BY order_date
@@ -557,7 +557,7 @@ MATCH_RECOGNIZE (
 );
 
 SELECT *
-FROM orders
+FROM memory.default.orders
 MATCH_RECOGNIZE (
     PARTITION BY customer_id
     ORDER BY order_date
