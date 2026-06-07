@@ -79,7 +79,7 @@ except ImportError as e:
 
 # Package metadata
 # Version information
-__version__ = "0.1.5"
+__version__ = "0.2.2"
 __author__ = "MonierAshraf"
 __description__ = "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 

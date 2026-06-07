@@ -219,7 +219,12 @@ pip install --upgrade pandas-match-recognize
 ### Install a specific version
 
 ```bash
-pip install "pandas-match-recognize==0.2.1"
+pip install "pandas-match-recognize==0.2.2"  # replace with your target version
+```
+
+To list all available versions:
+```bash
+pip index versions pandas-match-recognize
 ```
 
 ### Editable install (local development)
@@ -477,11 +482,12 @@ python -m pytest \
 
 #### 1. Bump the version
 
-Update the version string consistently in all three files:
+Update the version string consistently in all four files:
 
 - `setup.py` → `version="X.Y.Z"`
 - `pyproject.toml` → `version = "X.Y.Z"`
 - `pandas_match_recognize/__init__.py` → `__version__ = "X.Y.Z"`
+- `match_recognize/__init__.py` → `__version__ = "X.Y.Z"`
 
 Follow [Semantic Versioning](https://semver.org/):
 
