@@ -60,8 +60,8 @@ except ImportError:
 
 # Package metadata
 # Version information
-__version__ = "0.2.2"
-__author__ = "MonierAshraf"
+__version__ = "0.2.3"
+__author__ = "Monier Lawande"
 __description__ = "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 
 # Export the main function

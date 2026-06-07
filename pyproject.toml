@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pandas_match_recognize"
-version = "0.2.2"
+version = "0.2.3"
 description = "SQL MATCH_RECOGNIZE for Pandas DataFrames"
 readme = "README.md"
-authors = [{name = "MonierAshraf", email = "your.email@example.com"}]
+authors = [{name = "Monier Lawande", email = "MonierAshraf50@gmail.com"}]
 license = {text = "MIT"}
 keywords = ["sql", "match_recognize", "pandas", "pattern matching", "data science", "analytics"]
 classifiers = [
