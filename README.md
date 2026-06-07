@@ -3,8 +3,31 @@
 [![PyPI version](https://badge.fury.io/py/pandas-match-recognize.svg)](https://pypi.org/project/pandas-match-recognize/)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub](https://img.shields.io/badge/GitHub-source-black?logo=github)](https://github.com/MonierAshraf/Row_match_recognize)
 
 A Python implementation of SQL's `MATCH_RECOGNIZE` clause for Pandas DataFrames. Run complex sequence detection and event-stream pattern queries in-memory — no external database required.
+
+---
+
+## Contents
+
+- [Overview](#overview)
+- [Motivation](#motivation)
+- [Key Features](#key-features)
+- [Architecture](#architecture)
+- [Example SQL Query](#example-sql-query)
+- [Quick Start](#quick-start)
+- [API Reference](#api-reference)
+- [Installation](#installation)
+- [Uninstallation](#uninstallation)
+- [Testing Functionality](#testing-functionality)
+- [Development Setup](#development-setup)
+- [Publishing a New Version](#publishing-a-new-version)
+- [Troubleshooting](#troubleshooting)
+- [Conclusion and Future Work](#conclusion-and-future-work)
+- [References](#references)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
@@ -86,6 +109,8 @@ MATCH_RECOGNIZE (
 
 ## Quick Start
 
+The following Python code executes the V-shape pattern query shown above against a sample dataset.
+
 ```python
 from pandas_match_recognize import match_recognize
 import pandas as pd
@@ -138,6 +163,32 @@ print(result)
 
 ---
 
+## API Reference
+
+### `match_recognize(sql, df)`
+
+Execute a `MATCH_RECOGNIZE` query against a Pandas DataFrame.
+
+```python
+from pandas_match_recognize import match_recognize
+import pandas as pd
+
+def match_recognize(sql: str, df: pd.DataFrame) -> pd.DataFrame: ...
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `sql` | `str` | A SQL string containing a `MATCH_RECOGNIZE` clause. The `FROM` table name in the SQL maps to the supplied DataFrame. |
+| `df` | `pd.DataFrame` | The input DataFrame to query. Must contain all columns referenced in `PARTITION BY`, `ORDER BY`, `MEASURES`, and `DEFINE`. |
+
+**Returns:** `pd.DataFrame` — rows matching the specified pattern, projected and formatted according to the `MEASURES` clause and the selected output mode (`ONE ROW PER MATCH` or `ALL ROWS PER MATCH`).
+
+**Raises:**
+- `ValueError` — malformed SQL or undefined pattern variable referenced in `DEFINE` or `MEASURES`.
+- `KeyError` — a column name referenced in the query does not exist in the DataFrame.
+
+---
+
 ## Installation
 
 ### Requirements
@@ -152,6 +203,12 @@ print(result)
 ```bash
 pip install pandas-match-recognize
 ```
+
+> **Package name vs import name:** pip uses a hyphen (`pandas-match-recognize`) while Python imports use an underscore (`pandas_match_recognize`). This follows standard Python packaging convention.
+> ```python
+> from pandas_match_recognize import match_recognize  # correct
+> from pandas-match-recognize import match_recognize  # SyntaxError
+> ```
 
 ### Upgrade to the latest version
 
@@ -186,7 +243,11 @@ pip install --force-reinstall pandas-match-recognize
 ### Verify installation
 
 ```bash
+# Confirm the package imports correctly
 python -c "from pandas_match_recognize import match_recognize; print('Installation successful')"
+
+# Check the installed version
+python -c "import pandas_match_recognize; print(pandas_match_recognize.__version__)"
 ```
 
 For a more thorough check:
@@ -269,11 +330,6 @@ for pattern in patterns:
 # Remove the directories printed above, for example:
 # rm -rf /path/to/site-packages/pandas_match_recognize
 # rm -rf /path/to/site-packages/pandas_match_recognize-*.dist-info
-```
-
-**Remove all related package names in one pass:**
-```bash
-pip uninstall pandas-match-recognize row-match-recognize match-recognize -y
 ```
 
 **Remove local build artefacts:**
@@ -544,6 +600,9 @@ By addressing the identified limitations and implementing the planned enhancemen
 ## Contributing
 
 Pull requests and issue reports are welcome. Please ensure contributions include tests and a brief description of the change.
+
+- **Bug reports & feature requests:** [open an issue on GitHub](https://github.com/MonierAshraf/Row_match_recognize/issues)
+- **Pull requests:** fork the repository, create a feature branch, and submit a PR against `main`
 
 ---
 
