@@ -1,0 +1,958 @@
+% ============================================================
+%  ch5_experimental_evaluation.tex
+%  Chapter 5: Experimental Evaluation
+%  Master's Thesis -- SQL MATCH_RECOGNIZE on Pandas DataFrames
+% ============================================================
+\chapter{Experimental Evaluation}
+\label{chap:evaluation}
+
+This chapter evaluates the proposed \texttt{MATCH\_RECOGNIZE}
+implementation across three dimensions: output correctness (parity
+with Trino), semantic coverage (SQL:2016 feature completeness), and
+developer effort (reduction in lines of code compared with
+hand-written Pandas idioms).  Section~\ref{sec:eval-methodology}
+describes the evaluation methodology, including the hardware
+environment and the metrics used.
+Section~\ref{sec:eval-dataset} presents the benchmark dataset and
+test patterns.
+Section~\ref{sec:eval-correctness} reports correctness results.
+Section~\ref{sec:eval-performance} presents performance results.
+Section~\ref{sec:eval-comparison} compares the system with existing
+tools.
+
+% ----------------------------------------------------------------
+\section{Evaluation Methodology}
+\label{sec:eval-methodology}
+% ----------------------------------------------------------------
+
+We evaluate the proposed \texttt{MATCH\_RECOGNIZE} implementation
+through three complementary aspects.
+
+\begin{enumerate}
+  \item \textbf{Output correctness.}
+    Results are compared row-by-row with Trino across multiple
+    pattern types to ensure identical matched rows, pattern
+    alignment, and measure calculations.
+
+  \item \textbf{Semantic coverage.}
+    Compliance with SQL:2016 \texttt{MATCH\_RECOGNIZE} semantics is
+    verified, covering \texttt{PERMUTE} patterns, exclusions,
+    quantifiers, navigation functions, and output
+    modes~\cite{iso2016,ISO2021,monierashraf2025rowmatch}.
+
+  \item \textbf{Developer effort (code size).}
+    The lines/tokens required to express equivalent logic in
+    idiomatic Pandas serve as a baseline.  Hand-written Pandas
+    solutions typically require substantially more code (e.g.\
+    chained \texttt{groupby}/\texttt{shift}/joins) than a single
+    \texttt{MATCH\_RECOGNIZE} statement, so reducing LOC is a core
+    goal of the row-pattern recognition (RPR)
+    approach~\cite{iso2016,ISO2021,melton2017sqlrpr,Python_UDF}.
+\end{enumerate}
+
+% ................................
+\subsection{Environment and Configuration}
+\label{subsec:eval-environment}
+% ................................
+
+The experiments were performed on a workstation running Ubuntu
+24.04.2 LTS with an Intel Core i7-11800H (16 cores at 2.30\,GHz)
+and 16\,GB of DDR4 RAM at 3200\,MHz.
+
+The software environment comprised:
+\begin{itemize}
+  \item \textbf{Baseline SQL engine:} Trino~473.
+  \item \textbf{Runtimes:} Java~11.0.25 LTS and Python~3.12.7.
+  \item \textbf{Core Python libraries:} \texttt{pandas}~2.2.3,
+    \texttt{numpy}~1.26.4,
+    \texttt{antlr4-python3-runtime}~4.13.2,
+    \texttt{antlr4-tools}~0.2.1,
+    \texttt{pytest}~8.3.4,
+    Jupyter,
+    \texttt{unittest},
+    \texttt{matplotlib}~3.10.0,
+    \texttt{plotly}~5.24.1, and
+    \texttt{seaborn}~0.13.2.
+  \item \textbf{Standard library modules used:}
+    \texttt{typing}, \texttt{dataclasses}, \texttt{re},
+    \texttt{operator}, \texttt{math}, \texttt{itertools},
+    \texttt{collections}, \texttt{enum}, \texttt{time},
+    \texttt{sys}, \texttt{os}, \texttt{logging}, and
+    \texttt{traceback}.
+\end{itemize}
+
+The \texttt{MATCH\_RECOGNIZE} implementation uses ANTLR4 for
+parsing Trino SQL, \texttt{pandas} for DataFrame management, and
+custom AST/NFA/DFA modules for pattern detection (see
+Chapter~\ref{chap:methodology}).
+
+% ................................
+\subsection{Evaluation Metrics}
+\label{subsec:eval-metrics}
+% ................................
+
+Each test case is assessed on the three dimensions defined above.
+For \emph{output correctness}, the result DataFrame produced by the
+implementation is compared with the result set returned by Trino
+using an exact row-level equality check (same rows, same column
+values, same order where order is deterministic).  For
+\emph{semantic coverage}, each SQL:2016 feature is marked as
+\emph{supported}, \emph{partially supported}, or
+\emph{unsupported} based on whether the test suite exercises the
+feature and the output matches Trino.  For \emph{developer effort},
+the number of non-blank, non-comment lines in the equivalent
+idiomatic Pandas solution is recorded and compared with the
+single-statement \texttt{MATCH\_RECOGNIZE} query.
+
+% ----------------------------------------------------------------
+\section{Dataset and Test Patterns}
+\label{sec:eval-dataset}
+% ----------------------------------------------------------------
+
+% ................................
+\subsection{Dataset}
+\label{subsec:eval-dataset-orders}
+% ................................
+
+We use an \texttt{orders} table to demonstrate and validate
+pattern-matching queries.  The dataset comprises three
+attributes~\cite{trino2021row}: \texttt{customer\_id}
+(\texttt{VARCHAR}), which identifies the customer (two distinct
+values: \texttt{cust\_1} and \texttt{cust\_2});
+\texttt{order\_date} (\texttt{DATE}), the date the order was placed
+(ranging from 2020-05-11 to 2020-05-18); and \texttt{price}
+(\texttt{INTEGER}), the purchase amount on that date.
+Table~\ref{tab:orders} shows the eight records used throughout the
+experiments.
+
+\begin{table}[H]
+  \centering
+  \caption{Sample \texttt{orders} dataset
+    (\texttt{customer\_id}, \texttt{order\_date}, \texttt{price})}
+  \label{tab:orders}
+  \begin{tabularx}{\textwidth}{|>{\centering\arraybackslash}X|>{\centering\arraybackslash}X|>{\centering\arraybackslash}X|}
+    \hline
+    \textbf{customer\_id} & \textbf{order\_date} & \textbf{price} \\
+    \hline
+    cust\_1 & 2020-05-11 & 100 \\
+    cust\_1 & 2020-05-12 & 200 \\
+    cust\_2 & 2020-05-13 &   8 \\
+    cust\_1 & 2020-05-14 & 100 \\
+    cust\_2 & 2020-05-15 &   4 \\
+    cust\_1 & 2020-05-16 &  50 \\
+    cust\_1 & 2020-05-17 & 100 \\
+    cust\_2 & 2020-05-18 &   6 \\
+    \hline
+  \end{tabularx}
+\end{table}
+
+Each customer appears multiple times in chronological order:
+\texttt{cust\_1} spans five dates and \texttt{cust\_2} spans three.
+This structure enables comprehensive validation of partitioning,
+ordering, and pattern detection (e.g.\ sequences of rising or
+falling prices per customer).  In the experiments, data are loaded
+via a \texttt{VALUES} clause in Trino and verified to produce
+exactly the same matched rows and measures as the Pandas
+implementation.
+
+\begin{lstlisting}[basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={Creating the in-memory table in Trino}]
+CREATE TABLE memory.default.orders (
+    customer_id VARCHAR,
+    order_date  DATE,
+    price       INTEGER
+);
+\end{lstlisting}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={Inserting data into the table}]
+INSERT INTO memory.default.orders VALUES
+    ('cust_1', DATE '2020-05-11', 100),
+    ('cust_1', DATE '2020-05-12', 200),
+    ('cust_2', DATE '2020-05-13',   8),
+    ('cust_1', DATE '2020-05-14', 100),
+    ('cust_2', DATE '2020-05-15',   4),
+    ('cust_1', DATE '2020-05-16',  50),
+    ('cust_1', DATE '2020-05-17', 100),
+    ('cust_2', DATE '2020-05-18',   6);
+\end{lstlisting}
+
+% ----------------------------------------------------------------
+\section{Correctness Results}
+\label{sec:eval-correctness}
+% ----------------------------------------------------------------
+
+This section demonstrates output correctness by comparing results from
+three independent approaches---our proposed engine, Trino~473, and a
+hand-written Pandas baseline---on the same SQL \texttt{MATCH\_RECOGNIZE}
+query and dataset.
+
+% ................................
+\subsection{Experimental Setup}
+\label{subsec:correctness-setup}
+% ................................
+
+The experiments were conducted on a workstation running Ubuntu~24.04.2~LTS,
+equipped with an Intel Core i7-11800H processor (16~cores at 2.30\,GHz)
+and 16\,GB of DDR4 RAM at 3200\,MHz.  The baseline SQL engine was
+Trino~(version~473).  The software environment included Java~11.0.25~LTS
+and Python~3.12.7, together with Python libraries such as
+\texttt{pandas}~2.2.3, \texttt{numpy}~1.26.4,
+\texttt{antlr4-python3-runtime}~4.13.2, \texttt{antlr4-tools}~0.2.1,
+\texttt{pytest}~8.3.4, Jupyter, \texttt{unittest},
+\texttt{matplotlib}~3.10.0, \texttt{plotly}~5.24.1, and
+\texttt{seaborn}~0.13.2.  Standard Python library modules used
+include \texttt{typing}, \texttt{dataclasses}, \texttt{re},
+\texttt{operator}, \texttt{math}, \texttt{itertools},
+\texttt{collections}, \texttt{enum}, \texttt{time}, \texttt{sys},
+\texttt{os}, \texttt{logging}, and \texttt{traceback}.
+
+% ................................
+\subsection{Use Case: Stock Price Analysis}
+\label{sec:queries}
+% ................................
+
+We use the \texttt{stock\_price} table to demonstrate and validate
+pattern-matching queries with the \texttt{MATCH\_RECOGNIZE} clause.
+The table includes three columns: \texttt{company}, \texttt{price\_date},
+and \texttt{price}, representing a history of daily stock prices for
+market analysis.  Here, \texttt{company} specifies the company name,
+\texttt{price\_date} is the trading date, and \texttt{price} records
+the stock's value on that day~\cite{petkovic2022rpr}.
+
+This example detects bullish momentum by identifying three consecutive
+price increases $(A < B < C)$.  The query partitions records by company
+(\texttt{PARTITION BY company}), orders them chronologically
+(\texttt{ORDER BY price\_date}), and applies \texttt{PATTERN (A B C)}
+with a \texttt{DEFINE} condition enforcing rising prices.  Key
+attributes---starting price, ending price, and match ID---are produced
+in the \texttt{MEASURES} clause.  A structured \texttt{pandas} DataFrame
+serves as input to \texttt{MATCH\_RECOGNIZE}, enabling automated
+detection of upward trends across firms under SQL:2016 semantics.
+Additional use cases are available in the project
+repository~\cite{monierashraf2025rowmatch}.
+
+\begin{table}[H]
+  \centering
+  \caption[Stock price table]{The tabular form of the \texttt{stock\_price} table}
+  \label{tab:stock_price}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \texttt{Company} & \texttt{Price\_date} & \texttt{Price} \\
+    \midrule
+    A & 2020-10-01 & 50 \\
+    B & 2020-10-01 & 89 \\
+    A & 2020-10-02 & 36 \\
+    B & 2020-10-02 & 24 \\
+    A & 2020-10-03 & 39 \\
+    B & 2020-10-03 & 37 \\
+    A & 2020-10-04 & 42 \\
+    B & 2020-10-04 & 63 \\
+    A & 2020-10-05 & 30 \\
+    B & 2020-10-05 & 65 \\
+    A & 2020-10-06 & 47 \\
+    B & 2020-10-06 & 56 \\
+    A & 2020-10-07 & 71 \\
+    B & 2020-10-07 & 50 \\
+    A & 2020-10-08 & 80 \\
+    B & 2020-10-08 & 54 \\
+    A & 2020-10-09 & 75 \\
+    B & 2020-10-09 & 30 \\
+    A & 2020-10-10 & 63 \\
+    B & 2020-10-10 & 32 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\noindent\textbf{Load the dataset as a Pandas DataFrame.}
+
+\begin{lstlisting}[language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Python baseline dataset]Python baseline dataset.},
+  label={lst:dataset}]
+import pandas as pd
+data = {
+    "Company": [
+        "A","B","A","B","A","B","A","B","A","B",
+        "A","B","A","B","A","B","A","B","A","B"
+    ],
+    "Price_date": [
+        "2020-10-01","2020-10-01","2020-10-02","2020-10-02","2020-10-03",
+        "2020-10-03","2020-10-04","2020-10-04","2020-10-05","2020-10-05",
+        "2020-10-06","2020-10-06","2020-10-07","2020-10-07","2020-10-08",
+        "2020-10-08","2020-10-09","2020-10-09","2020-10-10","2020-10-10"
+    ],
+    "Price": [
+        50,89,36,24,39,37,42,63,30,65,
+        47,56,71,50,80,54,75,30,63,32
+    ]
+}
+df = pd.DataFrame(data)
+df["Price_date"] = pd.to_datetime(df["Price_date"])
+\end{lstlisting}
+
+\noindent\textbf{Using the proposed \texttt{MATCH\_RECOGNIZE}.}
+
+\begin{lstlisting}[language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Using the proposed MATCH\_RECOGNIZE]Using the proposed \texttt{MATCH\_RECOGNIZE}.}]
+from src.executor.match_recognize import match_recognize
+
+query = """
+SELECT *
+FROM stock_price
+MATCH_RECOGNIZE (
+  PARTITION BY Company
+  ORDER BY Price_date
+  MEASURES
+    FIRST(A.Price) AS start_price,
+    LAST(A.Price)  AS end_price,
+    MATCH_NUMBER() AS match_id
+  PATTERN (A B C)
+  DEFINE
+    B AS B.Price > PREV(B.Price),
+    C AS C.Price > PREV(C.Price)
+); """
+result = match_recognize(query, df)
+print(result)
+\end{lstlisting}
+
+\noindent\textbf{Results (proposed engine):}
+\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10}]
+  Company  start_price  end_price  match_id
+0       A           36         36         1
+1       A           30         30         2
+2       B           24         24         1
+\end{lstlisting}
+
+\noindent\textbf{Using Trino and Oracle as Baselines.}
+
+In the second step, we applied the same pattern-matching query using the
+same data in the Trino environment to validate the correctness of our
+approach.  The stock price history was created as an in-memory table
+using \texttt{CREATE TABLE} and populated through \texttt{INSERT INTO},
+ensuring that the schema and data (company, date, and price) remained
+consistent with the Pandas DataFrame used earlier.  We then executed
+the \texttt{MATCH\_RECOGNIZE} query in Trino to detect three consecutive
+price increases per company in accordance with SQL:2016 semantics.  In
+addition, we validated the same query in Oracle Database via
+\texttt{MATCH\_RECOGNIZE}~\cite{petkovic2022rpr,monierashraf2025oracle},
+using an equivalent \texttt{stock\_price} table with the same schema and
+rows; the Oracle results matched the expected behaviour, strengthening
+cross-system validation under standard \texttt{MATCH\_RECOGNIZE}
+semantics~\cite{monierashraf2025oracle}.
+
+\begin{lstlisting}[basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Create table in Trino]Creating the in-memory table in Trino.}]
+CREATE TABLE memory.default.stock_price (
+    Company    VARCHAR,
+    Price_date DATE,
+    Price      INTEGER
+);
+\end{lstlisting}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Insert rows in Trino]Inserting data into the table.}]
+INSERT INTO memory.default.stock_price (Company, Price_date, Price) VALUES
+('A', DATE '2020-10-01', 50),
+('B', DATE '2020-10-01', 89),
+('A', DATE '2020-10-02', 36),
+('B', DATE '2020-10-02', 24),
+...
+('A', DATE '2020-10-10', 63),
+('B', DATE '2020-10-10', 32);
+\end{lstlisting}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Execute MATCH\_RECOGNIZE in Trino]Executing the same \texttt{MATCH\_RECOGNIZE} query in Trino.}]
+SELECT *
+FROM memory.default.stock_price
+MATCH_RECOGNIZE (
+  PARTITION BY company
+  ORDER BY price_date
+  MEASURES
+    FIRST(A.price) AS start_price,
+    LAST(A.price)  AS end_price,
+    MATCH_NUMBER() AS match_id
+  PATTERN (A B C)
+  DEFINE
+    B AS B.price > PREV(B.price),
+    C AS C.price > PREV(C.price)
+);
+\end{lstlisting}
+
+\noindent\textbf{Results (Trino):}
+\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10}]
+ company | start_price | end_price | match_id
+---------+-------------+-----------+----------
+ A       |          36 |        36 |        1
+ A       |          30 |        30 |        2
+ B       |          24 |        24 |        1
+\end{lstlisting}
+
+\noindent\textbf{Python DataFrame Baseline.}
+As a Python baseline, we implemented the same pattern logic directly in
+\texttt{pandas}, without using \texttt{MATCH\_RECOGNIZE}.  The input
+DataFrame (Listing~\ref{lst:dataset}) is converted to \texttt{datetime}
+and sorted by company and trading date.  For each company, we compute a
+Boolean signal \texttt{inc\,:=\,diff(Price)\,>\,0} and mark candidate
+starts where \texttt{inc}, \texttt{inc.shift(-1)}, and
+\texttt{inc.shift(-2)} are all true, corresponding to a three-row
+uptrend ($A < B < C$).  Candidates are processed sequentially with a
+non-overlapping policy, advancing
+\texttt{next\_start\_pos\,=\,i\,+\,3} to emulate
+\texttt{AFTER MATCH SKIP PAST LAST ROW}.  For each accepted start, the
+implementation outputs \texttt{company}, \texttt{match\_id}, and
+measures \texttt{start\_price} and \texttt{end\_price} from the start
+row~(A), returning the resulting matches as a
+\texttt{DataFrame}~\cite{Python_UDF}.
+
+\begin{lstlisting}[language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Equivalent logic in pandas]Equivalent pattern matching in Python/pandas.}]
+import pandas as pd
+
+def detect_two_consecutive_increases(
+    df: pd.DataFrame,
+    company_col: str = "Company",
+    date_col:    str = "Price_date",
+    price_col:   str = "Price",
+) -> pd.DataFrame:
+    gdf = df.copy()
+    gdf[date_col] = pd.to_datetime(gdf[date_col])
+    gdf = gdf.sort_values([company_col, date_col]).reset_index(drop=True)
+    out_rows = []
+    for company, g in gdf.groupby(company_col, sort=False):
+        g = g.reset_index(drop=True)
+        inc = g[price_col].diff() > 0
+        start_mask = (inc.shift(-1).fillna(False)
+                      & inc.shift(-2).fillna(False))
+        candidates = [int(i) for i, ok in enumerate(start_mask)
+                      if ok and i + 2 < len(g)]
+        match_id, next_start_pos = 0, 0
+        for i in candidates:
+            if i < next_start_pos:
+                continue
+            match_id += 1
+            out_rows.append({
+                "company":     company,
+                "start_price": g.loc[i, price_col],
+                "end_price":   g.loc[i, price_col],
+                "match_id":    match_id,
+            })
+            next_start_pos = i + 3   # AFTER MATCH SKIP PAST LAST ROW
+    return pd.DataFrame(out_rows)
+
+result = detect_two_consecutive_increases(df)
+print(result)
+\end{lstlisting}
+
+\noindent\textbf{Results (Python/pandas):}
+\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10}]
+  company  start_price  end_price  match_id
+0       A           36         36         1
+1       A           30         30         2
+2       B           24         24         1
+\end{lstlisting}
+
+All three approaches---our proposed engine, Trino~473, and the
+hand-written Pandas baseline---produce identical output, confirming
+the correctness of the implementation under SQL:2016 semantics.
+
+% ----------------------------------------------------------------
+\section{Performance Results}
+\label{sec:eval-performance}
+% ----------------------------------------------------------------
+
+[Present throughput and scalability results here.]
+
+% ----------------------------------------------------------------
+\section{Comparison with Existing Systems}
+\label{sec:eval-comparison}
+% ----------------------------------------------------------------
+
+[Compare with Oracle, Trino, Flink, etc.]
+
+% ----------------------------------------------------------------
+\section{Use Cases and Applications}
+\label{sec:eval-usecases}
+% ----------------------------------------------------------------
+
+Our \texttt{MATCH\_RECOGNIZE} implementation supports a wide range of
+applications in various fields, such as log analysis, time series
+processing, and identifying patterns in financial sequences where
+pattern recognition in sequential data is critical.
+
+To assess correctness, we executed each pattern-matching query using
+three independent approaches.  First, a \textbf{Python-UDF baseline}:
+we implemented custom functions---built from \texttt{groupby},
+\texttt{rolling}, and \texttt{shift}---to detect the same sequences
+directly in \texttt{pandas} DataFrames; this required adjusting the
+code for each query to reproduce the intended
+semantics~\cite{Python_UDF}.  Second, a \textbf{Trino baseline}: we
+ran the equivalent \texttt{MATCH\_RECOGNIZE} statement in Trino
+(version~473) and treated its output as the reference result.  Third,
+our \textbf{proposed engine}: we executed \texttt{MATCH\_RECOGNIZE}
+on the same SQL string and DataFrame; the system parses the query,
+compiles a DFA, and performs the matching within \texttt{pandas}.
+
+\noindent Throughout our evaluation across multiple test scenarios, we
+compared the results from all three approaches on a row-by-row basis,
+confirming that our \texttt{MATCH\_RECOGNIZE} output exactly matched
+that of Trino (see Table~\ref{tab:sql-match-recognize-examples}).  Both
+Trino and our implementation produced identical rows and measure
+values.  In contrast, the UDF method involved significantly more code
+and was more prone to errors during development~\cite{Python_UDF}.
+
+\begin{longtable}{|p{0.95\textwidth}|}
+\caption{SQL \texttt{MATCH\_RECOGNIZE} Pattern Examples~\cite{monierashraf2025rowmatch}}
+\label{tab:sql-match-recognize-examples}\\
+\hline
+\multicolumn{1}{|l|}{\parbox{0.93\textwidth}{\textbf{Example 1: Detecting `Dip' Patterns
+(Three Orders with Successively Lower Prices)}}} \\
+\hline
+\textbf{SQL Query} \\
+\begin{minipage}{0.90\textwidth}
+\begin{verbatim}
+SELECT customer_id, start_date, end_date, bottom_price
+FROM orders
+MATCH_RECOGNIZE (
+  PARTITION BY customer_id
+  ORDER BY order_date
+  MEASURES
+    A.order_date AS start_date,
+    C.order_date AS end_date,
+    C.price      AS bottom_price
+  PATTERN (A B C)
+  DEFINE
+    B AS B.price < A.price,
+    C AS C.price < B.price
+);
+\end{verbatim}
+\end{minipage} \\
+\hline
+\textbf{Trino Results:} \\
+\begin{minipage}{0.90\textwidth}
+\begin{verbatim}
+customer_id | start_date | end_date   | bottom_price
+------------+------------+------------+--------------
+cust_1      | 2020-05-12 | 2020-05-16 | 50
+(1 row)
+\end{verbatim}
+\end{minipage} \\
+\hline
+\textbf{Our Proposed \texttt{MATCH\_RECOGNIZE} Results:} \\
+\begin{minipage}{0.90\textwidth}
+\begin{verbatim}
+  customer_id  start_date    end_date  bottom_price
+0      cust_1  2020-05-12  2020-05-16            50
+\end{verbatim}
+\end{minipage} \\
+\hline
+\textbf{Python UDF Results:} \\
+\begin{minipage}{0.90\textwidth}
+\begin{verbatim}
+  customer_id  start_date    end_date  bottom_price
+0      cust_1  2020-05-12  2020-05-16            50
+\end{verbatim}
+\end{minipage} \\
+\hline
+\end{longtable}
+
+% ................................................................
+\subsection{Performance Results Using Real Dataset}
+\label{subsec:eval-real-dataset}
+% ................................................................
+
+The Amazon UK Products Dataset is a large e-commerce dataset
+containing information about products listed on Amazon's UK
+marketplace~\cite{asaniczka2023amazon}, commonly used for data
+analysis, machine learning, and benchmarking.  It is provided as a
+single CSV file with roughly 2.2\,million product records.  Each
+record includes: \texttt{asin} (Amazon Standard Identification Number;
+unique product ID); \texttt{title} (product name); \texttt{imgUrl}
+(primary product image URL); \texttt{productURL} (canonical product
+page URL); \texttt{stars} (average customer rating, 1--5,
+floating-point); \texttt{reviews} (number of customer reviews,
+non-negative integer); \texttt{price} (listed price in GBP, numeric);
+\texttt{isBestSeller} (bestseller indicator, boolean);
+\texttt{boughtInLastMonth} (approximate purchases in the last 30 days,
+integer); and \texttt{categoryName} (top-level category label, e.g.\
+Electronics, Books, Clothing).  This dataset is representative for
+price-trend analysis, brand/feature-popularity studies, pattern
+recognition, and recommender-system benchmarking.
+
+Our methodology involved testing 25 test cases across 5 SQL patterns
+and 5 input sizes (25\,K, 35\,K, 50\,K, 75\,K, 100\,K rows).  All
+tests passed (100\% success).  The implementation demonstrated an
+average throughput of 9\,838~rows/s, and the end-to-end runtime over
+all 25 test cases was 157.44\,s, demonstrating pattern-invariant
+performance and near-linear scaling with input size.
+
+% ................................................................
+\subsection{Pattern Definitions}
+\label{subsec:eval-pattern-defs}
+% ................................................................
+
+{\small
+\setlength{\LTleft}{0pt}
+\setlength{\LTright}{0pt}
+\begin{longtable}{@{\extracolsep{\fill}}llp{0.55\textwidth}}
+\caption{SQL Pattern Definitions and Detection Goals}
+\label{tab:pattern_definitions} \\
+\toprule
+\textbf{Pattern Name} & \textbf{SQL Pattern} & \textbf{Description \& Goal} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Pattern Name} & \textbf{SQL Pattern} & \textbf{Description \& Goal} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+
+simple\_sequence & \texttt{A+ B+} &
+\textbf{Goal:} Detect transitions from unrated/poor to very poor products.
+\newline
+\textbf{Use:} Identify sequences where no-rating/poor products (0--1.0
+stars) are followed by very poor products (1.1--2.0 stars), useful for
+detecting problematic product sequences or data quality issues in
+listings. \\
+\midrule
+
+alternation & \texttt{A (B|C)+ D} &
+\textbf{Goal:} Detect quality improvement patterns.
+\newline
+\textbf{Use:} Find sequences starting with unrated/poor products,
+followed by mixed very poor/below-average products, ending with
+average-to-good products.  Useful for analysing quality improvement
+patterns in product browsing sequences or sorted lists. \\
+\midrule
+
+quantified & \texttt{A\{2,5\} B* C+} &
+\textbf{Goal:} Detect constrained low-quality patterns.
+\newline
+\textbf{Use:} Find sequences with 2--5 unrated/poor products,
+optionally followed by very poor products, then below-average products.
+Enforces minimum unrated product counts for identifying problematic
+product clusters. \\
+\midrule
+
+optional\_pattern & \texttt{A+ B? C*} &
+\textbf{Goal:} Flexible low-to-moderate quality transition detection.
+\newline
+\textbf{Use:} Broad pattern matching starting with unrated/poor
+products with optional transitions through worse ratings.  High recall
+for various low-quality sequence scenarios in e-commerce data. \\
+\midrule
+
+complex\_nested & \texttt{(A|B)+ (C\{1,3\} D*)+} &
+\textbf{Goal:} Complex quality improvement analysis.
+\newline
+\textbf{Use:} Detect sequences of unrated/very poor products followed
+by groups of improving quality (below-average to good).  Useful for
+multi-level quality grouping and advanced sorting pattern detection in
+product listings. \\
+\end{longtable}
+}
+
+\noindent
+All patterns analyse product quality based on star ratings where
+$A$~= No Rating/Poor (0--1.0 stars),
+$B$~= Very Poor (1.1--2.0 stars),
+$C$~= Below Average (2.1--3.0 stars),
+$D$~= Average to Good (3.1--4.0 stars),
+$E$~= Excellent (4.1--5.0 stars).
+Categories were created using equal-width binning on the \texttt{stars}
+column.  Table~\ref{tab:pattern_definitions} provides detailed
+specifications of all five SQL patterns used in the evaluation,
+including their formal syntax and intended detection goals.  Each
+pattern represents a different complexity level and use case, ranging
+from simple sequential matching to complex nested structures with
+quantifiers and alternation operators.
+
+\begin{longtable}{lrcr}
+\caption{Pattern Performance Summary (5 Patterns $\times$ 5 Dataset Sizes = 25 Tests)}
+\label{tab:pattern_summary} \\
+\toprule
+\textbf{Pattern} & \textbf{Avg Throughput} & \textbf{Avg Time} & \textbf{Test Cases} \\
+ & \textbf{(rows/s)} & \textbf{(s)} & \\
+\midrule
+\endfirsthead
+\caption*{Table~\thetable{} (continued): Pattern Performance Summary} \\
+\toprule
+\textbf{Pattern} & \textbf{Avg Throughput} & \textbf{Avg Time} & \textbf{Test Cases} \\
+ & \textbf{(rows/s)} & \textbf{(s)} & \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+simple\_sequence  & 12{,}455 & 4.62 & 25K, 35K, 50K, 75K, 100K \\
+alternation       & 10{,}774 & 5.43 & 25K, 35K, 50K, 75K, 100K \\
+quantified        &  6{,}973 & 8.21 & 25K, 35K, 50K, 75K, 100K \\
+optional\_pattern & 11{,}721 & 4.92 & 25K, 35K, 50K, 75K, 100K \\
+complex\_nested   &  6{,}630 & 8.69 & 25K, 35K, 50K, 75K, 100K \\
+\end{longtable}
+
+Table~\ref{tab:pattern_summary} summarises the performance
+characteristics of each pattern averaged across all five dataset
+sizes.  A clear inverse relationship exists between pattern complexity
+and throughput: simple patterns achieve nearly double the throughput of
+complex patterns.  The \texttt{simple\_sequence} pattern delivered the
+best throughput at 12\,455~rows/s.  The \texttt{complex\_nested}
+pattern, while lower at 6\,630~rows/s, successfully handles intricate
+nested structures.  The \texttt{alternation} pattern maintains good
+throughput at 10\,774~rows/s, and \texttt{optional\_pattern} provides
+strong performance at 11\,721~rows/s.
+
+\begin{table}[H]
+\centering
+\caption{Performance Summary by Dataset Size}
+\label{tab:size_summary}
+\begin{tabular}{rrrr}
+\toprule
+\textbf{Dataset Size} & \textbf{Avg Throughput} & \textbf{Avg Time}
+  & \textbf{Test Cases} \\
+\textbf{(rows)} & \textbf{(rows/s)} & \textbf{(s)} & \\
+\midrule
+ 25{,}000 & 10{,}150 &  2.65 & 5 patterns \\
+ 35{,}000 &  9{,}619 &  3.92 & 5 patterns \\
+ 50{,}000 &  9{,}928 &  5.41 & 5 patterns \\
+ 75{,}000 &  9{,}551 &  8.43 & 5 patterns \\
+100{,}000 &  9{,}306 & 11.47 & 5 patterns \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:size_summary} presents performance metrics organised by
+dataset size, averaging results across all five patterns.  The table
+demonstrates remarkable throughput stability across scales, with less
+than 8\% variation between the smallest (25\,K rows) and
+largest (100\,K rows) datasets.
+
+\begin{longtable}{lrrrrr}
+\caption{Execution Time (seconds) by Pattern and Dataset Size}
+\label{tab:execution_times} \\
+\toprule
+\textbf{Pattern} & \multicolumn{5}{c}{\textbf{Dataset Size (rows)}} \\
+\cmidrule(lr){2-6}
+ & \textbf{25K} & \textbf{35K} & \textbf{50K} & \textbf{75K} & \textbf{100K} \\
+\midrule
+\endfirsthead
+\caption*{Table~\thetable{} (continued): Execution Time by Pattern and Dataset Size} \\
+\toprule
+\textbf{Pattern} & \multicolumn{5}{c}{\textbf{Dataset Size (rows)}} \\
+\cmidrule(lr){2-6}
+ & \textbf{25K} & \textbf{35K} & \textbf{50K} & \textbf{75K} & \textbf{100K} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+simple\_sequence  & 1.94 &  2.77 &  3.82 &  6.12 &  8.20 \\
+alternation       & 2.19 &  3.19 &  4.41 &  7.18 &  9.75 \\
+quantified        & 3.45 &  5.07 &  7.06 & 10.87 & 14.19 \\
+optional\_pattern & 1.98 &  2.92 &  4.13 &  6.58 &  8.69 \\
+complex\_nested   & 3.55 &  5.22 &  7.31 & 11.57 & 15.29 \\
+\end{longtable}
+
+Table~\ref{tab:execution_times} presents a comprehensive matrix of
+execution times for all pattern--size combinations.  The table
+clearly illustrates the near-linear relationship between dataset size
+and execution time, with execution times roughly doubling as dataset
+size doubles.  The \texttt{complex\_nested} pattern consistently
+requires the longest execution time (15.29\,s for 100\,K rows), while
+\texttt{simple\_sequence} achieves the fastest processing
+(1.94\,s for 25\,K rows).
+
+% ................................................................
+\subsection{Throughput by Pattern and Size}
+\label{subsec:eval-throughput}
+% ................................................................
+
+\enlargethispage{2\baselineskip}
+
+{\small
+\begin{longtable}{@{\extracolsep{\fill}}lrrrrr}
+\caption{Throughput (rows/s) by Pattern and Dataset Size}
+\label{tab:throughput} \\
+\toprule
+\textbf{Pattern} & \multicolumn{5}{c}{\textbf{Dataset Size (rows)}} \\
+\cmidrule(lr){2-6}
+ & \textbf{25K} & \textbf{35K} & \textbf{50K} & \textbf{75K} & \textbf{100K} \\
+\midrule
+\endfirsthead
+\midrule
+\endhead
+\bottomrule
+\endfoot
+simple\_sequence  & 12{,}918 & 12{,}619 & 13{,}097 & 12{,}256 & 12{,}202 \\
+alternation       & 11{,}402 & 10{,}979 & 11{,}328 & 10{,}441 & 10{,}255 \\
+quantified        &  7{,}243 &  6{,}901 &  7{,}082 &  6{,}898 &  7{,}048 \\
+optional\_pattern & 12{,}642 & 11{,}993 & 12{,}108 & 11{,}400 & 11{,}513 \\
+complex\_nested   &  7{,}045 &  6{,}710 &  6{,}842 &  6{,}481 &  6{,}542 \\
+\end{longtable}
+}
+
+\noindent\textbf{Throughput (rows/s)} measures processing speed as
+dataset size divided by execution time; higher values indicate faster
+evaluation.  Across all experiments, throughput ranged from
+6{,}436 to 12{,}799~rows/s (mean 9{,}711~rows/s).  Simple sequential
+patterns, which require fewer state transitions, typically achieve
+12{,}000--13{,}000~rows/s, whereas complex nested patterns with
+multiple evaluation layers achieve about 6{,}000--7{,}000~rows/s.
+For a fixed pattern, throughput remains relatively constant as input
+size increases, confirming linear scalability.
+
+Table~\ref{tab:throughput} displays throughput measurements across
+all test scenarios.  The table reveals remarkable throughput
+consistency within each pattern across different dataset sizes
+(standard deviation less than 5\% for most patterns).
+
+% ................................................................
+\subsection{Memory Metrics}
+\label{subsec:eval-memory}
+% ................................................................
+
+\noindent\textbf{Memory Usage (MB)} represents the average memory
+consumed during pattern matching operations.  This includes memory
+for storing intermediate matching states, row buffers, and result
+sets.  Memory usage varies based on both dataset size and pattern
+complexity.  Simple patterns with fewer matches may use less memory
+(0.56--3.20\,MB for small datasets), while patterns that generate
+large result sets require more memory (15--30\,MB).  The memory
+values shown have been corrected to absolute values, as some
+measurements showed negative artefacts due to garbage collection
+timing.
+
+\noindent\textbf{Peak Memory (MB)} indicates the maximum memory
+consumption during pattern evaluation, typically occurring during
+result collection phases.  Peak memory is approximately $1.3\times$
+the average memory usage, accounting for temporary allocations during
+pattern state transitions and match aggregation.  Across all 25 test
+cases, peak memory remains under 43\,MB (maximum 42.34\,MB at 75\,K
+rows), demonstrating efficient memory management regardless of
+dataset size.  Notably, the 100\,K-row tests consume less peak memory
+(maximum 39.15\,MB) than the 75\,K-row tests, further validating the
+non-linear memory behaviour.
+
+Memory consumption does not correlate linearly with dataset size or
+match count, but rather depends on the complexity of intermediate
+pattern states and result-set characteristics.  For example, at
+100\,K rows, \texttt{optional\_pattern} finds 15{,}247 matches
+($8.4\times$ more than \texttt{alternation}'s 1{,}828) but uses only
+1.36\,MB compared to \texttt{alternation}'s 30.12\,MB, demonstrating
+that match count alone does not determine memory usage.  Most
+notably, \texttt{simple\_sequence} at 75\,K rows consumes
+42.34\,MB peak memory, while the same pattern at 100\,K rows uses
+only 30.38\,MB---a 28\% reduction despite the larger dataset.  This
+variability suggests memory usage is driven more by pattern state
+complexity, garbage collection timing, and internal representation
+than by output size or dataset scale.  Despite these variations, the
+implementation demonstrates efficient memory utilisation, with peak
+memory remaining within acceptable bounds (under 43\,MB) across all
+test scenarios.
+
+{\small
+\setlength{\LTleft}{0pt}
+\setlength{\LTright}{0pt}
+\begin{longtable}{@{\extracolsep{\fill}}rlrrr}
+\caption{Memory Consumption Metrics}
+\label{tab:memory_cache} \\
+\toprule
+\textbf{Dataset Size} & \textbf{Pattern} & \textbf{Execution} & \textbf{Memory} & \textbf{Peak Memory} \\
+\textbf{(rows)} & \textbf{Complexity} & \textbf{Time (ms)} & \textbf{Usage (MB)} & \textbf{(MB)} \\
+\midrule
+\endfirsthead
+\caption*{Table~\thetable{} (continued): Memory Consumption Metrics} \\
+\toprule
+\textbf{Dataset Size} & \textbf{Pattern} & \textbf{Execution} & \textbf{Memory} & \textbf{Peak Memory} \\
+\textbf{(rows)} & \textbf{Complexity} & \textbf{Time (ms)} & \textbf{Usage (MB)} & \textbf{(MB)} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+ 25{,}000 & simple\_sequence  & 1{,}935 & 15.20 & 19.76 \\
+ 25{,}000 & alternation       & 2{,}193 &  2.51 &  3.27 \\
+ 25{,}000 & optional\_pattern & 1{,}978 &  6.73 &  8.75 \\
+ 25{,}000 & quantified        & 3{,}451 &  1.02 &  1.33 \\
+ 25{,}000 & complex\_nested   & 3{,}548 &  0.56 &  0.73 \\
+\midrule
+ 35{,}000 & simple\_sequence  & 2{,}774 & 13.21 & 17.17 \\
+ 35{,}000 & alternation       & 3{,}187 &  1.23 &  1.60 \\
+ 35{,}000 & optional\_pattern & 2{,}918 &  7.68 &  9.98 \\
+ 35{,}000 & quantified        & 5{,}073 &  3.68 &  4.78 \\
+ 35{,}000 & complex\_nested   & 5{,}216 & 10.95 & 14.24 \\
+\midrule
+ 50{,}000 & simple\_sequence  & 3{,}817 & 11.27 & 14.65 \\
+ 50{,}000 & alternation       & 4{,}413 &  2.60 &  3.38 \\
+ 50{,}000 & optional\_pattern & 4{,}129 &  2.80 &  3.64 \\
+ 50{,}000 & quantified        & 7{,}059 &  4.66 &  6.06 \\
+ 50{,}000 & complex\_nested   & 7{,}306 &  6.57 &  8.54 \\
+\midrule
+ 75{,}000 & simple\_sequence  & 6{,}120 & 32.57 & 42.34 \\
+ 75{,}000 & alternation       & 7{,}181 &  8.71 & 11.32 \\
+ 75{,}000 & optional\_pattern & 6{,}577 &  8.86 & 11.52 \\
+ 75{,}000 & quantified        & 10{,}872 &  5.93 &  7.71 \\
+ 75{,}000 & complex\_nested   & 11{,}572 & 15.51 & 20.16 \\
+\midrule
+100{,}000 & simple\_sequence  &  8{,}195 & 23.37 & 30.38 \\
+100{,}000 & alternation       &  9{,}750 & 30.12 & 39.15 \\
+100{,}000 & optional\_pattern &  8{,}686 &  1.36 &  1.77 \\
+100{,}000 & quantified        & 14{,}188 & 20.60 & 26.78 \\
+100{,}000 & complex\_nested   & 15{,}286 & 17.82 & 23.17 \\
+\end{longtable}
+}
+
+Table~\ref{tab:memory_cache} presents detailed memory consumption
+metrics for all test scenarios, tracking both average and peak memory
+usage.  The table demonstrates the implementation's efficient memory
+management, with peak memory remaining under 43\,MB across all 25
+test cases.  The maximum peak memory of 42.34\,MB occurs at 75\,K
+rows (\texttt{simple\_sequence}) rather than at the largest dataset
+size (100\,K rows), illustrating that memory consumption is
+non-linear and depends on runtime factors including garbage
+collection timing, pattern state complexity, and the specific
+distribution of category transitions in the data.
+
+% ................................................................
+\subsection{Key Findings}
+\label{subsec:eval-key-findings}
+% ................................................................
+
+\begin{table}[H]
+\centering
+\caption{Overall Test Statistics}
+\label{tab:overall_stats}
+\begin{tabular}{lr}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Total Tests             & 25 \\
+Success Rate            & 100\% \\
+Total Execution Time    & 159.39\,s \\
+Average Execution Time  & 6.38\,s \\
+Average Throughput      & 9{,}711 rows/s \\
+Min Throughput          & 6{,}436 rows/s \\
+Max Throughput          & 12{,}799 rows/s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:overall_stats} presents the comprehensive test
+statistics aggregated across all 25 test cases.  The system achieves
+a 100\% success rate across all patterns and dataset sizes, with no
+failures or errors encountered during the entire evaluation suite.
+Linear scaling is demonstrated from 25\,K to 100\,K rows, with
+execution time increasing proportionally and predictably as dataset
+size grows.  The implementation successfully handles patterns ranging
+from simple sequences to complex nested structures, and demonstrates
+viability for production use cases in domains requiring sequential
+pattern detection over e-commerce data.

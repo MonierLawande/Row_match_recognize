@@ -1,0 +1,185 @@
+% ============================================================
+%  thesis_main.tex  --  Master's Thesis Main Document
+%  SQL MATCH_RECOGNIZE for Pandas DataFrames
+% ============================================================
+\documentclass[12pt, a4paper, oneside]{report}
+
+% ---- Encoding & Fonts ----
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+
+% ---- Page Geometry ----
+\usepackage[
+  top=2.5cm, bottom=2.5cm,
+  left=3.5cm, right=2.5cm
+]{geometry}
+
+% ---- Typography ----
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{microtype}
+
+% ---- Maths ----
+\usepackage{amsmath, amssymb, amsthm}
+
+% ---- Code Listings ----
+\usepackage{listings}
+\usepackage{xcolor}
+
+\definecolor{codebg}  {RGB}{248,248,248}
+\definecolor{keyword} {RGB}{0,0,200}
+\definecolor{comment} {RGB}{100,100,100}
+\definecolor{string}  {RGB}{163,21,21}
+
+\lstset{
+  backgroundcolor   = \color{codebg},
+  basicstyle        = \ttfamily\small,
+  keywordstyle      = \color{keyword}\bfseries,
+  commentstyle      = \color{comment}\itshape,
+  stringstyle       = \color{string},
+  numbers           = left,
+  numberstyle       = \tiny\color{gray},
+  stepnumber        = 1,
+  numbersep         = 8pt,
+  tabsize           = 2,
+  breaklines        = true,
+  breakatwhitespace = false,
+  frame             = single,
+  rulecolor         = \color{gray!40},
+  captionpos        = b,
+  showstringspaces  = false,
+  belowcaptionskip  = 6pt,
+  aboveskip         = 10pt,
+  belowskip         = 6pt
+}
+
+\lstdefinelanguage{SQL}{
+  keywords    = {SELECT, FROM, WHERE, MATCH_RECOGNIZE, PARTITION, BY,
+                 ORDER, MEASURES, ONE, ALL, ROW, ROWS, PER, MATCH,
+                 AFTER, SKIP, NEXT, PAST, LAST, FIRST, TO, PATTERN,
+                 DEFINE, AS, AND, OR, NOT, IN, BETWEEN, IS, NULL,
+                 PREV, PERMUTE, OVER, WINDOW, HAVING, GROUP, DISTINCT,
+                 UNION, JOIN, ON, INNER, OUTER, LEFT, RIGHT, FULL},
+  sensitive   = false,
+  morecomment = [l]{--},
+  morecomment = [s]{/*}{*/},
+  morestring  = [b]',
+}
+
+\lstdefinelanguage{Python}{
+  keywords    = {def, return, if, elif, else, for, while, in, import,
+                 from, class, self, True, False, None, and, or, not,
+                 lambda, yield, with, as, try, except, raise, pass},
+  sensitive   = true,
+  morecomment = [l]{\#},
+  morestring  = [b]",
+  morestring  = [b]',
+}
+
+% ---- Algorithms ----
+\let\listofalgorithms\relax   % guard against algorithm2e pre-defining this
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\algnewcommand\algorithmicinput{\textbf{Input:}}
+\algnewcommand\algorithmicoutput{\textbf{Output:}}
+
+% ---- Tables ----
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{longtable}
+\usepackage{float}
+\newcolumntype{Y}{>{\centering\arraybackslash}X}
+
+% ---- Framed environments ----
+\usepackage[framemethod=TikZ]{mdframed}
+
+% ---- Figures / TikZ ----
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{automata, positioning, arrows.meta, shapes.geometric}
+
+% ---- Inline lists ----
+\usepackage[inline]{enumitem}
+
+% ---- Hyperlinks ----
+\usepackage[
+  hidelinks,
+  pdftitle  = {SQL MATCH\_RECOGNIZE for Pandas DataFrames},
+  pdfauthor = {MonierAshraf},
+]{hyperref}
+
+% ---- Bibliography ----
+\usepackage[backend=bibtex, style=numeric, sorting=none]{biblatex}
+\addbibresource{references.bib}
+
+% ---- Custom commands ----
+\newcommand{\mr}{\texttt{MATCH\_RECOGNIZE}}
+
+% ================================================================
+\begin{document}
+% ================================================================
+
+% ---- Title Page ----
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  {\LARGE\bfseries SQL \texttt{MATCH\_RECOGNIZE} for Pandas DataFrames:\\[0.4em]
+   A Python Implementation of SQL:2016 Row Pattern Recognition}
+  \vspace{2cm}\\
+  {\large Master's Thesis}\\[0.5em]
+  {\large [University Name]}
+  \vspace{2cm}\\
+  {\large Submitted by\\[0.3em]
+   \textbf{MonierAshraf}}
+  \vfill
+  {\large [Year]}
+\end{titlepage}
+
+% ---- Front matter ----
+\pagenumbering{roman}
+\tableofcontents
+\listoffigures
+\listoftables
+\listofalgorithms
+
+\clearpage
+\pagenumbering{arabic}
+
+% ================================================================
+% Chapter 1 -- Introduction
+% ================================================================
+\input{ch1_introduction}
+
+% ================================================================
+% Chapter 2 -- Background and Concepts
+% ================================================================
+\input{ch2_background_concepts}
+
+% ================================================================
+% Chapter 3 -- Related Work
+% ================================================================
+\input{ch3_related_work}
+
+% ================================================================
+% Chapter 4 -- Methodology
+% ================================================================
+\input{ch4_methodology}
+
+% ================================================================
+% Chapter 5 -- Experimental Evaluation
+% ================================================================
+\input{ch5_experimental_evaluation}
+
+% ================================================================
+% Chapter 6 -- Conclusions and Future Work
+% ================================================================
+\input{ch6_conclusion_future}
+
+% ================================================================
+% Bibliography
+% ================================================================
+\printbibliography[heading=bibintoc]
+
+\end{document}

@@ -1,0 +1,303 @@
+% ============================================================
+%  ch3_related_work.tex
+%  Chapter 3: Related Work
+%  Master's Thesis -- SQL MATCH_RECOGNIZE on Pandas DataFrames
+% ============================================================
+\chapter{Related Work}
+\label{chap:related}
+
+Row pattern recognition was first proposed as a SQL standard feature
+by Zemke et al.~\cite{zemke2007pattern} and was officially adopted
+in SQL:2016~\cite{ISO2016SQL,iso2016}.
+Subsequent editions refined and documented its
+semantics~\cite{ISO2021,melton2017sqlrpr,michels2018new}.
+The clause has since been studied both as a specification and in
+terms of its practical
+implementations~\cite{petkovic2022rpr,petkovic2022fraud}.
+
+The \texttt{MATCH\_RECOGNIZE} clause is supported natively by many
+leading SQL engines, including
+Oracle~\cite{oracle2022,book},
+Snowflake~\cite{snowflake2025match_recognize}, and
+Trino~\cite{trino2022,trino2021row}.
+Other systems are still considering adding this feature, including
+PostgreSQL~\cite{howe2020matchrecognize},
+MariaDB~\cite{mariadb2025regex}, and
+Microsoft SQL Server~\cite{Zhu2023rowpattern}.
+To use \texttt{MATCH\_RECOGNIZE} in systems without native support,
+users must emulate row-pattern matching using window functions,
+user-defined aggregates, or external procedural
+layers~\cite{TURP2,TURP,cao2012optimizationanalyticwindowfunctions}---approaches
+that are often more complex, less efficient, and harder to maintain.
+
+% ----------------------------------------------------------------
+\section{SQL Engines with Native Support}
+\label{sec:related-native}
+% ----------------------------------------------------------------
+
+Oracle~\cite{oracle2022,book}, Trino~\cite{trino2022,trino2021row},
+Snowflake~\cite{snowflake2025match_recognize}, and
+Flink~\cite{flink} all provide advanced solutions for SQL-based
+pattern matching, but they each come with important practical
+challenges that users need to keep in mind.
+Although \texttt{MATCH\_RECOGNIZE} was already defined as part of the
+SQL:2016 standard, it has only been implemented in a limited number
+of DBMSs to date~\cite{petkovic2022rpr}.
+Given the construct's capacity to encapsulate the use of numerous
+other queries as a simplification, it would be beneficial to extend
+its application to more database systems.
+The Oracle implementation serves as the primary reference point for
+conformance with the SQL standard~\cite{oracle2022,oracle2021dwhsg,book}.
+
+% ................................
+\subsection{Oracle}
+\label{subsec:related-oracle}
+% ................................
+
+Oracle has been a pioneer in SQL \texttt{MATCH\_RECOGNIZE}, having
+introduced row pattern recognition in Version~12c.
+It provides a comprehensive and robust implementation well-suited
+for complex, enterprise-scale analytics, implementing
+\texttt{MATCH\_RECOGNIZE} based on Feature~R010.
+It executes pattern-matching queries in a highly efficient manner
+through internal optimisations, including backtracking algorithms
+specifically designed to address complex patterns.
+Due to implementation constraints, however, Oracle does not support
+Feature~R020---that is, the use of \texttt{MATCH\_RECOGNIZE} within
+the \texttt{WINDOW} clause is not permitted.
+There are also further restrictions during use: for example, Boolean
+expressions are not allowed in the \texttt{MEASURES} clause, and
+the \texttt{DISTINCT} keyword cannot be used before aggregates.
+Despite its technical capability, Oracle's power comes with high
+operational costs, including commercial licensing fees, which makes
+it less accessible for many users~\cite{oracle2022,oracle2021dwhsg,book}.
+
+% ................................
+\subsection{Trino}
+\label{subsec:related-trino}
+% ................................
+
+As an open-source project, Trino is defined by its role as a
+distributed data analytics tool offering capabilities for exploring
+voluminous data sets, where only a limited number of competitors
+provide analogous functionality within the same scope.
+In contrast to other DBMSs that are predominantly single-node,
+Trino is engineered for parallel processing, thereby enabling
+management of larger data sets.
+The Trino \texttt{MATCH\_RECOGNIZE} implementation is DFA-based,
+a distinction that enables deterministic pattern matching in linear
+time---a key difference from other engines that may rely on
+backtracking.
+However, \texttt{MATCH\_RECOGNIZE} can only be used inside the
+\texttt{FROM} clause, thereby implementing only Feature~R010.
+It is more accessible than Oracle in terms of deployment and cost,
+but still requires considerable infrastructure management and may
+lack some of Oracle's advanced
+optimisations~\cite{trino2022,trino2021row}.
+
+% ................................
+\subsection{Snowflake}
+\label{subsec:related-snowflake}
+% ................................
+
+Snowflake is a prominent cloud-native platform that offers
+\texttt{MATCH\_RECOGNIZE} support within its own syntax.
+It supports the \texttt{MATCH\_RECOGNIZE} clause both in the
+\texttt{FROM} clause and within the \texttt{WINDOW} clause,
+covering Features~R010 and R020.
+However, in contrast to the SQL standard, Snowflake makes no
+syntactic distinction between these two application areas:
+a \texttt{WINDOW} clause containing \texttt{MATCH\_RECOGNIZE}
+exhibits a strong similarity to its use in \texttt{FROM}, so
+Feature~R020 is implemented only semantically rather than through
+an explicit syntactic separation.
+Snowflake also offers limited support for advanced clauses and has
+computational costs that scale with warehouse
+size~\cite{snowflake2025match_recognize,hoffa2021snowflake}.
+
+% ................................
+\subsection{Apache Flink}
+\label{subsec:related-flink}
+% ................................
+
+Apache Flink~\cite{vsprem2024building,georgiou2025streaming} is
+designed for real-time stream processing, allowing rapid detection
+of event patterns in continuous data flows.
+While Flink is highly scalable and effective for high-velocity data,
+it introduces its own learning curve and is less familiar to users
+accustomed to traditional, batch-based SQL systems.
+A major limitation shared by all these platforms is the complexity
+of integrating SQL-based pattern matching with machine learning
+workflows and other analytics
+tools~\cite{ML_Workflow,Makrynioti2019sql4mlAD}.
+Typically, data must be exported from the database to external
+environments for ML modelling, resulting in data duplication,
+consistency challenges, and more complicated data
+pipelines~\cite{naphade2025evolution}.
+
+% ................................
+\subsection{Bringing \texttt{MATCH\_RECOGNIZE} to DuckDB}
+\label{subsec:related-duckdb}
+% ................................
+
+DuckDB is a relational database management system that offers
+several advantages over the DBMSs discussed
+above~\cite{raasveldt2019duckdb}.
+The most significant advantage is that it does not require a
+separate server for operation; instead it can be embedded directly
+into the host application, making it well-suited for small projects
+and in-process analytics.
+DuckDB is open-source, enabling users to contribute new
+functionality, and it provides a Python API that permits the
+execution of DuckDB queries inside a transpiler for testing and
+debugging purposes~\cite{raasveldt2019duckdb}.
+
+Although \texttt{MATCH\_RECOGNIZE} has not yet been implemented in
+DuckDB natively, DuckDB's aim for completeness of the SQL interface
+means it supports a wide range of other clauses---including the
+\texttt{WINDOW} clause and \texttt{WITH RECURSIVE}---which can be
+leveraged to transpile \texttt{MATCH\_RECOGNIZE} queries through a
+rule-based transformation
+approach~\cite{findling2025bringing,mogensen2024compiler,TURP2,TURP}.
+This approach filters multiple CTEs, thereby facilitating the
+different clauses contained within a \texttt{MATCH\_RECOGNIZE} call.
+Any such implementation targeting DuckDB would aim for Feature~R010
+of the SQL standard, restricting row pattern matching to the
+\texttt{FROM} clause while still supporting a wide range of
+aggregate functions inside the \texttt{MEASURES} and
+\texttt{DEFINE} clauses.
+
+% ................................
+\subsection{Implementation Restrictions Across Systems}
+\label{subsec:related-restrictions}
+% ................................
+
+Every implementation of the \texttt{MATCH\_RECOGNIZE} clause has
+certain restrictions that impose limitations during use.
+Common restrictions shared across
+systems~\cite{oracle2022,oracle2021dwhsg,trino2022,petkovic2022rpr} include:
+
+\begin{itemize}
+  \item The aggregate function \texttt{MATCH\_NUMBER()} is not
+    supported in the \texttt{MEASURES} or \texttt{DEFINE} clauses
+    in several implementations.
+  \item Column access as parameters within aggregate and navigation
+    functions is the only permitted form, which limits the
+    expressiveness of aggregate functions.
+  \item The \texttt{DISTINCT} keyword before aggregates is
+    unsupported in Oracle and related systems.
+  \item Boolean expressions cannot be used directly in the
+    \texttt{MEASURES} clause in Oracle.
+\end{itemize}
+
+For many users---especially those with modest analytics needs or who
+work independently---installing and managing large-scale systems
+like Oracle, Trino, Snowflake, or Flink can be overly complicated
+for some users.  These users may only need to perform occasional
+pattern detection and would prefer to avoid the overhead of learning
+different functions or dealing with varying syntax for similar
+queries across platforms~\cite{8509400}.
+
+Table~\ref{tab:engine-comparison} summarises the key characteristics
+and feature-level support of these implementations.
+
+\begin{table}[h]
+\centering
+\caption{Comparison of SQL engines providing \texttt{MATCH\_RECOGNIZE} support}
+\label{tab:engine-comparison}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Engine} & \textbf{Feature Level} & \textbf{Open Source} & \textbf{Deployment} & \textbf{Licence} \\
+\midrule
+Oracle          & R010 (no R020)  & No  & On-premise / Cloud & Commercial \\
+Trino           & R010            & Yes & Distributed        & Apache 2.0 \\
+Snowflake       & R010 + R020     & No  & Cloud-native       & Commercial \\
+Apache Flink    & CEP library     & Yes & Streaming cluster  & Apache 2.0 \\
+DuckDB          & None (planned)  & Yes & In-process         & MIT        \\
+Pandas (this work) & R010 (full) & Yes & In-process         & Open-source \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Additionally, for datasets that fit comfortably in memory, tools
+like Pandas offer a faster and more direct alternative, eliminating
+the latency of disk-based operations common to larger database
+engines~\cite{Evaluation,in-memory_processing}.
+Although Oracle, Trino, Snowflake, and Flink each have unique
+strengths for SQL pattern matching in large-scale or real-time
+scenarios, they introduce extra costs, infrastructure requirements,
+and integration issues that can be prohibitive for everyday users.
+These limitations highlight the value of Pandas, as it offers
+simpler, memory-based tools and unified workflows, where pattern
+matching and data analytics can be performed seamlessly and without
+unnecessary duplication or complexity.
+
+% ----------------------------------------------------------------
+\section{Pandas and the Python Ecosystem Gap}
+\label{sec:related-pandas-gap}
+% ----------------------------------------------------------------
+
+Pandas is a popular, open-source Python library for data analysis
+and manipulation.  Its straightforward installation process and
+strong community support make it a good choice for students,
+researchers, and professionals who frequently need to analyse data
+without deploying complicated systems like Oracle, Trino, or
+Snowflake.  For everyday tasks, Pandas offers straightforward
+methods for managing data sequences, filtering, grouping, and
+performing basic time-series analyses.
+
+However, Pandas has difficulty with advanced pattern detection in
+contrast to SQL's \texttt{MATCH\_RECOGNIZE} clause.  It lacks a
+straightforward way to express complex patterns; users must create
+their own solutions using functions like \texttt{rolling},
+\texttt{groupby}, or \texttt{shift}.  These custom approaches can
+become complicated and error-prone, especially with advanced
+patterns.
+
+Pandas is highly popular due to ease of setup and use, absence of
+licensing fees, and smooth integration within the larger Python
+libraries.  This makes it great for quickly developing and testing
+ideas for typical pattern detection needs.
+
+Despite Python's dominance in data science, no maintained library
+implements SQL:2016 \texttt{MATCH\_RECOGNIZE} semantics for Pandas
+DataFrames.  Existing approaches require analysts to manually
+implement stateful logic using \texttt{DataFrame.apply()} chains,
+\texttt{iterrows()}, or external database round-trips---all of which
+are error-prone, verbose, and difficult to maintain.  Alternative
+DataFrame libraries---Dask, Polars, Modin---similarly lack
+sequential pattern primitives.  Even DuckDB, which recently added
+partial support for window analytics~\cite{findling2025bringing},
+does not yet expose a full \texttt{MATCH\_RECOGNIZE} interface.
+
+% ----------------------------------------------------------------
+\section{Contribution of This Work}
+\label{sec:related-contribution}
+% ----------------------------------------------------------------
+
+This thesis addresses the identified gap with the following
+contributions:
+
+\begin{enumerate}
+  \item The \textbf{first SQL:2016-compliant
+    \texttt{MATCH\_RECOGNIZE} implementation} that runs entirely
+    in-process within a Python Pandas workflow with zero additional
+    deployment.
+  \item \textbf{Complete pattern construct support}, including
+    quantifiers, alternation, grouping, anchors, exclusions, and
+    \texttt{PERMUTE}, faithfully following the SQL:2016 standard.
+  \item A \textbf{production-ready optimisation layer} comprising
+    LRU pattern caching, partition-wise memory management, and
+    thread-safe concurrent execution.
+  \item A \textbf{safe expression evaluation pipeline} that
+    prevents code-injection vulnerabilities without sacrificing
+    the full expressiveness of user-defined predicates.
+  \item \textbf{Empirical validation} on a real-world dataset of
+    over 2.2~million rows with 100\% correctness across 25 diverse
+    test patterns and throughput reaching up to 12\,918~rows/sec on
+    a commodity laptop.
+\end{enumerate}
+
+% ................................................................
+% END OF CHAPTER
+% ................................................................

@@ -1,0 +1,293 @@
+% ============================================================
+%  ch1_introduction.tex
+%  Chapter 1: Introduction
+%  Master's Thesis -- SQL MATCH_RECOGNIZE on Pandas DataFrames
+% ============================================================
+\chapter{Introduction}
+\label{chap:intro}
+
+Pattern matching is the process of analysing a sequence of data
+points whether rows in a relational table or events in a data
+stream with the goal of identifying specific shapes, trends, or
+behaviour sequences within the data.  It plays a crucial role
+across many analytical domains: detecting chains of transactions
+associated with money laundering in financial
+systems~\cite{petkovic2022fraud}, revealing multi-step fraudulent
+behaviour sequences in security event logs, identifying equipment
+degradation patterns in IoT sensor streams, and tracking multi-step
+user journeys in e-commerce clickstreams.  Unlike conventional SQL
+predicates that evaluate each row in isolation, pattern matching
+takes the temporal ordering and relative values of successive rows
+into account.  Patterns are described using a regular-expression-like
+syntax applied at the row level, enabling analysts to match and
+extract meaningful sequences across entire records.
+
+% ----------------------------------------------------------------
+\section{Problem Statement}
+\label{sec:intro-problem}
+% ----------------------------------------------------------------
+
+The \texttt{MATCH\_RECOGNIZE} (MR) clause was introduced in the
+SQL:2016 standard~\cite{iso2016,ISO2021}, enabling users to define
+and search for patterns within ordered sequences of rows directly
+in SQL queries.  Although standardised nearly a decade ago, only
+a small number of database management systems have implemented it.
+Among established relational database systems, Oracle~\cite{oracle2022,book}
+was the first to provide a production quality implementation (in
+Database~12c, 2013), conforming to Feature~R010 of the standard.
+Several modern analytical platforms followed: Trino~\cite{trino2022,trino2021row},
+Snowflake~\cite{snowflake2025match_recognize}, and Apache Flink~\cite{flink}
+each provides their own implementations, though with varying degrees
+of conformance to the SQL:2016 feature levels (R010, R020, R030)
+and with important practical restrictions.  Notably, PostgreSQL
+and DuckDB two widely used open-source systems do not yet
+support \texttt{MATCH\_RECOGNIZE}~\cite{howe2020matchrecognize,findling2025bringing}.
+
+Without this declarative clause, detecting multi-row patterns
+requires complex combinations of SQL window functions, self-joins,
+or procedural loops over rows outside the database.  As the pattern
+grows beyond two or three steps, the corresponding code expands
+into dozens of lines filled with row-number calculations, timestamp
+comparisons, and cascading \texttt{JOIN} conditions.  Such code
+is difficult to write, harder to maintain, and typically forces
+multiple table scans with poor
+performance~\cite{cao2012optimizationanalyticwindowfunctions}.
+
+In Python's data science ecosystem, the limitation is even more
+acute.  Pandas~\cite{McKinney2010} is the dominant library for
+in-process tabular data analysis, yet it provides no native
+sequential pattern primitive.  Analysts who need to detect
+multi-step patterns must manually compose low-level operations:
+creating multiple shifted column copies (\texttt{df['value'].shift(-1)},
+\texttt{shift(-2)}, \ldots), building Boolean masks, stitching
+subsequences with \texttt{groupby().apply()}, and pivoting or
+renaming columns.  Listing~\ref{lst:ch1-udf} illustrates this
+approach for a simple three-step decreasing-price pattern (\texttt{A~B~C}).
+
+\begin{lstlisting}[language=Python,
+    caption={Detecting a three-step price-decrease pattern in
+             Pandas \emph{without} \texttt{MATCH\_RECOGNIZE}},
+    label={lst:ch1-udf}]
+import pandas as pd
+
+df['order_date'] = pd.to_datetime(df['order_date'])
+df = df.sort_values(['customer_id', 'order_date']).reset_index(drop=True)
+
+def match_pattern_ABC(group: pd.DataFrame):
+    matches = []
+    for i in range(len(group) - 2):
+        A, B, C = group.iloc[i], group.iloc[i+1], group.iloc[i+2]
+        if (B['price'] < A['price']) and (C['price'] < B['price']):
+            matches.append({
+                'customer_id':  A['customer_id'],
+                'start_date':   A['order_date'],
+                'end_date':     C['order_date'],
+                'bottom_price': C['price']
+            })
+    return matches
+
+all_matches = []
+for _, grp in df.groupby('customer_id'):
+    all_matches.extend(match_pattern_ABC(grp))
+
+result_df = pd.DataFrame(all_matches)
+\end{lstlisting}
+
+This hand-crafted approach is verbose (over 20 lines for a
+three-step pattern), prone to off-by-one alignment errors,
+and does not scale gracefully to longer or conditional patterns.
+The same query expressed with \texttt{MATCH\_RECOGNIZE} is shown
+in Listing~\ref{lst:ch1-mr}: a single declarative statement that
+specifies the partition, ordering, pattern grammar, variable definitions, and output measures.
+
+\begin{lstlisting}[language=Python,
+    caption={The same pattern expressed with \texttt{MATCH\_RECOGNIZE}
+             on a Pandas DataFrame},
+    label={lst:ch1-mr}]
+import pandas as pd
+from src.executor.match_recognize import match_recognize
+
+df['order_date'] = pd.to_datetime(df['order_date'])
+
+query = """
+SELECT customer_id, start_date, end_date, bottom_price
+FROM orders
+MATCH_RECOGNIZE (
+  PARTITION BY customer_id
+  ORDER BY     order_date
+  MEASURES
+    A.order_date AS start_date,
+    C.order_date AS end_date,
+    C.price      AS bottom_price
+  ONE ROW PER MATCH
+  AFTER MATCH SKIP PAST LAST ROW
+  PATTERN (A B C)
+  DEFINE
+    B AS B.price < A.price,
+    C AS C.price < B.price
+)
+"""
+
+output_df = match_recognize(query, df)
+\end{lstlisting}
+
+The declarative form is not merely shorter syntactically: it
+separates what to find (the pattern) from how to
+find it (the engine), making patterns composable, auditable, and
+easy to extend.  A more complex pattern, like four or five steps with conditional alternation requires no change to the surrounding
+Python code, only an update to the \texttt{PATTERN} and
+\texttt{DEFINE} clauses~\cite{michels2018new,petkovic2022rpr}.
+This approach also enables the engine to apply automata-based
+optimisations LRU pattern caching, partition-wise memory
+management, and NFA/DFA execution transparently.
+
+The full structure and sub-clauses of \texttt{MATCH\_RECOGNIZE}
+are introduced in Chapter~\ref{chap:background}.  Chapter~\ref{chap:related}
+surveys the existing implementations and identifies the research
+gap.
+
+% ----------------------------------------------------------------
+\section{Research Objectives and Contributions}
+\label{sec:intro-objectives}
+% ----------------------------------------------------------------
+
+This thesis closes the gap between the SQL:2016
+\texttt{MATCH\_RECOGNIZE} standard and Python's Pandas ecosystem,
+bridging the expressiveness of relational pattern queries with the
+flexibility of in-memory analytics.  Three objectives guided the
+work; each is stated below together with the contribution that
+fulfils it.
+
+\begin{enumerate}
+
+  \item \textbf{An in-process, SQL:2016-compliant engine for
+    Pandas DataFrames.}
+    Without a declarative alternative in Python, a data scientist
+    must write the twenty-line hand-crafted loop in
+    Listing~\ref{lst:ch1-udf} merely to detect a simple
+    three-step declining-price pattern.  This thesis delivers the
+    \textbf{first SQL:2016 Feature~R010-compliant
+    \texttt{MATCH\_RECOGNIZE} implementation} that runs entirely
+    in-process alongside Pandas---no external database server or
+    cloud subscription required---reducing that loop to a single
+    declarative call in Listing~\ref{lst:ch1-mr} and eliminating
+    the need for complex Python code or an external SQL engine
+    dependencies.
+
+  \item \textbf{Full coverage of SQL:2016 pattern constructs.}
+    The engine supports the complete construct set defined by the
+    standard: quantifiers (\texttt{*}, \texttt{+}, \texttt{?},
+    \texttt{\{n,m\}}), alternation (\texttt{|}), grouping,
+    anchors, exclusions (\texttt{\{- -\}}), and \texttt{PERMUTE}.
+    For example, a fraud analyst can express a probe-and-drain
+    sequence as
+
+    \medskip
+    \texttt{PATTERN (PROBE+ (TRANSFER | WITHDRAW)\{2,5\} DRAIN)}
+    \medskip
+
+    \noindent
+    and the engine parses, compiles, and executes it correctly.
+    Correctness is validated across 25 diverse test patterns in
+    Chapter~5.  One acknowledged boundary: patterns with three or
+    more levels of nested greedy quantifiers
+    (e.g., \texttt{(A+B*)+C?}) can trigger exponential
+    automata state-space growth; bounded quantifiers and simpler
+    nesting behave efficiently~\cite{michels2018new}.
+
+  \item \textbf{Safe predicate evaluation and empirical
+    validation at a real-world scale.}
+    User-written \texttt{DEFINE} predicates must be evaluated
+    \emph{securely}: passing strings directly to Python's
+    \texttt{eval()} is a code-injection vulnerability (a predicate
+    such as \texttt{\_\_import\_\_('os').system('rm~/')} would
+    execute arbitrary system commands).  The engine instead parses
+    predicates into an AST and evaluates them through a controlled interpreter that whitelists permitted operations.  Correctness
+    and performance are validated on the Amazon UK Products~2023
+    catalogue~\cite{asaniczka2023amazon} (2.2~million rows):
+    100\%~correctness across all 25~test patterns and throughput
+    up to \textbf{12\,918~rows/sec} on a commodity laptop.
+    Future work will address performance on larger datasets,
+    memory consumption for high-variable patterns, and integration
+    with query-optimiser plan-level improvements.
+
+\end{enumerate}
+
+% ----------------------------------------------------------------
+\section{Organisation of the Thesis}
+\label{sec:thesis-organization}
+% ----------------------------------------------------------------
+
+The remainder of this thesis is organised as follows.
+
+\textbf{Chapter~\ref{chap:background} --- Background and Concepts}
+presents the theoretical and technical foundations on which this work is built.  It introduces sequential pattern matching and its
+real-world applications, explains the SQL:2016
+\texttt{MATCH\_RECOGNIZE} clause and its eight sub-clauses in
+detail, and provides an overview of existing implementations
+together with the feature-level classification (R010, R020, R030)
+used throughout the thesis.
+
+\textbf{Chapter~\ref{chap:related} --- Related Work}
+surveys each major \texttt{MATCH\_RECOGNIZE} implementation in
+depth---Oracle, Trino, Snowflake, Apache Flink, and DuckDB---documenting
+their feature levels, execution strategies, and practical
+restrictions.  It also examines the Python and Pandas ecosystem
+gap and formally positions the contribution of this thesis within
+the broader pattern-matching research landscape.
+
+\textbf{Chapter~4 --- Methodology}
+describes the technical approach: finite automata (NFA construction
+via Thompson's algorithm, subset-construction DFA, and
+minimisation), the compiler pipeline (ANTLR4 grammar, AST
+construction, safe expression evaluation), the Pandas execution
+model, and the performance optimisation techniques.
+
+\textbf{Chapter~5 --- Experimental Evaluation}
+presents the evaluation methodology, the benchmark dataset
+(Amazon UK Products 2023, 2.2~million rows), and experimental
+results covering correctness across 25 test patterns, performance
+scalability, pattern complexity, and comparison with existing
+systems.
+
+\textbf{Chapter~6 --- Conclusions and Future Work}
+summarises the main contributions, and reflects on the limitations
+of the current implementation, and outlines directions for
+future research and further extensions.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Publications in the Course of this Thesis}
+
+This thesis has resulted in scientific output contributing to the area of data systems and sequence-based pattern recognition. The following publication summarizes the main outcome achieved during the course of this research.
+
+\begin{description}
+
+\item[First Publication.]
+The primary outcome of this thesis has been published in the \textit{2026 IEEE 23rd Mediterranean Electrotechnical Conference (MELECON)}. The paper, entitled ``Row Pattern Recognition for Pandas: Bringing MATCH\_RECOGNIZE to Python DataFrames'' \cite{lawande2026rpr}, addresses the absence of native row pattern recognition (RPR) support in Python data analysis frameworks. It proposes an SQL-in-Pandas engine that enables the execution of \texttt{MATCH\_RECOGNIZE}-like queries directly on \texttt{pandas} DataFrames. The system supports key SQL:2016 RPR constructs and utilizes a Non-deterministic Finite Automaton (NFA)-based matching approach for processing sequential patterns. Experimental results demonstrate reduced implementation complexity compared to conventional \texttt{pandas}-based workflows while maintaining correctness consistent with established SQL engines.
+
+\item[Second Publication.]
+Further research extending this work is currently under preparation. This ongoing work focuses on enhancing the proposed framework through (e.g., performance optimization, extended SQL support, or real-world dataset evaluation), aiming to strengthen the applicability of declarative pattern recognition in Python-based data processing.
+
+\end{description}

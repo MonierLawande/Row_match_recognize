@@ -1,0 +1,134 @@
+% ============================================================
+%  ch4_overleaf.tex
+%  STANDALONE Overleaf wrapper for Chapter 4 ONLY.
+%
+%  !! CRITICAL WARNING !!
+%  DO NOT \input or \include this file inside your full Thesis.tex.
+%  It contains its own \documentclass and will cause a
+%  "Two \documentclass" error if embedded in another document.
+%
+%  HOW TO USE (for ch4 in isolation):
+%  1. Create a BRAND NEW, EMPTY Overleaf project.
+%  2. Upload THIS file, ch4_methodology.tex, and references.bib.
+%  3. Go to Menu → Main document → select ch4_overleaf.tex.
+%  4. Compile with pdfLaTeX.
+%
+%  To add ch4 to your FULL thesis project instead:
+%  - Upload only ch4_methodology.tex into your thesis project.
+%  - In Thesis.tex add:  \input{chapters/ch4_methodology}
+%    (or wherever ch4 belongs in your chapter list).
+%  - Do NOT upload or reference ch4_overleaf.tex at all.
+% ============================================================
+\documentclass[12pt, a4paper]{report}
+
+% ---- Encoding & Fonts ----
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+
+% ---- Page Geometry ----
+\usepackage[
+  top=2.5cm, bottom=2.5cm,
+  left=3.5cm, right=2.5cm
+]{geometry}
+
+% ---- Typography ----
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{microtype}
+
+% ---- Maths ----
+\usepackage{amsmath, amssymb, amsthm}
+
+% ---- Code Listings ----
+\usepackage{listings}
+\usepackage{xcolor}
+
+\definecolor{codebg}  {RGB}{248,248,248}
+\definecolor{keyword} {RGB}{0,0,200}
+\definecolor{comment} {RGB}{100,100,100}
+\definecolor{string}  {RGB}{163,21,21}
+
+\lstset{
+  backgroundcolor   = \color{codebg},
+  basicstyle        = \ttfamily\small,
+  keywordstyle      = \color{keyword}\bfseries,
+  commentstyle      = \color{comment}\itshape,
+  stringstyle       = \color{string},
+  numbers           = left,
+  numberstyle       = \tiny\color{gray},
+  stepnumber        = 1,
+  numbersep         = 8pt,
+  tabsize           = 2,
+  breaklines        = true,
+  breakatwhitespace = false,
+  frame             = single,
+  rulecolor         = \color{gray!40},
+  captionpos        = b,
+  showstringspaces  = false,
+  belowcaptionskip  = 6pt,
+  aboveskip         = 10pt,
+  belowskip         = 6pt
+}
+
+\lstdefinelanguage{SQL}{
+  keywords    = {SELECT, FROM, WHERE, MATCH_RECOGNIZE, PARTITION, BY,
+                 ORDER, MEASURES, ONE, ALL, ROW, ROWS, PER, MATCH,
+                 AFTER, SKIP, NEXT, PAST, LAST, FIRST, TO, PATTERN,
+                 DEFINE, AS, AND, OR, NOT, IN, BETWEEN, IS, NULL,
+                 PREV, PERMUTE, OVER, WINDOW, HAVING, GROUP, DISTINCT,
+                 UNION, JOIN, ON, INNER, OUTER, LEFT, RIGHT, FULL},
+  sensitive   = false,
+  morecomment = [l]{--},
+  morecomment = [s]{/*}{*/},
+  morestring  = [b]',
+}
+
+\lstdefinelanguage{Python}{
+  keywords    = {def, return, if, elif, else, for, while, in, import,
+                 from, class, self, True, False, None, and, or, not,
+                 lambda, yield, with, as, try, except, raise, pass},
+  sensitive   = true,
+  morecomment = [l]{\#},
+  morestring  = [b]",
+  morestring  = [b]',
+}
+
+% ---- Algorithms ----
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\algnewcommand\algorithmicinput{\textbf{Input:}}
+\algnewcommand\algorithmicoutput{\textbf{Output:}}
+
+% ---- Tables ----
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{multirow}
+
+% ---- Figures / TikZ ----
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{automata, positioning, arrows.meta, shapes.geometric}
+
+% ---- Inline lists ----
+\usepackage[inline]{enumitem}
+
+% ---- Hyperlinks (load last, before biblatex) ----
+\usepackage[hidelinks]{hyperref}
+
+% ---- Bibliography ----
+\usepackage[backend=bibtex, style=numeric, sorting=none]{biblatex}
+\addbibresource{references.bib}
+
+% ---- Custom commands (mirror thesis_main.tex) ----
+\newcommand{\mr}{\texttt{MATCH\_RECOGNIZE}}
+
+% ================================================================
+\begin{document}
+% ================================================================
+
+\input{ch4_methodology.tex}
+
+\printbibliography
+
+\end{document}

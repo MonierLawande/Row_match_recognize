@@ -1,0 +1,162 @@
+% ============================================================
+%  ch6_conclusion_future.tex
+%  Chapter 6: Conclusions and Future Work
+%  Master's Thesis -- SQL MATCH_RECOGNIZE on Pandas DataFrames
+% ============================================================
+\chapter{Conclusions and Future Work}
+\label{chap:conclusions}
+
+% ----------------------------------------------------------------
+\section{Discussion}
+\label{sec:discussion}
+% ----------------------------------------------------------------
+
+Our evaluation shows that extending \texttt{MATCH\_RECOGNIZE} semantics
+to \texttt{pandas} not only preserves SQL:2016 correctness but also
+reduces developer effort for complex row-pattern recognition tasks.
+To ensure correctness, we validated our implementation against Trino
+and Oracle, confirming consistent results.  In contrast, a baseline
+implementation in idiomatic \texttt{pandas} required hand-written
+logic using \texttt{groupby}, \texttt{shift}/\texttt{diff}, and index
+bookkeeping to emulate skip and overlap policies, underscoring the
+additional complexity of reproducing the same semantics without native
+support.  These comparisons emphasise the practical benefits of a
+declarative approach: pattern logic can be expressed once in SQL and
+executed directly on in-memory DataFrames, bridging SQL--Python
+workflows.  Beyond correctness, the declarative integration also
+promotes readability, maintainability, and interoperability, since
+analysts can share queries across systems without rewriting custom
+logic.  This lowers the barrier for adopting advanced row-pattern
+recognition in data science pipelines, supports collaborative
+workflows between SQL practitioners and Python developers, and
+demonstrates how SQL-based semantics can be embedded into modern
+analytics ecosystems.
+
+From an architectural standpoint, the pipeline---ANTLR4-based parser,
+\texttt{NFABuilder}, \texttt{DFABuilder}, and
+\texttt{EnhancedMatcher}---is kept modular, which contributes to
+semantic transparency and backend portability.  The engine already
+incorporates a smart multi-level pattern cache (LRU-based, up to
+10{,}000 entries) that avoids recompiling identical patterns, and a
+parallel partition executor that processes independent
+\texttt{PARTITION BY} groups concurrently using a thread pool.
+This modularity also opens the door to future optimisation
+opportunities such as guard pushdown (early elimination of impossible
+transitions) and state pruning (discarding unreachable NFA states at
+compile time), which could further reduce evaluation overhead for
+complex patterns.  The same modular design would allow the matching
+core to target other columnar engines (e.g., Polars, Apache Arrow)
+with minimal changes.
+
+Nevertheless, limitations remain.  Python's interpreter overhead,
+particularly in high-ambiguity patterns, still constrains raw
+throughput compared to native C++/Java SQL engines.  While
+vectorisation and Cython/\texttt{numba} acceleration mitigate this,
+the performance gap for highly nondeterministic workloads persists due
+to potential NFA state explosion.  In addition, certain vendor-specific
+features such as nested navigation functions or proprietary
+optimisations are out of scope for this initial design.
+Finally, although our work emphasises correctness and modularity,
+scaling the approach into distributed execution frameworks
+(e.g., Dask, Spark) will require additional development.
+
+% ----------------------------------------------------------------
+\section{Limitations}
+\label{sec:conc-limitations}
+% ----------------------------------------------------------------
+
+Despite the system's comprehensive capabilities, several limitations
+remain.
+
+\textbf{Complex pattern and quantifier interactions.}
+Although the system supports concatenation, alternation, grouping, and
+standard quantifiers (\texttt{*}, \texttt{+}, \texttt{?},
+\texttt{\{n,m\}}), certain combinations---particularly multiple greedy
+quantifiers nested within groups (e.g., \texttt{(A+B*)+C?})---can
+trigger exponential state-space growth during automata construction.
+This issue primarily arises with three or more levels of nesting
+combined with unbounded quantifiers; simpler patterns and bounded
+quantifiers behave efficiently.
+
+\textbf{Limited support for user-defined aggregate functions.}
+While the engine supports a comprehensive set of built-in aggregates
+(\texttt{SUM}, \texttt{COUNT}, \texttt{MIN}, \texttt{MAX},
+\texttt{AVG}, \texttt{STDDEV}, \texttt{VARIANCE}, \texttt{ARRAY\_AGG},
+\texttt{STRING\_AGG}, \texttt{MAX\_BY}/\texttt{MIN\_BY}, conditional
+aggregates, and \texttt{RUNNING}/\texttt{FINAL} semantics), support
+for fully arbitrary user-defined aggregate functions is limited.
+
+\textbf{Performance on large datasets.}
+The system performs efficiently on moderate-sized datasets but may
+require additional optimisations for very large datasets.
+
+\textbf{Memory usage for large patterns.}
+Patterns with many variables and complex quantifiers can generate
+large automata that increase memory consumption.
+
+\textbf{Integration with query optimisers.}
+Because the pattern-matching engine currently operates independently of
+database query optimisers, it may miss plan-level optimisation
+opportunities.
+
+% ----------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+% ----------------------------------------------------------------
+
+We presented a SQL-in-\texttt{pandas} engine for executing
+\texttt{MATCH\_RECOGNIZE} queries over DataFrames.  The engine accepts
+SQL queries through an ANTLR4-generated parser (using an adapted Trino
+grammar), compiles patterns to NFAs via \texttt{NFABuilder}, converts
+them to DFAs via \texttt{DFABuilder}, and executes matches through
+\texttt{EnhancedMatcher}---a thread-safe, backtracking-capable engine
+that supports all four \texttt{AFTER MATCH SKIP} modes
+(\texttt{PAST LAST ROW}, \texttt{TO NEXT ROW}, \texttt{TO FIRST},
+\texttt{TO LAST}), both \texttt{ONE ROW PER MATCH} and
+\texttt{ALL ROWS PER MATCH} output modes, navigation functions
+(\texttt{FIRST}, \texttt{LAST}, \texttt{PREV}, \texttt{NEXT}),
+\texttt{CLASSIFIER()}, \texttt{MATCH\_NUMBER()}, and a comprehensive
+set of aggregate functions including \texttt{SUM}, \texttt{COUNT},
+\texttt{MIN}, \texttt{MAX}, \texttt{AVG}, \texttt{STDDEV},
+\texttt{ARRAY\_AGG}, conditional aggregates (\texttt{COUNT\_IF},
+\texttt{SUM\_IF}), and \texttt{RUNNING}/\texttt{FINAL} semantics.
+Results match vendor engines while substantially reducing developer effort.
+
+\texttt{MATCH\_RECOGNIZE} allows data scientists and analysts to use
+powerful pattern-matching semantics directly within their familiar
+\texttt{pandas} environment, without the need for complex Python code or
+external SQL engine dependencies.  This reduces development complexity
+and enhances productivity for sequential data analysis across domains,
+including financial analysis, log processing, and time series pattern
+detection.
+
+By enabling SQL-native pattern recognition directly in Python, our
+approach bridges the gap between the expressiveness of relational queries
+and the flexibility of in-memory analytics.  This opens the door to
+unified and portable pipelines that preserve both semantics and developer
+productivity.
+
+% ----------------------------------------------------------------
+\section{Future Work}
+\label{sec:conc-future}
+% ----------------------------------------------------------------
+
+We plan to extend the engine along three complementary directions.
+First, we will pursue \textbf{distributed execution} by enabling the
+matcher to scale across multi-node environments with boundary-aware
+state propagation, ensuring efficiency on large datasets.  Second, we
+aim to develop a \textbf{backend abstraction layer} that targets
+high-performance columnar engines such as Polars, Dask, Vaex, and
+Apache Arrow, thereby further closing the performance gap with native
+SQL systems.  Finally, we will invest in \textbf{tooling and adoption},
+including developer utilities for pattern debugging, match
+visualisation, and seamless SQL--Python interoperability within notebook
+environments.  Together, these directions will enhance scalability,
+performance, and usability, broadening the impact of our approach.
+
+By addressing the identified limitations and implementing the planned
+enhancements, our goal is to develop a more adaptable and efficient
+solution capable of handling complex pattern-matching scenarios across
+various data processing environments.  This roadmap provides a clear
+path for improving performance and expanding the scope of the current
+implementation.
