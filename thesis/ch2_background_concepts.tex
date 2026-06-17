@@ -1,0 +1,456 @@
+% ============================================================
+%  ch2_background_concepts.tex
+%  Chapter 2: Background and Concepts
+%  Master's Thesis -- SQL MATCH_RECOGNIZE on Pandas DataFrames
+% ============================================================
+% ================================================================
+%  CHAPTER 2 -- BACKGROUND AND CONCEPTS
+% ================================================================
+\chapter{Background and Concepts}
+\label{chap:background}
+
+This chapter establishes the theoretical and practical foundations
+required to understand the design and implementation of the
+\texttt{MATCH\_RECOGNIZE} engine for Pandas DataFrames.
+Section~\ref{sec:bg-pattern-matching} introduces the problem of
+sequential pattern detection in relational data.
+Section~\ref{sec:bg-match-recognize} examines the SQL:2016
+\texttt{MATCH\_RECOGNIZE} clause in detail.
+Section~\ref{sec:bg-performance} in Chapter~4 describes performance
+optimization techniques. Chapter~3 surveys related work and identifies
+the research gap addressed by this thesis.
+
+% ----------------------------------------------------------------
+\section{Pattern Matching in Sequential Data Analysis}
+\label{sec:bg-pattern-matching}
+% ----------------------------------------------------------------
+
+Sequential pattern detection represents a fundamental challenge in
+data analysis, where the objective is to identify ordered sequences
+of events or states within large datasets.  In contrast to
+conventional queries that match rows individually against one or
+more predicates, pattern matching takes preceding and subsequent
+rows into consideration and returns groups of rows when they follow
+a specified pattern.  This makes it possible to retrieve specific
+shapes---such as V-, W- or U-shapes---within the data, making
+pattern matching predestined for all kinds of processes driven by
+sequences of events: detecting unusual behaviour in security
+applications, analysing stock price development, sensor data
+analysis, fraud detection, and generally complex event
+processing~\cite{OracleMR}.
+
+Unlike traditional relational operations that focus on individual
+rows or aggregated values, pattern matching examines the temporal
+or logical ordering of data points to extract meaningful sequences.
+This capability is essential across many domains including financial
+market analysis, fraud detection, IoT sensor monitoring, and
+behavioural analytics.
+
+Historically, relational database systems excelled at set-based
+operations---selection, projection, joins, and aggregation---but
+lacked expressive mechanisms for sequence analysis.  Analysts
+requiring pattern detection were forced to either export data to
+specialised stream-processing systems, implement complex procedural
+logic using cursors and temporary tables, or employ application-layer
+processing with significant performance overhead.  These limitations
+created a gap between the widespread availability of sequential data
+and the tools available to analyse it effectively.  The introduction
+of row pattern recognition in SQL:2016 addresses this deficiency by
+bringing sequence analysis capabilities directly into the query
+language~\cite{ISO2016SQL}.
+
+% ................................
+\subsection{Real-World Applications}
+\label{subsec:bg-applications}
+% ................................
+
+\paragraph{Financial Market Analysis.}
+Detecting V-shaped price patterns---price decline followed by
+recovery---requires examining ordered sequences of price movements.
+For example, identifying stocks whose price troughs are successively
+higher (a ``higher-low'' pattern) signals a potential upward trend.
+The canonical example used throughout this thesis is the detection
+of such V-patterns in customer order data~\cite{OracleMR}.
+
+\paragraph{Fraud Detection.}
+Credit card fraud often manifests as specific transaction sequences,
+such as multiple small test charges followed by a large purchase, or
+geographically impossible transactions occurring within unrealistic
+timeframes.  Expressing these rules declaratively in SQL is more
+maintainable than equivalent procedural logic.
+
+\paragraph{IoT and Sensor Data.}
+Manufacturing systems monitor sensor readings to detect equipment
+degradation patterns, such as a gradual temperature rise followed by
+a sudden drop, which may indicate imminent failure.  Pattern queries
+over time-series sensor streams are a natural fit for
+\texttt{MATCH\_RECOGNIZE}.
+
+\paragraph{Clickstream and Funnel Analysis.}
+E-commerce platforms analyse user navigation sequences to identify
+conversion paths or abandonment patterns.  A classic funnel query
+detects the sequence
+``view~$\rightarrow$ add-to-cart~$\rightarrow$ remove~$\rightarrow$
+exit,'' which signals purchase hesitation.  With
+\texttt{MATCH\_RECOGNIZE}, the analyst can also quantify \emph{how
+many} add-to-cart events occurred before removal, extract the exact
+timestamps of each step, and compute the total dwell time in a single
+declarative query---tasks that would otherwise require multiple
+correlated subqueries or procedural session-stitching logic.
+
+\paragraph{Network Security and Intrusion Detection.}
+Cyber-attacks rarely manifest as a single anomalous event; they
+unfold as ordered sequences of actions.  A typical multi-stage
+intrusion follows the pattern: port scanning~$\rightarrow$ repeated
+failed authentication attempts~$\rightarrow$ a single successful
+login~$\rightarrow$ privilege escalation.
+\texttt{MATCH\_RECOGNIZE} can express this entire kill-chain as one
+pattern query over an event log, flagging the offending session and
+extracting the first and last timestamps, the targeted port, and the
+account compromised---all without exporting the log to a separate
+SIEM tool~\cite{petkovic2022fraud}.
+
+\paragraph{Healthcare and Patient Monitoring.}
+In clinical data streams, early warning systems must detect
+physiological deterioration before a critical event.  A typical
+sepsis-onset pattern consists of rising heart rate rows, followed by
+a drop in blood pressure rows, followed by a spike in white-blood-cell
+count.  Expressing this over an ordered time-series of vital signs
+with \texttt{MATCH\_RECOGNIZE} allows hospitals to produce real-time
+alerts from the same SQL infrastructure used for reporting, without
+duplicating data into a separate stream-processing system.
+
+\paragraph{Supply Chain and Logistics.}
+Operational disruptions in supply chains often emerge as a cascade:
+a single late shipment~$\rightarrow$ repeated partial deliveries~$\rightarrow$
+a stockout event.  \texttt{MATCH\_RECOGNIZE} applied to an order
+fulfilment log can identify such escalation sequences per supplier or
+warehouse and measure the time between first delay and eventual
+stockout, enabling proactive mitigation rather than retrospective
+reporting.
+
+\paragraph{Financial Compliance and Trade Surveillance.}
+Regulatory frameworks such as MiFID~II require exchanges to detect
+potential market manipulation patterns, for example
+``layering,'' where a trader places a large resting order
+(to move the price), then executes a trade on the opposite side, then
+cancels the resting order.  This three-step sequence---place, trade,
+cancel---with precise timing constraints is naturally expressed as a
+\texttt{MATCH\_RECOGNIZE} pattern, turning a complex compliance rule
+directly into an auditable SQL query.
+
+
+% ----------------------------------------------------------------
+\section{The SQL:2016 \texttt{MATCH\_RECOGNIZE} Clause}
+\label{sec:bg-match-recognize}
+% ----------------------------------------------------------------
+
+Nearly a decade ago, the SQL:2016 standard introduced
+\texttt{MATCH\_RECOGNIZE}~\cite{ISO2016SQL,iso2016}, a construct
+which enabled row pattern matching in SQL.  Row pattern matching is
+a technique which allows finding sequences of rows based on a
+pattern defined by regular expressions.  Using a syntax similar to
+regular expressions, it is possible to filter data sets processed
+by pattern specifications to recognise complex sequences of
+events~\cite{winand2017sqlnew}.  This process facilitates the
+recognition of patterns in data series that would otherwise require
+the use of additional SQL clauses, such as the \texttt{WINDOW}
+clause.  Consequently, the \texttt{MATCH\_RECOGNIZE} clause does
+not introduce new data-filtering power but rather serves as a
+shortcut to simplify special areas of application that can
+otherwise be circumvented by combining other clauses.
+
+Up to now, \texttt{MATCH\_RECOGNIZE} is not supported by many
+database management systems, including
+PostgreSQL~\cite{howe2020matchrecognize} and
+DuckDB~\cite{findling2025bringing}.  This thesis contributes to
+the overarching research topic of making pattern matching available
+to DBMSs that do not natively support it, so that a wider range of
+users can benefit from its power and expressiveness.  The clause
+brings capabilities previously available only in specialised
+stream-processing systems into standard relational databases.
+
+The SQL standard distinguishes between different feature levels for
+row pattern matching, which can be used to classify
+implementations~\cite{winand_match_recognize}.
+\textbf{Feature~R010} provides the most basic support and serves
+as a basis for further features; it includes row pattern
+recognition inside the \texttt{FROM} clause and basic aggregate
+functions (\texttt{MIN}, \texttt{MAX}, \texttt{SUM},
+\texttt{COUNT}, \texttt{AVG}) inside the \texttt{MEASURES}
+clause.  \textbf{Feature~R020} extends the areas of application:
+\texttt{MATCH\_RECOGNIZE} can be used within the \texttt{WINDOW}
+and \texttt{OVER} clauses to describe windows more precisely.
+\textbf{Feature~R030} allows full aggregate support inside the
+\texttt{MATCH\_RECOGNIZE}
+clause~\cite{ISO2021,michels2018new,melton2017sqlrpr}.
+
+% ................................
+\subsection{Clause Structure and Components}
+\label{subsec:bg-clause-structure}
+% ................................
+
+The clause operates on a rowset (table or derived table) and
+consists of eight interconnected sub-clauses, as shown in
+Listing~\ref{lst:mr-syntax}.
+
+\begin{lstlisting}[
+    language     = SQL,
+    caption      = {General syntax of the \texttt{MATCH\_RECOGNIZE} clause},
+    label        = {lst:mr-syntax}
+]
+SELECT <columns>
+FROM   <table>
+MATCH_RECOGNIZE (
+    PARTITION BY <partition_columns>   -- 1. Data organisation
+    ORDER BY     <ordering_columns>    -- 2. Row sequencing
+    MEASURES     <expressions>         -- 3. Output computations
+    <rows_per_match>                   -- 4. Result granularity
+    AFTER MATCH SKIP <option>          -- 5. Overlap handling
+    PATTERN ( <pattern_regex> )        -- 6. Sequence specification
+    SUBSET   <union_variable_defs>     -- 7. Union variables (optional)
+    DEFINE  <variable_definitions>     -- 8. Variable predicates
+) AS <alias>
+\end{lstlisting}
+
+\begin{enumerate}
+
+\item \textbf{PARTITION BY.}
+  Divides the input rowset into independent partitions, analogous to
+  window-function partitioning.  Pattern matching runs independently
+  within each partition, enabling both parallel processing and
+  domain-specific grouping (e.g.\ per customer or per sensor).
+
+\item \textbf{ORDER BY.}
+  Establishes the logical ordering of rows within each partition.
+  The pattern-matching algorithm processes rows strictly according
+  to this ordering.  Multiple sort keys with \texttt{ASC}/
+  \texttt{DESC} modifiers are supported.
+
+\item \textbf{MEASURES.}
+  Defines computed expressions that extract values from matched row
+  sequences using pattern variables and navigation functions
+  (\texttt{FIRST}, \texttt{LAST}, \texttt{PREV}, \texttt{NEXT}).
+  Each \texttt{MEASURE} expression becomes a column in the output.
+
+\item \textbf{Output options.}
+  \begin{itemize}
+    \item \texttt{ONE ROW PER MATCH}: one summary row per complete
+      match.
+    \item \texttt{ALL ROWS PER MATCH}: one row for every row
+      participating in a match.
+    \item \texttt{ALL ROWS PER MATCH WITH UNMATCHED ROWS}: includes
+      non-matching rows in the result.
+  \end{itemize}
+
+\item \textbf{AFTER MATCH SKIP.}
+  Controls how the engine resumes after finding a match:
+  \begin{itemize}
+    \item \texttt{SKIP TO NEXT ROW} -- resume from the row after
+      match start (maximum overlaps).
+    \item \texttt{SKIP PAST LAST ROW} -- resume from the row after
+      match end (non-overlapping matches).
+    \item \texttt{SKIP TO FIRST} \textit{var} -- resume from the
+      first row classified as \textit{var}.
+    \item \texttt{SKIP TO LAST} \textit{var} -- resume from the last
+      row classified as \textit{var}.
+  \end{itemize}
+
+\item \textbf{PATTERN.}
+  Specifies the sequence using regular-expression-like syntax with
+  pattern variables as terminals:
+  \begin{itemize}
+    \item Concatenation: \texttt{A~B~C} (A followed by B followed by C).
+    \item Alternation: \texttt{A~|~B} (either A or B).
+    \item Quantifiers: \texttt{A*} (zero or more), \texttt{A+}
+      (one or more), \texttt{A?} (zero or one), \texttt{A\{n\}}
+      (exactly $n$), \texttt{A\{n,m\}} (between $n$ and $m$).
+    \item Grouping: \texttt{(A~B)+} (one or more AB pairs).
+    \item Anchors: \texttt{\^{}A~B~C\$} (pattern must span the
+      entire partition).
+    \item Exclusions: \texttt{\{-~A+~B+~-\}} (rows \emph{not}
+      matching the enclosed sub-pattern).
+    \item Permutations: \texttt{PERMUTE(A,~B,~C)} (any ordering
+      of A, B, and C).
+  \end{itemize}
+
+\item \textbf{SUBSET.}
+  An optional clause for defining union variables, each of which
+  consists of a set of variables defined in the \texttt{PATTERN}
+  clause.  Union variables can be used to match rows to one of
+  several different patterns, and may appear inside
+  \texttt{MEASURES} and \texttt{DEFINE} expressions.
+
+\item \textbf{DEFINE.}
+  Assigns Boolean predicates to pattern variables.  The initial
+  step in execution involves implementing a filter on the ordered
+  data using this clause, which specifies a list of named Boolean
+  expressions (\emph{steps}) that either enable or deny the
+  inclusion of a row within the matched sequence based on a
+  predetermined criterion.  Each row is evaluated against these
+  predicates to determine its variable classification.  Predicates
+  may reference current-row columns, navigation functions,
+  aggregations over matched sub-sequences, and Boolean/comparison
+  operators~\cite{winand_match_recognize}.
+
+\end{enumerate}
+
+The complete \texttt{MATCH\_RECOGNIZE} clause is embedded in a
+\texttt{SELECT} query and can therefore be further processed by
+additional specifications.  Possible extensions include applying
+groupings or aggregate functions to the outer
+\texttt{SELECT}~\cite{winand_match_recognize}.
+
+% ................................
+\subsection{Illustrative Example: Stock Price V-Pattern}
+\label{subsec:bg-example}
+% ................................
+
+Listing~\ref{lst:mr-example} shows a complete \texttt{MATCH\_RECOGNIZE}
+query that detects V-shaped price patterns in customer order data.
+
+\begin{lstlisting}[
+    language = SQL,
+    caption  = {Detecting V-shaped price patterns with \texttt{MATCH\_RECOGNIZE}},
+    label    = {lst:mr-example}
+]
+SELECT customer_id,
+       start_price, bottom_price, final_price,
+       start_date,  final_date
+FROM   orders
+MATCH_RECOGNIZE (
+    PARTITION BY customer_id
+    ORDER BY     order_date
+    MEASURES
+        START.price          AS start_price,
+        LAST(DOWN.price)     AS bottom_price,
+        LAST(UP.price)       AS final_price,
+        START.order_date     AS start_date,
+        LAST(UP.order_date)  AS final_date
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP PAST LAST ROW
+    PATTERN (START DOWN+ UP+)
+    DEFINE
+        DOWN AS price < PREV(price),
+        UP   AS price > PREV(price)
+);
+\end{lstlisting}
+
+The engine partitions rows by \texttt{customer\_id}, sorts by
+\texttt{order\_date}, and seeks sequences matching
+\texttt{START~DOWN+~UP+}: one \texttt{START} row (any row, as it
+carries no \texttt{DEFINE} predicate), one or more \texttt{DOWN}
+rows (each with a strictly lower price than its predecessor), and
+one or more \texttt{UP} rows (each with a strictly higher price
+than its predecessor).  For every match found, the \texttt{MEASURES}
+sub-clause extracts the starting price and date from the
+\texttt{START} row, the lowest price from the last \texttt{DOWN}
+row, and the final price from the last \texttt{UP} row.
+
+% ................................
+\subsection{Comparison of Existing Implementations}
+\label{subsec:bg-existing}
+% ................................
+
+Several database and stream-processing systems have implemented
+\texttt{MATCH\_RECOGNIZE}.  The SQL standard defines three feature
+profiles for classifying those implementations~\cite{ISO2021,michels2018new}:
+\textbf{Feature~R010} covers row pattern recognition in the
+\texttt{FROM} clause together with basic aggregate functions;
+\textbf{Feature~R020} additionally permits \texttt{MATCH\_RECOGNIZE}
+inside \texttt{WINDOW}/\texttt{OVER} clauses; and
+\textbf{Feature~R030} enables full aggregate support within the
+clause.  In practice, most systems have adopted only Feature~R010
+as the baseline.  Snowflake is the only publicly available engine
+that additionally implements Feature~R020.  Feature~R030 has not
+been adopted by any major production system to date.
+
+The following paragraphs briefly characterise each implementation
+included in Table~\ref{tab:bg-systems}.
+
+\textbf{Oracle} introduced \texttt{MATCH\_RECOGNIZE} in
+Database~12c (2013) and remains the primary reference
+implementation~\cite{oracle2022,oracle2021dwhsg,book}.
+It implements Feature~R010 using an NFA-based engine with
+backtracking optimisations for complex patterns.  Feature~R020 is
+not supported; the clause cannot appear inside a \texttt{WINDOW}
+function.  Oracle also enforces several additional restrictions:
+Boolean expressions are not permitted in the \texttt{MEASURES}
+clause, and \texttt{DISTINCT} may not precede aggregate functions.
+Despite its technical depth, Oracle operates under a commercial
+licence, making it inaccessible for many users.
+
+\textbf{Trino} is an open-source distributed query engine whose
+\texttt{MATCH\_RECOGNIZE} implementation is DFA-based, guaranteeing
+deterministic pattern matching in linear time without
+backtracking~\cite{trino2022,trino2021row}.  It supports
+Feature~R010 only---the clause may only appear in the
+\texttt{FROM} clause.  Trino's architecture is designed for
+parallelised, federated query execution across large clusters, which
+differentiates it from single-node systems.
+
+\textbf{Snowflake} is a cloud-native data platform that covers
+both Feature~R010 and Feature~R020~\cite{snowflake2025match_recognize,hoffa2021snowflake}.
+In contrast to the SQL standard, Snowflake makes no syntactic
+distinction between the \texttt{FROM} and \texttt{WINDOW} usage
+contexts: the two are syntactically equivalent, and Feature~R020
+is realised purely through semantic interpretation.  Snowflake
+charges by compute time (warehouse size), so query costs scale
+with workload.
+
+\textbf{Apache Flink} targets real-time stream processing and
+implements \texttt{MATCH\_RECOGNIZE} through its Complex Event
+Processing (CEP) library rather than as a native SQL
+sub-clause~\cite{vsprem2024building,georgiou2025streaming}.
+This makes Flink highly effective for high-velocity continuous
+data, but it introduces a separate programming model that is
+less familiar to analysts accustomed to batch SQL.
+
+\textbf{DuckDB} is an embeddable, in-process analytical database
+that does not yet provide native \texttt{MATCH\_RECOGNIZE}
+support~\cite{raasveldt2019duckdb,findling2025bringing}.  Because
+DuckDB requires no separate server and exposes a Python API, it
+is architecturally close to this thesis's target environment.
+Ongoing research investigates transpiling \texttt{MATCH\_RECOGNIZE}
+to \texttt{WITH~RECURSIVE} inside DuckDB as a path toward
+Feature~R010 compliance.
+
+Table~\ref{tab:bg-systems} summarises these five systems alongside
+this work.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Existing \texttt{MATCH\_RECOGNIZE} implementations}
+  \label{tab:bg-systems}
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{llccl}
+    \toprule
+    \textbf{Engine} & \textbf{Feature Level} & \textbf{Open Source} & \textbf{Deployment} & \textbf{Licence} \\
+    \midrule
+    Oracle       & R010 (no R020)  & No  & On-premise / Cloud & Commercial  \\
+    Trino        & R010            & Yes & Distributed        & Apache 2.0  \\
+    Snowflake    & R010 + R020     & No  & Cloud-native       & Commercial  \\
+    Apache Flink & CEP library     & Yes & Streaming cluster  & Apache 2.0  \\
+    DuckDB       & None (planned)  & Yes & In-process         & MIT         \\
+    \midrule
+    \textbf{This work} & \textbf{R010 (full)} & \textbf{Yes} & \textbf{In-process Python} & \textbf{Open-source} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Two structural gaps are visible from this overview.  First, every
+system with native \texttt{MATCH\_RECOGNIZE} support---Oracle,
+Trino, Snowflake, and Flink---requires a separate server, a
+distributed cluster, or a paid cloud subscription, making them
+unsuitable for lightweight or in-process data science.  Second,
+none of these systems integrates with Python's Pandas ecosystem,
+which is the dominant platform for in-process analytical workloads.
+This thesis addresses both gaps by delivering a full
+Feature~R010-compliant \texttt{MATCH\_RECOGNIZE} engine that runs
+entirely inside a Pandas workflow with zero additional deployment.
+
+Chapter~\ref{chap:related} examines each of these systems in
+greater depth, documenting the precise restrictions each imposes,
+comparing their execution strategies, and situating the contribution
+of this work within the broader landscape of pattern-matching
+research.
