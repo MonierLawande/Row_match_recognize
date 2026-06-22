@@ -2232,22 +2232,24 @@ conversion $\to$ minimisation---is computationally expensive,
 especially for patterns with quantifiers and \texttt{PERMUTE}
 constructs.  The implementation maintains a thread-safe
 \emph{Least Recently Used} (LRU) cache that maps a hash of the
-pattern string and \texttt{DEFINE} predicates to the compiled DFA.
-Key configuration parameters (configurable via environment
-variables) are listed in Table~\ref{tab:bg-cache-config}.
+pattern string and \texttt{DEFINE} predicates to the compiled
+pattern (the full NFA and DFA pipeline result).
+Key configuration parameters are listed in
+Table~\ref{tab:bg-cache-config}.
 
 \begin{table}[htbp]
   \centering
-  \caption{Pattern cache configuration defaults}
+  \caption{Pattern cache configuration defaults
+    (\texttt{src/config/production\_config.py})}
   \label{tab:bg-cache-config}
   \begin{tabular}{lrl}
     \toprule
     \textbf{Parameter}         & \textbf{Default} & \textbf{Description} \\
     \midrule
-    \texttt{CACHE\_SIZE\_LIMIT}        & 10\,000 entries  & Maximum cached patterns \\
-    \texttt{CACHE\_MEMORY\_LIMIT\_MB}  & 500 MB           & Maximum cache memory \\
-    \texttt{CACHE\_TTL\_SECONDS}       & 3\,600 s         & Entry time-to-live \\
-    \texttt{CACHE\_CLEAR\_THRESHOLD\_MB} & 400 MB         & Proactive eviction threshold \\
+    \texttt{cache\_size\_limit}        & 50\,000 entries  & Maximum cached patterns \\
+    \texttt{cache\_memory\_limit\_mb}  & 2\,048 MB        & Maximum cache memory \\
+    \texttt{cache\_ttl\_seconds}       & 3\,600 s         & Entry time-to-live \\
+    \texttt{cache\_clear\_threshold\_mb} & 1\,600 MB      & Proactive eviction threshold \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -2259,110 +2261,46 @@ variables) are listed in Table~\ref{tab:bg-cache-config}.
 
 Large-scale matching over millions of rows requires careful memory
 management.  The implementation processes one partition at a time,
-accumulating matches in a fixed-size buffer before flushing results
-to the output DataFrame.  Memory usage is monitored via
-\texttt{psutil}; garbage collection is triggered proactively when
-consumption approaches user-configured limits.  Object pools reuse
-DFA state structures and transition objects across successive
-matches, reducing allocator pressure.
-
-% ................................
-\subsection{Parallel Partition Processing}
-\label{subsec:bg-parallel}
-% ................................
-
-Because partitions are mutually independent each has its own sorted row sequence, its own variable bindings, and produces its own output rows they are a natural unit of parallelism.  For queries involving large numbers of partitions (e.g./\/ one partition per trading symbol over a multi-year stock dataset), sequential processing wastes available CPU cores.
-
-The engine exposes two paths, selected at runtime:
-\begin{description}
-  \item[\texttt{\_process\_partitions\_in\_parallel}.]
-    Submits each partition's work item to a
-    \texttt{concurrent.futures.ThreadPoolExecutor}.  The pool size
-    is bounded by \texttt{MAX\_WORKERS} (default: CPU count) and
-    the activation threshold is controlled by
-    \texttt{PARALLEL\_THRESHOLD} (default: 4 partitions).
-
-  \item[\texttt{\_process\_partitions\_sequentially}.]
-    Processes partitions in a plain Python \texttt{for} loop.
-    Used when the number of partitions is below the threshold, or
-    when the caller has explicitly disabled parallelism (e.g.\
-    for deterministic test execution).
-\end{description}
-
-Thread safety is preserved because each worker receives its own
-copy of the compiled DFA (via a shallow clone of the shared
-\texttt{EnhancedMatcher} instance) and writes only to its own
-private results list.  The final concatenation of per-partition
-result lists into the output DataFrame occurs in the main thread,
-requiring no synchronisation.
-
-Figure~\ref{fig:parallel-partitions} illustrates the data-flow
-for a dataset with three partitions processed in parallel.
-
-\begin{figure}[htbp]
-  \centering
-  \begin{tikzpicture}[
-    node distance=0.45cm and 1.6cm,
-    every node/.style={font=\small},
-    box/.style={rectangle, draw, rounded corners=3pt,
-                minimum width=3.0cm, minimum height=0.7cm,
-                text centered},
-    arrow/.style={->, thick}
-  ]
-    \node[box, fill=gray!15] (df) {Input DataFrame $D$};
-    \node[box, below left=0.9cm and 2.2cm of df, fill=blue!12]  (p1) {Partition 1};
-    \node[box, below=0.9cm of df, fill=blue!12]                 (p2) {Partition 2};
-    \node[box, below right=0.9cm and 2.2cm of df, fill=blue!12] (p3) {Partition 3};
-    \node[box, below=0.9cm of p1, fill=green!15] (r1) {Results 1};
-    \node[box, below=0.9cm of p2, fill=green!15] (r2) {Results 2};
-    \node[box, below=0.9cm of p3, fill=green!15] (r3) {Results 3};
-    \node[box, below right=0.9cm and 0.0cm of r1, fill=gray!15] (out) {Output DataFrame};
-
-    \draw[arrow] (df) -- (p1);
-    \draw[arrow] (df) -- (p2);
-    \draw[arrow] (df) -- (p3);
-    \draw[arrow,dashed] (p1) -- node[left,font=\tiny]{Thread 1} (r1);
-    \draw[arrow,dashed] (p2) -- node[left,font=\tiny]{Thread 2} (r2);
-    \draw[arrow,dashed] (p3) -- node[right,font=\tiny]{Thread 3} (r3);
-    \draw[arrow] (r1) -- (out);
-    \draw[arrow] (r2) -- (out);
-    \draw[arrow] (r3) -- (out);
-  \end{tikzpicture}
-  \caption{Fan-out/fan-in architecture for parallel partition
-    processing.  Each partition is handled by an independent worker
-    thread (dashed arrows); results are merged in the main thread.}
-  \label{fig:parallel-partitions}
-\end{figure}
+keeping only the current partition's data in memory at any point.
+Memory usage is monitored via \texttt{psutil}; garbage collection
+is triggered proactively when consumption approaches
+user-configured limits (\texttt{cache\_clear\_threshold\_mb}).
+An object-pool layer (\texttt{src/utils/memory\_management.py})
+reuses frequently allocated objects across successive match
+operations, reducing allocator pressure on long-running queries.
 
 % ................................
 \subsection{Vectorised Condition Evaluation}
 \label{subsec:bg-vectorised}
 % ................................
 
-For large partitions the engine can avoid the overhead of
-per-row Python function calls by pre-computing a
-\emph{condition matrix} $M$ of shape
-$|\mathcal{V}| \times n$, where $\mathcal{V}$ is the set of
-pattern variables (those with explicit \texttt{DEFINE} predicates),
-$n$ is the partition size, and $M[v][i] = 1$ if row $i$ satisfies
-the predicate for variable $v$.
+For large partitions the engine avoids repeated Python function-call
+overhead by pre-computing a \emph{condition matrix}: a dictionary
+mapping each pattern variable $v$ to a NumPy Boolean array of
+length $n$ (the partition size), where entry $i$ is \texttt{True}
+if row $i$ satisfies the \texttt{DEFINE} predicate for $v$.
 
-Pre-computation uses NumPy broadcast operations: each predicate is
-normalised into an expression tree that can be evaluated
-column-wise over the entire DataFrame (e.g.\
-\texttt{df['price'] > df['price'].shift(1)}), producing a
-Boolean Series without a Python-level loop.  The DFA simulation
-loop then replaces the per-row condition call with a direct look-up
-$M[v][j]$, reducing the inner-loop cost from an interpreted
-function call to a single array index.
+The pre-computation pass in
+\texttt{EnhancedMatcher.\_vectorize\_condition\_evaluation()}
+evaluates each variable's predicate function once per row and
+stores the results as a compact \texttt{numpy.ndarray(dtype=bool)}.
+When the Polars library is available it is used to parallelise this
+pass; otherwise a plain Python loop with NumPy storage provides the
+same result.  Implicit variables (present in the pattern but absent
+from \texttt{DEFINE}) are assigned an all-\texttt{True} array,
+matching any row unconditionally.
 
-The trade-off is that vectorised pre-computation requires holding
-the full condition matrix in memory ($|\mathcal{V}| \times n$
-Boolean values).  For narrow patterns over short partitions
-(below a configurable row threshold) the engine defaults to the
-scalar evaluation path to avoid this overhead.  The threshold
-is exposed via the \texttt{VECTORISE\_THRESHOLD} environment
-variable (default: $50\,000$ rows per partition).
+Once the condition matrix is built, the DFA simulation loop
+replaces every per-row predicate call with a single array index
+look-up $M[v][j]$, reducing the inner-loop cost from an interpreted
+function invocation to a direct memory access.
+
+For partitions below $5\,000$ rows an enhanced
+condition-evaluation cache is used instead; for very large
+partitions ($>50\,000$ rows) a sample-based pre-warming step
+warms internal caches before the full evaluation pass begins.
+Both thresholds are hardcoded in
+\texttt{src/matcher/matcher.py}.
 
 Table~\ref{tab:perf-summary} summarises all performance
 optimisations and the conditions under which each is applied.
@@ -2381,20 +2319,16 @@ optimisations and the conditions under which each is applied.
       & Always on
       & Eliminates redundant NFA/DFA construction across repeated
         queries \\[4pt]
-    Parallel partitions
-      & $|\text{partitions}| \geq \texttt{PARALLEL\_THRESHOLD}$
-      & Scales throughput with CPU cores for wide-partition
-        datasets \\[4pt]
-    Vectorised conditions
-      & Partition size $\geq \texttt{VECTORISE\_THRESHOLD}$
-      & Eliminates per-row Python call overhead for large
-        partitions \\[4pt]
-    Streaming output buffer
+    Condition matrix (vectorised look-up)
+      & Partition size $> 5\,000$ rows
+      & Replaces per-row predicate calls with array index
+        look-ups inside the DFA loop \\[4pt]
+    One-partition-at-a-time streaming
       & Always on
-      & Bounds peak memory to buffer size regardless of match
-        count \\[4pt]
+      & Bounds peak memory to one partition regardless of total
+        dataset size \\[4pt]
     Proactive GC / memory guard
-      & Process RSS $\geq \texttt{CACHE\_CLEAR\_THRESHOLD\_MB}$
+      & Process RSS $\geq$ \texttt{cache\_clear\_threshold\_mb}
       & Prevents OOM errors on very large dataset scans \\
     \bottomrule
   \end{tabular}
