@@ -7,10 +7,10 @@
 \label{chap:evaluation}
 
 This chapter evaluates the proposed \texttt{MATCH\_RECOGNIZE}
-implementation across three dimensions: output correctness (parity
-with Trino), semantic coverage (SQL:2016 feature completeness), and
-developer effort (reduction in lines of code compared with
-hand-written Pandas idioms).  Section~\ref{sec:eval-methodology}
+implementation across five dimensions: output correctness (parity
+with Trino), SQL:2016 feature coverage, row-pattern type coverage,
+performance and scalability, and developer usability.
+Section~\ref{sec:eval-methodology}
 describes the evaluation methodology, including the hardware
 environment and the metrics used.
 Section~\ref{sec:eval-dataset} presents the benchmark dataset and
@@ -26,27 +26,43 @@ tools.
 % ----------------------------------------------------------------
 
 We evaluate the proposed \texttt{MATCH\_RECOGNIZE} implementation
-through three complementary aspects.
+through five complementary criteria.
 
 \begin{enumerate}
-  \item \textbf{Output correctness.}
+  \item \textbf{Correctness.}
     Results are compared row-by-row with Trino across multiple
     pattern types to ensure identical matched rows, pattern
     alignment, and measure calculations.
 
-  \item \textbf{Semantic coverage.}
-    Compliance with SQL:2016 \texttt{MATCH\_RECOGNIZE} semantics is
-    verified, covering \texttt{PERMUTE} patterns, exclusions,
-    quantifiers, navigation functions, and output
-    modes~\cite{iso2016,ISO2021,monierashraf2025rowmatch}.
+  \item \textbf{SQL:2016 feature coverage.}
+    Compliance with key \texttt{MATCH\_RECOGNIZE} clauses is
+    verified, including \texttt{PARTITION~BY}, \texttt{ORDER~BY},
+    \texttt{PATTERN}, \texttt{DEFINE}, \texttt{MEASURES},
+    \texttt{SUBSET}, output modes (\texttt{ONE~ROW~PER~MATCH} /
+    \texttt{ALL~ROWS~PER~MATCH}), after-match skip policies, and
+    navigation
+    functions~\cite{iso2016,ISO2021,monierashraf2025rowmatch}.
 
-  \item \textbf{Developer effort (code size).}
-    The lines/tokens required to express equivalent logic in
+  \item \textbf{Pattern-type coverage.}
+    A variety of row-pattern types are exercised, including simple
+    sequences, quantified repetitions
+    (\texttt{*}, \texttt{+}, \texttt{?}, \texttt{\{n,m\}}),
+    ascending/descending trends, recovery patterns, alternation,
+    exclusion blocks (\texttt{\{-\ldots-\}}), anchored patterns,
+    and \texttt{PERMUTE} constructs.
+
+  \item \textbf{Performance and scalability.}
+    Execution time is measured across increasing DataFrame sizes
+    and pattern complexities to characterise how the engine scales
+    with data volume and pattern structure.
+
+  \item \textbf{Usability (developer effort).}
+    The lines of code required to express equivalent logic as
     idiomatic Pandas serve as a baseline.  Hand-written Pandas
-    solutions typically require substantially more code (e.g.\
-    chained \texttt{groupby}/\texttt{shift}/joins) than a single
-    \texttt{MATCH\_RECOGNIZE} statement, so reducing LOC is a core
-    goal of the row-pattern recognition (RPR)
+    solutions typically require substantially more code
+    (e.g.\ chained \texttt{groupby}/\texttt{shift}/joins) than a
+    single \texttt{MATCH\_RECOGNIZE} statement, so reducing LOC
+    is a core goal of the RPR
     approach~\cite{iso2016,ISO2021,melton2017sqlrpr,Python_UDF}.
 \end{enumerate}
 
@@ -91,18 +107,38 @@ Chapter~\ref{chap:methodology}).
 \label{subsec:eval-metrics}
 % ................................
 
-Each test case is assessed on the three dimensions defined above.
-For \emph{output correctness}, the result DataFrame produced by the
-implementation is compared with the result set returned by Trino
-using an exact row-level equality check (same rows, same column
-values, same order where order is deterministic).  For
-\emph{semantic coverage}, each SQL:2016 feature is marked as
-\emph{supported}, \emph{partially supported}, or
+Each test case is assessed on the five dimensions defined above.
+
+\paragraph{Correctness.}
+The result DataFrame produced by the implementation is compared
+with the result set returned by Trino using an exact row-level
+equality check---same rows, same column values, and same order
+where order is deterministic.
+
+\paragraph{SQL:2016 feature coverage.}
+Each clause and sub-feature of \texttt{MATCH\_RECOGNIZE} is marked
+as \emph{supported}, \emph{partially supported}, or
 \emph{unsupported} based on whether the test suite exercises the
-feature and the output matches Trino.  For \emph{developer effort},
-the number of non-blank, non-comment lines in the equivalent
+feature and the output matches Trino.
+
+\paragraph{Pattern-type coverage.}
+Test cases are grouped by row-pattern type
+(sequence, repetition, trend, recovery, alternation, exclusion,
+anchor, \texttt{PERMUTE}).  A pattern type is considered covered
+if at least one test case exercises it and produces correct output.
+
+\paragraph{Performance and scalability.}
+Execution time (wall-clock seconds, averaged over three runs) is
+recorded for increasing DataFrame sizes and for patterns of
+varying complexity.  Measurements report mean execution time and
+are used to characterise how the engine scales with data volume
+and pattern structure.
+
+\paragraph{Usability.}
+The number of non-blank, non-comment lines in the equivalent
 idiomatic Pandas solution is recorded and compared with the
-single-statement \texttt{MATCH\_RECOGNIZE} query.
+single-statement \texttt{MATCH\_RECOGNIZE} query, providing a
+concrete measure of developer effort reduction.
 
 % ----------------------------------------------------------------
 \section{Dataset and Test Patterns}
