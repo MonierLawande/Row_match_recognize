@@ -25,7 +25,7 @@ tools.
 \label{sec:eval-methodology}
 % ----------------------------------------------------------------
 
-We evaluate the proposed \texttt{MATCH\_RECOGNIZE} implementation
+This chapter evaluates the proposed \texttt{MATCH\_RECOGNIZE} implementation
 through five complementary criteria.
 
 \begin{enumerate}
@@ -150,7 +150,7 @@ concrete measure of developer effort reduction.
 \label{subsec:eval-dataset-orders}
 % ................................
 
-We use an \texttt{orders} table to demonstrate and validate
+An \texttt{orders} table is used to demonstrate and validate
 pattern-matching queries.  The dataset comprises three
 attributes~\cite{trino2021row}: \texttt{customer\_id}
 (\texttt{VARCHAR}), which identifies the customer (two distinct
@@ -221,7 +221,7 @@ INSERT INTO memory.default.orders VALUES
 % ----------------------------------------------------------------
 
 This section demonstrates output correctness by comparing results from
-three independent approaches---our proposed engine, Trino~473, and a
+three independent approaches---the proposed engine, Trino~473, and a
 hand-written Pandas baseline---on the same SQL \texttt{MATCH\_RECOGNIZE}
 query and dataset.
 
@@ -250,7 +250,7 @@ include \texttt{typing}, \texttt{dataclasses}, \texttt{re},
 \label{sec:queries}
 % ................................
 
-We use the \texttt{stock\_price} table to demonstrate and validate
+The \texttt{stock\_price} table is used to demonstrate and validate
 pattern-matching queries with the \texttt{MATCH\_RECOGNIZE} clause.
 The table includes three columns: \texttt{company}, \texttt{price\_date},
 and \texttt{price}, representing a history of daily stock prices for
@@ -367,15 +367,15 @@ print(result)
 
 \noindent\textbf{Using Trino and Oracle as Baselines.}
 
-In the second step, we applied the same pattern-matching query using the
-same data in the Trino environment to validate the correctness of our
+In the second step, the same pattern-matching query was applied using the
+same data in the Trino environment to validate the correctness of the proposed
 approach.  The stock price history was created as an in-memory table
 using \texttt{CREATE TABLE} and populated through \texttt{INSERT INTO},
 ensuring that the schema and data (company, date, and price) remained
-consistent with the Pandas DataFrame used earlier.  We then executed
-the \texttt{MATCH\_RECOGNIZE} query in Trino to detect three consecutive
+consistent with the Pandas DataFrame used earlier.  The
+\texttt{MATCH\_RECOGNIZE} query was then executed in Trino to detect three consecutive
 price increases per company in accordance with SQL:2016 semantics.  In
-addition, we validated the same query in Oracle Database via
+addition, the same query was validated in Oracle Database via
 \texttt{MATCH\_RECOGNIZE}~\cite{petkovic2022rpr,monierashraf2025oracle},
 using an equivalent \texttt{stock\_price} table with the same schema and
 rows; the Oracle results matched the expected behaviour, strengthening
@@ -434,10 +434,10 @@ MATCH_RECOGNIZE (
 \end{lstlisting}
 
 \noindent\textbf{Python DataFrame Baseline.}
-As a Python baseline, we implemented the same pattern logic directly in
+As a Python baseline, the same pattern logic was implemented directly in
 \texttt{pandas}, without using \texttt{MATCH\_RECOGNIZE}.  The input
 DataFrame (Listing~\ref{lst:dataset}) is converted to \texttt{datetime}
-and sorted by company and trading date.  For each company, we compute a
+and sorted by company and trading date.  For each company, the baseline computes a
 Boolean signal \texttt{inc\,:=\,diff(Price)\,>\,0} and mark candidate
 starts where \texttt{inc}, \texttt{inc.shift(-1)}, and
 \texttt{inc.shift(-2)} are all true, corresponding to a three-row
@@ -499,7 +499,7 @@ print(result)
 2       B           24         24         1
 \end{lstlisting}
 
-All three approaches---our proposed engine, Trino~473, and the
+All three approaches---the proposed engine, Trino~473, and the
 hand-written Pandas baseline---produce identical output, confirming
 the correctness of the implementation under SQL:2016 semantics.
 
@@ -522,29 +522,29 @@ the correctness of the implementation under SQL:2016 semantics.
 \label{sec:eval-usecases}
 % ----------------------------------------------------------------
 
-Our \texttt{MATCH\_RECOGNIZE} implementation supports a wide range of
+The \texttt{MATCH\_RECOGNIZE} implementation supports a wide range of
 applications in various fields, such as log analysis, time series
 processing, and identifying patterns in financial sequences where
 pattern recognition in sequential data is critical.
 
-To assess correctness, we executed each pattern-matching query using
+To assess correctness, each pattern-matching query was executed using
 three independent approaches.  First, a \textbf{Python-UDF baseline}:
-we implemented custom functions---built from \texttt{groupby},
+custom functions were implemented---built from \texttt{groupby},
 \texttt{rolling}, and \texttt{shift}---to detect the same sequences
 directly in \texttt{pandas} DataFrames; this required adjusting the
 code for each query to reproduce the intended
-semantics~\cite{Python_UDF}.  Second, a \textbf{Trino baseline}: we
-ran the equivalent \texttt{MATCH\_RECOGNIZE} statement in Trino
+semantics~\cite{Python_UDF}.  Second, a \textbf{Trino baseline}: the
+equivalent \texttt{MATCH\_RECOGNIZE} statement was run in Trino
 (version~473) and treated its output as the reference result.  Third,
-our \textbf{proposed engine}: we executed \texttt{MATCH\_RECOGNIZE}
+the \textbf{proposed engine}: \texttt{MATCH\_RECOGNIZE} was executed
 on the same SQL string and DataFrame; the system parses the query,
 compiles a DFA, and performs the matching within \texttt{pandas}.
 
-\noindent Throughout our evaluation across multiple test scenarios, we
-compared the results from all three approaches on a row-by-row basis,
-confirming that our \texttt{MATCH\_RECOGNIZE} output exactly matched
+\noindent Throughout the evaluation across multiple test scenarios, the results
+from all three approaches were compared on a row-by-row basis,
+confirming that the \texttt{MATCH\_RECOGNIZE} output exactly matched
 that of Trino (see Table~\ref{tab:sql-match-recognize-examples}).  Both
-Trino and our implementation produced identical rows and measure
+Trino and the proposed implementation produced identical rows and measure
 values.  In contrast, the UDF method involved significantly more code
 and was more prone to errors during development~\cite{Python_UDF}.
 
@@ -585,7 +585,7 @@ cust_1      | 2020-05-12 | 2020-05-16 | 50
 \end{verbatim}
 \end{minipage} \\
 \hline
-\textbf{Our Proposed \texttt{MATCH\_RECOGNIZE} Results:} \\
+\textbf{Proposed \texttt{MATCH\_RECOGNIZE} Results:} \\
 \begin{minipage}{0.90\textwidth}
 \begin{verbatim}
   customer_id  start_date    end_date  bottom_price
@@ -626,7 +626,7 @@ Electronics, Books, Clothing).  This dataset is representative for
 price-trend analysis, brand/feature-popularity studies, pattern
 recognition, and recommender-system benchmarking.
 
-Our methodology involved testing 25 test cases across 5 SQL patterns
+The methodology involved testing 25 test cases across 5 SQL patterns
 and 5 input sizes (25\,K, 35\,K, 50\,K, 75\,K, 100\,K rows).  All
 tests passed (100\% success).  The implementation demonstrated an
 average throughput of 9\,838~rows/s, and the end-to-end runtime over
