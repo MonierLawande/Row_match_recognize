@@ -9,26 +9,29 @@ provide row-pattern functionality, but Pandas does not offer a native
 equivalent for in-memory Python analytics.  As a result, analysts must
 often emulate sequential patterns with shifted columns, manual loops,
 and custom state management, which makes the code longer, less
-readable, and more error-prone.  This thesis investigated how SQL
-row-pattern recognition can be implemented directly over Pandas
-DataFrames.  The proposed engine
-parses SQL-based \texttt{MATCH\_RECOGNIZE} queries from a string,
-constructs an abstract syntax tree, validates the supported
-SQL:2016 row-pattern clauses, translates pattern expressions into
-finite automata, and executes the resulting matcher over ordered
-DataFrame partitions.  The implementation supports key row-pattern
-semantics, including \texttt{PARTITION BY}, \texttt{ORDER BY},
-\texttt{PATTERN}, \texttt{DEFINE}, \texttt{MEASURES}, output modes,
-skip policies, quantifiers, alternation, grouping, and selected
-navigation and aggregate functions.  The system was evaluated through
-correctness checks against Trino and Oracle reference outputs and performance
-experiments on real-world tabular data.
-The results show that the proposed approach preserves the evaluated
-row-pattern semantics while reducing developer effort compared with
-native Pandas implementations.  The thesis concludes that bringing
-\texttt{MATCH\_RECOGNIZE} to Pandas can bridge SQL and Python
-workflows, improving readability, portability, and productivity for
-sequential data analysis.
+readable, and more error-prone.  This thesis investigates how core
+SQL:2016 \texttt{MATCH\_RECOGNIZE}-style behavior can be implemented
+directly over Pandas DataFrames.  The proposed engine parses
+SQL-based \texttt{MATCH\_RECOGNIZE} queries from a string, constructs
+a structured query representation, validates the supported
+row-pattern clauses, translates pattern expressions into finite
+automata, and executes the resulting matcher over ordered DataFrame
+partitions.  The
+implementation supports the evaluated Feature~R010-style scope,
+including \texttt{PARTITION BY}, \texttt{ORDER BY}, \texttt{PATTERN},
+\texttt{DEFINE}, \texttt{MEASURES}, output modes, skip policies,
+quantifiers, alternation, grouping, anchors, exclusions,
+\texttt{PERMUTE}, and selected navigation and aggregate functions.
+It also uses controlled predicate evaluation instead of executing raw
+Python expressions.  The system was evaluated through targeted
+correctness tests, comparisons with Trino and Oracle reference
+outputs, and performance experiments on samples from the Amazon UK
+Products~2023 catalog.  The results show that the proposed approach
+preserves the evaluated row-pattern semantics while reducing developer
+effort compared with hand-written Pandas implementations.  The thesis
+concludes that bringing \texttt{MATCH\_RECOGNIZE}-style functionality
+to Pandas can bridge SQL and Python workflows, improving readability,
+portability, and productivity for sequential data analysis.
 
 \vspace{\baselineskip}
 \noindent\textbf{Keywords:} Pattern matching; \texttt{MATCH\_RECOGNIZE};
