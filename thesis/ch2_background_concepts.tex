@@ -12,12 +12,11 @@ required to understand the design and implementation of the
 Section~\ref{sec:bg-pattern-matching} introduces the problem of
 sequential pattern detection in relational data.
 Section~\ref{sec:bg-match-recognize} examines the SQL:2016
-\texttt{MATCH\_RECOGNIZE} clause in detail.
-Chapter~\ref{chap:methodology} describes the system design and
-methodology, while Chapter~\ref{chap:implementation} presents the
-implementation and optimisation techniques.  Chapter~\ref{chap:related}
-surveys related work and identifies the research gap addressed by
-this thesis.
+\texttt{MATCH\_RECOGNIZE} clause and the terminology used throughout
+the thesis.  The chapter closes with a worked V-pattern example that
+connects the standard concepts to the Pandas-based implementation.
+The next chapter then surveys related work and identifies the
+research gap addressed by this thesis.
 
 % ----------------------------------------------------------------
 \section{Pattern Matching in Sequential Data Analysis}
@@ -41,17 +40,27 @@ rows or aggregated values, pattern matching examines the temporal
 or logical ordering of data points to extract meaningful sequences.
 This capability is essential across many domains including financial
 market analysis, fraud detection, IoT sensor monitoring, and
-behavioural analytics.
+behavioral analytics.
+
+The important distinction is that the ``symbols'' in row-pattern
+recognition are not characters in a string.  They are data rows that
+become associated with pattern variables such as \texttt{A},
+\texttt{B}, or \texttt{DOWN} when their predicates hold.  A row
+sequence can therefore be interpreted as a sequence of variable
+assignments, which explains why regular-expression-like syntax and
+finite automata are natural tools for this problem.  This connection
+is used later in the thesis when patterns are tokenized, compiled
+into NFAs, and executed over ordered Pandas partitions.
 
 Historically, relational database systems excelled at set-based
 operations such as selection, projection, joins, and aggregation,
 but lacked expressive mechanisms for sequence analysis.  Analysts
-requiring pattern detection were forced to export data to specialised
+requiring pattern detection were forced to export data to specialized
 stream-processing systems, implement procedural logic using cursors
 and temporary tables, or employ application-layer processing with
 significant performance overhead.  These limitations created a gap
 between the widespread availability of sequential data and the tools
-available to analyse it effectively.  The introduction of row pattern
+available to analyze it effectively.  The introduction of row pattern
 recognition in SQL:2016 addresses this deficiency by bringing
 sequence analysis capabilities directly into the query
 language~\cite{ISO2016SQL}.
@@ -84,7 +93,7 @@ over time-series sensor streams are a natural fit for
 \texttt{MATCH\_RECOGNIZE}~\cite{OracleMR}.
 
 \paragraph{Clickstream and Funnel Analysis.}
-E-commerce platforms analyse user navigation sequences to identify
+E-commerce platforms analyze user navigation sequences to identify
 conversion paths or abandonment patterns.  A classic funnel query
 detects the sequence
 ``view~$\rightarrow$ add-to-cart~$\rightarrow$ remove~$\rightarrow$
@@ -115,7 +124,7 @@ physiological deterioration before a critical event.  A typical
 sepsis-onset pattern consists of rising heart rate rows, followed by
 a drop in blood pressure rows, followed by a spike in white-blood-cell
 count.  This example illustrates how ordered clinical measurements
-could be modelled as a row-pattern query over a time-series of vital
+could be modeled as a row-pattern query over a time-series of vital
 signs, while the exact alerting workflow would remain domain- and
 system-dependent.
 
@@ -123,7 +132,7 @@ system-dependent.
 Operational disruptions in supply chains often emerge as a cascade:
 a single late shipment~$\rightarrow$ repeated partial deliveries~$\rightarrow$
 a stockout event.  \texttt{MATCH\_RECOGNIZE} applied to an order
-fulfilment log can identify such escalation sequences per supplier or
+fulfillment log can identify such escalation sequences per supplier or
 warehouse and measure the time between first delay and eventual
 stockout, supporting earlier investigation rather than purely
 retrospective reporting.
@@ -146,19 +155,17 @@ into an auditable SQL query.
 
 The SQL:2016 standard introduced
 \texttt{MATCH\_RECOGNIZE}~\cite{ISO2016SQL,iso2016}, a construct
-that enabled row pattern matching in SQL.  Row pattern matching is
-a technique that makes it possible to find sequences of rows based on a
-pattern defined by regular expressions.  Using a syntax similar to
-regular expressions, users can describe and search for complex
-sequences of events~\cite{winand2017sqlnew}.  This process facilitates the
-recognition of patterns in data series that would otherwise require
-the use of additional SQL clauses, such as the \texttt{WINDOW}
-clause.  In a theoretical sense, \texttt{MATCH\_RECOGNIZE} does
-not add new relational expressiveness: many row-pattern queries can
-be rewritten using joins, window functions, recursive queries, or
-procedural code.  Its practical contribution is instead a concise
-declarative abstraction for sequence-oriented logic that would
-otherwise be verbose and difficult to maintain.
+that enables row pattern matching in SQL.  Row pattern matching finds
+ordered sequences of rows whose variable assignments satisfy a
+regular-expression-like pattern.  The expression is regular in its
+structure, but its variables are row predicates rather than literal
+characters.  This allows users to describe complex event sequences in
+a declarative form~\cite{winand2017sqlnew}.  In a theoretical sense,
+\texttt{MATCH\_RECOGNIZE} does not add new relational expressiveness:
+many row-pattern queries can be rewritten using joins, window
+functions, recursive queries, or procedural code.  Its practical
+contribution is instead a concise abstraction for sequence-oriented
+logic that would otherwise be verbose and difficult to maintain.
 
 At the time of writing, \texttt{MATCH\_RECOGNIZE} is still absent from
 several widely used data systems, including
@@ -183,6 +190,15 @@ and \texttt{OVER} clauses to describe windows more precisely.
 \texttt{MATCH\_RECOGNIZE}
 clause~\cite{ISO2021,michels2018new,melton2017sqlrpr}.
 
+This thesis uses the SQL:2016 terminology as the conceptual frame,
+but the implementation claims are intentionally scoped.  The proposed
+engine targets core R010-style behavior in the \texttt{FROM} clause
+and evaluates selected row-pattern constructs that are relevant to
+in-memory Pandas analytics.  Features outside this scope, including
+full window-clause row-pattern recognition and complete vendor-specific
+extensions, are treated as related work or future work rather than as
+requirements of the implemented system.
+
 % ................................
 \subsection{Clause Structure and Components}
 \label{subsec:bg-clause-structure}
@@ -194,7 +210,7 @@ mandatory and some optional, as shown in
 Listing~\ref{lst:mr-syntax}.  The \texttt{PATTERN} and
 \texttt{DEFINE} clauses form the core mandatory part of row pattern
 recognition; the remaining clauses control partitioning, ordering,
-output, and overlap behaviour.
+output, and overlap behavior.
 
 \begin{lstlisting}[
     language     = SQL,
@@ -204,7 +220,7 @@ output, and overlap behaviour.
 SELECT <columns>
 FROM   <table>
 MATCH_RECOGNIZE (
-    [PARTITION BY <partition_columns>] -- 1. Data organisation
+    [PARTITION BY <partition_columns>] -- 1. Data organization
     [ORDER BY     <ordering_columns>]  -- 2. Row sequencing
     [MEASURES     <expressions>]       -- 3. Output computations
     [<rows_per_match>]                 -- 4. Result granularity
@@ -235,7 +251,8 @@ MATCH_RECOGNIZE (
   Optionally defines computed expressions that extract values from
   matched row sequences using pattern variables and navigation functions
   (\texttt{FIRST}, \texttt{LAST}, \texttt{PREV}, \texttt{NEXT}).
-  Each \texttt{MEASURE} expression becomes a column in the output.
+  Each measure expression becomes a column in the output, allowing a
+  match to be summarized without returning every raw input row.
 
 \item \textbf{Output options.}
   \begin{itemize}
@@ -245,7 +262,7 @@ MATCH_RECOGNIZE (
       participating in a match.
     \item \texttt{WITH UNMATCHED ROWS}: an
       \texttt{ALL ROWS PER MATCH} modifier that includes
-      non-matching rows in the result.
+      non-matching rows in the result where supported.
   \end{itemize}
 
 \item \textbf{AFTER MATCH SKIP.}
@@ -283,7 +300,7 @@ MATCH_RECOGNIZE (
   An optional clause for defining union variables, each of which
   consists of a set of variables already defined in the
   \texttt{PATTERN} clause.  A union variable does not introduce new
-  matching behaviour; it provides a shared name for rows matched by
+  matching behavior; it provides a shared name for rows matched by
   any of its component variables, and may appear inside
   \texttt{MEASURES}, \texttt{DEFINE}, and skip expressions where
   supported.
@@ -305,6 +322,17 @@ A \texttt{MATCH\_RECOGNIZE} clause is embedded in a
 additional specifications.  Possible extensions include applying
 groupings or aggregate functions to the outer
 \texttt{SELECT}~\cite{winand_match_recognize}.
+
+Conceptually, these sub-clauses separate \emph{what} pattern should
+be detected from \emph{how} the engine searches for it.  The
+\texttt{PATTERN} clause defines the shape of the sequence, the
+\texttt{DEFINE} clause defines the predicates that label rows, and
+the output and skip clauses determine how matches are materialized.
+This separation is central to the design of the implementation in
+later chapters: parsing produces a structured representation of the
+query, validation checks that the referenced variables and columns are
+consistent, and the pattern component is then compiled into an
+automaton for execution.
 
 % ................................
 \subsection{Illustrative Example: Stock Price V-Pattern}
@@ -341,7 +369,7 @@ MATCH_RECOGNIZE (
 );
 \end{lstlisting}
 
-The engine partitions rows by \texttt{customer\_id}, sorts by
+The query partitions rows by \texttt{customer\_id}, sorts by
 \texttt{order\_date}, and seeks sequences matching
 \texttt{START~DOWN+~UP+}: one \texttt{START} row (any row, as it
 carries no \texttt{DEFINE} predicate), one or more \texttt{DOWN}
@@ -352,6 +380,20 @@ sub-clause extracts the starting price and date from the
 \texttt{START} row, the lowest price from the last \texttt{DOWN}
 row, and the final price from the last \texttt{UP} row.
 
-Chapter~\ref{chap:related} examines existing implementations in
-greater depth, comparing their feature coverage, deployment models,
-and practical restrictions.
+% ----------------------------------------------------------------
+\section{Chapter Summary}
+\label{sec:bg-summary}
+% ----------------------------------------------------------------
+
+This chapter introduced sequential pattern matching as an analytical
+problem and explained why ordinary row-by-row predicates are
+insufficient for many ordered-data tasks.  It then described the
+main components of SQL:2016 \texttt{MATCH\_RECOGNIZE}, including
+partitioning, ordering, measures, output modes, skip policies,
+pattern definitions, and variable predicates.
+
+The stock-price V-pattern example showed how these components work
+together in a complete query and why the abstraction maps naturally
+to automata-based execution.  Chapter~\ref{chap:related} examines
+existing implementations in greater depth, comparing their feature
+coverage, deployment models, and practical restrictions.

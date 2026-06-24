@@ -183,13 +183,17 @@
 % ---- Custom commands ----
 \newcommand{\mr}{\texttt{MATCH\_RECOGNIZE}}
 
+\DeclareCaptionFont{elevenpt}{\fontsize{11}{13}\selectfont}
 \captionsetup{
-  font=small,
-  labelfont=normalfont,
-  textfont=normalfont,
+  font={elevenpt,it},
+  labelfont=it,
+  textfont=it,
   justification=centering,
+  singlelinecheck=true,
   skip=2pt
 }
+\captionsetup[table]{position=top}
+\captionsetup[figure]{position=bottom}
 \newtheorem{theorem}{Theorem}
 \newtheorem{lemma}{Lemma}
 \newtheorem{definition}{Definition}

@@ -6,6 +6,14 @@
 \chapter{Related Work}
 \label{chap:related}
 
+This chapter positions the thesis within existing work on SQL
+row-pattern recognition and Python-based tabular analytics.
+Section~\ref{sec:related-native} reviews systems that provide native
+\texttt{MATCH\_RECOGNIZE} or related row-pattern support.
+Section~\ref{sec:related-pandas-gap} discusses the gap in Pandas and
+similar DataFrame libraries.  Section~\ref{sec:related-contribution}
+summarizes how this thesis addresses that gap.
+
 Row pattern recognition was first proposed as a SQL standard feature
 by Zemke et al.~\cite{zemke2007pattern} and was officially adopted
 in SQL:2016~\cite{ISO2016SQL,iso2016}.
@@ -70,11 +78,14 @@ documentation, for example, also describes row pattern recognition
 inside window structures~\cite{trino2022}.  Feature~R030 is not
 widely adopted in publicly documented implementations.
 
-Table~\ref{tab:engine-comparison} summarises the main systems
+Table~\ref{tab:engine-comparison} summarizes the main systems
 considered in this chapter alongside the implementation developed in
 this thesis.  The table uses the SQL feature levels where they map
 cleanly to public documentation; otherwise, it describes the
-documented implementation scope more cautiously.
+documented implementation scope more cautiously.  The comparison is
+therefore based on documented feature scope, deployment model, and
+research relevance, rather than on a claim that all systems expose
+identical SQL semantics.
 
 \begin{table}[htbp]
   \centering
@@ -84,7 +95,7 @@ documented implementation scope more cautiously.
   \setlength{\tabcolsep}{3pt}
   \begin{tabularx}{\textwidth}{l>{\raggedright\arraybackslash}Xcll}
     \toprule
-    \textbf{Engine} & \textbf{Documented scope} & \textbf{Open Source} & \textbf{Deployment} & \textbf{Licence} \\
+    \textbf{Engine} & \textbf{Documented scope} & \textbf{Open Source} & \textbf{Deployment} & \textbf{License} \\
     \midrule
     Oracle       & \texttt{FROM}-clause row patterns & No  & On-premise / Cloud & Commercial  \\
     Trino        & \texttt{FROM} + window row patterns & Yes & Distributed        & Apache 2.0  \\
@@ -92,7 +103,7 @@ documented implementation scope more cautiously.
     Apache Flink & SQL subset / streaming CEP-backed & Yes & Streaming cluster  & Apache 2.0  \\
     DuckDB       & No native implementation; research translation & Yes & In-process         & MIT         \\
     \midrule
-    \textbf{This work} & \textbf{Core R010 capabilities} & \textbf{Yes} & \textbf{In-process Python} & \textbf{Open-source} \\
+    \textbf{This work} & \textbf{Core R010-style capabilities evaluated here} & \textbf{Yes} & \textbf{In-process Python} & \textbf{Open-source} \\
     \bottomrule
   \end{tabularx}
 \end{table}
@@ -113,10 +124,9 @@ the table expression context; the window-pattern feature level
 in this thesis.  Oracle also imposes implementation-specific
 restrictions, including limitations on Boolean expressions in
 \texttt{MEASURES} and restrictions around aggregate syntax.
-Despite its technical capability, Oracle's power comes with high
-operational costs, including commercial licensing fees, which makes
-it less accessible for users seeking lightweight or open-source
-deployment.
+Despite this technical maturity, Oracle's commercial deployment model
+and operational requirements make it less accessible for users seeking
+lightweight or open-source experimentation.
 
 % ................................
 \subsection{Trino}
@@ -132,7 +142,10 @@ makes Trino one of the broader open-source implementations from a
 SQL-feature perspective, but it is still a distributed query engine
 rather than an in-process DataFrame library.  Using it therefore
 requires server or cluster deployment and operational management that
-may be unnecessary for smaller Pandas workflows.
+may be unnecessary for smaller Pandas workflows.  In this thesis,
+Trino is useful primarily as a semantic reference point for
+validating selected query results, not as a substitute for a local
+DataFrame-native execution path.
 
 % ................................
 \subsection{Snowflake}
@@ -143,7 +156,7 @@ Snowflake is a cloud-native data platform.  It provides documented
 \texttt{MATCH\_\allowbreak RECOGNIZE} support with rich
 \texttt{DEFINE} and \texttt{MEASURES} expression capabilities for
 row-pattern queries~\cite{snowflake2025match_recognize,hoffa2021snowflake}.
-Its documentation also notes implementation-specific behaviour: the
+Its documentation also notes implementation-specific behavior: the
 engine uses backtracking for pattern matching and warns that some
 pattern/data combinations can take a long time to execute.  Some
 row-pattern functions are also restricted in particular sub-clauses.
@@ -168,7 +181,7 @@ introduces its own learning curve for users accustomed to
 lightweight, batch-oriented analysis.
 For analytical workflows that combine pattern extraction with
 machine learning, these systems may also require additional
-integration work between SQL execution and Python-oriented modelling
+integration work between SQL execution and Python-oriented modeling
 tools~\cite{ML_Workflow,Makrynioti2019sql4mlAD}.  In many practical
 pipelines, this can introduce data movement, duplicated
 intermediate data, or more complicated orchestration
@@ -198,7 +211,7 @@ makes it a natural target for research that transpiles
 \texttt{MATCH\_RECOGNIZE} queries into standard relational
 constructs~\cite{findling2025bringing,mogensen2024compiler,TURP2,TURP}.
 Such approaches typically use multiple CTEs and rule-based
-rewriting to simulate pattern variables, ordering, skip behaviour,
+rewriting to simulate pattern variables, ordering, skip behavior,
 and output measures.  A DuckDB-oriented translation approach would
 therefore aim to cover core Feature~R010 use cases without requiring
 a native execution operator inside DuckDB itself.
@@ -234,7 +247,7 @@ These users may only need occasional pattern detection and may prefer
 to avoid the overhead of learning different functions or dealing
 with varying syntax for similar queries across
 platforms~\cite{8509400}.  Table~\ref{tab:engine-comparison}
-summarises the key characteristics and documented scope of the
+summarizes the key characteristics and documented scope of the
 systems discussed above.
 
 Additionally, for datasets that already fit comfortably in memory,
@@ -243,9 +256,36 @@ database server, cluster, or cloud warehouse~\cite{Evaluation,in-memory_processi
 This does not replace the
 strengths of Oracle, Trino, Snowflake, or Flink for large-scale or
 streaming workloads; rather, it highlights a different use case:
-lightweight, local, Python-centred analysis where data preparation,
-pattern extraction, and downstream modelling can remain in the same
+lightweight, local, Python-centered analysis where data preparation,
+pattern extraction, and downstream modeling can remain in the same
 environment.
+
+% ................................
+\subsection{Synthesis of the Research Gap}
+\label{subsec:related-gap-synthesis}
+% ................................
+
+The reviewed systems show that row-pattern recognition is a mature
+and useful abstraction, but they also reveal a deployment and
+workflow gap.  Oracle and Snowflake provide powerful managed or
+commercial database environments; Trino provides a distributed
+open-source SQL engine; and Flink targets streaming workloads.  These
+systems are appropriate when data already resides in their execution
+environment or when the workload requires distributed processing.
+They are less convenient when the analyst is working with a Pandas
+DataFrame that already fits in memory and wants to remain inside a
+Python notebook, script, or experimental pipeline.
+
+The research problem addressed in this thesis is therefore not the
+absence of \texttt{MATCH\_RECOGNIZE} in SQL engines in general.
+Rather, it is the absence of a Pandas-native row-pattern interface
+that preserves the main declarative structure of SQL row-pattern
+recognition while avoiding a round trip through an external database
+or stream-processing system.  This distinction defines the scope of
+the contribution: the proposed engine targets in-process, offline
+DataFrame analytics and evaluates core R010-style behavior and
+selected SQL:2016 pattern constructs.  It is not intended to replace
+distributed engines for large-scale or streaming workloads.
 
 % ----------------------------------------------------------------
 \section{Pandas and the Python Ecosystem Gap}
@@ -256,7 +296,7 @@ Pandas is a popular, open-source Python library for data analysis
 and manipulation~\cite{McKinney2010}.  Its straightforward installation process, broad
 community adoption, and integration with the Python data-science
 ecosystem make it attractive for students, researchers, and
-practitioners who need to analyse tabular data without deploying a
+practitioners who need to analyze tabular data without deploying a
 separate database system.  Pandas provides useful primitives for
 sorting, filtering, grouping, rolling windows, shifting columns, and
 basic time-series analysis.
@@ -275,11 +315,11 @@ pattern recognition.  In this setting, analysts often need to
 manually implement stateful logic using
 \texttt{DataFrame.\allowbreak apply()} chains, \texttt{iterrows()}, or external
 database round-trips---all of which are error-prone, verbose, and
-difficult to maintain.  Alternative DataFrame libraries---Dask,
-Polars, Modin---similarly lack a direct equivalent to SQL row
-pattern recognition.  Even DuckDB, which supports window functions
-and in-process analytics~\cite{findling2025bringing}, does not yet
-expose a native \texttt{MATCH\_RECOGNIZE} interface.
+difficult to maintain.  Within the scope of this thesis, alternative
+DataFrame libraries such as Dask, Polars, and Modin similarly lack a
+direct equivalent to SQL row pattern recognition.  Even DuckDB, which
+supports window functions and in-process analytics~\cite{findling2025bringing},
+does not yet expose a native \texttt{MATCH\_RECOGNIZE} interface.
 
 % ----------------------------------------------------------------
 \section{Contribution of This Work}
@@ -291,14 +331,14 @@ contributions:
 
 \begin{enumerate}
   \item A \textbf{Pandas-native \texttt{MATCH\_RECOGNIZE} engine}
-    supporting core SQL:2016 Feature~R010 capabilities in an
+    supporting core SQL:2016 Feature~R010-style capabilities in an
     in-process Python workflow, without requiring a separate
     database server or cloud warehouse.
   \item \textbf{Broad pattern construct support}, including
     quantifiers, alternation, grouping, anchors, exclusions, and
     \texttt{PERMUTE}, following the main row-pattern constructs used
     by SQL:2016 \texttt{MATCH\_RECOGNIZE}.
-  \item An \textbf{optimisation layer} comprising
+  \item An \textbf{optimization layer} comprising
     LRU pattern caching, partition-wise memory management, and
     thread-safe access to shared cache components.
   \item A \textbf{safe expression evaluation pipeline} that
@@ -307,9 +347,27 @@ contributions:
     Python expressions.
   \item \textbf{Empirical validation} using targeted functional
     tests and experiments on samples from the Amazon UK
-    Products~2023 catalogue, with the detailed methodology and
+    Products~2023 catalog, with the detailed methodology and
     results reported in Chapter~\ref{chap:evaluation}.
 \end{enumerate}
+
+% ----------------------------------------------------------------
+\section{Chapter Summary}
+\label{sec:related-summary}
+% ----------------------------------------------------------------
+
+This chapter reviewed the main systems that currently support, or
+partially support, SQL row-pattern recognition.  Oracle, Trino,
+Snowflake, and Apache Flink provide useful reference points, while
+DuckDB and Pandas illustrate the current gap for lightweight
+in-process analytics.
+
+The chapter showed that existing alternatives either require a
+separate database or stream-processing engine, or force analysts to
+write procedural logic in Python.  The resulting gap is a scoped but
+important one: declarative row-pattern recognition for in-memory
+Pandas workflows.  This motivates the system design presented in
+Chapter~\ref{chap:methodology}.
 
 % ................................................................
 % END OF CHAPTER
