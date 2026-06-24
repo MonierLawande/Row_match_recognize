@@ -11,10 +11,10 @@
 \label{sec:discussion}
 % ----------------------------------------------------------------
 
-Our evaluation shows that extending \texttt{MATCH\_RECOGNIZE} semantics
+The evaluation shows that extending \texttt{MATCH\_RECOGNIZE} semantics
 to \texttt{pandas} not only preserves SQL:2016 correctness but also
 reduces developer effort for complex row-pattern recognition tasks.
-To ensure correctness, we validated our implementation against Trino
+To ensure correctness, the implementation was validated against Trino
 and Oracle, confirming consistent results.  In contrast, a baseline
 implementation in idiomatic \texttt{pandas} required hand-written
 logic using \texttt{groupby}, \texttt{shift}/\texttt{diff}, and index
@@ -56,7 +56,7 @@ the performance gap for highly nondeterministic workloads persists due
 to potential NFA state explosion.  In addition, certain vendor-specific
 features such as nested navigation functions or proprietary
 optimisations are out of scope for this initial design.
-Finally, although our work emphasises correctness and modularity,
+Finally, although this work emphasises correctness and modularity,
 scaling the approach into distributed execution frameworks
 (e.g., Dask, Spark) will require additional development.
 
@@ -104,7 +104,7 @@ opportunities.
 \label{sec:conclusion}
 % ----------------------------------------------------------------
 
-We presented a SQL-in-\texttt{pandas} engine for executing
+This thesis presented a SQL-in-\texttt{pandas} engine for executing
 \texttt{MATCH\_RECOGNIZE} queries over DataFrames.  The engine accepts
 SQL queries through an ANTLR4-generated parser (using an adapted Trino
 grammar), compiles patterns to NFAs via \texttt{NFABuilder}, converts
@@ -130,7 +130,7 @@ and enhances productivity for sequential data analysis across domains,
 including financial analysis, log processing, and time series pattern
 detection.
 
-By enabling SQL-native pattern recognition directly in Python, our
+By enabling SQL-native pattern recognition directly in Python, the proposed
 approach bridges the gap between the expressiveness of relational queries
 and the flexibility of in-memory analytics.  This opens the door to
 unified and portable pipelines that preserve both semantics and developer
@@ -141,21 +141,21 @@ productivity.
 \label{sec:conc-future}
 % ----------------------------------------------------------------
 
-We plan to extend the engine along three complementary directions.
-First, we will pursue \textbf{distributed execution} by enabling the
+Future work will extend the engine along three complementary directions.
+First, \textbf{distributed execution} will be pursued by enabling the
 matcher to scale across multi-node environments with boundary-aware
-state propagation, ensuring efficiency on large datasets.  Second, we
-aim to develop a \textbf{backend abstraction layer} that targets
+state propagation, ensuring efficiency on large datasets.  Second, a
+\textbf{backend abstraction layer} will be developed to target
 high-performance columnar engines such as Polars, Dask, Vaex, and
 Apache Arrow, thereby further closing the performance gap with native
-SQL systems.  Finally, we will invest in \textbf{tooling and adoption},
+SQL systems.  Finally, \textbf{tooling and adoption} will be strengthened,
 including developer utilities for pattern debugging, match
 visualisation, and seamless SQL--Python interoperability within notebook
 environments.  Together, these directions will enhance scalability,
-performance, and usability, broadening the impact of our approach.
+performance, and usability, broadening the impact of the approach.
 
 By addressing the identified limitations and implementing the planned
-enhancements, our goal is to develop a more adaptable and efficient
+enhancements, the goal is to develop a more adaptable and efficient
 solution capable of handling complex pattern-matching scenarios across
 various data processing environments.  This roadmap provides a clear
 path for improving performance and expanding the scope of the current

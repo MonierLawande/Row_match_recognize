@@ -243,21 +243,28 @@ restrictions.  It also examines the Python and Pandas ecosystem
 gap and formally positions the contribution of this thesis within
 the broader pattern-matching research landscape.
 
-\textbf{Chapter~4 --- Methodology}
-describes the technical approach: finite automata (NFA construction
-via Thompson's algorithm, subset-construction DFA, and
-minimisation), the compiler pipeline (ANTLR4 grammar, AST
-construction, safe expression evaluation), the Pandas execution
-model, and the performance optimisation techniques.
+\textbf{Chapter~4 --- System Design and Methodology}
+describes the overall system architecture and methodology.  It
+covers the SQL parsing pipeline, grammar and AST design, semantic
+validation, logical plan construction, and the design choices that
+connect declarative \texttt{MATCH\_RECOGNIZE} queries to the
+execution layer.
 
-\textbf{Chapter~5 --- Experimental Evaluation}
+\textbf{Chapter~5 --- Implementation and Optimization}
+describes the concrete implementation of the engine.  It covers
+finite-automata compilation, NFA and DFA construction, Pandas-based
+execution, output materialisation, measure evaluation, and
+performance optimisations such as pattern caching, memory
+management, and vectorised condition evaluation.
+
+\textbf{Chapter~6 --- Experimental Evaluation}
 presents the evaluation methodology, the benchmark dataset
 (Amazon UK Products 2023, 2.2~million rows), and experimental
 results covering functional correctness, performance across five
 pattern families and five input sizes, scalability, pattern
 complexity, and comparison with existing systems.
 
-\textbf{Chapter~6 --- Conclusions and Future Work}
+\textbf{Chapter~7 --- Conclusions and Future Work}
 summarises the main contributions, reflects on the limitations
 of the current implementation, and outlines directions for
 future research and further extensions.

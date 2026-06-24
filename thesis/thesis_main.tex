@@ -1,30 +1,108 @@
-% ============================================================
-%  thesis_main.tex  --  Master's Thesis Main Document
-%  SQL MATCH_RECOGNIZE for Pandas DataFrames
-% ============================================================
-\documentclass[12pt, a4paper, oneside]{report}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\documentclass[ms]{osudissert96}
+%% Language %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\usepackage[USenglish]{babel}
+\usepackage[ansinew]{inputenc}
+\usepackage{mathptmx} % Times-style text and maths fonts
+
+%% Packages for Graphics & Figures %%%%%%%%%%%%%%%%%%%%%%%%%%
+\usepackage{graphicx}
+\usepackage[hang]{subfigure}
+
+%% Math Packages %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\setcounter{secnumdepth}{3}
+\usepackage{enumerate}
+\usepackage{amssymb}
+\usepackage{textcomp}
+\usepackage{graphics}
+\usepackage{epsfig}
+\usepackage{epstopdf}
+\usepackage{float}
+\usepackage{color}
+\usepackage[cmex10]{amsmath}
+\usepackage{latexsym,amsfonts}
+\usepackage{amsthm,bbm}
+\usepackage{url}
+\usepackage{longtable}
+\usepackage[figuresright]{rotating}
+\usepackage{listings}
+\usepackage{etoolbox}
+\usepackage{fancyhdr}
+\usepackage{subcaption}
+\pagestyle{fancy}
+\fancyhead{} \fancyfoot{}
+\fancyfoot[C]{\thepage}
+\usepackage[table,xcdraw]{xcolor}
+
+\usepackage{listingsutf8}
+
+\lstdefinelanguage{docker}{
+  keywords={FROM, RUN, COPY, ADD, ENTRYPOINT, CMD, ENV, ARG, WORKDIR, EXPOSE,
+             LABEL, USER, VOLUME, STOPSIGNAL, ONBUILD, MAINTAINER, HEALTHCHECK},
+  keywordstyle=\color{blue}\bfseries\ttfamily,
+  identifierstyle=\color{black}\ttfamily,
+  sensitive=false,
+  comment=[l]\#,
+  commentstyle=\color{teal}\ttfamily,
+  stringstyle=\color{brown}\ttfamily,
+  morestring=[b]',
+  morestring=[b]"
+}
+
+%% Math / theorems %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{amsfonts}
+\usepackage{amssymb,amscd,mathrsfs}
+\usepackage{epstopdf}
+\usepackage{paralist}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{bm}
+\newcommand{\vect}[1]{\boldsymbol{\mathbf{#1}}}
+\usepackage{epsf,color}
+\usepackage{caption}
+\usepackage[a4paper,left=1.5in,right=1in,top=1in,bottom=1in]{geometry}
+\usepackage{tabularx}
+\usepackage[export]{adjustbox}
+\usepackage[section]{placeins}
+\usepackage{booktabs}
+\usepackage{multirow}
 
 % ---- Encoding & Fonts ----
 \usepackage[T1]{fontenc}
-\usepackage[utf8]{inputenc}
-\usepackage{lmodern}
-
-% ---- Page Geometry ----
-\usepackage[
-  top=2.5cm, bottom=2.5cm,
-  left=3.5cm, right=2.5cm
-]{geometry}
 
 % ---- Typography ----
 \usepackage{setspace}
 \onehalfspacing
 \usepackage{microtype}
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\normalfont\bfseries\fontsize{14}{16}\selectfont\centering}
+  {\MakeUppercase{\chaptername}~\thechapter}
+  {0pt}
+  {\MakeUppercase}
+\titlespacing*{\chapter}{0pt}{0pt}{18pt}
+\titleformat{\section}
+  {\normalfont\bfseries\fontsize{12}{14}\selectfont}
+  {\thesection}
+  {1em}
+  {\MakeUppercase}
+\titleformat{\subsection}
+  {\normalfont\bfseries\fontsize{12}{14}\selectfont}
+  {\thesubsection}
+  {1em}
+  {}
+\titleformat{\subsubsection}
+  {\normalfont\bfseries\fontsize{12}{14}\selectfont}
+  {\thesubsubsection}
+  {1em}
+  {}
 
 % ---- Maths ----
 \usepackage{amsmath, amssymb, amsthm}
 
 % ---- Code Listings ----
-\usepackage{listings}
 \usepackage{xcolor}
 
 \definecolor{codebg}  {RGB}{248,248,248}
@@ -78,22 +156,13 @@
 }
 
 % ---- Algorithms ----
-\let\listofalgorithms\relax   % guard against algorithm2e pre-defining this
 \usepackage{algorithm}
 \usepackage{algpseudocode}
-\algnewcommand\algorithmicinput{\textbf{Input:}}
-\algnewcommand\algorithmicoutput{\textbf{Output:}}
 
 % ---- Tables ----
 \usepackage{booktabs}
 \usepackage{tabularx}
 \usepackage{multirow}
-\usepackage{longtable}
-\usepackage{float}
-\newcolumntype{Y}{>{\centering\arraybackslash}X}
-
-% ---- Framed environments ----
-\usepackage[framemethod=TikZ]{mdframed}
 
 % ---- Figures / TikZ ----
 \usepackage{graphicx}
@@ -103,83 +172,148 @@
 % ---- Inline lists ----
 \usepackage[inline]{enumitem}
 
-% ---- Hyperlinks ----
-\usepackage[
-  hidelinks,
-  pdftitle  = {SQL MATCH\_RECOGNIZE for Pandas DataFrames},
-  pdfauthor = {MonierAshraf},
-]{hyperref}
+% ---- Hyperlinks (load once, last) ----
+\usepackage[hidelinks]{hyperref}
 
 % ---- Bibliography ----
 \usepackage[backend=bibtex, style=numeric, sorting=none]{biblatex}
-\addbibresource{references.bib}
+\addbibresource{Bibliography.bib}
+\AtEveryCite{\small}
 
 % ---- Custom commands ----
 \newcommand{\mr}{\texttt{MATCH\_RECOGNIZE}}
 
-% ================================================================
+\captionsetup{
+  font=small,
+  labelfont=normalfont,
+  textfont=normalfont,
+  justification=centering,
+  skip=2pt
+}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{definition}{Definition}
+\newcommand{\Us}{\mathcal{U}_s}
+\newcommand{\Ls}{\mathcal{L}_s}
+\newcommand{\Os}{\mathcal{O}_s}
+\newcommand{\Op}{\mathcal{O}_p}
+\newcommand{\Oq}{\mathcal{O}_q}
+\newcommand{\mpd}{\mathrm{MPD}}
+\newcommand{\msd}{\mathrm{MSD}}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newcommand{\prob}{\mathbb{P}}
+\newcommand{\cbs}{C_{B}}
+\newcommand{\crs}{C_{R}}
+\newcommand{\ct}{C_{\textsl{Total}}}
+\newcommand{\pgbs}{\prob (g_{B}(l)=g_{\mathrm{B}})}
+\newcommand{\phbs}{\prob (g_{B}(l)=h_{\mathrm{B}})}
+\newcommand{\pgbsP}{\prob (g_{B}(t)=g_{\mathrm{B}})}
+\newcommand{\phbsP}{\prob (g_{B}(l)=h_{\mathrm{B}})}
+\newcommand{\pgrs}{\prob (g_{R}(l)=g_{\mathrm{R}})}
+\newcommand{\phrs}{\prob (g_{R}(l)=h_{\mathrm{R}})}
+\newcommand{\pgrsP}{\prob (g_{R}(t)=g_{\mathrm{R}})}
+\newcommand{\phrsP}{\prob (g_{R}(l)=h_{\mathrm{R}})}
+\newcommand{\pf}{\prob (r(l)=r)}
+\newcommand{\pw}{\prob (r(l)=r)}
+\newcommand{\pfP}{\prob (r(t)=r)}
+\newcommand{\pwP}{\prob (r(l)=r)}
+\DeclareMathOperator{\Exp}{\mathbb{E}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% DOCUMENT
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \begin{document}
-% ================================================================
+\thispagestyle{empty}
 
-% ---- Title Page ----
-\begin{titlepage}
-  \centering
-  \vspace*{2cm}
-  {\LARGE\bfseries SQL \texttt{MATCH\_RECOGNIZE} for Pandas DataFrames:\\[0.4em]
-   A Python Implementation of SQL:2016 Row Pattern Recognition}
-  \vspace{2cm}\\
-  {\large Master's Thesis}\\[0.5em]
-  {\large [University Name]}
-  \vspace{2cm}\\
-  {\large Submitted by\\[0.3em]
-   \textbf{MonierAshraf}}
-  \vfill
-  {\large [Year]}
-\end{titlepage}
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{images/header_logo.png}
+\end{figure}
 
-% ---- Front matter ----
-\pagenumbering{roman}
+\begin{center}
+
+Nile University
+
+School of Information Technology and Computer Science
+
+Program of Informatics
+
+\vspace{\baselineskip}
+{\Large \textbf{Row Pattern Matching Analytics: Bringing SQL MATCH\_RECOGNIZE to Pandas DataFrames}}
+
+\vspace{\baselineskip}
+A thesis submitted to the School of Information Technology and Computer Science at Nile University in Partial Fulfillment of the Requirements for the degree of Master of Science in Informatics.
+
+\textbf{By}
+
+Monier Ashraf Monier Lawande\\
+\textbf{Under Supervision of}
+
+Prof. Mohamed ElHelw
+
+Prof. Ahmed Awad \\
+
+***
+
+Nile University
+
+May, 2026
+\end{center}
+
+\input{committee}
+\pagebreak
+
+\input{copyright}
+\pagebreak
+
+\startdoublespace
+\begin{abstract}
+\input{Abstract}
+\end{abstract}
+%\dedication{To my beloved family}
+
+\acknowledgements{\input{Acknowledgment}}
+
 \tableofcontents
-\listoffigures
 \listoftables
-\listofalgorithms
+\listoffigures
 
-\clearpage
-\pagenumbering{arabic}
+\cleardoublepage
+\pagestyle{plain}
 
-% ================================================================
-% Chapter 1 -- Introduction
-% ================================================================
-\input{ch1_introduction}
+%%%%%%%%%%%%%%%% LIST OF ABBREVIATIONS %%%%%%%%%%%%%%%%%%%%
+\begin{center}
+  \textbf{{LIST OF ABBREVIATIONS}}
+\end{center}
+\begin{longtable}{@{\extracolsep{\fill}}ll@{}}
+\centering
+\begin{tabular}{l l}
+\hline
+\textbf{Full Name} & \textbf{Abbreviation} \\
+\hline \hline
+Full Definition & Shortcut \\
+\hline
+Full Definition & Shortcut \\
+\hline
+Full Definition & Shortcut \\
+\hline\hline
+\end{tabular}
+\label{table:loa}
+\end{longtable}
 
-% ================================================================
-% Chapter 2 -- Background and Concepts
-% ================================================================
-\input{ch2_background_concepts}
+\input{chapters/ch1_introduction}
+\input{chapters/ch2_background_concepts}
+\input{chapters/ch3_related_work}
+\input{chapters/ch4_System Design and Methodology}
+\input{chapters/ch5 Implementation and Optimization}
+\input{chapters/ch6_experimental_evaluation}
+\input{chapters/ch7_conclusion_future}
 
-% ================================================================
-% Chapter 3 -- Related Work
-% ================================================================
-\input{ch3_related_work}
+\addtocontents{toc}{\vspace{2em}}
+\addtocontents{toc}{\vspace{2em}}
 
-% ================================================================
-% Chapter 4 -- Methodology
-% ================================================================
-\input{ch4_methodology}
-
-% ================================================================
-% Chapter 5 -- Experimental Evaluation
-% ================================================================
-\input{ch5_experimental_evaluation}
-
-% ================================================================
-% Chapter 6 -- Conclusions and Future Work
-% ================================================================
-\input{ch6_conclusion_future}
-
-% ================================================================
-% Bibliography
-% ================================================================
+% ---- Bibliography ----
 \printbibliography[heading=bibintoc]
 
 \end{document}
