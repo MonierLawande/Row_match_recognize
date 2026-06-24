@@ -306,13 +306,27 @@ Full Definition & Shortcut \\
 \label{table:loa}
 \end{longtable}
 
-\input{chapters/ch1_introduction}
-\input{chapters/ch2_background_concepts}
-\input{chapters/ch3_related_work}
-\input{chapters/ch4_System Design and Methodology}
-\input{chapters/ch5 Implementation and Optimization}
-\input{chapters/ch6_experimental_evaluation}
-\input{chapters/ch7_conclusion_future}
+\IfFileExists{chapters/ch1_introduction.tex}
+  {\input{chapters/ch1_introduction}}
+  {\input{ch1_introduction}}
+\IfFileExists{chapters/ch2_background_concepts.tex}
+  {\input{chapters/ch2_background_concepts}}
+  {\input{ch2_background_concepts}}
+\IfFileExists{chapters/ch3_related_work.tex}
+  {\input{chapters/ch3_related_work}}
+  {\input{ch3_related_work}}
+\IfFileExists{chapters/ch4_System Design and Methodology.tex}
+  {\input{chapters/ch4_System Design and Methodology}}
+  {\input{ch4_System Design and Methodology}}
+\IfFileExists{chapters/ch5 Implementation and Optimization.tex}
+  {\input{chapters/ch5 Implementation and Optimization}}
+  {\input{ch5 Implementation and Optimization}}
+\IfFileExists{chapters/ch6_experimental_evaluation.tex}
+  {\input{chapters/ch6_experimental_evaluation}}
+  {\input{ch6_experimental_evaluation}}
+\IfFileExists{chapters/ch7_conclusion_future.tex}
+  {\input{chapters/ch7_conclusion_future}}
+  {\input{ch7_conclusion_future}}
 
 \addtocontents{toc}{\vspace{2em}}
 \addtocontents{toc}{\vspace{2em}}

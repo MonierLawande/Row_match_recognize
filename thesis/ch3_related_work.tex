@@ -173,12 +173,16 @@ designed for real-time stream processing and exposes
 \texttt{MATCH\_\allowbreak RECOGNIZE} through Flink SQL, backed by
 its Complex Event Processing (CEP) runtime library~\cite{flink}.
 Its documented implementation is a SQL subset oriented toward
-streaming use cases; for example, Flink documents restrictions on
-empty-match-producing patterns, some reluctant quantifiers, and
-\texttt{DISTINCT} aggregations.  While Flink is highly scalable and
-effective for high-velocity data, it assumes a streaming runtime and
-introduces its own learning curve for users accustomed to
-lightweight, batch-oriented analysis.
+streaming use cases.  The current Flink documentation explicitly
+describes the implementation as a subset of the full standard and
+lists unsupported features including pattern groups, some
+alternations, \texttt{PERMUTE}, anchors, exclusions,
+\texttt{ALL ROWS PER MATCH}, \texttt{SUBSET}, physical offsets
+(\texttt{PREV}/\texttt{NEXT}), and \texttt{DISTINCT}
+aggregations.  While Flink is highly scalable and effective for
+high-velocity data, it assumes a streaming runtime and introduces
+its own learning curve for users accustomed to lightweight,
+batch-oriented analysis.
 For analytical workflows that combine pattern extraction with
 machine learning, these systems may also require additional
 integration work between SQL execution and Python-oriented modeling
