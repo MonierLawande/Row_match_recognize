@@ -1,6 +1,6 @@
 % ============================================================
-%  ch5_experimental_evaluation.tex
-%  Chapter 5: Experimental Evaluation
+%  ch6_experimental_evaluation.tex
+%  Chapter 6: Experimental Evaluation
 %  Master's Thesis -- SQL MATCH_RECOGNIZE on Pandas DataFrames
 % ============================================================
 \chapter{Experimental Evaluation}
@@ -992,3 +992,19 @@ size grows.  The implementation successfully handles patterns ranging
 from simple sequences to complex nested structures, and demonstrates
 viability for production use cases in domains requiring sequential
 pattern detection over e-commerce data.
+
+% ----------------------------------------------------------------
+\section{Chapter Summary}
+\label{sec:eval-summary}
+% ----------------------------------------------------------------
+
+This chapter evaluated the proposed \texttt{MATCH\_RECOGNIZE}
+implementation through correctness checks, feature-coverage tests,
+performance measurements, memory analysis, and comparison with
+existing systems.  The experiments used five pattern families across
+five dataset sizes, producing 25 successful performance runs.
+
+The results show that the implementation preserves the evaluated
+semantics while reducing developer effort compared with hand-written
+Pandas logic.  The next chapter summarises the thesis contributions,
+discusses limitations, and outlines future work.
