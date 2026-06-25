@@ -9,21 +9,21 @@
 \label{chap:implementation}
 
 This chapter describes how the logical design introduced in
-Chapter~\ref{chap:methodology} is realised as an executable
+Chapter~\ref{chap:methodology} is realized as an executable
 \texttt{MATCH\_RECOGNIZE} engine for Pandas DataFrames.  The focus is
 on the implementation layers that translate a validated logical plan
 into executable pattern matching: automata compilation, pattern
-tokenisation, NFA/DFA construction, Pandas-based execution, measure
-materialisation, and performance optimisation.
+tokenization, NFA/DFA construction, Pandas-based execution, measure
+materialization, and performance optimization.
 
-The chapter is organised as follows.  Section~\ref{sec:meth-automata}
+The chapter is organized as follows.  Section~\ref{sec:meth-automata}
 explains how row patterns are compiled into finite automata.
 Section~\ref{sec:meth-pandas} describes execution over Pandas
 DataFrames, including partitioning, row classification, skip modes,
 output modes, and measure evaluation.  Section~\ref{sec:meth-impl}
-summarises the concrete implementation components.  Finally,
-Section~\ref{sec:bg-performance} presents the optimisation layer,
-including LRU pattern caching, memory management, and vectorised
+summarizes the concrete implementation components.  Finally,
+Section~\ref{sec:bg-performance} presents the optimization layer,
+including LRU pattern caching, memory management, and enhanced
 condition evaluation.
 
 % ----------------------------------------------------------------
@@ -31,12 +31,12 @@ condition evaluation.
 \label{sec:meth-automata}
 % ----------------------------------------------------------------
 
-Pattern matching in \texttt{MATCH\_RECOGNIZE} is fundamentally a
-problem of sequence recognition.  A sequence of data rows, each
-labelled with the pattern variable(s) it satisfies, constitutes a
+Pattern matching in \texttt{MATCH\_RECOGNIZE} can be modeled as a
+sequence-recognition problem.  A sequence of data rows, each labeled
+with the pattern variable or variables it satisfies, constitutes a
 string over the alphabet of pattern variables.  The problem of
 determining whether this string is accepted by the pattern is
-exactly the problem solved by finite automata~\cite{HopcroftUllman}.
+therefore naturally expressed using finite automata~\cite{HopcroftUllman}.
 
 % ................................
 \subsection{Non-deterministic Finite Automata (NFA)}
@@ -84,7 +84,7 @@ Figure~\ref{fig:meth-nfa} shows the NFA for pattern $A^{+}\,B?$.
       (q2) edge [bend right=35] node [below] {$\varepsilon$} (q3);
   \end{tikzpicture}
   \caption{NFA for the pattern $A^{+}\,B?$ illustrating
-    $\varepsilon$-transitions and non-determinism}
+    $\varepsilon$-transitions and nondeterminism}
   \label{fig:meth-nfa}
 \end{figure}
 
@@ -107,7 +107,7 @@ Algorithm~\ref{alg:thompson}.
   \If{$e = \varepsilon$}
     \State \Return NFA with one $\varepsilon$-transition from start to accept
   \ElsIf{$e = a \in \Sigma$}
-    \State \Return NFA with one $a$-labelled transition from start to accept
+    \State \Return NFA with one $a$-labeled transition from start to accept
   \ElsIf{$e = r \cdot s$ \Comment{concatenation}}
     \State $N_r \gets \Call{Build}{r}$
     \State $N_s \gets \Call{Build}{s}$
@@ -132,12 +132,16 @@ Algorithm~\ref{alg:thompson}.
 \end{algorithmic}
 \end{algorithm}
 
-The resulting NFA has at most $2n$ states and is constructed in
-$O(n)$ time and space, making it suitable for patterns of arbitrary
-complexity~\cite{DragonBook}.
+In its classical form, Thompson's construction is linear in the size
+of the regular expression~\cite{DragonBook}.  The implementation uses
+the same construction principle, while adding wrapper states,
+predicate metadata, priorities, and safety guards for SQL-specific
+constructs such as \texttt{PERMUTE}.  Consequently, the exact state
+count depends on the supported SQL pattern constructs rather than on
+the textbook $2n$ bound alone.
 
 % ................................
-\subsection{Pattern Tokenisation}
+\subsection{Pattern Tokenization}
 \label{subsec:meth-pattern-tokeniser}
 % ................................
 
@@ -146,7 +150,7 @@ from the SQL query must be converted into a structured, traversable
 representation.  The \texttt{tokenize\_pattern()} function in
 \texttt{src/matcher/pattern\_tokenizer.py} performs this step in a
 single left-to-right scan, producing a flat list of
-\texttt{PatternToken} objects—the \emph{linearised} form of the
+\texttt{PatternToken} objects—the \emph{linearized} form of the
 pattern's syntax tree.
 
 \paragraph{PatternToken structure.}
@@ -171,9 +175,11 @@ following key fields:
     type-specific structured data (e.g.\ a \texttt{variables} list
     for \texttt{PERMUTE} tokens, an \texttt{excluded\_variables}
     list for \texttt{EXCLUSION} tokens); and
-  \item \textbf{\texttt{priority}} — an integer priority inherited
-    from the token's position in the stream, propagated to NFA
-    transitions to enforce greedy/leftmost semantics.
+  \item \textbf{\texttt{priority}} — an integer priority field used
+    by selected builders, especially alternation and \texttt{PERMUTE}
+    handling, to order competing transitions; tokens normally default
+    to priority zero unless a construction step assigns a more
+    specific ordering.
 \end{itemize}
 
 \begin{table}[htbp]
@@ -204,7 +210,7 @@ following key fields:
   \end{tabular}
 \end{table}
 
-\paragraph{Tokenisation algorithm.}
+\paragraph{Tokenization algorithm.}
 The internal function \texttt{\_tokenize\_pattern\_internal()} scans
 the pattern string character by character, dispatching on the current
 position:
@@ -238,10 +244,10 @@ preserving the one-variable-per-token invariant that the NFA builder
 requires: adjacent \texttt{LITERAL} tokens that look like pattern
 variable names are deliberately \emph{not} merged.
 
-\paragraph{Quantifier normalisation.}
+\paragraph{Quantifier normalization.}
 Quantifiers are stored as attributes of the token they modify rather
 than as separate tokens.  The helper \texttt{parse\_quantifier()}
-normalises all surface forms to the triple
+normalizes all surface forms to the triple
 $(\textit{min},\,\textit{max},\,\textit{greedy})$:
 \begin{center}
 \begin{tabular}{lll}
@@ -268,7 +274,7 @@ central method \texttt{\_process\_sequence()} iterates the token
 stream and dispatches on each token's \texttt{type} field to invoke
 the appropriate NFA-fragment builder—mirroring the recursive
 tree-traversal structure of classical Thompson's construction but
-applied to the flat linearised token representation rather than an
+applied to the flat linearized token representation rather than an
 explicit parse tree.
 
 \paragraph{Overall build sequence.}
@@ -299,7 +305,7 @@ following steps:
 \subsubsection{Token-to-NFA Fragment Mapping}
 \label{subsubsec:meth-token-to-nfa}
 
-Table~\ref{tab:token-nfa-map} summarises how the visitor translates
+Table~\ref{tab:token-nfa-map} summarizes how the visitor translates
 each token type into NFA structure.
 
 \begin{table}[htbp]
@@ -318,7 +324,7 @@ each token type into NFA structure.
                                      \texttt{DEFINE} predicate for variable $v$;
                                      the token's \texttt{quantifier} (if any) is
                                      applied by \texttt{\_apply\_quantifier()} \\[4pt]
-    \texttt{ALTERNATION}           & The left branch is finalised; the right branch
+    \texttt{ALTERNATION}           & The left branch is finalized; the right branch
                                      is processed by a recursive call to
                                      \texttt{\_process\_sequence()}; a fresh start
                                      state fans out with $\varepsilon$-transitions
@@ -366,16 +372,17 @@ and adds $\varepsilon$-transitions accordingly:
     $\varepsilon(e \to s)$ (loop for repetition).
   \item \textbf{\texttt{+}} $(\min=1,\,\max=\infty)$: as \texttt{*}
     but without the skip transition, enforcing at least one match.
-  \item \textbf{\texttt{\{$n$,$m$\}}}: constructs $n$ mandatory
-    copies of the fragment in series (connected by
-    $\varepsilon$-transitions), followed by $(m-n)$ optional copies
-    each of which carries an $\varepsilon$-bypass to $q_e$—the
-    standard elimination-of-quantifier reduction.
-  \item \textbf{Reluctant} (\texttt{greedy = False}): the same
-    $\varepsilon$ structure is used, but the loop-back and
-    extension transitions are annotated with a \emph{higher}
-    numeric priority value so the epsilon-closure traversal
-    prefers the exit path, yielding shorter matches.
+  \item \textbf{\texttt{\{$n$,$m$\}}}: represents mandatory and
+    optional repetitions using additional states and
+    $\varepsilon$-transitions.  The implementation uses a simplified
+    bounded-repetition expansion rather than a complete deep clone
+    of an arbitrary sub-automaton for every repetition.
+  \item \textbf{Reluctant} (\texttt{greedy = False}): the parser
+    records reluctant quantifiers through the token's
+    \texttt{greedy} flag.  The NFA construction currently preserves
+    the same structural transitions and logs the reluctant case; the
+    greedy/reluctant distinction is therefore only partially
+    reflected in transition priorities.
 \end{itemize}
 
 \subsubsection{PERMUTE Expansion}
@@ -383,8 +390,8 @@ and adds $\varepsilon$-transitions accordingly:
 
 The \texttt{PERMUTE}$(v_1, v_2, \ldots, v_n)$ construct is
 semantically equivalent to the alternation of all $n!$ orderings of
-its arguments.  \texttt{\_process\_permute()} proceeds in three
-phases:
+its arguments.  In the main NFA builder,
+\texttt{\_process\_permute()} proceeds in three phases:
 
 \begin{enumerate}
   \item \textbf{Complexity guard.}  Patterns with more than eight
@@ -394,11 +401,13 @@ phases:
     than 50\,000 combinations are redirected to a conservative
     fallback via \texttt{\_process\_permute\_limited()}.
   \item \textbf{Permutation generation.}
-    \texttt{ProductionPermuteHandler.expand\_permutation()} is called,
-    which uses \texttt{itertools.per\-muta\-tions} for $n \leq 6$ and
-    a memory-efficient streaming algorithm for larger $n$.  Results
-    are memoised in a thread-safe LRU cache keyed on the sorted
-    variable tuple.
+    The builder generates permutation branches with
+    \texttt{itertools.permutations}; optional arguments are expanded
+    through subset-permutation combinations.  A separate
+    \texttt{ProductionPermuteHandler} utility also exists for
+    reusable cached permutation expansion, but the main automaton
+    construction path performs the branch expansion inside
+    \texttt{NFABuilder}.
   \item \textbf{NFA assembly.}  For each permutation
     $\sigma = (\sigma_1, \ldots, \sigma_n)$, the builder constructs
     a concatenation fragment by calling
@@ -418,11 +427,12 @@ The NFA returned by \texttt{NFABuilder.build()} satisfies the
 following formal properties:
 
 \begin{enumerate}
-  \item \textbf{Linear size.}  At most two states per
-    \texttt{LITERAL} token (the transition's source and target)
-    plus a bounded constant of intermediate states per structural
-    token (alternation fork/merge, quantifier envelope, etc.).
-    Total state count is $O(n)$ in token-list length $n$.
+  \item \textbf{Controlled size for ordinary patterns.}  For
+    ordinary concatenation, grouping, alternation, anchors, and
+    simple quantifiers, the builder adds a small number of states per
+    token or construct.  Constructs such as \texttt{PERMUTE} can grow
+    factorially, so explicit complexity guards cap the number of
+    expanded branches.
 
   \item \textbf{Single accept state.}  Exactly one accept state
     $q_\text{accept}$ exists; all fragment tails are connected to
@@ -436,25 +446,28 @@ following formal properties:
     $\varepsilon$ has lower priority than the exit $\varepsilon$,
     so the $\varepsilon$-closure computation (which sorts targets by
     ascending priority) extends the match before terminating.
-    Reluctant quantifiers reverse the ordering.  These priorities
-    are propagated through subset construction so that each DFA
+    These priorities are propagated through subset construction so
+    that each DFA
     transition inherits the minimum (highest-priority) value of the
-    contributing NFA transitions, implementing SQL:2016 greedy and
-    leftmost-match semantics without modifying the DFA construction
-    algorithm.
+    contributing NFA transitions.  This priority layer supports the
+    implementation's greedy and leftmost-preference behavior, while
+    some SQL edge cases remain governed by executor-level heuristics.
 
   \item \textbf{Thread safety.}  Each \texttt{NFAState} and the
     \texttt{NFA} object itself are guarded by a
     \texttt{threading.RLock()}.  Epsilon-closure results are cached
     in a bounded dictionary (capped at 1\,000 entries) accessed
-    under the same lock, enabling safe concurrent queries by
-    multiple partition workers.
+    under the same lock, protecting shared automaton data if the
+    execution layer is extended to concurrent partition workers.
 
   \item \textbf{Structural validation.}  \texttt{NFA.validate()}
-    verifies that (i)~all transition targets are valid state
-    indices, (ii)~the accept state is reachable from the start
-    state, and (iii)~PERMUTE metadata is internally consistent
-    before the NFA is returned to the caller.
+    validates transition and $\varepsilon$ targets, checks and
+    reports accept-state reachability, and validates general
+    automaton metadata before the NFA is returned to the caller.
+    PERMUTE metadata is also checked for required fields where it
+    appears, but this is a structural consistency check rather than a
+    formal proof of semantic equivalence for every expanded
+    permutation.
 \end{enumerate}
 
 % ................................
@@ -464,7 +477,7 @@ following formal properties:
 
 Consider the pattern \texttt{A B+ C?} with three pattern variables
 \texttt{A}, \texttt{B}, \texttt{C} each associated with an
-arbitrary Boolean DEFINE predicate.  The tokeniser produces the
+arbitrary Boolean DEFINE predicate.  The tokenizer produces the
 flat list:
 \begin{center}
   \texttt{[\,LITERAL('A'),\quad LITERAL('B', quantifier='+'),\quad
@@ -507,12 +520,13 @@ The \texttt{NFABuilder} then processes this list as follows.
 \end{enumerate}
 
 \noindent
-The resulting NFA (11 states: $q_0$–$q_{10}$ plus the accept state
-shared with $q_{10}$ in this abbreviated numbering) accepts exactly
-the language $A \cdot B^{+} \cdot C^{?}$: one row satisfying $A$,
-one or more rows satisfying $B$ (the loop $q_4 \to q_3$ implements
-the \texttt{+} greedily), and zero or one row satisfying $C$ (the
-bypass $q_9 \to q_{10}$ implements the \texttt{?}).
+The constructed automaton accepts the language
+$A \cdot B^{+} \cdot C^{?}$: one row satisfying $A$, one or more
+rows satisfying $B$ (the loop $q_4 \to q_3$ implements the
+\texttt{+} case), and zero or one row satisfying $C$ (the bypass
+$q_9 \to q_{10}$ implements the \texttt{?}).  In the current
+implementation, this example produces twelve NFA states after the
+global start/accept states and quantifier envelopes are included.
 
 After construction the NFA is passed to \texttt{DFABuilder.build()}
 for subset construction as described in the next section.
@@ -526,8 +540,9 @@ A \emph{Deterministic Finite Automaton} (DFA) is a special case of
 an NFA in which:
 \begin{enumerate*}[label=(\roman*)]
   \item there are no $\varepsilon$-transitions, and
-  \item for each state $q$ and symbol $a$, $|\delta(q,a)| = 1$
-    (exactly one successor state).
+  \item for each state $q$ and symbol $a$, there is at most one
+    successor state in the partial transition relation used by the
+    implementation.
 \end{enumerate*}
 DFAs require $O(n)$ time to process an input of length $n$ with no
 backtracking, making them ideal for row-by-row matching.
@@ -553,20 +568,21 @@ to $2^{|Q|}$ states in the worst case, patterns arising from
 \texttt{MATCH\_RECOGNIZE} syntax are structurally constrained and in
 practice yield DFAs with far fewer states.
 
-\paragraph{DFA Minimisation.}
-Hopcroft's algorithm~\cite{HopcroftUllman} reduces a DFA to its
-canonical minimal form in $O(n \log n)$ time by iteratively
-partitioning states into equivalence classes of
-indistinguishable states.  The implementation applies minimisation
-after subset construction to reduce memory footprint and improve
-matching speed.
+\paragraph{DFA Optimization.}
+After subset construction, the implementation applies iterative
+optimization passes: unreachable states are removed, equivalent
+states are merged when their metadata and transitions are compatible,
+and transitions are grouped for faster lookup.  This reduces memory
+footprint and matching overhead in practice, but it is not presented
+as a full canonical Hopcroft minimization.
 
-\paragraph{State Prioritisation for SQL Semantics.}
+\paragraph{State Prioritization for SQL Semantics.}
 SQL:2016 mandates \emph{greedy} matching by default: the engine
 must prefer the longest possible match, and in the case of
 alternation, the leftmost alternative takes precedence.  Standard
-DFA theory does not encode these preferences.  The implementation
-addresses this by:
+DFA theory does not encode these preferences directly.  For the
+supported pattern subset, the implementation approximates these
+preferences by:
 \begin{enumerate}
   \item Assigning a \emph{priority} to each NFA transition based on
     its position in the pattern and quantifier greediness.
@@ -574,8 +590,8 @@ addresses this by:
     each DFA transition inherits the minimum (highest-priority)
     value of the contributing NFA transitions.
   \item Ordering outgoing DFA transitions by priority during
-    match execution so that higher-priority paths are explored
-    first.
+    match execution so that higher-priority paths are considered
+    first in ambiguous cases.
 \end{enumerate}
 
 
@@ -585,9 +601,10 @@ addresses this by:
 % ----------------------------------------------------------------
 
 Pandas~\cite{McKinney2010} is a Python library providing the
-\texttt{DataFrame} data structure: a two-dimensional, labelled
-table backed by typed NumPy arrays.  Its in-memory, columnar
-storage enables vectorised operations over millions of rows, making
+\texttt{DataFrame} data structure: a two-dimensional, labeled
+table whose columns are stored in array-like structures, commonly
+NumPy or Pandas extension arrays.  Its in-memory, column-oriented
+storage enables vectorized operations over large row sets, making
 it well suited for the row-by-row DFA simulation that
 \texttt{MATCH\_RECOGNIZE} requires.
 
@@ -645,8 +662,10 @@ NumPy index is preserved so that row references in navigation
 functions remain stable.
 
 Because partitions share no state, they can be processed
-independently—and optionally in parallel (see
-Section~\ref{subsec:bg-parallel}).  The remainder of this section
+independently.  The implementation keeps this partition-level
+independence explicit, and the optimization layer discussed in
+Section~\ref{subsec:bg-parallel} provides a parallel-aware scheduling
+boundary for future execution modes.  The remainder of this section
 describes the processing of a single partition $P$ of $n$ rows,
 indexed $r_0, r_1, \ldots, r_{n-1}$ in sorted order.
 
@@ -663,6 +682,10 @@ expression—which may reference pattern variables via dot notation
 (\texttt{A.price}), navigation functions, and SQL comparison
 operators—and wraps it in a closure that accepts a row dictionary
 and a \texttt{RowContext} object.
+Consistent with Trino's documented behavior, pattern variables that
+appear in \texttt{PATTERN} but are absent from \texttt{DEFINE} are
+treated as implicit always-true variables, so they may match any
+row unless constrained by surrounding pattern structure~\cite{trino2022}.
 
 The \texttt{RowContext}
 (Listing~\ref{lst:rowcontext-iface}) is the central evaluation
@@ -698,13 +721,13 @@ class RowContext:
 
 \noindent
 Predicates are evaluated lazily during DFA simulation: a condition
-is called only when the DFA attempts the corresponding transition.
-For large partitions (over $50\,000$ rows) the engine switches to a
-vectorised evaluation path that pre-computes a
-\emph{condition matrix}—a Boolean array of shape
-$|\text{variables}| \times n$—using NumPy broadcast operations,
-reducing condition evaluations from $O(n \cdot |\text{variables}|)$
-scalar calls to $O(|\text{variables}|)$ vector operations.
+is called when the matcher attempts the corresponding transition.
+For larger partitions, the engine enables a hybrid condition
+preprocessing path that increases condition-cache capacity and, for
+very large inputs, pre-warms common condition-evaluation paths on a
+sample of rows.  The codebase also contains a condition-matrix
+routine for precomputing Boolean arrays, but the main matching path
+currently relies primarily on the hybrid cache/pre-warming strategy.
 
 % ................................
 \subsection{DFA Simulation}
@@ -776,8 +799,8 @@ applies the following priority ordering, consistent with
 SQL:2016 greedy-leftmost semantics:
 \begin{enumerate}
   \item Transitions leading to accepting states are preferred over
-    non-accepting ones, ensuring the shortest valid prefix is
-    always recorded as a candidate match.
+    non-accepting ones, ensuring a valid prefix is recorded as a
+    candidate match before later rows are considered.
   \item Among non-accepting transitions, those whose source and
     target state are the same (self-loops for repeating quantifiers
     such as \texttt{A+}) are preferred over state-advancing
@@ -804,12 +827,10 @@ row sets over which measure expressions and navigation functions
 are evaluated.
 
 Rows belonging to \emph{exclusion} variables (those wrapped in
-\texttt{\{- \ldots -\}}) are tracked in a separate
-\texttt{excluded\_rows} list: they participate in condition
-evaluation and DFA state transitions normally but are omitted from
-the measure-evaluation context and from the output rows in
-\texttt{ALL ROWS PER MATCH} mode, conforming to the SQL:2016
-semantics for pattern exclusions.
+\texttt{\{- \ldots -\}}) participate in condition evaluation and
+state transitions, but the implementation omits them from the
+\texttt{ALL ROWS PER MATCH} output and from the measure-evaluation
+context.
 
 % ................................
 \subsection{After Match Skip}
@@ -819,7 +840,7 @@ semantics for pattern exclusions.
 After recording a match the engine must decide where to start the
 next match attempt, controlling whether matches can overlap.
 SQL:2016 defines four \texttt{AFTER MATCH SKIP} strategies;
-Table~\ref{tab:skip-modes} summarises their semantics and the
+Table~\ref{tab:skip-modes} summarizes their semantics and the
 corresponding next-start-position computation.
 
 \begin{table}[htbp]
@@ -839,12 +860,12 @@ corresponding next-start-position computation.
       are produced because only a single row is skipped regardless
       of match length. \\[4pt]
     \textsc{To First} $V$ &
-      $i \leftarrow \min(\mathit{bindings}[V]) + 1$. The scan
-      resumes after the \emph{first} row assigned to variable $V$.
+      $i \leftarrow \min(\mathit{bindings}[V])$. The scan
+      resumes at the \emph{first} row assigned to variable $V$.
       Requires $V$ to appear in the pattern; enforced at compile time. \\[4pt]
     \textsc{To Last} $V$ &
-      $i \leftarrow \max(\mathit{bindings}[V]) + 1$. The scan
-      resumes after the \emph{last} row assigned to variable $V$.
+      $i \leftarrow \max(\mathit{bindings}[V])$. The scan
+      resumes at the \emph{last} row assigned to variable $V$.
       May overlap if $V$'s last row precedes the match end. \\
     \bottomrule
   \end{tabular}
@@ -863,14 +884,20 @@ position is revisited.
 \label{subsec:meth-exec-output}
 % ................................
 
-SQL:2016 specifies two principal output-row multiplicity modes,
-each admitting further sub-options
-(Table~\ref{tab:rows-per-match}).
+SQL row-pattern recognition, including Trino's implementation,
+exposes two principal output-row multiplicity modes, each admitting
+further sub-options~\cite{trino2022}.  The current engine follows
+these output multiplicities and applies the effective measure
+contexts summarized in Table~\ref{tab:rows-per-match}.  Trino
+documents \textsc{Running} as the default row-pattern expression
+semantics; this implementation additionally applies function-specific
+defaults for undecorated measures in \texttt{ALL ROWS PER MATCH}
+mode to match the behavior exercised by the regression suite.
 
 \begin{table}[htbp]
   \centering
   \caption{Output modes and their row-count and measure-semantics
-    behaviour}
+    behavior}
   \label{tab:rows-per-match}
   \begin{tabular}{llp{7cm}}
     \toprule
@@ -878,16 +905,17 @@ each admitting further sub-options
     \midrule
     \textsc{One Row Per Match}
       & 1 per match
-      & \textsc{Final}: measures see the complete, finalised
+      & \textsc{Final}: measures see the complete, finalized
         variable bindings.  Navigation functions
         (\texttt{FIRST}, \texttt{LAST}) operate over the full
         matched span. \\[6pt]
     \textsc{All Rows Per Match}
       & 1 per matched row
-      & Default semantics per function: \texttt{LAST} uses
+      & Implementation default per function: \texttt{LAST} uses
         \textsc{Running}; \texttt{FIRST}/\texttt{PREV}/\texttt{NEXT}
-        use \textsc{Final}; aggregates
-        (\texttt{COUNT}, \texttt{SUM}) use \textsc{Running}.
+        use \textsc{Final}; \texttt{COUNT}, \texttt{SUM}, and
+        \texttt{ARRAY\_AGG} use \textsc{Running}; other aggregate
+        functions default to \textsc{Final}.
         Explicit \texttt{RUNNING}/\texttt{FINAL} keywords override
         the default. \\[6pt]
     \textsc{All Rows \ldots With Unmatched}
@@ -908,14 +936,13 @@ appended to the results list and later assembled into the output
 DataFrame.
 
 \paragraph{All Rows Per Match.}
-For each recorded match the engine iterates over every row
-belonging to the match span (from \texttt{best.start} to
-\texttt{best.end} inclusive).  For each row $r_j$ in the span
-the engine:
+For each recorded match the engine iterates over the non-excluded
+rows belonging to the match span (from \texttt{best.start} to
+\texttt{best.end} inclusive).  For each output row $r_j$ in this
+filtered span the engine:
 \begin{enumerate}
   \item assigns $r_j$ a \texttt{CLASSIFIER} column value equal to
-    the name of the pattern variable to which row $j$ was assigned
-    (or \texttt{NULL} if the row was excluded);
+    the name of the pattern variable to which row $j$ was assigned;
   \item evaluates each measure expression with the semantics
     determined by Table~\ref{tab:rows-per-match}: \textsc{Running}
     semantics limits variable bindings to rows $\leq j$,
@@ -923,10 +950,8 @@ the engine:
     bindings; and
   \item appends the resulting row dictionary to the results list.
 \end{enumerate}
-Rows covered by the match span but assigned to an exclusion
-variable are handled according to the SQL:2016 rule: they appear
-in the output with a \texttt{NULL} \texttt{CLASSIFIER} value and
-\texttt{NULL} measure columns.
+Rows assigned to an exclusion variable are omitted from the
+\texttt{ALL ROWS PER MATCH} output in the current implementation.
 
 % ................................
 \subsection{Measure Evaluation}
@@ -1026,7 +1051,7 @@ MATCH_RECOGNIZE (
   AFTER MATCH SKIP PAST LAST ROW
   PATTERN (A+ B+ C+)
   DEFINE
-    A AS A.price >= PREV(A.price, 1),
+    A AS PREV(A.price, 1) IS NULL OR A.price >= PREV(A.price, 1),
     B AS B.price <  PREV(B.price, 1),
     C AS C.price >  PREV(C.price, 1)
 )
@@ -1047,9 +1072,9 @@ $[100, 102, 98, 95, 103]$.
 \vspace{0.5em}
 \noindent
 \textbf{Step 2 — DFA construction.}
-The pattern \texttt{A+ B+ C+} compiles to an NFA with 8 states via
-Thompson's construction and then to a DFA with 4 states via subset
-construction (Section~\ref{subsec:meth-dfa}).
+The pattern \texttt{A+ B+ C+} compiles to an NFA with 16 states in
+the current implementation and then to a DFA with 4 states via
+subset construction (Section~\ref{subsec:meth-dfa}).
 
 \vspace{0.5em}
 \noindent
@@ -1057,8 +1082,8 @@ construction (Section~\ref{subsec:meth-dfa}).
 
 \begin{itemize}[leftmargin=2em]
   \item Row 0 ($p=100$): \texttt{PREV(A.price)} is undefined at the
-    first row; the engine treats this as trivially satisfying
-    $A$'s predicate.  Transition $q_0 \xrightarrow{A} q_1$ fires;
+    first row, so the explicit \texttt{IS NULL} guard in $A$'s
+    predicate is satisfied.  Transition $q_0 \xrightarrow{A} q_1$ fires;
     $\mathit{bindings}[A] = [0]$.  State $q_1$ is not accepting.
   \item Row 1 ($p=102 \geq 100$): \texttt{A} predicate satisfied;
     self-loop $q_1 \xrightarrow{A} q_1$.  $\mathit{bindings}[A] = [0,1]$.
@@ -1101,21 +1126,21 @@ end\_price=103)}.
 This example demonstrates how all execution components--partition
 ordering, DFA simulation with greedy quantifiers, variable binding
 accumulation, after-match skip, and measure evaluation—interact to
-produce a single SQL:2016-compliant output row from a five-row
-price sequence.
+produce a single output row for the supported SQL:2016 row-pattern
+subset from a five-row price sequence.
 
 
 % ----------------------------------------------------------------
-\section{Implementation and Evaluation Metrics}
+\section{Implementation Components}
 \label{sec:meth-impl}
 % ----------------------------------------------------------------
 
 The implementation provides a \texttt{MATCH\_RECOGNIZE} engine for Pandas
-DataFrames following the SQL:2016 standard for pattern matching in
+DataFrames following the supported SQL:2016 row-pattern semantics for
 sequential data.  The implementation has four core components: an
 ANTLR4-based SQL parser that transforms \texttt{MATCH\_RECOGNIZE}
 queries into abstract syntax trees; a finite-automata engine that
-converts pattern expressions into optimised NFAs and DFAs using
+converts pattern expressions into optimized NFAs and DFAs using
 Thompson's construction; a pattern-matching executor that processes
 DataFrames with support for partitioning and ordering; and a measure
 evaluator that handles navigation functions (\texttt{PREV},
@@ -1129,9 +1154,10 @@ permuted patterns, and exclusion syntax.
 \label{subsec:impl-antlr4}
 % ................................
 
-The system uses a customised SQL grammar extended from Trino's SQL
-that fully supports the SQL:2016 \texttt{MATCH\_RECOGNIZE} clause.
-This grammar was defined using ANTLR4, covering complex patterns,
+The system uses the Trino SQL grammar from the ANTLR community
+grammars project and extracts its \texttt{MATCH\_RECOGNIZE}
+productions into project-specific AST nodes.  This ANTLR4 grammar
+covers the pattern constructs used by the implementation, including
 nested patterns, alternation, quantifiers, grouping, and
 exclusions~\cite{antlr_trino_sql}.  The parser's output is a
 detailed parse tree that captures the syntactic structure of each
@@ -1142,9 +1168,9 @@ SQL query~\cite{parr2013definitive,tarazona2021antlr}.
 \label{subsec:impl-automata}
 % ................................
 
-\paragraph{Pattern Tokenisation.}
-Pattern expressions are tokenised using a recursive-descent
-tokenisation algorithm that supports anchors, grouping,
+\paragraph{Pattern Tokenization.}
+Pattern expressions are tokenized using a single-pass tokenization
+routine that supports anchors, grouping,
 quantifiers, and nested constructs.
 
 \paragraph{NFA Construction.}
@@ -1155,16 +1181,15 @@ metadata for advanced features.  Quantifiers (\texttt{*},
 \texttt{+}, \texttt{?}, \texttt{\{$n$,$m$\}}) are directly
 mapped to sub-automata~\cite{georgiou2025streaming}.
 
-\paragraph{DFA Construction and Optimisation.}
+\paragraph{DFA Construction and Optimization.}
 The NFA is systematically converted into a Deterministic Finite
-Automaton (DFA) using subset construction, drastically reducing
-the number of active states during execution.  Optimisation steps
-including state minimisation, transition indexing, and merging of
-equivalent states yield a compact, performant automaton.  The
+Automaton (DFA) using subset construction, reducing the number of
+active states that must be tracked during execution.  Optimization
+steps include removal of unreachable states, compatible-state
+merging, and transition grouping.  The
 resulting DFA supports efficient row-by-row evaluation while
 preserving pattern semantics, priorities, and custom conditions
-for accurate pattern
-semantics~\cite{e104-d_3_381,10.1145/986537.986588,georgiou2025streaming}.
+for the supported pattern semantics~\cite{e104-d_3_381,10.1145/986537.986588,georgiou2025streaming}.
 
 % ................................
 \subsection{Execution}
@@ -1172,16 +1197,16 @@ semantics~\cite{e104-d_3_381,10.1145/986537.986588,georgiou2025streaming}.
 % ................................
 
 The matching engine applies the DFA sequentially over each partition
-of the DataFrame with specialised handling for anchors, skip modes,
+of the DataFrame with specialized handling for anchors, skip modes,
 and edge cases.  The executor coordinates the entire
 pattern-matching process, integrating parsing, automata
 construction, match identification, and result formatting.
 
 \paragraph{Condition and Measure Evaluation.}
 A dedicated evaluation subsystem translates SQL pattern conditions
-and measures into executable Python code that supports navigation
-functions and aggregations with SQL:2016-compliant \texttt{NULL}
-semantics for both running and final calculations.
+and measures into controlled Python callables and evaluator routines
+that support navigation functions and aggregations with SQL-style
+\texttt{NULL} handling for both running and final calculations.
 
 % ----------------------------------------------------------------
 \section{Performance Optimization Techniques}
@@ -1197,28 +1222,22 @@ Because \texttt{MATCH\_RECOGNIZE} evaluates each
 \texttt{PARTITION BY} group independently, partitions provide a
 natural unit of parallel work.  The implementation includes a
 \texttt{ParallelExecutionManager} in
-\texttt{src/utils/performance\_optimizer.py}, which can dispatch
-partition-level work items to a thread or process pool when
-parallel processing is enabled and the input size is large enough
-to justify the scheduling overhead.  If the workload is too small,
-system resources are constrained, or parallel execution is disabled
-by configuration, the engine falls back to sequential partition
-processing.
-
-This optimisation does not change match semantics: each partition
-is still ordered, classified, and matched independently, and the
-final output is assembled after all partition-level results have
-been collected.  Parallelism therefore improves wall-clock time for
-multi-partition workloads while preserving the same logical result
-as single-threaded execution.
+\texttt{src/utils/performance\_optimizer.py}, which estimates whether
+partition-level work is large enough to justify parallel execution.
+The current top-level \texttt{match\_recognize} path uses this
+manager as a parallel-aware scheduling layer but still processes the
+partition work sequentially after ordering each partition.  The
+design therefore preserves the partition independence needed for
+future parallel dispatch without changing match semantics in the
+current execution path.
 
 % ................................
 \subsection{LRU Pattern Caching}
 \label{subsec:bg-caching}
 % ................................
 
-Pattern compilation---tokenisation $\to$ NFA construction $\to$ DFA
-conversion $\to$ minimisation---is computationally expensive,
+Pattern compilation---tokenization $\to$ NFA construction $\to$ DFA
+conversion $\to$ optimization---is computationally expensive,
 especially for patterns with quantifiers and \texttt{PERMUTE}
 constructs.  The implementation maintains a thread-safe
 \emph{Least Recently Used} (LRU) cache that maps a hash of the
@@ -1250,54 +1269,40 @@ Table~\ref{tab:bg-cache-config}.
 % ................................
 
 Large-scale matching over millions of rows requires careful memory
-management.  The implementation processes one partition at a time,
-keeping only the current partition's data in memory at any point.
-Memory usage is monitored via \texttt{psutil}; garbage collection
-is triggered proactively when consumption approaches
-user-configured limits (\texttt{cache\_clear\_threshold\_mb}).
-An object-pool layer (\texttt{src/utils/memory\_management.py})
-reuses frequently allocated objects across successive match
-operations, reducing allocator pressure on long-running queries.
+management.  The implementation treats partitions as independent
+execution units and iterates over them separately during matching.
+In the current executor, however, partition objects are materialized
+from the Pandas \texttt{groupby()} result before they are processed,
+so the memory model is partition-oriented rather than fully streaming.
+Memory usage is monitored via \texttt{psutil}; garbage collection is
+triggered proactively when consumption approaches user-configured
+limits (\texttt{cache\_clear\_threshold\_mb}).  An object-pool layer
+(\texttt{src/utils/memory\_management.py}) reuses frequently allocated
+objects across successive match operations, reducing allocator
+pressure on long-running queries.
 
 % ................................
-\subsection{Vectorised Condition Evaluation}
+\subsection{Enhanced Condition Evaluation}
 \label{subsec:bg-vectorised}
 % ................................
 
-For large partitions the engine avoids repeated Python function-call
-overhead by pre-computing a \emph{condition matrix}: a dictionary
-mapping each pattern variable $v$ to a NumPy Boolean array of
-length $n$ (the partition size), where entry $i$ is \texttt{True}
-if row $i$ satisfies the \texttt{DEFINE} predicate for $v$.
+For larger partitions, the engine reduces repeated Python
+function-call overhead through smart condition preprocessing.  The
+main path in \texttt{EnhancedMatcher.\_smart\_condition\_preprocessing()}
+enlarges the condition-evaluation cache when the partition contains
+more than $5\,000$ rows and pre-warms common condition paths on a
+sample when the partition contains more than $50\,000$ rows.  The
+codebase also contains
+\texttt{EnhancedMatcher.\_vectorize\_condition\_evaluation()}, which
+can materialize a Boolean condition matrix, but this is not the
+primary path used by the current matcher.
 
-The pre-computation pass in
-\texttt{EnhancedMatcher.\_vectorize\_condition\_evaluation()}
-evaluates each variable's predicate function once per row and
-stores the results as a compact \texttt{numpy.ndarray(dtype=bool)}.
-When the Polars library is available it is used to parallelise this
-pass; otherwise a plain Python loop with NumPy storage provides the
-same result.  Implicit variables (present in the pattern but absent
-from \texttt{DEFINE}) are assigned an all-\texttt{True} array,
-matching any row unconditionally.
-
-Once the condition matrix is built, the DFA simulation loop
-replaces every per-row predicate call with a single array index
-look-up $M[v][j]$, reducing the inner-loop cost from an interpreted
-function invocation to a direct memory access.
-
-For partitions below $5\,000$ rows an enhanced
-condition-evaluation cache is used instead; for very large
-partitions ($>50\,000$ rows) a sample-based pre-warming step
-warms internal caches before the full evaluation pass begins.
-Both thresholds are hardcoded in
-\texttt{src/matcher/matcher.py}.
-
-Table~\ref{tab:perf-summary} summarises all performance
-optimisations and the conditions under which each is applied.
+Table~\ref{tab:perf-summary} summarizes the performance
+optimizations and the conditions under which each is applied.
 
 \begin{table}[htbp]
   \centering
-  \caption{Performance optimisations and their activation
+  \caption{Performance optimizations and their activation
     conditions}
   \label{tab:perf-summary}
   \begin{tabular}{p{3.8cm}p{4.2cm}p{4.4cm}}
@@ -1309,18 +1314,22 @@ optimisations and the conditions under which each is applied.
       & Always on
       & Eliminates redundant NFA/DFA construction across repeated
         queries \\[4pt]
-    Parallel partition execution
-      & Enabled by configuration and sufficient partition workload
-      & Reduces wall-clock time for independent multi-partition
-        queries \\[4pt]
-    Condition matrix (vectorised look-up)
+    Parallel-aware partition scheduling
+      & Multiple partitions, sufficient rows, and acceptable memory
+        pressure
+      & Preserves a scheduling boundary for future concurrent
+        partition execution \\[4pt]
+    Enhanced condition cache
       & Partition size $> 5\,000$ rows
-      & Replaces per-row predicate calls with array index
-        look-ups inside the DFA loop \\[4pt]
-    One-partition-at-a-time streaming
+      & Increases cache capacity for repeated predicate evaluation \\[4pt]
+    Condition pre-warming
+      & Partition size $> 50\,000$ rows
+      & Warms common predicate paths on a sample of rows before the
+        full scan \\[4pt]
+    Partition-oriented processing
       & Always on
-      & Bounds peak memory to one partition regardless of total
-        dataset size \\[4pt]
+      & Keeps match state partition-local, although Pandas group
+        objects may still be materialized before processing \\[4pt]
     Proactive GC / memory guard
       & Process RSS $\geq$ \texttt{cache\_clear\_threshold\_mb}
       & Prevents OOM errors on very large dataset scans \\
@@ -1333,23 +1342,23 @@ optimisations and the conditions under which each is applied.
 \label{sec:impl-summary}
 % ----------------------------------------------------------------
 
-This chapter has presented the implementation and optimisation of the
+This chapter has presented the implementation and optimization of the
 \texttt{MATCH\_RECOGNIZE} engine.  It explained how row patterns are
-tokenised, compiled into NFAs, converted into DFAs, and executed over
+tokenized, compiled into NFAs, converted into DFAs, and executed over
 ordered Pandas partitions.  It also described the implementation of
-after-match skip behaviour, output modes, measure evaluation, and the
+after-match skip behavior, output modes, measure evaluation, and the
 runtime components that connect the parser and logical plan to the
 matching engine.
 
-The chapter also described the optimisation layer: LRU pattern
-caching to avoid repeated compilation, optional parallel
-partition processing, partition-wise memory management, and
-vectorised condition evaluation to reduce per-row predicate
-overhead.  These optimisations are orthogonal to the core matching
+The chapter also described the optimization layer: LRU-style pattern
+caching to avoid repeated compilation, parallel-aware partition
+scheduling, partition-oriented memory management, and enhanced condition
+caching/pre-warming to reduce repeated predicate overhead.  These
+optimizations are orthogonal to the core matching
 semantics and can be evaluated independently in the experimental
 chapter.
 
 Chapter~\ref{chap:evaluation} evaluates these design and
 implementation decisions empirically, measuring correctness,
-throughput, memory behaviour, and performance across the selected
+throughput, memory behavior, and performance across the selected
 pattern families and dataset sizes.

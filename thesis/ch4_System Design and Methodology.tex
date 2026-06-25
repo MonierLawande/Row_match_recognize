@@ -21,12 +21,13 @@ The pipeline consists of five phases: \emph{parsing},
 In the parsing stage, the SQL query is transformed into an abstract
 syntax tree (AST) that captures both the \texttt{SELECT}/\texttt{FROM}
 clauses and \texttt{MATCH\_RECOGNIZE} sub-clauses~\cite{tarazona2021antlr,parr2013definitive}.
-Semantic validation then checks schema references, variable usage,
-predicates, skip policies, and output modes.  Compliance rules are
-applied to ensure standard conformance, correct use of navigation
-functions, consistent measure semantics, and robust handling of edge
-cases such as empty matches, partition boundaries, and skip
-behaviours.
+Semantic validation then checks variable usage, predicates, skip
+policies, output modes, and the consistency of referenced
+row-pattern constructs.  The validation rules are scoped to the
+features supported by the implementation: they enforce correct use of
+navigation functions, consistent measure semantics, and predictable
+handling of edge cases such as empty matches, partition boundaries,
+and skip behavior.
 
 The validated plan is translated into a logical plan composed of
 modular operators for partitioning, sorting, matching, measuring,
@@ -35,21 +36,63 @@ nondeterministic finite automaton (NFA) with guarded transitions
 that support quantifiers, alternation, and \texttt{PERMUTE}
 constructs~\cite{salomaa1996nfa}.  The NFA is constructed using
 Thompson's construction, extended for SQL:2016 semantics by
-embedding predicates from the \texttt{DEFINE} clause, minimising
-$\varepsilon$-transitions, and applying subset construction with
-state deduplication to mitigate exponential growth.
+embedding predicates from the \texttt{DEFINE} clause when present,
+organizing $\varepsilon$-transitions, and applying subset
+construction with state deduplication to mitigate unnecessary state
+growth in practical patterns.
 
 Finally, execution is performed over ordered partitions using the
-compiled automaton.  Matches are materialised with the correct
+compiled automaton.  Matches are materialized with the correct
 \texttt{RUNNING}/\texttt{FINAL} semantics.  The evaluation engine
 manages context separation, applies navigation functions
 (\texttt{FIRST}, \texttt{LAST}, \texttt{PREV}, \texttt{NEXT}) with
 partition awareness, and computes aggregates such as \texttt{COUNT},
 \texttt{SUM}, and \texttt{AVG} across pattern variables.  This
-preserves the supported SQL:2016 behaviour while producing results
+preserves the supported SQL:2016 behavior while producing results
 directly as \texttt{pandas} DataFrames.
 
-The remainder of this chapter is organised as follows.
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    node distance=0.7cm and 0.7cm,
+    every node/.style={font=\small},
+    phase/.style={rectangle, draw, rounded corners=3pt,
+                  minimum width=2.8cm, minimum height=0.75cm,
+                  align=center},
+    artifact/.style={rectangle, draw, dashed, rounded corners=3pt,
+                     minimum width=2.6cm, minimum height=0.6cm,
+                     align=center, fill=gray!10},
+    arrow/.style={->, thick}
+  ]
+    \node[phase, fill=blue!10] (parse) {SQL Parsing};
+    \node[phase, fill=blue!10, right=of parse] (validate) {Semantic\\Validation};
+    \node[phase, fill=blue!10, right=of validate] (plan) {Logical Plan\\Construction};
+    \node[phase, fill=blue!10, right=of plan] (compile) {Pattern\\Compilation};
+    \node[phase, fill=blue!10, right=of compile] (execute) {Pandas\\Execution};
+
+    \node[artifact, below=0.65cm of parse] (ast) {AST};
+    \node[artifact, below=0.65cm of validate] (checked) {Validated\\AST};
+    \node[artifact, below=0.65cm of plan] (logical) {Logical\\Plan};
+    \node[artifact, below=0.65cm of compile] (automata) {NFA/DFA};
+    \node[artifact, below=0.65cm of execute] (dfout) {Output\\DataFrame};
+
+    \draw[arrow] (parse) -- (validate);
+    \draw[arrow] (validate) -- (plan);
+    \draw[arrow] (plan) -- (compile);
+    \draw[arrow] (compile) -- (execute);
+
+    \draw[arrow] (parse) -- (ast);
+    \draw[arrow] (validate) -- (checked);
+    \draw[arrow] (plan) -- (logical);
+    \draw[arrow] (compile) -- (automata);
+    \draw[arrow] (execute) -- (dfout);
+  \end{tikzpicture}
+  \caption{Five-stage architecture of the Pandas
+    \texttt{MATCH\_RECOGNIZE} engine}
+  \label{fig:system-architecture}
+\end{figure}
+
+The remainder of this chapter is organized as follows.
 Section~\ref{sec:meth-overview} provides a high-level overview of
 the three primary runtime components.
 Section~\ref{sec:meth-compiler} describes the SQL parsing pipeline
@@ -59,7 +102,7 @@ checks applied after parsing.
 Section~\ref{sec:meth-logical} presents the logical plan
 construction step.  The following chapter continues from this
 logical design into automata compilation, Pandas execution,
-implementation details, and optimisation techniques.
+implementation details, and optimization techniques.
 
 % ----------------------------------------------------------------
 \section{System Architecture Overview}
@@ -67,23 +110,23 @@ implementation details, and optimisation techniques.
 % ----------------------------------------------------------------
 
 The engine's five-phase pipeline is designed so that each stage
-produces a well-defined artefact consumed by the next.
+produces a well-defined artifact consumed by the next.
 The following three subsections give a brief description of the
 primary runtime components.  This chapter then details the parsing,
 validation, and logical-planning stages; Chapter~\ref{chap:implementation}
 continues with automata compilation, Pandas execution, and
-optimisation.
+optimization.
 
 % ................................
 \subsection{SQL Parsing and AST Construction}
 \label{subsec:overview-parsing}
 % ................................
 
-The process starts by analysing the user's SQL query and identifying
+The process starts by analyzing the user's SQL query and identifying
 its logical components.  A parsing process explores the query,
-recognises its main components---grouping (\texttt{PARTITION BY}),
+recognizes its main components---grouping (\texttt{PARTITION BY}),
 ordering (\texttt{ORDER BY}), the pattern to be searched, and any
-specific conditions or output metrics---and organises these into an
+specific conditions or output metrics---and organizes these into an
 Abstract Syntax Tree (AST).  The AST provides a clear, structured
 representation of the query.  This approach eases query validation
 and prepares it for pattern matching in the following stages.
@@ -96,7 +139,7 @@ and prepares it for pattern matching in the following stages.
 Once the AST is complete, the system focuses on the pattern
 component of the SQL query.  The pattern is converted into a finite
 automaton that defines a set of states and transitions for detecting
-complex sequences or behaviours in the data.  The process begins by
+complex sequences or behaviors in the data.  The process begins by
 constructing a non-deterministic finite automaton (NFA) from the
 pattern and then, for improved efficiency, transforms it into a
 deterministic finite automaton
@@ -116,10 +159,11 @@ The execution phase uses the compiled DFA to perform pattern
 matching directly on input data represented as Pandas DataFrames.
 The engine begins by partitioning and ordering the data according to
 the query's specifications.  It then applies the DFA to scan the
-dataset, identifying all sequences that fit the defined pattern.
+dataset, identifying matching sequences according to the configured
+pattern and skip policy.
 For every detected match the engine computes any requested measures
 or calculations and compiles the results into a DataFrame formatted
-to mirror standard SQL query outputs.  By utilising Pandas, the
+to mirror standard SQL query outputs.  By utilizing Pandas, the
 system retains both flexibility and accessibility, smoothly
 incorporating advanced pattern matching into conventional Python
 data-analysis workflows.
@@ -180,27 +224,27 @@ can traverse and transform.
 % ................................
 
 Several Python libraries offer SQL parsing out of the box.
-\texttt{sqlparse} performs tokenisation and basic structural
+\texttt{sqlparse}~\cite{sqlparse_tool} performs tokenization and basic structural
 splitting (statements, clauses) but produces only a shallow token
 stream, not a typed AST, and does not model \texttt{MATCH\_RECOGNIZE}
-at all.  \texttt{sqlglot} is a more complete SQL transpiler that
+at all.  \texttt{sqlglot}~\cite{sqlglot_tool} is a more complete SQL transpiler that
 supports multiple SQL dialects and exposes a typed AST; however,
-its \texttt{MATCH\_RECOGNIZE} support is partial and does not cover
-the full SQL:2016 pattern sub-language (e.g.\ exclusions, anchors,
-\texttt{PERMUTE}, bounded quantifiers).  \texttt{mo\_sql\_parsing}
-converts SQL to JSON but similarly provides no coverage for row
-pattern constructs.
+it does not provide project-ready coverage for the required
+SQL:2016 row-pattern sub-language (e.g.\ exclusions, anchors,
+\texttt{PERMUTE}, bounded quantifiers).  \texttt{mo\_sql\_parsing}~\cite{mo_sql_parsing_tool}
+converts SQL to JSON but similarly provides no project-ready
+coverage for row-pattern constructs.
 
 A widely used baseline for conventional SQL parsing is the
 \textbf{PostgreSQL parser}, which has been extracted from the
 PostgreSQL source code and released as a standalone C library via
-the \texttt{libpg\_query} project.  Built on top of
-\texttt{libpg\_query}, the Python library \texttt{pglast} wraps the
+the \texttt{libpg\_query} project~\cite{libpg_query_tool}.  Built on top of
+\texttt{libpg\_query}, the Python library \texttt{pglast}~\cite{pglast_tool} wraps the
 original C AST nodes as typed Python classes and provides
 functionality to reconstruct SQL text from an AST.
 Listing~\ref{lst:pglast-example} shows a minimal usage example:
 the call to \texttt{parse\_sql} returns a tree of typed node
-objects, and \texttt{RawStream} serialises it back to SQL.
+objects, and \texttt{RawStream} serializes it back to SQL.
 
 \begin{lstlisting}[language=Python,
     caption={Parsing a SQL statement with \texttt{pglast} and
@@ -215,11 +259,14 @@ print(RawStream()(tree_root))  # SELECT 42
 \end{lstlisting}
 
 Although \texttt{pglast} cannot parse \texttt{MATCH\_RECOGNIZE}, it
-is useful for parsing the SQL sub-expressions that appear inside
-\texttt{DEFINE} predicates and \texttt{MEASURES} clauses
-(see Section~\ref{subsec:meth-safe-eval}).  The absence of any
-library that handles the full SQL:2016 row-pattern sub-language
-made a custom parser necessary for this project.
+illustrates the difference between a conventional SQL AST and the
+row-pattern-specific structure required here.  The project therefore
+does not depend on \texttt{pglast}, \texttt{sqlparse},
+\texttt{sqlglot}, or \texttt{mo\_sql\_parsing} for execution.
+Instead, these tools were considered as alternatives, and a
+grammar-based parser was selected because the required syntax
+includes pattern constructs that are not handled uniformly by
+general-purpose Python SQL parsers.
 
 % ................................
 \subsection{Grammars}
@@ -265,8 +312,8 @@ as:
 \end{center}
 
 SQL is a large context-free language; the \texttt{MATCH\_RECOGNIZE}
-sub-language adds several hundred additional productions for pattern
-terms, quantifiers, alternation, grouping, anchors, exclusions,
+sub-language adds additional syntactic constructs for pattern terms,
+quantifiers, alternation, grouping, anchors, exclusions,
 \texttt{PERMUTE}, and the eight sub-clauses.
 
 % ................................
@@ -274,10 +321,10 @@ terms, quantifiers, alternation, grouping, anchors, exclusions,
 \label{subsec:meth-parsing-needs}
 % ................................
 
-This section examines exactly what must be parsed and what the output
-should look like.  Listing~\ref{lst:mr-full-syntax} shows the full syntax
-of a query containing a \texttt{MATCH\_RECOGNIZE} clause as supported
-by this implementation.
+This section examines what must be parsed and what the output
+should look like.  Listing~\ref{lst:mr-full-syntax} shows the
+supported syntax of a query containing a \texttt{MATCH\_RECOGNIZE}
+clause in this implementation.
 
 \begin{lstlisting}[
     language   = {},
@@ -290,7 +337,7 @@ FROM   <table>
 MATCH_RECOGNIZE (
   [ PARTITION BY <column> [, ...] ]
   [ ORDER BY <column> [ASC|DESC] [, ...] ]
-  [ MEASURES <expression> [AS] <alias> [, ...] ]
+  [ MEASURES <expression> AS <alias> [, ...] ]
   [ ONE ROW PER MATCH
   | ALL ROWS PER MATCH
     [ SHOW EMPTY MATCHES
@@ -303,23 +350,35 @@ MATCH_RECOGNIZE (
     | TO LAST  <variable> } ]
   PATTERN ( <row_pattern> )
   [ SUBSET <subset_name> = ( <variable> [, ...] ) [, ...] ]
-  DEFINE <variable> AS <condition> [, ...]
-) AS <alias>
+  [ DEFINE <variable> AS <condition> [, ...] ]
+) [ AS <alias> ]
 <rest>;
 \end{lstlisting}
 
-\texttt{MATCH\_RECOGNIZE} is an optional sub-clause of the
-\texttt{FROM} clause.  For simplicity, the implementation is
-restricted to a single top-level \texttt{SELECT} statement:
-no Common Table Expression (CTE), \texttt{VIEW} definition, or
-inline sub-query nesting is supported.  Similarly, the trailing
-\texttt{<rest>} part must not include set operations such as
-\texttt{UNION}, \texttt{INTERSECT}, or \texttt{EXCEPT}.  These
-restrictions are sufficient to cover the full SQL:2016 row-pattern
-use-case within a Pandas-based execution engine.
+The \texttt{DEFINE} clause is optional in both the grammar and the
+execution pipeline.  If a pattern variable appears in
+\texttt{PATTERN} without a corresponding predicate in
+\texttt{DEFINE}, the logical plan assigns that variable an implicit
+always-true predicate.
+Measure aliases require the \texttt{AS} keyword in the adopted
+Trino grammar, while the alias after the
+\texttt{MATCH\_RECOGNIZE} clause itself is optional.
 
-The parser must extract all eight optional and mandatory
-sub-clauses of \texttt{MATCH\_RECOGNIZE}---\texttt{PARTITION~BY},
+\texttt{MATCH\_RECOGNIZE} is an optional sub-clause of the
+\texttt{FROM} clause.  The implementation focuses on one
+\texttt{MATCH\_RECOGNIZE} clause extracted from a top-level
+\texttt{SELECT} query and supports an optional outer
+\texttt{ORDER~BY}.  More complex SQL compositions such as full CTE
+rewriting, set-operation planning, and general nested-subquery
+execution are outside the main execution path, although selected
+subquery-like and multi-query scenarios are covered by the test
+suite as foundations for future extension.  This scope is sufficient
+for the core \texttt{FROM}-clause row-pattern use cases evaluated in
+this thesis.
+
+The parser must extract the mandatory pattern clause and the
+available optional sub-clauses of
+\texttt{MATCH\_RECOGNIZE}---\texttt{PARTITION~BY},
 \texttt{ORDER~BY}, \texttt{MEASURES}, rows-per-match,
 after-match-skip, \texttt{PATTERN}, \texttt{SUBSET}, and
 \texttt{DEFINE}---and deliver them to subsequent pipeline stages
@@ -334,11 +393,15 @@ The AST exposed by the parser to downstream stages is defined by a
 hierarchy of typed Python \texttt{@dataclass} objects.  The root
 node, \texttt{FullQueryAST}, holds the outer \texttt{SelectClause},
 \texttt{FromClause}, and a single \texttt{MatchRecognizeClause}
-object that groups all eight sub-clause nodes.  The interface
+object that groups the parsed row-pattern sub-clauses.  The interface
 contract is:
 
 \begin{itemize}
-  \item Every node is immutable after construction.
+  \item Each node is represented as a typed Python dataclass or
+    structured object.  Some metadata fields, especially those on
+    \texttt{PatternClause}, are normalized after construction so that
+    defined variables, implicit variables, and subset components can
+    be resolved consistently.
   \item Each \texttt{MATCH\_RECOGNIZE} sub-clause maps to a
     dedicated typed dataclass
     (\texttt{PartitionByClause}, \texttt{OrderByClause},
@@ -348,10 +411,10 @@ contract is:
     enabling the NFA compiler to dispatch on type rather than
     parsing raw strings.
   \item \texttt{DEFINE} predicates and \texttt{MEASURES}
-    expressions are captured as plain strings during the first
-    pass and re-evaluated on demand through a lightweight
-    expression evaluator (Section~\ref{subsec:meth-safe-eval}),
-    keeping the main grammar concise.
+    expressions are captured as expression strings during the first
+    pass and interpreted on demand through a controlled expression
+    evaluator (Section~\ref{subsec:meth-safe-eval}), keeping the main
+    grammar concise.
   \item \texttt{Measure} nodes carry computed flags
     (\texttt{is\_classifier}, \texttt{is\_match\_number}) that
     allow the execution layer to route output columns without
@@ -454,7 +517,8 @@ Lex/Yacc~\cite{antlr_performance}.
 
 In this thesis the workflow combining ANTLR4 with the typed
 \texttt{MATCH\_RECOGNIZE} AST interface is evaluated for its
-suitability in parsing the full \texttt{MATCH\_RECOGNIZE} statement.
+suitability in parsing the supported \texttt{MATCH\_RECOGNIZE}
+statement.
 
 % ................................
 \subsection{Alternative Methods}
@@ -490,12 +554,16 @@ written in the ANTLR meta-language~\cite{Parr2013,parr2014adaptive,antlr_website
 file the tool generates a lexer, a parser, and listener/visitor
 scaffolding in the target language (Python in this project).
 
-The implementation extends Trino's production SQL grammar
-(\texttt{TrinoLexer.g4} / \texttt{TrinoParser.g4}) with specialised
-rules for every sub-clause of \texttt{MATCH\_RECOGNIZE}, as shown in
-the excerpt in Listing~\ref{lst:grammar}.  A custom error listener
-intercepts syntax errors and reports them with precise
-line/column positions and contextual suggestions.
+The implementation uses Trino's SQL grammar
+(\texttt{TrinoLexer.g4} / \texttt{TrinoParser.g4}) from the ANTLR
+community grammars project.  This grammar already contains the
+\texttt{patternRecognition} productions needed for the
+\texttt{MATCH\_RECOGNIZE} sub-clauses, as shown in
+Listing~\ref{lst:grammar}.  The project-specific layer is therefore
+the Python visitor and validation logic that extracts these parse
+tree nodes into typed AST objects.  A custom error listener
+intercepts syntax errors and reports them with line/column positions
+and contextual suggestions.
 
 % ................................
 \subsection{Implementation of the Parser}
@@ -507,10 +575,11 @@ line/column positions and contextual suggestions.
 \label{subsubsec:meth-grammar-design}
 % ................................
 
-The implementation uses the production Trino SQL grammar obtained
-from the ANTLR community grammars project
+The implementation uses the Trino SQL grammar obtained from the
+ANTLR community grammars project
 (\texttt{TrinoLexer.g4} / \texttt{TrinoParser.g4},
-approximately 1\,124 lines in total)~\cite{antlr_trino_sql}.
+approximately 1\,521 lines across the two grammar files in this
+project)~\cite{antlr_trino_sql}.
 This grammar natively contains the \texttt{patternRecognition} rule
 that covers all eight \texttt{MATCH\_RECOGNIZE} sub-clauses; no
 modifications to the grammar file were required.
@@ -571,14 +640,14 @@ patternPrimary
 % ................................
 
 \texttt{DEFINE} predicates and \texttt{MEASURES} expressions contain
-arbitrary column references, navigation function calls, arithmetic,
-and comparisons.  Parsing these into a fully typed expression tree
-requires the grammar to enumerate every possible SQL operator and
-function name.  An alternative---adopted here---is to capture such
-expressions as structured token sequences during parsing, then
-re-parse them through a lightweight expression parser on first use.
-This two-pass strategy keeps the main grammar concise while still
-producing a typed AST for safe evaluation (see
+column references, navigation function calls, arithmetic, comparisons,
+and selected scalar or aggregate functions.  Parsing every expression
+into a fully typed SQL expression tree would require a much larger
+expression subsystem.  The adopted strategy is therefore to preserve
+the relevant expression text during parsing and interpret it later
+through the controlled expression evaluators used by the matching and
+measure layers.  This two-pass strategy keeps the main grammar concise
+while still avoiding direct execution of raw user expressions (see
 Section~\ref{subsec:meth-safe-eval}).
 
 % ................................
@@ -616,9 +685,11 @@ types are summarised in Table~\ref{tab:meth-ast-nodes}.
 \end{table}
 
 The AST is validated for semantic correctness before pattern
-compilation: undefined variable references in \texttt{DEFINE}
-predicates, circular definitions, and illegal quantifier ranges are
-all detected and reported at this stage.
+compilation: unresolved pattern-variable references, invalid subset
+definitions, incompatible output modes, and illegal pattern syntax are
+detected and reported at this stage.  Pattern variables without an
+explicit \texttt{DEFINE} predicate remain valid and are assigned an
+implicit always-true predicate downstream.
 
 % ................................
 \subsection{Visitor Implementation}
@@ -631,7 +702,7 @@ built on the generated \texttt{TrinoParserVisitor} base.
 
 \paragraph{\texttt{MatchRecognizeExtractor}.}
 The inner visitor overrides \texttt{visitPatternRecognition}
-and extracts all eight sub-clauses in strict grammar order:
+and extracts the available sub-clauses in grammar order:
 \texttt{PARTITION~BY} column expressions,
 \texttt{ORDER~BY} sort items with direction and nulls handling,
 \texttt{MEASURES} definitions (handling \texttt{RUNNING}/\texttt{FINAL}
@@ -639,20 +710,18 @@ prefix and alias via a dedicated \texttt{smart\_split()} helper that
 correctly traverses nested parentheses and quoted identifiers),
 rows-per-match mode, after-match-skip policy, the raw pattern string,
 \texttt{SUBSET} definitions, and \texttt{DEFINE} variable--condition
-pairs.  After extraction, a four-step validation chain is applied:
-\texttt{validate\_clauses} (ensures \texttt{PATTERN}
-and \texttt{DEFINE} are both present when required);
-\texttt{validate\_pattern\_clause} (checks balanced parentheses and
-flags conflicts such as pattern exclusion combined with
-\texttt{WITH UNMATCHED ROWS});
-\texttt{validate\_function\_usage} (permits only the whitelisted
-navigation and aggregate functions---\texttt{FIRST}, \texttt{LAST},
-\texttt{PREV}, \texttt{NEXT}, \texttt{COUNT}, \texttt{SUM\_IF},
-\texttt{AVG\_IF}, \texttt{COUNT\_IF}---inside \texttt{MEASURES});
-and \texttt{validate\_pattern\_variables\_defined} (verifies that
-every variable referenced in the pattern appears in \texttt{DEFINE} or
-\texttt{SUBSET}, and detects table-qualified references that would be
-ambiguous at execution time).
+pairs.  After extraction, the parser applies validation routines such
+as \texttt{validate\_clauses}, \texttt{validate\_identifiers},
+\texttt{validate\_pattern\_clause},
+\texttt{validate\_pattern\_variables\_defined}, and
+\texttt{validate\_function\_usage}.  These checks verify required
+clauses, balanced pattern syntax, incompatible output-mode
+combinations such as exclusions with \texttt{WITH UNMATCHED ROWS},
+table-prefix misuse, skip targets, and malformed uses of supported
+navigation or aggregate functions.  Pattern variables that appear in
+\texttt{PATTERN} but not in \texttt{DEFINE} are intentionally allowed
+and later receive the implicit always-true predicate required by the
+standard.
 
 \paragraph{\texttt{FullQueryExtractor}.}
 The outer visitor handles the top-level \texttt{singleStatement}
@@ -680,44 +749,42 @@ on any syntax violation, and visits the parse tree with
 % ................................
 
 The parser implementation is validated through a structured test
-suite located in the \texttt{tests/} directory.  Tests are organised
-into three layers: unit tests for individual extractor methods,
-integration tests that exercise the full
-\texttt{parse\_full\_query} pipeline, and
-SQL:2016 compliance tests that compare output against Trino's
-reference behaviour.
+suite located in the \texttt{tests/} directory.  Tests are organized
+into parser-focused checks, integration tests that exercise the
+\texttt{parse\_full\_query} pipeline, and SQL:2016-oriented tests
+derived from reference scenarios and observed Trino behavior.
 
-\paragraph{Unit tests.}
-Each of the eight \texttt{extract\_*} methods is tested in isolation
-against known SQL fragments.  For example, \texttt{extract\_measures}
-is fed a \texttt{MEASURES} token stream containing \texttt{RUNNING},
-\texttt{FINAL}, and undecorated expressions, and the resulting
-\texttt{Measure} objects are asserted for correct alias, expression
-text, and semantic flags (\texttt{explicit\_semantics},
-\texttt{is\_classifier}, \texttt{is\_match\_number}).
-The validation chain is also tested adversarially: supplying an
-undefined pattern variable, a prohibited function in \texttt{MEASURES},
-or a \texttt{PATTERN} clause without a corresponding \texttt{DEFINE}
-all trigger a \texttt{ParserError} carrying the expected
-line and column information.
+\paragraph{Parser-focused tests.}
+The parser tests exercise the extraction and validation behavior of
+the main \texttt{MATCH\_RECOGNIZE} sub-clauses, including
+\texttt{MEASURES} expressions with \texttt{RUNNING}/\texttt{FINAL}
+keywords, after-match skip targets, output-mode combinations, and
+pattern syntax.  The validation chain is also tested
+adversarially: supplying an undefined pattern-variable reference, a
+prohibited function form in \texttt{MEASURES}, an invalid skip
+target, or an incompatible output-mode combination triggers a
+\texttt{ParserError} or an empty-result path as appropriate.  By
+contrast, a pattern variable without a corresponding
+\texttt{DEFINE} predicate is valid and receives an implicit
+always-true condition.
 
 \paragraph{Integration tests.}
-The file \texttt{test\_match\_recognize.py} mirrors Trino's
-\texttt{TestRowPatternMatching.java} and exercises twelve scenarios
-end-to-end: simple queries, pattern quantifiers (\texttt{*}, \texttt{+},
-\texttt{?}, bounded \texttt{\{n,m\}}), pattern exclusion syntax
-(\texttt{\{-\ldots-\}}), all four after-match-skip modes,
-one-row and all-rows output modes, \texttt{CLASSIFIER()} and
-\texttt{MATCH\_NUMBER()} special columns, all four navigation functions,
-partitioned and ordered input, \texttt{SUBSET} aliasing, and
-\texttt{RUNNING}/\texttt{FINAL} semantics.
+The file \texttt{test\_match\_recognize.py} is adapted from Trino's
+\texttt{TestRowPatternMatching.java} and exercises representative
+end-to-end scenarios: simple queries, pattern quantifiers
+(\texttt{*}, \texttt{+}, \texttt{?}, bounded \texttt{\{n,m\}}),
+pattern exclusion syntax (\texttt{\{-\ldots-\}}), the supported
+after-match-skip modes, one-row and all-rows output modes,
+\texttt{CLASSIFIER()} and \texttt{MATCH\_NUMBER()} special columns,
+navigation functions, partitioned and ordered input, \texttt{SUBSET}
+aliasing, and \texttt{RUNNING}/\texttt{FINAL} semantics.
 
 \paragraph{SQL:2016 compliance tests.}
-\texttt{test\_sql2016\_compliance.py} contains seven test classes
-targeted specifically at standard conformance: pattern syntax,
-navigation functions, special aggregate functions, partition
-boundary handling, subset variable resolution, output-mode
-semantics, and all six skip policies.  Empty-match handling is
+\texttt{test\_sql2016\_compliance.py} contains targeted tests for
+standard-oriented behavior: pattern syntax, navigation functions,
+special aggregate functions, partition boundary handling, subset
+variable resolution, output-mode semantics, and the supported skip
+policies.  Empty-match handling is
 covered separately in \texttt{test\_empty\_matches.py} with nine
 test cases including \texttt{SHOW EMPTY MATCHES},
 \texttt{OMIT EMPTY MATCHES}, \texttt{WITH UNMATCHED ROWS}, and
@@ -731,8 +798,7 @@ anchored patterns (\texttt{test\_anchor\_patterns.py}),
 \texttt{PERMUTE} patterns (\texttt{test\_permute\_patterns.py}),
 back-references (\texttt{test\_back\_reference.py}),
 pattern cache correctness and thread safety
-(\texttt{test\_pattern\_cache.py}), and
-production-scale aggregation accuracy
+(\texttt{test\_pattern\_cache.py}), and aggregate-function behavior
 (\texttt{test\_production\_aggregates.py}).
 
 % ................................
@@ -742,25 +808,25 @@ production-scale aggregation accuracy
 
 The grammar-driven approach provides several practical advantages:
 the language specification remains in a single readable
-\texttt{.g4} file; ANTLR4's error recovery inserts synthetic tokens
-to continue parsing past a local error, collecting multiple
-diagnostics in one pass; and the generated visitor scaffolding
-eliminates manual tree traversal boilerplate.
+\texttt{.g4} file; ANTLR4 provides structured parse-tree generation
+and error-recovery mechanisms, while the custom listener reports
+syntax errors with line and column context; and the generated
+visitor scaffolding eliminates manual tree traversal boilerplate.
 
 % ................................
 \subsubsection{Limits}
 \label{subsubsec:meth-parser-limits}
 % ................................
 
-Two limitations are known.  First, some advanced SQL:2016 expression
-constructs (e.g.\ recursive \texttt{WITH RECURSIVE} inside a
-\texttt{DEFINE} predicate) are not supported; the expression
-sub-parser recognises only the constructs needed for
-\texttt{MATCH\_RECOGNIZE} evaluation.  Second, because the grammar
-extends Trino's dialect, vendor-specific extensions of other
-systems (Oracle \texttt{RUNNING} keyword placement differences,
-Snowflake aggregate variants) require minor grammar adjustments if
-cross-dialect compatibility is needed.
+Two limitations are known.  First, advanced SQL constructs outside
+the supported row-pattern subset, such as recursive common table
+expressions embedded inside predicate subqueries, are not part of the
+main execution path; the expression subsystem recognizes the
+constructs needed for \texttt{MATCH\_RECOGNIZE} evaluation.  Second,
+because the grammar is based on Trino's dialect, vendor-specific
+extensions of other systems (Oracle \texttt{RUNNING} keyword
+placement differences, Snowflake aggregate variants) may require
+minor grammar adjustments if cross-dialect compatibility is needed.
 
 % ................................
 \subsection{Safe SQL Expression Evaluation}
@@ -768,11 +834,13 @@ cross-dialect compatibility is needed.
 % ................................
 
 \texttt{DEFINE} predicates and \texttt{MEASURES} expressions are
-user-supplied strings that must be evaluated as Python code at
-runtime.  Directly calling \texttt{eval()} on arbitrary user input
-creates a code-injection vulnerability.  The implementation instead
-uses Python's \texttt{ast} module to parse and validate expressions
-before execution, as shown in Listing~\ref{lst:safe-eval}.
+user-supplied strings that must be interpreted at runtime.  Directly
+calling \texttt{eval()} on arbitrary user input would create a
+code-injection vulnerability.  The implementation instead translates
+the supported SQL expression subset into controlled Python expression
+forms and evaluates them through AST-aware evaluators with explicit
+operator and function handling.  Listing~\ref{lst:safe-eval} shows
+the simplified principle.
 
 \begin{lstlisting}[
     language = Python,
@@ -793,16 +861,19 @@ def safe_evaluate(sql_expr, row_data, context):
     #    function calls (except navigation functions), assignments
     ASTSecurityValidator().visit(tree)
 
-    # 4. Compile and execute in a controlled namespace
-    code = compile(tree, '<expr>', 'eval')
-    return eval(code, {'__builtins__': {}},
-                       {'row': row_data, **context})
+    # 4. Evaluate by walking only the approved AST nodes
+    evaluator = ControlledExpressionEvaluator(row_data, context)
+    return evaluator.visit(tree.body)
 \end{lstlisting}
 
-The controlled namespace exposes only the current row dictionary and
-the whitelisted navigation functions (\texttt{PREV}, \texttt{NEXT},
-\texttt{FIRST}, \texttt{LAST}), providing a safe sandbox with no
-access to the file system, network, or interpreter internals.
+The runtime evaluator follows the same principle but uses the
+project's \texttt{ConditionEvaluator} and measure-evaluation helpers:
+it walks supported AST nodes explicitly and exposes only the current
+row context, pattern-variable bindings, supported navigation
+functions (\texttt{PREV}, \texttt{NEXT}, \texttt{FIRST},
+\texttt{LAST}), and selected scalar or aggregate operations.  It does
+not expose Python built-ins, imports, file-system access, network
+access, or interpreter internals.
 
 
 % ----------------------------------------------------------------
@@ -813,8 +884,8 @@ access to the file system, network, or interpreter internals.
 After the AST is constructed, the engine performs a systematic
 semantic validation pass before any automaton is built.  This pass
 catches errors that are syntactically valid but logically
-inconsistent or non-conformant with the SQL:2016 standard, and
-applies a set of normalisation rules that simplify downstream
+inconsistent with the supported SQL:2016 row-pattern subset, and
+applies a set of normalization rules that simplify downstream
 processing.
 
 % ................................
@@ -822,24 +893,28 @@ processing.
 \label{subsec:sem-schema}
 % ................................
 
-The validator first verifies that:
+The validation and execution setup verify the following properties,
+raising parser or execution errors when a query cannot be mapped
+safely to the input DataFrame:
 
 \begin{itemize}
-  \item Every column name referenced in \texttt{PARTITION BY},
+  \item Columns referenced in \texttt{PARTITION BY},
     \texttt{ORDER BY}, \texttt{DEFINE}, and \texttt{MEASURES}
-    expressions exists in the input DataFrame schema.
-    Column names are resolved case-insensitively to match
-    common SQL conventions.
+    expressions must be resolvable against the input DataFrame during
+    execution setup or expression evaluation.
 
-  \item Every pattern variable referenced in \texttt{MEASURES} or
-    \texttt{DEFINE} expressions has been declared in the
-    \texttt{PATTERN} clause.  Variables appearing in
-    \texttt{DEFINE} but absent from \texttt{PATTERN} are treated
-    as an error rather than silently ignored.
+  \item Pattern-variable references in \texttt{MEASURES} or
+    \texttt{DEFINE} expressions must refer to variables declared in
+    the \texttt{PATTERN} clause or made available through
+    \texttt{SUBSET}.  Variables without explicit \texttt{DEFINE}
+    predicates are allowed and are treated as implicit always-true
+    variables.
 
-  \item If a \texttt{SUBSET} clause is present, each component
-    variable listed in the subset definition must be a declared
-    pattern variable.  Circular subset definitions are rejected.
+  \item If a \texttt{SUBSET} clause is present, the subset mapping is
+    normalized and made available to later stages.  References to
+    subset aliases and their component variables are then resolved
+    where they are used in measures, predicates, or automaton
+    construction.
 
   \item The \texttt{AFTER MATCH SKIP TO FIRST/LAST $V$} options
     reference a pattern variable $V$ that actually exists in the
@@ -854,28 +929,29 @@ The validator first verifies that:
 Navigation functions impose inter-variable ordering constraints that
 must be verified before the automaton is constructed.  The
 \texttt{validate\_navigation\_conditions()} function in
-\texttt{src/executor/match\_recognize.py} performs this check by
+\texttt{src/matcher/condition\_evaluator.py} performs this check by
 building a \emph{variable timeline}: the order in which distinct
 pattern variables first appear in the pattern string.  For each
 \texttt{DEFINE} predicate the validator then checks:
 
 \begin{itemize}
-  \item \texttt{NEXT($v$.$c$)} is only permitted inside the
-    predicate of a non-final pattern variable, i.e.\ a variable
-    that is not last in the timeline.  Using \texttt{NEXT} in the
-    predicate of the final variable would always reference a row
-    beyond the match, violating SQL:2016.  If this rule is
-    violated, the engine returns an empty result set rather than
-    raising an exception---mirroring the behaviour documented for
-    Trino.
+  \item Cross-variable \texttt{NEXT($v$.$c$)} references must point
+    to a variable that appears later in the pattern timeline.
+    Self-references and unqualified column navigation are handled by
+    the evaluator according to the available row context.  If a
+    navigation condition is determined to be invalid for the pattern,
+    the engine returns an empty result set rather than raising an
+    exception, matching the Trino-oriented behavior used in the
+    tests.
 
-  \item \texttt{PREV($v$.$c$, $k$)} references are accepted in any
-    variable's predicate; the validator checks that the offset $k$
-    is a non-negative integer literal.
+  \item \texttt{PREV($v$.$c$, $k$)} references are accepted when
+    the referenced variable is available in the pattern context; the
+    evaluator also checks boundary conditions during execution.
 
   \item Nested navigation expressions (e.g.\
-    \texttt{NEXT(PREV(A.price, 1), 1)}) are validated recursively
-    by \texttt{validate\_complex\_nested\_navigation()}.
+    \texttt{NEXT(PREV(A.price, 1), 1)}) are handled by the enhanced
+    navigation-evaluation path; executor-side helper routines also
+    validate nested forms where they are used.
 \end{itemize}
 
 % ................................
@@ -884,8 +960,8 @@ pattern variables first appear in the pattern string.  For each
 % ................................
 
 Several combinations of output mode, skip mode, and pattern
-features are prohibited by the SQL:2016 standard.  The validator
-enforces the following rules:
+features are invalid in the supported SQL:2016-oriented subset.  The
+validator enforces the following rules:
 
 \begin{itemize}
   \item Pattern exclusion syntax (\texttt{\{- \ldots -\}}) is
@@ -896,13 +972,13 @@ enforces the following rules:
   \item \texttt{AFTER MATCH SKIP TO FIRST/LAST $V$} requires that
     $V$ be a pattern variable, not a subset alias.  Subset aliases
     are resolved at automaton-construction time, not at skip-mode
-    computation time, so this restriction is necessary to guarantee
+    computation time, so this restriction is necessary to ensure
     a deterministic next-start position.
 \end{itemize}
 
 \noindent
 After all checks pass, the validator records the resolved
-configuration—normalised output mode, skip mode, implicit-variable
+configuration—normalized output mode, skip mode, implicit-variable
 defaults, and measure semantics—ready for the logical planning step.
 
 % ................................................................
@@ -913,7 +989,7 @@ defaults, and measure semantics—ready for the logical planning step.
 The logical plan translates the validated AST into a flat,
 canonical data structure that drives all subsequent phases without
 further reference to the raw SQL text.  In the implementation this
-materialises as a set of typed Python objects extracted from the
+materializes as a set of typed Python objects extracted from the
 \texttt{MatchRecognizeClause} AST node and passed as explicit
 arguments to the execution functions.
 Table~\ref{tab:logical-plan} lists the principal logical-plan
@@ -934,7 +1010,7 @@ attributes and their types.
     \texttt{order\_by}       & \texttt{List[str]}
       & Column names for intra-partition sort order \\[4pt]
     \texttt{pattern\_text}   & \texttt{str}
-      & Normalised pattern string forwarded to the tokeniser \\[4pt]
+      & Normalized pattern string forwarded to the tokenizer \\[4pt]
     \texttt{define}          & \texttt{Dict[str, str]}
       & Variable $\to$ predicate expression mapping; implicit
         variables (absent from \texttt{DEFINE}) are assigned
@@ -1046,9 +1122,9 @@ expressions in order:
 \end{figure}
 
 \noindent
-Once all attributes are resolved, the logical plan is complete and
-is passed to the pattern-compilation phase described in the next
-section.
+Once the required attributes are resolved, the logical plan is
+assembled and passed to the pattern-compilation phase described in
+Chapter~\ref{chap:implementation}.
 
 % ----------------------------------------------------------------
 \section{Chapter Summary}
@@ -1065,11 +1141,11 @@ user query into a validated logical representation.
 The chapter first described the overall architecture and then focused
 on the front-end methodology: SQL parsing, grammar selection,
 ANTLR4-based parse-tree processing, AST construction, safe expression
-handling, semantic validation, and logical-plan normalisation.  These
+handling, semantic validation, and logical-plan normalization.  These
 stages establish the boundary between declarative SQL input and the
 lower-level execution machinery.
 
 Chapter~\ref{chap:implementation} continues from this logical design
 by describing the automata compilation pipeline, the Pandas execution
-model, the concrete implementation components, and the optimisation
-techniques used to improve runtime performance and memory behaviour.
+model, the concrete implementation components, and the optimization
+techniques used to improve runtime performance and memory behavior.
