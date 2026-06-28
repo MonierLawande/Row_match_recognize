@@ -1,0 +1,1774 @@
+% $ biblatex auxiliary file $
+% $ biblatex bbl format version 3.2 $
+% Do not modify the above lines!
+%
+% This is an auxiliary file used by the 'biblatex' package.
+% This file may safely be deleted. It will be recreated as
+% required.
+%
+\begingroup
+\makeatletter
+\@ifundefined{ver@biblatex.sty}
+  {\@latex@error
+     {Missing 'biblatex' package}
+     {The bibliography requires the 'biblatex' package.}
+      \aftergroup\endinput}
+  {}
+\endgroup
+
+\datalist[entry]{none/global//global/global}
+  \entry{petkovic2022fraud}{article}{}
+    \name{author}{1}{}{%
+      {{hash=PD}{%
+         family={Petkovi\'{c}},
+         familyi={P\bibinitperiod},
+         given={Du\v{s}an},
+         giveni={D\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Foundation of Computer Science (FCS), NY, USA}%
+    }
+    \strng{namehash}{PD1}
+    \strng{fullhash}{PD1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \verb{doi}
+    \verb 10.5120/ijca2022922446
+    \endverb
+    \field{issn}{0975-8887}
+    \field{number}{35}
+    \field{pages}{31\bibrangedash 34}
+    \field{title}{Identifying Possible Financial Frauds using {SQL} Row Pattern
+  Recognition}
+    \verb{url}
+    \verb https://ijcaonline.org/archives/volume184/number35/32542-2022922446/
+    \endverb
+    \field{volume}{184}
+    \field{journaltitle}{International Journal of Computer Applications}
+    \field{month}{11}
+    \field{year}{2022}
+  \endentry
+
+  \entry{iso2016}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=I}{%
+         family={{International Organization for Standardization}},
+         familyi={I\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{I1}
+    \strng{fullhash}{I1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{\url{https://www.iso.org/standard/65143.html}}
+    \field{title}{{ISO/IEC TR 19075-5:2016} Information technology -- Database
+  languages -- SQL Technical Reports -- Part 5: Row Pattern Recognition in SQL,
+  Feature R010: Row pattern recognition in FROM clause}
+    \field{year}{2016}
+  \endentry
+
+  \entry{ISO2021}{misc}{}
+    \name{author}{2}{}{%
+      {{hash=I}{%
+         family={{International Organization for Standardization}},
+         familyi={I\bibinitperiod},
+      }}%
+      {{hash=I}{%
+         family={{International Electrotechnical Commission}},
+         familyi={I\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{II1}
+    \strng{fullhash}{II1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{\url{https://www.iso.org/standard/78936.html}}
+    \field{note}{ISO/IEC 19075-5:2021, Edition 1}
+    \field{title}{Information technology --- Guidance for the use of database
+  language SQL --- Part 5: Row pattern recognition}
+    \field{year}{2021}
+  \endentry
+
+  \entry{oracle2022}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=O}{%
+         family={{Oracle}},
+         familyi={O\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{O1}
+    \strng{fullhash}{O1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+  \field{howpublished}{\url{https://docs.oracle.com/en/middleware/fusion-middleware/osa/19.1/cqlreference/pattern-recognition-match_recognize.html}}
+    \field{title}{Pattern Recognition With {MATCH\_RECOGNIZE}}
+    \field{year}{2022}
+  \endentry
+
+  \entry{book}{book}{}
+    \name{author}{1}{}{%
+      {{hash=HK}{%
+         family={Hansen},
+         familyi={H\bibinitperiod},
+         given={Kim},
+         giveni={K\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Apress Berkeley, CA}%
+    }
+    \strng{namehash}{HK1}
+    \strng{fullhash}{HK1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \verb{doi}
+    \verb 10.1007/978-1-4842-5617-6
+    \endverb
+    \field{isbn}{978-1-4842-5616-9}
+    \field{title}{Practical Oracle SQL: Mastering the Full Power of Oracle
+  Database}
+    \field{month}{01}
+    \field{year}{2020}
+  \endentry
+
+  \entry{trino2022}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=T}{%
+         family={{Trino}},
+         familyi={T\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{T1}
+    \strng{fullhash}{T1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+  \field{howpublished}{\url{https://trino.io/docs/current/sql/match-recognize.html}}
+    \field{title}{{MATCH\_RECOGNIZE}}
+    \field{year}{2022}
+  \endentry
+
+  \entry{trino2021row}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=T}{%
+         family={{Trino}},
+         familyi={T\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{T1}
+    \strng{fullhash}{T1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+  \field{howpublished}{\url{https://trino.io/blog/2021/05/19/row_pattern_matching.html}}
+    \field{title}{Row Pattern Recognition with {MATCH\_RECOGNIZE}}
+    \field{year}{2021}
+  \endentry
+
+  \entry{snowflake2025match_recognize}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=S}{%
+         family={{Snowflake Inc.}},
+         familyi={S\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{S1}
+    \strng{fullhash}{S1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{Snowflake Documentation}
+    \field{title}{{MATCH\_RECOGNIZE} Clause}
+    \verb{url}
+    \verb https://docs.snowflake.com/en/sql-reference/constructs/match_recogniz
+    \verb e
+    \endverb
+    \field{year}{2025}
+    \field{urlday}{18}
+    \field{urlmonth}{06}
+    \field{urlyear}{2025}
+  \endentry
+
+  \entry{flink}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=A}{%
+         family={{Apache Flink}},
+         familyi={A\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{A3}
+    \strng{fullhash}{A3}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+  \field{howpublished}{\url{https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/table/sql/queries/match_recognize/}}
+    \field{title}{{MATCH\_RECOGNIZE}}
+    \field{year}{2026}
+  \endentry
+
+  \entry{howe2020matchrecognize}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=HG}{%
+         family={Howe},
+         familyi={H\bibinitperiod},
+         given={Guyren},
+         giveni={G\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{HG1}
+    \strng{fullhash}{HG1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{PostgreSQL General Mailing List, Message-ID:
+  7e495cb8-ca03-4e3e-aa7e-45bf75212da8@Spark}
+    \field{title}{Any interest in adding {\texttt{MATCH\_RECOGNIZE}}?}
+    \verb{url}
+    \verb https://www.postgresql.org/message-id/7e495cb8-ca03-4e3e-aa7e-45bf752
+    \verb 12da8@Spark
+    \endverb
+    \field{year}{2020}
+    \field{urlday}{18}
+    \field{urlmonth}{06}
+    \field{urlyear}{2025}
+  \endentry
+
+  \entry{findling2025bringing}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=FT}{%
+         family={Findling},
+         familyi={F\bibinitperiod},
+         given={Tim},
+         giveni={T\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{FT1}
+    \strng{fullhash}{FT1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{Bachelor's thesis, Eberhard Karls Universit\"{a}t
+  T\"{u}bingen}
+    \field{title}{Bringing Row Pattern Recognition to {DuckDB}: Translating
+  {MATCH\_RECOGNIZE} to {WITH RECURSIVE}}
+    \field{year}{2025}
+  \endentry
+
+  \entry{cao2012optimizationanalyticwindowfunctions}{misc}{}
+    \name{author}{4}{}{%
+      {{hash=CY}{%
+         family={Cao},
+         familyi={C\bibinitperiod},
+         given={Yu},
+         giveni={Y\bibinitperiod},
+      }}%
+      {{hash=CCY}{%
+         family={Chan},
+         familyi={C\bibinitperiod},
+         given={Chee-Yong},
+         giveni={C\bibinithyphendelim Y\bibinitperiod},
+      }}%
+      {{hash=LJ}{%
+         family={Li},
+         familyi={L\bibinitperiod},
+         given={Jie},
+         giveni={J\bibinitperiod},
+      }}%
+      {{hash=TKL}{%
+         family={Tan},
+         familyi={T\bibinitperiod},
+         given={Kian-Lee},
+         giveni={K\bibinithyphendelim L\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{CY+1}
+    \strng{fullhash}{CYCCYLJTKL1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \verb{eprint}
+    \verb 1208.0086
+    \endverb
+    \field{title}{Optimization of Analytic Window Functions}
+    \verb{url}
+    \verb https://arxiv.org/abs/1208.0086
+    \endverb
+    \field{eprinttype}{arXiv}
+    \field{eprintclass}{cs.DB}
+    \field{year}{2012}
+  \endentry
+
+  \entry{McKinney2010}{inproceedings}{}
+    \name{author}{1}{}{%
+      {{hash=MW}{%
+         family={McKinney},
+         familyi={M\bibinitperiod},
+         given={Wes},
+         giveni={W\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{MW1}
+    \strng{fullhash}{MW1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{booktitle}{Proceedings of the 9th Python in Science Conference}
+    \verb{doi}
+    \verb 10.25080/Majora-92bf1922-00a
+    \endverb
+    \field{pages}{56\bibrangedash 61}
+    \field{title}{Data Structures for Statistical Computing in {Python}}
+    \field{year}{2010}
+  \endentry
+
+  \entry{michels2018new}{article}{}
+    \name{author}{7}{}{%
+      {{hash=MJ}{%
+         family={Michels},
+         familyi={M\bibinitperiod},
+         given={Jan},
+         giveni={J\bibinitperiod},
+      }}%
+      {{hash=HK}{%
+         family={Hare},
+         familyi={H\bibinitperiod},
+         given={Keith},
+         giveni={K\bibinitperiod},
+      }}%
+      {{hash=KK}{%
+         family={Kulkarni},
+         familyi={K\bibinitperiod},
+         given={Krishna},
+         giveni={K\bibinitperiod},
+      }}%
+      {{hash=ZC}{%
+         family={Zuzarte},
+         familyi={Z\bibinitperiod},
+         given={Calisto},
+         giveni={C\bibinitperiod},
+      }}%
+      {{hash=LZH}{%
+         family={Liu},
+         familyi={L\bibinitperiod},
+         given={Zhen\bibnamedelima Hua},
+         giveni={Z\bibinitperiod\bibinitdelim H\bibinitperiod},
+      }}%
+      {{hash=HB}{%
+         family={Hammerschmidt},
+         familyi={H\bibinitperiod},
+         given={Beda},
+         giveni={B\bibinitperiod},
+      }}%
+      {{hash=ZF}{%
+         family={Zemke},
+         familyi={Z\bibinitperiod},
+         given={Fred},
+         giveni={F\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {ACM New York, NY, USA}%
+    }
+    \strng{namehash}{MJ+1}
+    \strng{fullhash}{MJHKKKZCLZHHBZF1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{number}{2}
+    \field{pages}{51\bibrangedash 60}
+    \field{title}{The new and improved {SQL}: 2016 standard}
+    \field{volume}{47}
+    \field{journaltitle}{ACM SIGMOD Record}
+    \field{year}{2018}
+  \endentry
+
+  \entry{petkovic2022rpr}{article}{}
+    \name{author}{1}{}{%
+      {{hash=PD}{%
+         family={Petkovi\'{c}},
+         familyi={P\bibinitperiod},
+         given={Du\v{s}an},
+         giveni={D\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{PD1}
+    \strng{fullhash}{PD1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \verb{doi}
+    \verb 10.1007/s13222-022-00404-3
+    \endverb
+    \field{issn}{1610-1995}
+    \field{number}{2}
+    \field{pages}{163\bibrangedash 174}
+    \field{title}{Specification of Row Pattern Recognition in the {SQL}
+  Standard and its Implementations}
+    \field{volume}{22}
+    \field{journaltitle}{Datenbank-Spektrum}
+    \field{month}{07}
+    \field{year}{2022}
+  \endentry
+
+  \entry{asaniczka2023amazon}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=a}{%
+         family={{asaniczka}},
+         familyi={a\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{a1}
+    \strng{fullhash}{a1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{Kaggle dataset}
+  \field{note}{\url{https://www.kaggle.com/datasets/asaniczka/amazon-uk-products-dataset-2023}
+  (accessed 2025-07-16)}
+    \field{title}{{Amazon UK Products Dataset 2023}}
+    \field{year}{2023}
+  \endentry
+
+  \entry{lawande2026rpr}{inproceedings}{}
+    \name{author}{3}{}{%
+      {{hash=LM}{%
+         family={Lawande},
+         familyi={L\bibinitperiod},
+         given={Monier},
+         giveni={M\bibinitperiod},
+      }}%
+      {{hash=EhM}{%
+         family={El-helw},
+         familyi={E\bibinithyphendelim h\bibinitperiod},
+         given={Mohamed},
+         giveni={M\bibinitperiod},
+      }}%
+      {{hash=AA}{%
+         family={Awad},
+         familyi={A\bibinitperiod},
+         given={Ahmed},
+         giveni={A\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {IEEE}%
+    }
+    \strng{namehash}{LMEhMAA1}
+    \strng{fullhash}{LMEhMAA1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{booktitle}{2026 IEEE 23rd Mediterranean Electrotechnical Conference
+  (MELECON)}
+    \verb{doi}
+    \verb 10.1109/MELECON64486.2026.11418885
+    \endverb
+    \field{title}{Row Pattern Recognition for Pandas: Bringing MATCH\_RECOGNIZE
+  to Python DataFrames}
+    \field{year}{2026}
+  \endentry
+
+  \entry{OracleMR}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=O}{%
+         family={{Oracle Corporation}},
+         familyi={O\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{O2}
+    \strng{fullhash}{O2}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+  \field{howpublished}{\url{https://docs.oracle.com/database/121/DWHSG/pattern_match.htm}}
+    \field{note}{Accessed: 2024}
+    \field{title}{Pattern Matching in Oracle Database 12c}
+    \field{year}{2013}
+  \endentry
+
+  \entry{ISO2016SQL}{report}{}
+    \name{author}{1}{}{%
+      {{hash=I}{%
+         family={{ISO/IEC}},
+         familyi={I\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{I2}
+    \strng{fullhash}{I2}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{title}{{ISO/IEC 9075-2:2016} Information technology --- Database
+  languages --- {SQL} --- Part~2: Foundation ({SQL/Foundation})}
+    \list{institution}{1}{%
+      {International Organization for Standardization}%
+    }
+    \field{type}{International Standard}
+    \field{year}{2016}
+  \endentry
+
+  \entry{hoffa2021snowflake}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=HF}{%
+         family={Hoffa},
+         familyi={H\bibinitperiod},
+         given={Felipe},
+         giveni={F\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{HF1}
+    \strng{fullhash}{HF1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{Medium, Towards Data Science}
+    \field{title}{Funnel Analytics with {SQL}: {MATCH\_RECOGNIZE()} on
+  {Snowflake}}
+    \verb{url}
+    \verb https://medium.com/data-science/funnel-analytics-with-sql-match-recog
+    \verb nize-on-snowflake-8bd576d9b7b1
+    \endverb
+    \field{month}{03}
+    \field{year}{2021}
+    \field{urlday}{15}
+    \field{urlmonth}{06}
+    \field{urlyear}{2025}
+  \endentry
+
+  \entry{winand2017sqlnew}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=WM}{%
+         family={Winand},
+         familyi={W\bibinitperiod},
+         given={Markus},
+         giveni={M\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{WM1}
+    \strng{fullhash}{WM1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{Modern SQL: A lot has changed since SQL-92}
+    \field{title}{What's new in {SQL:2016}}
+    \verb{url}
+    \verb https://modern-sql.com/blog/2017-06/whats-new-in-sql-2016
+    \endverb
+    \field{month}{06}
+    \field{year}{2017}
+    \field{urlday}{15}
+    \field{urlmonth}{06}
+    \field{urlyear}{2025}
+  \endentry
+
+  \entry{winand_match_recognize}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=WM}{%
+         family={Winand},
+         familyi={W\bibinitperiod},
+         given={Markus},
+         giveni={M\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{WM1}
+    \strng{fullhash}{WM1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{Modern SQL: A lot has changed since SQL-92}
+    \field{title}{{match\_recognize} --- Regular Expressions Over Rows}
+    \verb{url}
+    \verb https://modern-sql.com/feature/match_recognize
+    \endverb
+    \field{urlday}{15}
+    \field{urlmonth}{06}
+    \field{urlyear}{2025}
+  \endentry
+
+  \entry{melton2017sqlrpr}{article}{}
+    \name{author}{2}{}{%
+      {{hash=MJ}{%
+         family={Melton},
+         familyi={M\bibinitperiod},
+         given={Jim},
+         giveni={J\bibinitperiod},
+      }}%
+      {{hash=EA}{%
+         family={Eisenberg},
+         familyi={E\bibinitperiod},
+         given={Andrew},
+         giveni={A\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{MJEA1}
+    \strng{fullhash}{MJEA1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \verb{doi}
+    \verb 10.1145/3105906.3105914
+    \endverb
+    \field{number}{2}
+    \field{pages}{39\bibrangedash 48}
+    \field{title}{{SQL:2016} Support for Row Pattern Recognition}
+    \field{volume}{46}
+    \field{journaltitle}{SIGMOD Record}
+    \field{year}{2017}
+  \endentry
+
+  \entry{zemke2007pattern}{report}{}
+    \name{author}{4}{}{%
+      {{hash=ZF}{%
+         family={Zemke},
+         familyi={Z\bibinitperiod},
+         given={Fred},
+         giveni={F\bibinitperiod},
+      }}%
+      {{hash=WA}{%
+         family={Witkowski},
+         familyi={W\bibinitperiod},
+         given={Andrew},
+         giveni={A\bibinitperiod},
+      }}%
+      {{hash=CM}{%
+         family={Cherniack},
+         familyi={C\bibinitperiod},
+         given={Mitch},
+         giveni={M\bibinitperiod},
+      }}%
+      {{hash=CL}{%
+         family={Colby},
+         familyi={C\bibinitperiod},
+         given={Latha},
+         giveni={L\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{ZF+1}
+    \strng{fullhash}{ZFWACMCL1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{title}{Pattern Matching in Sequences of Rows}
+    \list{institution}{1}{%
+      {ANSI Standard Proposal}%
+    }
+    \field{type}{Technical Report}
+    \field{year}{2007}
+  \endentry
+
+  \entry{TURP2}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=U}{%
+         family={{University of T\"ubingen, Database Systems Group}},
+         familyi={U\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{U1}
+    \strng{fullhash}{U1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{Database Systems Teaching Notes}
+    \field{title}{{Match\_Recognize} Research Project}
+    \verb{url}
+    \verb https://db.cs.uni-tuebingen.de/teaching/research-projects/match-recog
+    \verb nize/
+    \endverb
+    \field{urlday}{07}
+    \field{urlmonth}{07}
+    \field{urlyear}{2025}
+  \endentry
+
+  \entry{TURP}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=U}{%
+         family={{University of T\"ubingen, Database Systems Group}},
+         familyi={U\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{U1}
+    \strng{fullhash}{U1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{Database Systems Teaching Notes}
+    \field{title}{Research Projects}
+    \verb{url}
+    \verb https://db.cs.uni-tuebingen.de/teaching/research-projects/
+    \endverb
+    \field{urlday}{07}
+    \field{urlmonth}{07}
+    \field{urlyear}{2025}
+  \endentry
+
+  \entry{oracle2021dwhsg}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=O}{%
+         family={{Oracle}},
+         familyi={O\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{O1}
+    \strng{fullhash}{O1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+  \field{howpublished}{\url{https://docs.oracle.com/en/database/oracle/oracle-database/21/dwhsg/sql-pattern-matching-data-warehouses.html}}
+    \field{note}{Oracle Database 21c Data Warehousing Guide}
+    \field{title}{SQL Pattern Matching in Oracle Database}
+    \field{year}{2021}
+    \field{urlday}{15}
+    \field{urlmonth}{06}
+    \field{urlyear}{2025}
+  \endentry
+
+  \entry{vsprem2024building}{article}{}
+    \name{author}{4}{}{%
+      {{hash=SS}{%
+         family={{\v{S}}prem},
+         familyi={{\v{S}}\bibinitperiod},
+         given={{\v{S}}imun},
+         giveni={{\v{S}}\bibinitperiod},
+      }}%
+      {{hash=TN}{%
+         family={Toma{\v{z}}in},
+         familyi={T\bibinitperiod},
+         given={Nikola},
+         giveni={N\bibinitperiod},
+      }}%
+      {{hash=MJ}{%
+         family={Mate{\v{c}}i{\'c}},
+         familyi={M\bibinitperiod},
+         given={Jelena},
+         giveni={J\bibinitperiod},
+      }}%
+      {{hash=HM}{%
+         family={Horvat},
+         familyi={H\bibinitperiod},
+         given={Marko},
+         giveni={M\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {MDPI}%
+    }
+    \strng{namehash}{SS+1}
+    \strng{fullhash}{SSTNMJHM1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{number}{4}
+    \field{pages}{709}
+    \field{title}{Building Advanced Web Applications Using Data Ingestion and
+  Data Processing Tools}
+    \field{volume}{13}
+    \field{journaltitle}{Electronics}
+    \field{year}{2024}
+  \endentry
+
+  \entry{georgiou2025streaming}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=GE}{%
+         family={Georgiou},
+         familyi={G\bibinitperiod},
+         given={Elena},
+         giveni={E\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{GE1}
+    \strng{fullhash}{GE1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{title}{Evaluating {Apache Flink}, {Kafka Streams}, and {Spark
+  Streaming} for Scalable Machine Learning Workflows}
+    \field{year}{2025}
+  \endentry
+
+  \entry{ML_Workflow}{inproceedings}{}
+    \name{author}{6}{}{%
+      {{hash=SM}{%
+         family={Schule},
+         familyi={S\bibinitperiod},
+         given={Maximilian},
+         giveni={M\bibinitperiod},
+      }}%
+      {{hash=LH}{%
+         family={Lang},
+         familyi={L\bibinitperiod},
+         given={Harald},
+         giveni={H\bibinitperiod},
+      }}%
+      {{hash=SM}{%
+         family={Springer},
+         familyi={S\bibinitperiod},
+         given={Maximilian},
+         giveni={M\bibinitperiod},
+      }}%
+      {{hash=KA}{%
+         family={Kemper},
+         familyi={K\bibinitperiod},
+         given={Alfons},
+         giveni={A\bibinitperiod},
+      }}%
+      {{hash=NT}{%
+         family={Neumann},
+         familyi={N\bibinitperiod},
+         given={Thomas},
+         giveni={T\bibinitperiod},
+      }}%
+      {{hash=GS}{%
+         family={Gunnemann},
+         familyi={G\bibinitperiod},
+         given={Stephan},
+         giveni={S\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Association for Computing Machinery}%
+    }
+    \strng{namehash}{SM+1}
+    \strng{fullhash}{SMLHSMKANTGS1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{booktitle}{Proceedings of the 33rd International Conference on
+  Scientific and Statistical Database Management}
+    \verb{doi}
+    \verb 10.1145/3468791.3468840
+    \endverb
+    \field{isbn}{9781450384131}
+    \field{pages}{25\bibrangedash 36}
+    \field{series}{SSDBM '21}
+    \field{title}{In-Database Machine Learning with SQL on GPUs}
+    \verb{url}
+    \verb https://doi.org/10.1145/3468791.3468840
+    \endverb
+    \list{location}{1}{%
+      {New York, NY, USA}%
+    }
+    \field{year}{2021}
+  \endentry
+
+  \entry{Makrynioti2019sql4mlAD}{article}{}
+    \name{author}{3}{}{%
+      {{hash=MN}{%
+         family={Makrynioti},
+         familyi={M\bibinitperiod},
+         given={Nantia},
+         giveni={N\bibinitperiod},
+      }}%
+      {{hash=LWR}{%
+         family={Ley-Wild},
+         familyi={L\bibinithyphendelim W\bibinitperiod},
+         given={Ruy},
+         giveni={R\bibinitperiod},
+      }}%
+      {{hash=VV}{%
+         family={Vassalos},
+         familyi={V\bibinitperiod},
+         given={Vasilis},
+         giveni={V\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{MNLWRVV1}
+    \strng{fullhash}{MNLWRVV1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{title}{sql4ml: A declarative end-to-end workflow for machine
+  learning}
+    \verb{url}
+    \verb https://api.semanticscholar.org/CorpusID:198968138
+    \endverb
+    \field{journaltitle}{arXiv preprint arXiv:1907.12415}
+    \field{year}{2019}
+  \endentry
+
+  \entry{naphade2025evolution}{article}{}
+    \name{author}{1}{}{%
+      {{hash=ND}{%
+         family={Naphade},
+         familyi={N\bibinitperiod},
+         given={D.},
+         giveni={D\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{ND1}
+    \strng{fullhash}{ND1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{number}{6}
+    \field{pages}{42\bibrangedash 53}
+    \field{title}{The Evolution and Modernization of Data Pipeline
+  Architectures}
+    \field{volume}{13}
+    \field{journaltitle}{European Journal of Computer Science and Information
+  Technology}
+    \field{year}{2025}
+  \endentry
+
+  \entry{raasveldt2019duckdb}{inproceedings}{}
+    \name{author}{2}{}{%
+      {{hash=RM}{%
+         family={Raasveldt},
+         familyi={R\bibinitperiod},
+         given={Mark},
+         giveni={M\bibinitperiod},
+      }}%
+      {{hash=MH}{%
+         family={M\"{u}hleisen},
+         familyi={M\bibinitperiod},
+         given={Hannes},
+         giveni={H\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Association for Computing Machinery}%
+    }
+    \strng{namehash}{RMMH1}
+    \strng{fullhash}{RMMH1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{booktitle}{Proceedings of the 2019 International Conference on
+  Management of Data}
+    \verb{doi}
+    \verb 10.1145/3299869.3320212
+    \endverb
+    \field{pages}{1981\bibrangedash 1984}
+    \field{title}{{DuckDB}: an Embeddable Analytical Database}
+    \list{location}{1}{%
+      {Amsterdam, Netherlands}%
+    }
+    \field{year}{2019}
+  \endentry
+
+  \entry{mogensen2024compiler}{book}{}
+    \name{author}{1}{}{%
+      {{hash=MTAE}{%
+         family={Mogensen},
+         familyi={M\bibinitperiod},
+         given={Torben\bibnamedelima {\AE}gidius},
+         giveni={T\bibinitperiod\bibinitdelim {\AE}\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Springer Nature}%
+    }
+    \strng{namehash}{MTAE1}
+    \strng{fullhash}{MTAE1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{edition}{3rd}
+    \field{pages}{105\bibrangedash 113}
+    \field{title}{Introduction to Compiler Design}
+    \field{year}{2024}
+  \endentry
+
+  \entry{8509400}{inproceedings}{}
+    \name{author}{5}{}{%
+      {{hash=LJ}{%
+         family={Lucas},
+         familyi={L\bibinitperiod},
+         given={Ji},
+         giveni={J\bibinitperiod},
+      }}%
+      {{hash=IY}{%
+         family={Idris},
+         familyi={I\bibinitperiod},
+         given={Yasser},
+         giveni={Y\bibinitperiod},
+      }}%
+      {{hash=CRB}{%
+         family={Contreras-Rojas},
+         familyi={C\bibinithyphendelim R\bibinitperiod},
+         given={Bertty},
+         giveni={B\bibinitperiod},
+      }}%
+      {{hash=QRJA}{%
+         family={Quiane-Ruiz},
+         familyi={Q\bibinithyphendelim R\bibinitperiod},
+         given={Jorge-Arnulfo},
+         giveni={J\bibinithyphendelim A\bibinitperiod},
+      }}%
+      {{hash=CS}{%
+         family={Chawla},
+         familyi={C\bibinitperiod},
+         given={Sanjay},
+         giveni={S\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{LJ+1}
+    \strng{fullhash}{LJIYCRBQRJACS1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{booktitle}{2018 IEEE 34th International Conference on Data
+  Engineering (ICDE)}
+    \verb{doi}
+    \verb 10.1109/ICDE.2018.00179
+    \endverb
+    \field{pages}{1573\bibrangedash 1576}
+    \field{title}{RheemStudio: Cross-Platform Data Analytics Made Easy}
+    \field{year}{2018}
+  \endentry
+
+  \entry{Evaluation}{misc}{}
+    \name{author}{6}{}{%
+      {{hash=MA}{%
+         family={Mozzillo},
+         familyi={M\bibinitperiod},
+         given={Angelo},
+         giveni={A\bibinitperiod},
+      }}%
+      {{hash=ZL}{%
+         family={Zecchini},
+         familyi={Z\bibinitperiod},
+         given={Luca},
+         giveni={L\bibinitperiod},
+      }}%
+      {{hash=GL}{%
+         family={Gagliardelli},
+         familyi={G\bibinitperiod},
+         given={Luca},
+         giveni={L\bibinitperiod},
+      }}%
+      {{hash=AA}{%
+         family={Aslam},
+         familyi={A\bibinitperiod},
+         given={Adeel},
+         giveni={A\bibinitperiod},
+      }}%
+      {{hash=BS}{%
+         family={Bergamaschi},
+         familyi={B\bibinitperiod},
+         given={Sonia},
+         giveni={S\bibinitperiod},
+      }}%
+      {{hash=SG}{%
+         family={Simonini},
+         familyi={S\bibinitperiod},
+         given={Giovanni},
+         giveni={G\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {OpenProceedings.org}%
+    }
+    \strng{namehash}{MA+1}
+    \strng{fullhash}{MAZLGLAABSSG1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \verb{doi}
+    \verb 10.48786/EDBT.2025.27
+    \endverb
+    \field{title}{Evaluation of Dataframe Libraries for Data Preparation on a
+  Single Machine}
+    \verb{url}
+    \verb https://openproceedings.org/2025/conf/edbt/paper-96.pdf
+    \endverb
+    \field{year}{2025}
+  \endentry
+
+  \entry{in-memory_processing}{article}{}
+    \name{author}{5}{}{%
+      {{hash=CS}{%
+         family={Chawla},
+         familyi={C\bibinitperiod},
+         given={Sanjay},
+         giveni={S\bibinitperiod},
+      }}%
+      {{hash=CRB}{%
+         family={Contreras\bibnamedelima Rojas},
+         familyi={C\bibinitperiod\bibinitdelim R\bibinitperiod},
+         given={Bertty},
+         giveni={B\bibinitperiod},
+      }}%
+      {{hash=KZ}{%
+         family={Kaoudi},
+         familyi={K\bibinitperiod},
+         given={Zoi},
+         giveni={Z\bibinitperiod},
+      }}%
+      {{hash=KS}{%
+         family={Kruse},
+         familyi={K\bibinitperiod},
+         given={Sebastian},
+         giveni={S\bibinitperiod},
+      }}%
+      {{hash=QRJA}{%
+         family={Quian{\'e}-Ruiz},
+         familyi={Q\bibinithyphendelim R\bibinitperiod},
+         given={Jorge-Arnulfo},
+         giveni={J\bibinithyphendelim A\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{CS+1}
+    \strng{fullhash}{CSCRBKZKSQRJA1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \verb{doi}
+    \verb 10.48550/arXiv.1805.11723
+    \endverb
+    \field{title}{Building your Cross-Platform Application with {RHEEM}}
+    \verb{url}
+    \verb https://arxiv.org/abs/1805.11723
+    \endverb
+    \field{journaltitle}{arXiv preprint arXiv:1805.11723}
+    \field{year}{2018}
+  \endentry
+
+  \entry{monierashraf2025rowmatch}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=M}{%
+         family={{MonierAshraf}},
+         familyi={M\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{M1}
+    \strng{fullhash}{M1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{GitHub repository}
+    \field{title}{Row\_match\_recognize}
+    \verb{url}
+    \verb https://github.com/MonierAshraf/Row_match_recognize/blob/5d58e8de6b11
+    \verb 43e8c1d77cd7017e37c7a8bae421/Examples%20Match_reocginze/Examples.ipyn
+    \verb b
+    \endverb
+    \field{year}{2025}
+  \endentry
+
+  \entry{tarazona2021antlr}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=TBYS}{%
+         family={Tarazona\bibnamedelima Bernal},
+         familyi={T\bibinitperiod\bibinitdelim B\bibinitperiod},
+         given={Yeisson\bibnamedelima Steven},
+         giveni={Y\bibinitperiod\bibinitdelim S\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Universidad de los Andes}%
+    }
+    \strng{namehash}{TBYS1}
+    \strng{fullhash}{TBYS1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{title}{ANTLR 4 grammar of the Swift 5 programming language}
+    \field{year}{2021}
+  \endentry
+
+  \entry{parr2013definitive}{book}{}
+    \name{author}{1}{}{%
+      {{hash=PT}{%
+         family={Parr},
+         familyi={P\bibinitperiod},
+         given={Terence},
+         giveni={T\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {The Pragmatic Bookshelf}%
+    }
+    \strng{namehash}{PT1}
+    \strng{fullhash}{PT1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{title}{The definitive ANTLR 4 reference}
+    \field{year}{2013}
+  \endentry
+
+  \entry{salomaa1996nfa}{inproceedings}{}
+    \name{author}{2}{}{%
+      {{hash=SK}{%
+         family={Salomaa},
+         familyi={S\bibinitperiod},
+         given={Kai},
+         giveni={K\bibinitperiod},
+      }}%
+      {{hash=YS}{%
+         family={Yu},
+         familyi={Y\bibinitperiod},
+         given={Sheng},
+         giveni={S\bibinitperiod},
+      }}%
+    }
+    \list{organization}{1}{%
+      {Springer}%
+    }
+    \strng{namehash}{SKYS1}
+    \strng{fullhash}{SKYS1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{booktitle}{International Workshop on Implementing Automata}
+    \field{pages}{149\bibrangedash 158}
+    \field{title}{NFA to DFA transformation for finite languages}
+    \field{year}{1996}
+  \endentry
+
+  \entry{DragonBook}{book}{}
+    \name{author}{4}{}{%
+      {{hash=AAV}{%
+         family={Aho},
+         familyi={A\bibinitperiod},
+         given={Alfred\bibnamedelima V.},
+         giveni={A\bibinitperiod\bibinitdelim V\bibinitperiod},
+      }}%
+      {{hash=LMS}{%
+         family={Lam},
+         familyi={L\bibinitperiod},
+         given={Monica\bibnamedelima S.},
+         giveni={M\bibinitperiod\bibinitdelim S\bibinitperiod},
+      }}%
+      {{hash=SR}{%
+         family={Sethi},
+         familyi={S\bibinitperiod},
+         given={Ravi},
+         giveni={R\bibinitperiod},
+      }}%
+      {{hash=UJD}{%
+         family={Ullman},
+         familyi={U\bibinitperiod},
+         given={Jeffrey\bibnamedelima D.},
+         giveni={J\bibinitperiod\bibinitdelim D\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Addison-Wesley}%
+    }
+    \strng{namehash}{AAV+1}
+    \strng{fullhash}{AAVLMSSRUJD1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{edition}{2nd}
+    \field{isbn}{978-0-321-48681-3}
+    \field{title}{Compilers: Principles, Techniques, and Tools}
+    \list{location}{1}{%
+      {Boston, MA, USA}%
+    }
+    \field{year}{2006}
+  \endentry
+
+  \entry{sqlparse_tool}{misc}{}
+    \name{author}{2}{}{%
+      {{hash=AA}{%
+         family={Albrecht},
+         familyi={A\bibinitperiod},
+         given={Andi},
+         giveni={A\bibinitperiod},
+      }}%
+      {{hash=c}{%
+         family={contributors},
+         familyi={c\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{AAc1}
+    \strng{fullhash}{AAc1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{\url{https://sqlparse.readthedocs.io/en/latest/}}
+    \field{note}{Accessed: 25 June 2026}
+    \field{title}{python-sqlparse Documentation}
+    \field{year}{2026}
+  \endentry
+
+  \entry{sqlglot_tool}{misc}{}
+    \name{author}{2}{}{%
+      {{hash=MT}{%
+         family={Mao},
+         familyi={M\bibinitperiod},
+         given={Toby},
+         giveni={T\bibinitperiod},
+      }}%
+      {{hash=c}{%
+         family={contributors},
+         familyi={c\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{MTc1}
+    \strng{fullhash}{MTc1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{\url{https://github.com/tobymao/sqlglot}}
+    \field{note}{Accessed: 25 June 2026}
+    \field{title}{{SQLGlot}: Python SQL Parser and Transpiler}
+    \field{year}{2026}
+  \endentry
+
+  \entry{mo_sql_parsing_tool}{misc}{}
+    \name{author}{2}{}{%
+      {{hash=KE}{%
+         family={Klahn},
+         familyi={K\bibinitperiod},
+         given={Erik},
+         giveni={E\bibinitperiod},
+      }}%
+      {{hash=c}{%
+         family={contributors},
+         familyi={c\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{KEc1}
+    \strng{fullhash}{KEc1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{\url{https://github.com/klahnakoski/mo-sql-parsing}}
+    \field{note}{Accessed: 25 June 2026}
+    \field{title}{{mo-sql-parsing}: More SQL Parsing}
+    \field{year}{2026}
+  \endentry
+
+  \entry{libpg_query_tool}{misc}{}
+    \name{author}{2}{}{%
+      {{hash=p}{%
+         family={{pganalyze}},
+         familyi={p\bibinitperiod},
+      }}%
+      {{hash=c}{%
+         family={contributors},
+         familyi={c\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{pc1}
+    \strng{fullhash}{pc1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{\url{https://github.com/pganalyze/libpg_query}}
+    \field{note}{Accessed: 25 June 2026}
+    \field{title}{{libpg\_query}: PostgreSQL Parser as a Standalone Library}
+    \field{year}{2026}
+  \endentry
+
+  \entry{pglast_tool}{misc}{}
+    \name{author}{2}{}{%
+      {{hash=GL}{%
+         family={Gaifax},
+         familyi={G\bibinitperiod},
+         given={Lele},
+         giveni={L\bibinitperiod},
+      }}%
+      {{hash=c}{%
+         family={contributors},
+         familyi={c\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{GLc1}
+    \strng{fullhash}{GLc1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{\url{https://pglast.readthedocs.io/en/latest/}}
+    \field{note}{Accessed: 25 June 2026}
+    \field{title}{{pglast}: PostgreSQL Languages AST and Statements Prettifier}
+    \field{year}{2026}
+  \endentry
+
+  \entry{wagenknecht2022formal}{book}{}
+    \name{author}{2}{}{%
+      {{hash=WC}{%
+         family={Wagenknecht},
+         familyi={W\bibinitperiod},
+         given={Christian},
+         giveni={C\bibinitperiod},
+      }}%
+      {{hash=HM}{%
+         family={Hielscher},
+         familyi={H\bibinitperiod},
+         given={Michael},
+         giveni={M\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Springer}%
+    }
+    \strng{namehash}{WCHM1}
+    \strng{fullhash}{WCHM1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{title}{Formale Sprachen, abstrakte Automaten und Compiler}
+    \field{year}{2022}
+  \endentry
+
+  \entry{ply_tool}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=BDM}{%
+         family={Beazley},
+         familyi={B\bibinitperiod},
+         given={David\bibnamedelima M.},
+         giveni={D\bibinitperiod\bibinitdelim M\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{BDM1}
+    \strng{fullhash}{BDM1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{\url{https://www.dabeaz.com/ply/}}
+    \field{note}{Accessed: 2024}
+    \field{title}{{PLY} (Python Lex-Yacc)}
+    \field{year}{2023}
+  \endentry
+
+  \entry{lark_tool}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=SE}{%
+         family={Shinan},
+         familyi={S\bibinitperiod},
+         given={Erez},
+         giveni={E\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{SE1}
+    \strng{fullhash}{SE1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{\url{https://github.com/lark-parser/lark}}
+    \field{note}{Accessed: 2024}
+    \field{title}{Lark -- a modern parsing library for {Python}}
+    \field{year}{2023}
+  \endentry
+
+  \entry{Parr2013}{book}{}
+    \name{author}{1}{}{%
+      {{hash=PT}{%
+         family={Parr},
+         familyi={P\bibinitperiod},
+         given={Terence},
+         giveni={T\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Pragmatic Bookshelf}%
+    }
+    \strng{namehash}{PT1}
+    \strng{fullhash}{PT1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{isbn}{978-1-934356-99-9}
+    \field{title}{The Definitive {ANTLR~4} Reference}
+    \list{location}{1}{%
+      {Lewisville, TX, USA}%
+    }
+    \field{year}{2013}
+  \endentry
+
+  \entry{parr2014adaptive}{inproceedings}{}
+    \name{author}{3}{}{%
+      {{hash=PT}{%
+         family={Parr},
+         familyi={P\bibinitperiod},
+         given={Terence},
+         giveni={T\bibinitperiod},
+      }}%
+      {{hash=HS}{%
+         family={Harwell},
+         familyi={H\bibinitperiod},
+         given={Sam},
+         giveni={S\bibinitperiod},
+      }}%
+      {{hash=FK}{%
+         family={Fisher},
+         familyi={F\bibinitperiod},
+         given={Kathleen},
+         giveni={K\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {ACM}%
+    }
+    \strng{namehash}{PTHSFK1}
+    \strng{fullhash}{PTHSFK1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{booktitle}{Proceedings of the 2014 {ACM} International Conference on
+  Object Oriented Programming Systems Languages {\&} Applications}
+    \verb{doi}
+    \verb 10.1145/2660193.2660202
+    \endverb
+    \field{series}{OOPSLA '14}
+    \field{title}{Adaptive {LL(*)} Parsing: The Power of Dynamic Analysis}
+    \field{year}{2014}
+  \endentry
+
+  \entry{antlr_performance}{article}{}
+    \name{author}{4}{}{%
+      {{hash=OF}{%
+         family={Ortin},
+         familyi={O\bibinitperiod},
+         given={Francisco},
+         giveni={F\bibinitperiod},
+      }}%
+      {{hash=QJ}{%
+         family={Quiroga},
+         familyi={Q\bibinitperiod},
+         given={Jose},
+         giveni={J\bibinitperiod},
+      }}%
+      {{hash=RPO}{%
+         family={Rodriguez-Prieto},
+         familyi={R\bibinithyphendelim P\bibinitperiod},
+         given={Oscar},
+         giveni={O\bibinitperiod},
+      }}%
+      {{hash=GM}{%
+         family={Garcia},
+         familyi={G\bibinitperiod},
+         given={Miguel},
+         giveni={M\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Elsevier}%
+    }
+    \strng{namehash}{OF+1}
+    \strng{fullhash}{OFQJRPOGM1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{title}{An empirical evaluation of {Lex/Yacc} and {ANTLR} parser
+  generation tools}
+    \field{volume}{64}
+    \field{journaltitle}{Computer Languages, Systems \& Structures}
+    \field{year}{2021}
+  \endentry
+
+  \entry{antlr_website}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=A}{%
+         family={{ANTLR}},
+         familyi={A\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{A1}
+    \strng{fullhash}{A1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{\url{https://www.antlr.org/}}
+    \field{note}{Accessed: Nov. 15, 2024}
+    \field{title}{{ANTLR} (ANother Tool for Language Recognition)}
+    \field{year}{2024}
+  \endentry
+
+  \entry{parr_antlr_docs}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=PT}{%
+         family={Parr},
+         familyi={P\bibinitperiod},
+         given={Terence},
+         giveni={T\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{PT1}
+    \strng{fullhash}{PT1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{howpublished}{\url{https://github.com/antlr/antlr4/tree/dev/doc}}
+    \field{note}{Accessed: Nov. 15, 2024}
+    \field{title}{{ANTLR4} Documentation}
+    \field{year}{2024}
+  \endentry
+
+  \entry{antlr_trino_sql}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=A}{%
+         family={{ANTLR Team and Contributors}},
+         familyi={A\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{A2}
+    \strng{fullhash}{A2}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+  \field{howpublished}{\url{https://github.com/antlr/grammars-v4/tree/master/sql/trino}}
+    \field{title}{Trino SQL Grammar for ANTLR}
+    \field{year}{2022}
+  \endentry
+
+  \entry{jones2003ast}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=JJ}{%
+         family={Jones},
+         familyi={J\bibinitperiod},
+         given={Jeremy},
+         giveni={J\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{JJ1}
+    \strng{fullhash}{JJ1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+  \field{howpublished}{\url{https://hillside.net/plop/plop2003/Papers/Jones-ImplementingASTs.pdf}}
+    \field{title}{Abstract Syntax Tree Implementation Idioms}
+    \field{year}{2003}
+  \endentry
+
+  \entry{robson2022designpatterns}{book}{}
+    \name{author}{2}{}{%
+      {{hash=RE}{%
+         family={Robson},
+         familyi={R\bibinitperiod},
+         given={Elisabeth},
+         giveni={E\bibinitperiod},
+      }}%
+      {{hash=FE}{%
+         family={Freeman},
+         familyi={F\bibinitperiod},
+         given={Eric},
+         giveni={E\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {O'Reilly}%
+    }
+    \strng{namehash}{REFE1}
+    \strng{fullhash}{REFE1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{pages}{614\bibrangedash 615}
+    \field{title}{Entwurfsmuster von Kopf bis Fu{\ss}}
+    \field{year}{2022}
+  \endentry
+
+  \entry{HopcroftUllman}{book}{}
+    \name{author}{3}{}{%
+      {{hash=HJE}{%
+         family={Hopcroft},
+         familyi={H\bibinitperiod},
+         given={John\bibnamedelima E.},
+         giveni={J\bibinitperiod\bibinitdelim E\bibinitperiod},
+      }}%
+      {{hash=MR}{%
+         family={Motwani},
+         familyi={M\bibinitperiod},
+         given={Rajeev},
+         giveni={R\bibinitperiod},
+      }}%
+      {{hash=UJD}{%
+         family={Ullman},
+         familyi={U\bibinitperiod},
+         given={Jeffrey\bibnamedelima D.},
+         giveni={J\bibinitperiod\bibinitdelim D\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Addison-Wesley}%
+    }
+    \strng{namehash}{HJEMRUJD1}
+    \strng{fullhash}{HJEMRUJD1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{edition}{3rd}
+    \field{isbn}{978-0-321-45536-9}
+    \field{title}{Introduction to Automata Theory, Languages, and Computation}
+    \list{location}{1}{%
+      {Boston, MA, USA}%
+    }
+    \field{year}{2006}
+  \endentry
+
+  \entry{Thompson1968}{article}{}
+    \name{author}{1}{}{%
+      {{hash=TK}{%
+         family={Thompson},
+         familyi={T\bibinitperiod},
+         given={Ken},
+         giveni={K\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {ACM}%
+    }
+    \strng{namehash}{TK1}
+    \strng{fullhash}{TK1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \verb{doi}
+    \verb 10.1145/363347.363387
+    \endverb
+    \field{number}{6}
+    \field{pages}{419\bibrangedash 422}
+    \field{title}{Programming Techniques: Regular Expression Search Algorithm}
+    \field{volume}{11}
+    \field{journaltitle}{Communications of the ACM}
+    \field{year}{1968}
+  \endentry
+
+  \entry{e104-d_3_381}{article}{}
+    \name{author}{2}{}{%
+      {{hash=YH}{%
+         family={Yamamoto},
+         familyi={Y\bibinitperiod},
+         given={Hiroaki},
+         giveni={H\bibinitperiod},
+      }}%
+      {{hash=FH}{%
+         family={Fujiwara},
+         familyi={F\bibinitperiod},
+         given={Hiroshi},
+         giveni={H\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{YHFH1}
+    \strng{fullhash}{YHFH1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \verb{doi}
+    \verb 10.1587/transinf.2020FCP0010
+    \endverb
+    \field{issn}{1745-1361}
+    \field{title}{A New Finite Automata Construction Using a Prefix and a
+  Suffix of Regular Expressions}
+    \field{journaltitle}{IEICE Transactions on Information and Systems}
+    \field{year}{2021}
+  \endentry
+
+  \entry{10.1145/986537.986588}{inproceedings}{}
+    \name{author}{1}{}{%
+      {{hash=XG}{%
+         family={Xing},
+         familyi={X\bibinitperiod},
+         given={Guangming},
+         giveni={G\bibinitperiod},
+      }}%
+    }
+    \list{publisher}{1}{%
+      {Association for Computing Machinery}%
+    }
+    \strng{namehash}{XG1}
+    \strng{fullhash}{XG1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{booktitle}{Proceedings of the 42nd Annual ACM Southeast Conference}
+    \verb{doi}
+    \verb 10.1145/986537.986588
+    \endverb
+    \field{isbn}{1581138709}
+    \field{series}{ACMSE '04}
+    \field{title}{A simple way to construct NFA with fewer states and
+  transitions}
+    \verb{url}
+    \verb https://doi.org/10.1145/986537.986588
+    \endverb
+    \list{location}{1}{%
+      {New York, NY, USA}%
+    }
+    \field{year}{2004}
+  \endentry
+
+  \entry{Python_UDF}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=AM}{%
+         family={Ashraf},
+         familyi={A\bibinitperiod},
+         given={Monier},
+         giveni={M\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{AM1}
+    \strng{fullhash}{AM1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{GitHub repository}
+    \field{title}{Python UDF Example for Row Pattern Recognition}
+    \verb{url}
+    \verb https://github.com/MonierAshraf/Row_match_recognize/blob/master/Pytho
+    \verb n_Examples/python_udf.ipynb
+    \endverb
+    \field{year}{2025}
+  \endentry
+
+  \entry{monierashraf2025oracle}{misc}{}
+    \name{author}{1}{}{%
+      {{hash=AM}{%
+         family={Ashraf},
+         familyi={A\bibinitperiod},
+         given={Monier},
+         giveni={M\bibinitperiod},
+      }}%
+    }
+    \strng{namehash}{AM1}
+    \strng{fullhash}{AM1}
+    \field{labelnamesource}{author}
+    \field{labeltitlesource}{title}
+    \field{note}{GitHub repository}
+    \field{title}{Oracle {MATCH\_RECOGNIZE} --- Stock Price Examples}
+    \verb{url}
+    \verb https://github.com/MonierAshraf/Row_match_recognize/blob/master/Examp
+    \verb les%20Match_reocginze/Oracle_data_tables.sql
+    \endverb
+    \field{year}{2025}
+  \endentry
+\enddatalist
+\endinput

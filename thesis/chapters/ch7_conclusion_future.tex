@@ -1,0 +1,349 @@
+% ============================================================
+%  ch7_conclusion_future.tex
+%  Chapter 7: Conclusions and Future Work
+%  Master's Thesis -- SQL MATCH_RECOGNIZE on Pandas DataFrames
+% ============================================================
+\chapter{Conclusions and Future Work}
+\label{chap:conclusions}
+
+This chapter concludes the thesis by interpreting the main findings,
+stating the remaining limitations, and outlining future research
+directions.  Section~\ref{sec:discussion} discusses the practical
+meaning of the evaluation results.  Section~\ref{sec:conc-limitations}
+summarizes the current limitations.  Section~\ref{sec:conc-validation}
+maps the chapter's claims to the evidence used to support them.
+Section~\ref{sec:conclusion} states the overall conclusion, and
+Section~\ref{sec:conc-future} presents future work.
+
+% ----------------------------------------------------------------
+\section{Discussion}
+\label{sec:discussion}
+% ----------------------------------------------------------------
+
+The results show that a practical subset of SQL row-pattern
+recognition can be moved into \texttt{pandas} without abandoning the
+declarative structure of \texttt{MATCH\_\allowbreak{}RECOGNIZE}.  The correctness
+experiments compared selected reference queries against Trino~473,
+Oracle, and hand-written \texttt{pandas} baselines.  For the reported
+reference cases, the proposed engine produced the same rows and
+measure values as the SQL baselines, including partition-local
+ordering, implicit \texttt{DEFINE} behavior, navigation with
+\texttt{PREV}, \texttt{MATCH\_NUMBER()}, and measure materialization.
+These results do not imply broad equivalence with every feature of
+commercial SQL systems; instead, they provide evidence that the
+implemented subset preserves the evaluated semantics.
+
+The comparison with idiomatic \texttt{pandas} is also important.
+Equivalent procedural implementations require explicit
+\texttt{groupby}, \texttt{shift}/\texttt{diff}, candidate filtering,
+index bookkeeping, and manual handling of skip behavior.  The SQL
+form expresses the same intent in one declarative statement.  This
+reduces developer effort, makes the pattern definition easier to
+inspect, and supports reuse across notebook-based analysis and SQL
+workflows, provided that the query stays within the supported syntax
+and semantic subset.
+
+The performance evaluation further supports the practical viability of
+the approach for medium-scale in-memory workloads.  Chapter~\ref{chap:evaluation}
+reported 40 successful pattern--size runs using five pattern families
+and eight dataset sizes from 25\,K to 300\,K rows.  Across these runs,
+the implementation achieved an average throughput of 9\,444~rows/s,
+with throughput remaining relatively stable as input size increased.
+The main variation came from pattern structure: simple and optional
+patterns were fastest, while quantified and nested patterns incurred
+additional transition and predicate-evaluation overhead.  The memory
+measurements were also bounded for the evaluated range, with peak
+memory remaining below 75\,MB across the 40 reported scenarios.
+
+Architecturally, the system benefits from a separation between parsing,
+semantic validation, automata construction, matching, and result
+materialization.  The implementation uses an ANTLR4 parser based on
+the Trino grammar, normalized internal representations, NFA/DFA
+construction, a \texttt{pandas}-oriented execution layer, and measure
+evaluation.  This modular structure makes the implementation easier to
+validate and easier to extend.  It also limits the effect of future
+changes: improving pattern compilation, adding a backend, or extending
+measure evaluation can be done without redesigning the entire engine.
+
+The optimization layer contributes to this result but should be
+interpreted precisely.  The implementation includes LRU-style pattern
+caching, bounded memory-management mechanisms, condition-cache
+pre-warming, and a parallel-aware scheduling abstraction for partition
+work.  The current thesis evaluation, however, should be read as an
+evaluation of the implemented \texttt{pandas} execution path rather
+than as evidence for a distributed or broadly parallel SQL engine.
+This distinction is important because SQL engines such as Trino and
+Oracle provide mature optimizers, broader dialect coverage, and
+execution infrastructure that remain outside the scope of the present
+prototype.
+
+The central finding is therefore scoped but meaningful: the thesis
+demonstrates that SQL row-pattern semantics can be compiled into a
+finite-automata-based engine and executed directly over DataFrames,
+while producing correct results for the evaluated reference scenarios
+and predictable performance over the measured input range.
+
+% ----------------------------------------------------------------
+\section{Validation of Chapter Claims}
+\label{sec:conc-validation}
+% ----------------------------------------------------------------
+
+Table~\ref{tab:conc-claim-validation} summarizes the main claims made
+in this chapter, the evidence supporting each claim, and the boundary
+conditions under which the claim should be interpreted.  This mapping
+is intended to keep the conclusion scientifically scoped: each claim is
+linked either to the correctness comparisons, the implementation
+description, or the measured benchmark results.
+
+{\small
+\setlength{\LTleft}{0pt}
+\setlength{\LTright}{0pt}
+\begin{longtable}{@{}p{0.18\textwidth}p{0.27\textwidth}p{0.25\textwidth}p{0.20\textwidth}@{}}
+\caption{Validation mapping between thesis claims, supporting
+evidence, and scope boundaries}
+\label{tab:conc-claim-validation} \\
+\toprule
+\textbf{Claim area} & \textbf{Supporting evidence} &
+\textbf{Validated conclusion} & \textbf{Scope boundary} \\
+\midrule
+\endfirsthead
+\caption*{Table~\thetable{} (continued): Validation mapping between
+thesis claims, supporting evidence, and scope boundaries} \\
+\toprule
+\textbf{Claim area} & \textbf{Supporting evidence} &
+\textbf{Validated conclusion} & \textbf{Scope boundary} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+Correctness &
+Selected Trino~473, Oracle, and hand-written \texttt{pandas}
+comparisons in Chapter~\ref{chap:evaluation}. &
+The reported reference queries produce the same rows and measure
+values across the compared systems. &
+The evidence covers selected supported scenarios, not every SQL:2016
+or vendor-specific case. \\
+\midrule
+Feature support &
+Implemented parser, semantic model, NFA/DFA compilation, output
+modes, skip policies, navigation, subsets, anchors, exclusion blocks,
+and \texttt{PERMUTE} support described in
+Chapters~\ref{chap:methodology} and~\ref{chap:implementation}. &
+The system supports a practical row-pattern subset suitable for
+DataFrame-centered analysis. &
+Unsupported syntax, uncommon edge cases, and cost-based optimizer behavior
+remain outside the thesis scope. \\
+\midrule
+Performance &
+The 40-run Amazon UK Products benchmark over five pattern families and
+eight dataset sizes from 25\,K to 300\,K rows. &
+Execution time scales predictably over the measured range, with
+average throughput of 9\,444~rows/s. &
+The benchmark does not establish performance for very large,
+distributed, or highly adversarial workloads. \\
+\midrule
+Memory use &
+Memory measurements for all 40 benchmark scenarios, including the
+maximum observed peak memory of 74.51\,MB. &
+Memory use remains bounded for the evaluated workloads. &
+The measurements are empirical and do not define a formal upper bound
+for all possible patterns or datasets. \\
+\midrule
+Developer effort &
+Comparison between declarative \texttt{MATCH\_\allowbreak{}RECOGNIZE} queries and
+hand-written \texttt{pandas} baselines using grouping, shifting, and
+manual skip handling. &
+The SQL form reduces procedural code and improves readability for the
+evaluated pattern tasks. &
+The claim is based on code-level comparison, not a controlled user
+study. \\
+\midrule
+Architecture &
+The modular parser--AST--automata--matcher--measure-evaluator pipeline
+described in Chapter~\ref{chap:implementation}. &
+The design separates concerns and creates extension points for future
+backends and optimizations. &
+The current implementation remains a \texttt{pandas}-centered
+prototype, not a mature distributed SQL optimizer. \\
+\end{longtable}
+}
+
+The validation evidence also has three important threats to validity.
+First, \emph{internal validity} depends on the correctness of the
+reference baselines and on careful normalization of case-only column
+differences between SQL and \texttt{pandas} outputs.  Second,
+\emph{construct validity} depends on whether the selected metrics
+capture the intended qualities: row-level equality captures output
+correctness for the tested cases, throughput captures execution speed,
+and line-count comparison captures only one aspect of developer
+effort.  Third, \emph{external validity} is limited by the use of one
+workstation, one main real-world dataset, and a bounded range of input
+sizes.  These threats do not invalidate the reported results, but they
+define the conditions under which the results should be generalized.
+
+% ----------------------------------------------------------------
+\section{Limitations}
+\label{sec:conc-limitations}
+% ----------------------------------------------------------------
+
+Several limitations remain and should be considered when interpreting
+the results.
+
+\textbf{Supported subset rather than exhaustive SQL coverage.}
+The implementation targets a substantial but bounded subset of
+\texttt{MATCH\_\allowbreak{}RECOGNIZE}.  It covers core clauses such as
+\texttt{PARTITION BY}, \texttt{ORDER BY}, \texttt{PATTERN},
+\texttt{DEFINE}, selected \texttt{MEASURES}, supported skip modes,
+output modes, navigation functions, subsets, exclusion blocks,
+anchors, and \texttt{PERMUTE}.  It does not claim exhaustive SQL:2016
+coverage or feature parity with Trino, Oracle, or other production SQL
+engines.  Vendor-specific extensions and uncommon edge cases remain
+outside the validated scope.
+
+\textbf{Complex pattern and quantifier interactions.}
+The automata-based design handles ordinary sequences, alternation,
+grouping, bounded repetitions, and common quantified patterns.
+However, deeply nested expressions with multiple greedy or unbounded
+quantifiers can increase the number of states and transitions
+substantially.  Constructs such as \texttt{PERMUTE} are especially
+expensive because their direct semantics involve factorial expansion,
+so the implementation relies on complexity guards and conservative
+fallback behavior for large cases.
+
+\textbf{Measure and aggregate expression scope.}
+The engine supports selected aggregate and scalar expressions used by
+the implemented measure evaluator, including commonly used functions
+such as \texttt{SUM}, \texttt{COUNT}, \texttt{MIN}, \texttt{MAX},
+\texttt{AVG}, statistical aggregates, collection/string aggregates,
+conditional aggregates, and supported \texttt{RUNNING}/\texttt{FINAL}
+forms.  Nevertheless, arbitrary user-defined aggregate functions and
+all possible SQL expression combinations remain outside the current
+scope.
+This is a natural limitation of an in-memory prototype that implements
+its own expression evaluator rather than reusing a general SQL
+execution engine.
+
+\textbf{Performance boundaries.}
+The benchmark demonstrates predictable behavior from 25\,K to 300\,K
+rows on the evaluated workstation.  Larger datasets, wider schemas,
+more partitions, and highly ambiguous patterns may expose bottlenecks
+from Python execution, \texttt{pandas} group processing, row-context
+construction, and predicate evaluation.  Native SQL engines and
+compiled columnar systems can still provide higher throughput for
+large-scale workloads.
+
+\textbf{Memory behavior.}
+Memory usage remained bounded in the reported benchmark, but the
+measurements were non-monotonic across pattern families and dataset
+sizes.  This behavior is consistent with garbage collection timing,
+intermediate state representation, partition grouping, and result-set
+materialization.  Therefore, the reported memory results should be
+interpreted as empirical measurements for the tested workloads rather
+than as a formal upper bound for all possible patterns.
+
+\textbf{Optimizer integration.}
+The engine operates independently of database query optimizers.  It
+does not currently perform cost-based plan selection, predicate
+pushdown into external storage, join reordering, or distributed
+resource scheduling.  As a result, some plan-level optimizations
+available in database systems are not available in the current
+implementation.
+
+% ----------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+% ----------------------------------------------------------------
+
+This thesis presented a SQL-in-\texttt{pandas} implementation for
+executing a supported subset of \texttt{MATCH\_\allowbreak{}RECOGNIZE} over
+DataFrames.  The work contributes a parsing and validation pipeline
+based on Trino SQL syntax, an internal representation of row-pattern
+queries, finite-automata-based pattern compilation, a
+\texttt{pandas}-based matcher, measure evaluation, and optimization
+support through caching and memory-aware execution mechanisms.
+
+The evaluation provides three main conclusions.  First, the selected
+correctness scenarios matched the reference outputs from Trino,
+Oracle, and hand-written \texttt{pandas} baselines.  Second, the
+declarative SQL formulation substantially reduces the amount of
+procedural Python code needed to express sequential row-pattern
+analysis.  Third, the benchmark over the Amazon UK Products Dataset
+shows stable medium-scale performance across 40 pattern--size runs,
+with an average throughput of 9\,444~rows/s and bounded memory use in
+the measured range.
+
+The proposed approach is therefore best understood as a bridge between
+SQL row-pattern recognition and DataFrame-centered analytics.  It does
+not replace mature SQL engines, but it makes a useful subset of their
+row-pattern functionality available inside Python workflows where data
+are already represented as \texttt{pandas} DataFrames.
+
+% ----------------------------------------------------------------
+\section{Future Work}
+\label{sec:conc-future}
+% ----------------------------------------------------------------
+
+Future work can extend the implementation along five complementary
+directions.
+
+\textbf{Broader SQL and dialect coverage.}
+The most direct extension is to increase coverage of SQL:2016
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} semantics and selected vendor behavior.
+This includes additional navigation combinations, broader
+expression support, richer aggregate handling, more extensive
+\texttt{RUNNING}/\texttt{FINAL} semantics, and a larger conformance
+suite based on Trino, Oracle, and standard-derived examples.
+
+\textbf{Parallel and distributed execution.}
+Independent partitions provide a natural unit of parallel work.
+Future versions can connect the existing parallel-aware scheduling
+abstraction to real concurrent execution, while preserving deterministic
+partition ordering and skip semantics.  A further step is distributed
+execution over frameworks such as Dask or Spark, which would require
+boundary-aware state propagation for patterns whose matches may span
+partition chunks.
+
+\textbf{Backend abstraction and columnar acceleration.}
+The current execution path is centered on \texttt{pandas}.  A backend
+abstraction could target Polars, Apache Arrow, or other columnar
+engines.  This would allow more predicate evaluation to run in
+compiled vectorized kernels and could reduce Python-level row
+iteration.  Additional acceleration through Cython, Numba, or
+specialized compiled predicates is also a promising direction, but it
+requires careful validation to preserve SQL-style null handling,
+navigation semantics, and deterministic output.
+
+\textbf{Optimization and diagnostics.}
+The automata pipeline can be improved through stronger state pruning,
+guard pushdown, more precise selectivity estimates, and better
+handling of high-ambiguity quantified patterns.  Diagnostic tooling is
+also important: explain plans, NFA/DFA visualizations, match traces,
+and per-pattern performance counters would make it easier to debug
+incorrect patterns and understand performance behavior.
+
+\textbf{Usability and integration.}
+Future work can improve the user-facing workflow by adding clearer
+error messages, notebook-friendly visualizations, reusable test
+fixtures, and integration with existing DataFrame query interfaces.
+These additions would make the engine easier to adopt in exploratory
+data analysis and teaching settings.
+
+% ----------------------------------------------------------------
+\section{Chapter Summary}
+\label{sec:conc-summary}
+% ----------------------------------------------------------------
+
+This chapter summarized the thesis findings and placed them in a
+scientifically scoped context.  The implementation was shown to
+support a useful subset of \texttt{MATCH\_\allowbreak{}RECOGNIZE} over
+\texttt{pandas}, with correctness evidence from selected reference
+queries and performance evidence from a 40-run benchmark over
+medium-scale DataFrames.
+
+The chapter also identified the main limitations: bounded SQL
+coverage, complex-pattern growth, expression-evaluation scope,
+large-scale performance constraints, memory variability, and limited
+optimizer integration.  The proposed future work targets these issues
+through broader conformance testing, parallel and distributed
+execution, backend abstraction, optimization improvements, and better
+developer tooling.
