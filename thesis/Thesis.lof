@@ -1,0 +1,6 @@
+\vskip 0.55in {\bfseries Figure}\hfill {\bfseries Page}\vskip 0.25em\rm 
+\babel@toc {USenglish}{}\relax 
+\contentsline {figure}{\numberline {4.1}{\ignorespaces Five-stage architecture of the Pandas \texttt {MATCH\_RECOGNIZE} engine}}{28}{figure.caption.19}%
+\contentsline {figure}{\numberline {4.2}{\ignorespaces Measure semantics resolution algorithm applied to each measure expression individually. The decision tree follows SQL:2016 default-semantics rules.}}{49}{figure.caption.34}%
+\contentsline {figure}{\numberline {5.1}{\ignorespaces NFA for the pattern $A^{+}\,B?$ illustrating $\varepsilon $-transitions and nondeterminism}}{52}{figure.caption.35}%
+\contentsline {figure}{\numberline {5.2}{\ignorespaces Five-phase execution pipeline; the execution stage (shaded) is the subject of this section}}{64}{figure.caption.45}%

@@ -44,11 +44,11 @@
   <internal package="biblatex" priority="9" active="1">
     <generic>latex</generic>
     <provides type="dynamic">
-      <file>thesis_main.aux</file>
-      <file>thesis_main-blx.bib</file>
+      <file>Thesis.aux</file>
+      <file>Thesis-blx.bib</file>
     </provides>
     <requires type="dynamic">
-      <file>thesis_main.bbl</file>
+      <file>Thesis.bbl</file>
     </requires>
     <requires type="static">
       <file>blx-dm.def</file>
@@ -60,6 +60,8 @@
       <file>numeric.cbx</file>
       <file>biblatex.cfg</file>
       <file>english.lbx</file>
+      <file>american.lbx</file>
+      <file>USenglish.lbx</file>
     </requires>
   </internal>
   <external package="biblatex" priority="5" active="1">
@@ -67,23 +69,23 @@
     <cmdline>
       <binary>bibtex</binary>
       <option>-min-crossrefs 2</option>
-      <infile>thesis_main</infile>
+      <infile>Thesis</infile>
     </cmdline>
     <input>
-      <file>thesis_main.aux</file>
+      <file>Thesis.aux</file>
     </input>
     <output>
-      <file>thesis_main.bbl</file>
+      <file>Thesis.bbl</file>
     </output>
     <provides type="dynamic">
-      <file>thesis_main.bbl</file>
+      <file>Thesis.bbl</file>
     </provides>
     <requires type="dynamic">
-      <file>thesis_main.aux</file>
-      <file>thesis_main-blx.bib</file>
+      <file>Thesis.aux</file>
+      <file>Thesis-blx.bib</file>
     </requires>
     <requires type="editable">
-      <file>references.bib</file>
+      <file>Bibliography.bib</file>
     </requires>
     <requires type="static">
       <file>biblatex.bst</file>

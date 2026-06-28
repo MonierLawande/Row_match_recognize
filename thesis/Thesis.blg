@@ -1,0 +1,66 @@
+This is BibTeX, Version 0.99d (TeX Live 2023/Debian)
+Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
+The top-level auxiliary file: Thesis.aux
+The style file: biblatex.bst
+Reallocated glb_str_ptr (elt_size=4) to 20 items from 10.
+Reallocated global_strs (elt_size=200001) to 20 items from 10.
+Reallocated glb_str_end (elt_size=4) to 20 items from 10.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated wiz_functions (elt_size=4) to 6000 items from 3000.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated field_info (elt_size=4) to 14100 items from 5000.
+Database file #1: Thesis-blx.bib
+Database file #2: Bibliography.bib
+Biblatex version: 3.19
+Reallocated wiz_functions (elt_size=4) to 9000 items from 6000.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+You've used 65 entries,
+            6399 wiz_defined-function locations,
+            1567 strings with 20503 characters,
+and the built_in function-call counts, 408839 in all, are:
+= -- 30910
+> -- 8362
+< -- 1771
++ -- 12402
+- -- 3886
+* -- 26024
+:= -- 44472
+add.period$ -- 0
+call.type$ -- 65
+change.case$ -- 991
+chr.to.int$ -- 264
+cite$ -- 128
+duplicate$ -- 43194
+empty$ -- 36508
+format.name$ -- 3703
+if$ -- 82665
+int.to.chr$ -- 0
+int.to.str$ -- 181
+missing$ -- 0
+newline$ -- 1747
+num.names$ -- 3108
+pop$ -- 22320
+preamble$ -- 1
+purify$ -- 1321
+quote$ -- 0
+skip$ -- 11717
+stack$ -- 0
+substring$ -- 54298
+swap$ -- 8327
+text.length$ -- 1346
+text.prefix$ -- 0
+top$ -- 1
+type$ -- 2188
+warning$ -- 0
+while$ -- 5256
+width$ -- 0
+write$ -- 1683
