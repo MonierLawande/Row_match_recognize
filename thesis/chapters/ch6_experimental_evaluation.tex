@@ -1184,6 +1184,112 @@ complex nested structures.  This provides evidence of practical
 viability for medium-scale sequential pattern detection over
 e-commerce data.
 
+% ................................................................
+\subsection{Cross-System Comparison Under Equal Resources}
+\label{subsec:eval-cross-system}
+% ................................................................
+
+A second benchmark was executed to compare the proposed Pandas engine
+with Trino~473 and Oracle XE under the same resource budget.  Each
+system was run separately with 1 CPU core and 8\,GB of memory, so
+the database systems were not competing with each other during the
+measurement.  The same prepared CSV datasets were used for all
+systems, with sizes 25\,K, 35\,K, 50\,K, 75\,K, 100\,K, 150\,K,
+200\,K, and 300\,K rows.  The same five row-pattern queries were used:
+\texttt{simple\_sequence}, \texttt{alternation},
+\texttt{quantified}, \texttt{optional\_pattern}, and
+\texttt{complex\_nested}.  Query execution time was measured after
+the data had been loaded into each system.
+
+The benchmark artifacts were saved externally for reproducibility:
+one result file per system
+(\texttt{pandas\_results.csv}, \texttt{trino\_results.csv}, and
+\texttt{oracle\_results.csv}), shared input datasets, saved SQL query
+files, and combined summary files in the
+\texttt{Performance/cross\_system\_matrix} directory.
+
+\begin{table}[H]
+\centering
+\caption{Cross-system benchmark summary under 1 CPU core and 8\,GB memory}
+\label{tab:cross_system_summary}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{System} & \textbf{Tests} & \textbf{Avg Time}
+& \textbf{Avg Throughput} & \textbf{Max Memory}
+& \textbf{All Correct} \\
+& & \textbf{(s)} & \textbf{(rows/s)}
+& \textbf{(MB)} & \\
+\midrule
+Proposed Pandas engine & 40 & 14.45 &  9{,}048 &   63.94 & baseline \\
+Trino~473              & 40 &  1.68 & 77{,}369 & 5{,}506.05 & yes \\
+Oracle XE~21c          & 40 &  1.80 & 68{,}844 & 2{,}305.02 & yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:cross_system_summary} shows that Trino and Oracle are
+faster than the current Pandas prototype for the measured SQL
+execution step.  This is expected because both systems are mature
+database engines with optimized execution layers.  The memory values
+should be interpreted carefully: the Pandas value is a process RSS
+peak-delta measurement, while the Trino and Oracle values are Docker
+container peak-memory measurements.
+
+\begin{table}[H]
+\centering
+\caption{Average execution time by pattern under 1 CPU core and 8\,GB memory}
+\label{tab:cross_system_pattern_time}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Pattern} & \textbf{Pandas Engine} & \textbf{Trino~473}
+& \textbf{Oracle XE~21c} \\
+& \textbf{(s)} & \textbf{(s)} & \textbf{(s)} \\
+\midrule
+simple\_sequence  & 10.43 & 1.28 & 1.41 \\
+alternation       & 12.43 & 1.70 & 1.92 \\
+quantified        & 21.02 & 2.14 & 1.89 \\
+optional\_pattern &  9.65 & 1.76 & 1.91 \\
+complex\_nested   & 18.70 & 1.53 & 1.85 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:cross_system_pattern_time} shows the same trend as the
+single-system benchmark: patterns with quantified or nested structure
+require more work in the Pandas prototype than simpler sequential
+patterns.  Trino and Oracle remain faster across all five patterns,
+while the Pandas engine provides the advantage of running directly on
+DataFrames without loading data into a database server.
+
+\begin{table}[H]
+\centering
+\caption{Cross-system correctness by pattern}
+\label{tab:cross_system_correctness}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Pattern} & \textbf{Pandas Baseline} & \textbf{Trino~473}
+& \textbf{Oracle XE~21c} \\
+\midrule
+simple\_sequence  & baseline & matched & matched \\
+alternation       & baseline & matched & matched \\
+quantified        & baseline & matched & matched \\
+optional\_pattern & baseline & matched & matched \\
+complex\_nested   & baseline & matched & matched \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:cross_system_correctness} gives an important
+correctness finding.  After the quantifier and optional-pattern
+matching fixes, Trino, Oracle, and the proposed Pandas engine produced
+the same normalized output for all 40 pattern--size combinations.  In
+particular, the previously problematic \texttt{quantified} and
+\texttt{optional\_pattern} families now match the database baselines
+over all eight dataset sizes.  The cross-system comparison therefore
+serves both as a performance comparison and as additional evidence
+that the implemented greedy, optional, and nested quantifier behavior
+is aligned with the evaluated Trino and Oracle semantics.
+
 % ----------------------------------------------------------------
 \section{Chapter Summary}
 \label{sec:eval-summary}
@@ -1194,9 +1300,14 @@ implementation through correctness checks, feature-coverage tests,
 complexity analysis, performance measurements, memory analysis, and
 comparison with existing systems.  The experiments used five pattern
 families across eight dataset sizes, producing 40 successful
-performance runs.
+performance runs for the proposed engine and an additional
+cross-system comparison against Trino and Oracle under equal resource
+limits.
 
 The results show that the implementation preserves the evaluated
-semantics while reducing developer effort compared with hand-written
-Pandas logic.  The next chapter summarizes the thesis contributions,
-discusses limitations, and outlines future work.
+semantics for several core pattern families while reducing developer
+effort compared with hand-written Pandas logic.  The cross-system
+comparison further shows that the evaluated outputs match Trino and
+Oracle for all five benchmark pattern families after the quantifier
+and optional-pattern fixes.  The next chapter summarizes the thesis
+contributions, discusses limitations, and outlines future work.

@@ -9,17 +9,13 @@
 
 Pattern matching is the process of analyzing a sequence of data
 points whether rows in a relational table or events in a data
-stream with the goal of identifying specific shapes, trends, or
+stream with the goal of recognizing specific shapes, trends, or
 behavior sequences within the data.  It plays a crucial role
 across many analytical domains: detecting chains of transactions
 associated with money laundering in financial
 systems~\cite{petkovic2022fraud}, revealing multi-step fraudulent
-behavior sequences in security event logs, identifying equipment
-degradation patterns in IoT sensor streams, and tracking multi-step
-user journeys in e-commerce clickstreams.  Unlike conventional SQL
-predicates that evaluate each row in isolation, pattern matching
-takes the temporal ordering and relative values of successive rows
-into account.  Patterns are described using a regular-expression-like
+behavior sequences in security event logs, identifying breakdown behavior patterns in IoT sensor streams, and tracking multi-step
+user trips in e-commerce clickstreams.  compared to standard SQL clauses that analyze each row in isolation, Pattern matching examines at the order of events and the numbers in each row in relation to the others.  Patterns are described using a regular-expression-like
 syntax applied at the row level, enabling analysts to match and
 extract meaningful sequences across ordered partitions.
 
@@ -31,36 +27,28 @@ extract meaningful sequences across ordered partitions.
 The \texttt{MATCH\_RECOGNIZE} (MR) clause was introduced in the
 SQL:2016 standard~\cite{iso2016,ISO2021}, enabling users to define
 and search for patterns within ordered sequences of rows directly
-in SQL queries.  Although standardized in 2016, only
-a limited number of database management systems have implemented it.
-Among established relational database systems, Oracle~\cite{oracle2022,book}
-was the first to provide a production-quality implementation (in
-Database~12c, 2013), providing an early reference implementation
-for table-expression row pattern recognition.
+in SQL queries.  Although row pattern recognition was standardized in SQL:2016,Oracle Database had already introduced \texttt{MATCH\_RECOGNIZE}
+support (in Database~12c, 2013) ~\cite{oracle2022,book},However, only a limited number of database management systems have since adopted this functionality.
 Several modern analytical platforms followed: Trino~\cite{trino2022,trino2021row},
 Snowflake~\cite{snowflake2025match_recognize}, and Apache Flink~\cite{flink}
 each provide their own implementations, though with varying degrees
 of conformance to the SQL:2016 feature levels (R010, R020, R030)
-and with important practical restrictions.  Notably, PostgreSQL
-and DuckDB---two widely used open-source systems---do not yet
-support \texttt{MATCH\_RECOGNIZE}~\cite{howe2020matchrecognize,findling2025bringing}.
+and with important practical restrictions. This limitation is also evident in PostgreSQL and DuckDB, two widely used open source systems that do not currently provide native support for \texttt{MATCH\_RECOGNIZE}~\cite{howe2020matchrecognize,findling2025bringing}.
 
-This gap is especially important for local analytical workflows.
-Many users prepare data, test hypotheses, and build downstream
-models directly in Python before moving to larger database or
-cloud systems.  For data that fits comfortably in memory, requiring
-a separate SQL engine only to express row-pattern logic can add
-deployment and data-movement overhead.  The focus of this thesis is
+This gap is particularly significant for local analytical workflows.
+Many analytical workflows begin in Python, where users prepare data, test hypotheses, and develop downstream models before moving to larger-scale database or cloud platforms.  For data that fits comfortably in memory, requiring
+a separate SQL engine only to express row pattern logic can add
+deployment and data movement overhead.  The focus of this thesis is
 therefore not to replace enterprise or streaming systems, but to
-bring a practical subset of declarative row-pattern recognition into
+bring a practical subset of declarative row pattern recognition into
 the Pandas environment where many analytical workflows already
 begin.
 
 Without this declarative clause, detecting multi-row patterns
 requires complex combinations of SQL window functions, self-joins,
 or procedural loops over rows outside the database.  As the pattern
-grows beyond two or three steps, the corresponding code expands
-into dozens of lines filled with row-number calculations, timestamp
+grows past two or three steps, the corresponding code expands
+into many of lines filled with row-number calculations, timestamp
 comparisons, and cascading \texttt{JOIN} conditions.  Such code
 is difficult to write, harder to maintain, and typically forces
 multiple table scans with poor
