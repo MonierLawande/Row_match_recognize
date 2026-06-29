@@ -1955,6 +1955,155 @@ class NFABuilder:
     def add_epsilon_with_priority(self, from_state: int, to_state: int, priority: int):
         """Add an epsilon transition with explicit priority (delegates to add_epsilon)."""
         self.add_epsilon(from_state, to_state, priority)
+
+    def _token_min_repetitions(self, token: PatternToken) -> int:
+        """Return the minimum number of rows/pattern instances required by a token."""
+        if token.quantifier:
+            min_rep, _, _ = parse_quantifier(token.quantifier)
+            return min_rep
+        return 1
+
+    def _tokens_allow_empty_match(self, tokens: List[PatternToken]) -> bool:
+        """
+        Determine whether an entire token sequence can match zero rows.
+
+        This is intentionally different from asking whether the pattern contains
+        any optional token.  For example, ``A+ B? C*`` contains optional tokens,
+        but the whole pattern cannot be empty because ``A+`` is required.
+        """
+        return self._sequence_allows_empty(tokens, 0, len(tokens))
+
+    def _sequence_allows_empty(self, tokens: List[PatternToken], start: int, end: int) -> bool:
+        """Recursively check whether a sequence slice can match the empty row sequence."""
+        # Top-level alternation: any branch that can be empty makes the whole
+        # alternation empty-match capable.
+        depth = 0
+        branch_start = start
+        branches = []
+        i = start
+        while i < end:
+            token = tokens[i]
+            if token.type == PatternTokenType.GROUP_START:
+                depth += 1
+            elif token.type == PatternTokenType.GROUP_END:
+                depth -= 1
+            elif token.type == PatternTokenType.ALTERNATION and depth == 0:
+                branches.append((branch_start, i))
+                branch_start = i + 1
+            i += 1
+
+        if branches:
+            branches.append((branch_start, end))
+            return any(self._sequence_allows_empty(tokens, left, right) for left, right in branches)
+
+        i = start
+        while i < end:
+            token = tokens[i]
+
+            if token.type in (PatternTokenType.ANCHOR_START, PatternTokenType.ANCHOR_END):
+                i += 1
+                continue
+
+            if token.type == PatternTokenType.GROUP_START:
+                group_depth = 1
+                j = i + 1
+                while j < end and group_depth:
+                    if tokens[j].type == PatternTokenType.GROUP_START:
+                        group_depth += 1
+                    elif tokens[j].type == PatternTokenType.GROUP_END:
+                        group_depth -= 1
+                    j += 1
+
+                if group_depth != 0:
+                    return False
+
+                group_end_idx = j - 1
+                group_min = self._token_min_repetitions(tokens[group_end_idx])
+                group_inner_empty = self._sequence_allows_empty(tokens, i + 1, group_end_idx)
+                if group_min > 0 and not group_inner_empty:
+                    return False
+                i = j
+                continue
+
+            if token.type in (
+                PatternTokenType.LITERAL,
+                PatternTokenType.PERMUTE,
+                PatternTokenType.EXCLUSION,
+                PatternTokenType.EXCLUSION_START,
+            ):
+                if self._token_min_repetitions(token) > 0:
+                    return False
+
+            i += 1
+
+        return True
+
+    def _clone_fragment(self, start: int, end: int) -> Tuple[int, int]:
+        """
+        Clone an NFA fragment so bounded quantifiers can consume real repetitions.
+
+        Earlier bounded repetition handling used placeholder epsilon states for
+        the second and later repetitions.  That made ``A{1,5}`` behave like a
+        single ``A``.  This method copies the fragment graph, including
+        transitions, epsilon edges, variables, exclusion flags, anchors, subset
+        metadata, and priorities.
+        """
+        fragment_states: Set[int] = set()
+        queue = deque([start])
+
+        while queue:
+            state_idx = queue.popleft()
+            if state_idx in fragment_states:
+                continue
+            fragment_states.add(state_idx)
+
+            if state_idx == end:
+                continue
+
+            state = self.states[state_idx]
+            for transition in state.transitions:
+                queue.append(transition.target)
+            for target in state.epsilon:
+                queue.append(target)
+
+        fragment_states.add(end)
+        mapping = {old_idx: self.new_state() for old_idx in sorted(fragment_states)}
+
+        for old_idx, new_idx in mapping.items():
+            old_state = self.states[old_idx]
+            new_state = self.states[new_idx]
+            new_state.variable = old_state.variable
+            new_state.is_excluded = old_state.is_excluded
+            new_state.is_anchor = old_state.is_anchor
+            new_state.anchor_type = old_state.anchor_type
+            new_state.subset_vars = set(old_state.subset_vars)
+            new_state.permute_data = dict(old_state.permute_data)
+            new_state.is_empty_match = old_state.is_empty_match
+            new_state.can_accept = old_state.can_accept
+            new_state.is_accept = False
+            new_state.subset_parent = old_state.subset_parent
+            new_state.priority = old_state.priority
+
+        for old_idx, new_idx in mapping.items():
+            old_state = self.states[old_idx]
+            for transition in old_state.transitions:
+                if transition.target in mapping:
+                    self.states[new_idx].add_transition(
+                        transition.condition,
+                        mapping[transition.target],
+                        transition.variable,
+                        transition.priority,
+                        dict(transition.metadata),
+                    )
+            for target in old_state.epsilon:
+                if target in mapping:
+                    self.add_epsilon(
+                        new_idx,
+                        mapping[target],
+                        old_state.epsilon_priorities.get(target, 0),
+                    )
+
+        return mapping[start], mapping[end]
     
     def _is_empty_pattern_branch(self, start: int, end: int) -> bool:
         """
@@ -2250,15 +2399,12 @@ class NFABuilder:
             # since D? is optional and can be skipped
             self._add_optional_suffix_transitions(tokens, start, accept, define)
             
-            # Check for patterns that allow empty matches - critical for SQL:2016 compliance
-            allows_empty = False
-            
-            # Check token quantifiers for empty match possibilities
-            for token in tokens:
-                if token.quantifier in ['?', '*', '{0}', '{0,}']:
-                    allows_empty = True
-                    self.metadata["allows_empty"] = True
-                    break
+            # Check whether the full pattern can match zero rows.  This must
+            # consider the whole sequence, not just the presence of one optional
+            # token.  For example, A+ B? C* is not an empty-match pattern.
+            allows_empty = self._tokens_allow_empty_match(tokens)
+            if allows_empty:
+                self.metadata["allows_empty"] = True
             
             # Check for empty groups in alternations like (() | A)
             if not allows_empty:
@@ -2402,6 +2548,7 @@ class NFABuilder:
         # Extract all pattern variables and their properties
         all_vars = set()
         vars_with_quantifiers = {}
+        reluctant_quantifiers = {}
         
         for token in tokens:
             if token.type == PatternTokenType.LITERAL:
@@ -2410,34 +2557,25 @@ class NFABuilder:
                 # Track variables with quantifiers
                 if token.quantifier:
                     vars_with_quantifiers[token.value] = token.quantifier
+                    if not token.greedy:
+                        reluctant_quantifiers[token.value] = token.quantifier
         
         if all_vars:
             self.metadata["pattern_variables"] = list(all_vars)
         
         if vars_with_quantifiers:
             self.metadata["variables_with_quantifiers"] = vars_with_quantifiers
+
+        if reluctant_quantifiers:
+            self.metadata["reluctant_quantifiers"] = reluctant_quantifiers
         
         # Check for alternation (|) - important for pattern compilation strategy
         has_alternations = any(t.type == PatternTokenType.ALTERNATION for t in tokens)
         if has_alternations:
             self.metadata["has_alternations"] = True
         
-        # Check for pattern structures that allow empty matches
-        allows_empty = False
-        
-        # Empty match is possible if any token has a quantifier that allows zero occurrences
-        for token in tokens:
-            if token.quantifier in ['?', '*', '{0}', '{0,}']:
-                allows_empty = True
-                break
-                
-            # Also check for complex structures like (A|) which allow empty matches
-            if token.type == PatternTokenType.ALTERNATION:
-                # If alternation is followed by a GROUP_END, it might allow empty match
-                idx = tokens.index(token)
-                if idx + 1 < len(tokens) and tokens[idx + 1].type == PatternTokenType.GROUP_END:
-                    allows_empty = True
-                    break
+        # Check for pattern structures that allow a full empty match.
+        allows_empty = self._tokens_allow_empty_match(tokens)
         
         if allows_empty:
             self.metadata["allows_empty_match"] = True
@@ -3691,74 +3829,79 @@ class NFABuilder:
         q_start = self.new_state()
         q_end = self.new_state()
         
-        if min_rep == 0:
-            # Optional pattern - epsilon from start to end
-            self.add_epsilon(q_start, q_end)
-            
         if min_rep == 0 and max_rep == 1:
             # ? quantifier - optional
-            self.add_epsilon(q_start, start)  # Can enter pattern
-            self.add_epsilon(end, q_end)     # Exit after one match
-            self.add_epsilon(q_start, q_end) # Can skip entirely
+            consume_priority = 0 if greedy else 1
+            skip_priority = 1 if greedy else 0
+            self.add_epsilon(q_start, start, consume_priority)  # Can enter pattern
+            self.add_epsilon(end, q_end, skip_priority)         # Exit after one match
+            self.add_epsilon(q_start, q_end, skip_priority)     # Can skip entirely
             
         elif min_rep == 0 and (max_rep == float('inf') or max_rep is None):
             # * quantifier - zero or more
-            self.add_epsilon(q_start, start)  # Can enter pattern
-            self.add_epsilon(end, q_end)     # Exit after match
-            self.add_epsilon(q_start, q_end) # Can skip entirely
-            self.add_epsilon(end, start)     # Can repeat
+            consume_priority = 0 if greedy else 1
+            skip_priority = 1 if greedy else 0
+            self.add_epsilon(q_start, start, consume_priority)  # Can enter pattern
+            self.add_epsilon(end, q_end, skip_priority)         # Exit after match
+            self.add_epsilon(q_start, q_end, skip_priority)     # Can skip entirely
+            self.add_epsilon(end, start, consume_priority)      # Can repeat
             
         elif min_rep == 1 and (max_rep == float('inf') or max_rep is None):
             # + quantifier - one or more
-            self.add_epsilon(q_start, start)  # Must enter pattern
-            self.add_epsilon(end, q_end)     # Exit after match
-            self.add_epsilon(end, start)     # Can repeat
+            consume_priority = 0 if greedy else 1
+            skip_priority = 1 if greedy else 0
+            self.add_epsilon(q_start, start, consume_priority)  # Must enter pattern
+            self.add_epsilon(end, q_end, skip_priority)         # Exit after match
+            self.add_epsilon(end, start, consume_priority)      # Can repeat
             
-        elif min_rep > 0:
+        elif max_rep != float('inf') and max_rep is not None:
             # {n}, {n,m} quantifiers - exact or range repetitions
-            current_start = q_start
-            
-            # Create required repetitions (min_rep)
-            for i in range(min_rep):
-                if i == 0:
-                    # First repetition connects to original pattern
-                    self.add_epsilon(current_start, start)
-                    current_start = end
-                else:
-                    # Subsequent repetitions - create fresh copies
-                    rep_start = self.new_state()
-                    rep_end = self.new_state()
-                    
-                    # Copy the pattern structure (simplified - in production would need full copy)
-                    self.add_epsilon(current_start, rep_start)
-                    self.add_epsilon(rep_start, rep_end)  # Placeholder for pattern copy
-                    current_start = rep_end
-            
-            # Handle optional additional repetitions if max_rep > min_rep
-            if max_rep == float('inf') or max_rep is None:
-                # Unbounded - can repeat indefinitely
-                self.add_epsilon(current_start, start)  # Can repeat original pattern
-                self.add_epsilon(current_start, q_end)  # Or exit
-            elif max_rep > min_rep:
-                # Bounded additional repetitions - ensure max_rep is int for range
-                additional_reps = int(max_rep) - min_rep
-                for i in range(additional_reps):
-                    rep_start = self.new_state()
-                    rep_end = self.new_state()
-                    
-                    # Can skip this repetition
-                    self.add_epsilon(current_start, q_end)
-                    
-                    # Or take this repetition
-                    self.add_epsilon(current_start, rep_start)
-                    self.add_epsilon(rep_start, rep_end)  # Placeholder for pattern copy
-                    current_start = rep_end
-                    
-                # Final connection to end
-                self.add_epsilon(current_start, q_end)
+            max_count = int(max_rep)
+            if max_count < min_rep:
+                raise ValueError(f"Invalid quantifier bounds: min={min_rep}, max={max_count}")
+
+            consume_priority = 0 if greedy else 1
+            skip_priority = 1 if greedy else 0
+            current = q_start
+
+            if max_count == 0:
+                self.add_epsilon(q_start, q_end, skip_priority)
             else:
-                # Exact repetitions - connect final state to end
-                self.add_epsilon(current_start, q_end)
+                for rep_idx in range(max_count):
+                    if rep_idx >= min_rep:
+                        # Optional tail repetition can be skipped.
+                        self.add_epsilon(current, q_end, skip_priority)
+
+                    if rep_idx == 0:
+                        rep_start, rep_end = start, end
+                    else:
+                        rep_start, rep_end = self._clone_fragment(start, end)
+
+                    self.add_epsilon(current, rep_start, consume_priority)
+                    current = rep_end
+
+                self.add_epsilon(current, q_end, skip_priority)
+
+        elif min_rep > 0:
+            # {n,} quantifier - finite required prefix followed by unbounded
+            # repetitions.  Clone the required prefix so each required
+            # repetition consumes a real copy of the fragment.
+            consume_priority = 0 if greedy else 1
+            skip_priority = 1 if greedy else 0
+            current = q_start
+
+            for rep_idx in range(min_rep):
+                if rep_idx == 0:
+                    rep_start, rep_end = start, end
+                else:
+                    rep_start, rep_end = self._clone_fragment(start, end)
+                self.add_epsilon(current, rep_start, consume_priority)
+                current = rep_end
+
+            self.add_epsilon(current, q_end, skip_priority)
+            loop_start, loop_end = self._clone_fragment(start, end)
+            self.add_epsilon(current, loop_start, consume_priority)
+            self.add_epsilon(loop_end, current, consume_priority)
         
         # For reluctant quantifiers, adjust epsilon transition priorities
         if not greedy:

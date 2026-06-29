@@ -988,9 +988,15 @@ def parse_quantifier(quantifier: str) -> Tuple[int, int, bool]:
     if not quantifier:
         return (1, 1, True)
     
+    # A bare question mark is the SQL optional quantifier.  Only treat a
+    # trailing question mark as the reluctant marker when it follows another
+    # quantifier, e.g. *?, +?, or {1,3}?.
+    if quantifier == '?':
+        return (0, 1, True)
+
     # Remove non-greedy marker
     is_greedy = True
-    if quantifier.endswith('?'):
+    if len(quantifier) > 1 and quantifier.endswith('?'):
         is_greedy = False
         quantifier = quantifier[:-1]
     
