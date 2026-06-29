@@ -248,25 +248,26 @@ def _process_empty_match(start_idx: int, rows: List[Dict[str, Any]], measures: D
     # Process each measure appropriately for empty matches
     for alias, expr in measures.items():
         expr_upper = expr.upper().strip()
+        normalized_expr = re.sub(r'^(RUNNING|FINAL)\s+', '', expr_upper).strip()
         
         # Handle special functions
-        if expr_upper == "MATCH_NUMBER()":
+        if normalized_expr == "MATCH_NUMBER()":
             result[alias] = match_number
-        elif expr_upper == "CLASSIFIER()":
+        elif normalized_expr == "CLASSIFIER()":
             result[alias] = None  # No variables matched in empty match
-        elif re.match(r'^COUNT\s*\(\s*\*\s*\)$', expr_upper):
+        elif re.match(r'^COUNT\s*\(\s*\*\s*\)$', normalized_expr):
             # COUNT(*) for empty match is 0
             result[alias] = 0
-        elif re.match(r'^COUNT\s*\(.*\)$', expr_upper):
+        elif re.match(r'^COUNT\s*\(.*\)$', normalized_expr):
             # COUNT(expression) for empty match is 0
             result[alias] = 0
-        elif re.match(r'^(SUM|AVG|MIN|MAX|STDDEV|VARIANCE)\s*\(.*\)$', expr_upper):
+        elif re.match(r'^(SUM|AVG|MIN|MAX|STDDEV|VARIANCE)\s*\(.*\)$', normalized_expr):
             # Aggregates for empty match are None (NULL in SQL)
             result[alias] = None
-        elif re.match(r'^(FIRST|LAST)\s*\(.*\)$', expr_upper):
+        elif re.match(r'^(FIRST|LAST)\s*\(.*\)$', normalized_expr):
             # Navigation functions for empty match are None
             result[alias] = None
-        elif re.match(r'^(PREV|NEXT)\s*\(.*\)$', expr_upper):
+        elif re.match(r'^(PREV|NEXT)\s*\(.*\)$', normalized_expr):
             # Navigation functions for empty match are None
             result[alias] = None
         else:
