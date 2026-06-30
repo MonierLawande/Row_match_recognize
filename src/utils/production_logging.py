@@ -373,7 +373,11 @@ class ProductionLogger:
         """Get current CPU usage percentage."""
         try:
             import psutil
-            return psutil.cpu_percent(interval=0.1)
+            # Use a non-blocking snapshot.  This method is called from
+            # logging/statistics paths, so it must not add a fixed sleep to
+            # query execution.  Background monitors can use blocking sampling;
+            # synchronous request paths should not.
+            return psutil.cpu_percent(interval=None)
         except:
             return 0.0
     

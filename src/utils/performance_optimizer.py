@@ -1953,8 +1953,12 @@ class ParallelExecutionManager:
             return self._execute_sequential(work_items)
         
         start_time = time.time()
+        monitoring_started = False
         
         try:
+            self.resource_monitor.start_monitoring()
+            monitoring_started = True
+
             # Sort work items by priority and estimated complexity
             sorted_items = sorted(work_items, key=lambda x: (-x.priority, -x.estimated_complexity))
             
@@ -1992,6 +1996,9 @@ class ParallelExecutionManager:
         except Exception as e:
             logger.error(f"Parallel execution failed: {e}, falling back to sequential")
             return self._execute_sequential(work_items)
+        finally:
+            if monitoring_started:
+                self.resource_monitor.stop_monitoring()
     
     def _execute_with_threads(self, work_items: List[ParallelWorkItem]) -> List[Dict[str, Any]]:
         """Execute work items using thread pool."""
@@ -2095,8 +2102,10 @@ class ParallelExecutionManager:
                 self.execution_stats['memory_pressure_switches'] += 1
             return False
         
-        # Check CPU
-        cpu_percent = psutil.cpu_percent(interval=0.1)
+        # Check CPU with a non-blocking snapshot.  This check can run while
+        # choosing an execution strategy, so a blocking interval would add
+        # fixed latency unrelated to the matching work itself.
+        cpu_percent = psutil.cpu_percent(interval=None)
         if cpu_percent > self.config.cpu_threshold_percent:
             with self.lock:
                 self.execution_stats['cpu_pressure_switches'] += 1
@@ -2231,7 +2240,6 @@ def get_parallel_execution_manager() -> ParallelExecutionManager:
     global _parallel_manager
     if _parallel_manager is None:
         _parallel_manager = ParallelExecutionManager()
-        _parallel_manager.resource_monitor.start_monitoring()
     return _parallel_manager
 
 def monitor_performance(operation_name: str):
