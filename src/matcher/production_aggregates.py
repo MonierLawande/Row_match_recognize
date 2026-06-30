@@ -639,18 +639,98 @@ class ProductionAggregateEvaluator:
             pattern_vars.add(var_name.upper())
         
         return pattern_vars
+
+    def _find_balanced_function_calls(
+        self,
+        expr: str,
+        function_names: Optional[Set[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Find balanced SQL/Python-style function calls in an expression.
+
+        Regexes such as ``FUNC([^)]*)`` break as soon as an argument contains
+        another function call, for example ``sum(NEXT(A.value, 1))``.  This
+        scanner records the full outer call using parenthesis depth and quote
+        tracking, making it safe for aggregate arguments that contain
+        navigation functions, CASE fragments, or arithmetic subexpressions.
+        """
+        calls: List[Dict[str, Any]] = []
+        if not expr:
+            return calls
+
+        allowed = {name.upper() for name in function_names} if function_names else None
+        n = len(expr)
+        i = 0
+
+        while i < n:
+            ch = expr[i]
+            if ch == "_" or ch.isalpha():
+                name_start = i
+                i += 1
+                while i < n and (expr[i] == "_" or expr[i].isalnum()):
+                    i += 1
+
+                name = expr[name_start:i]
+                j = i
+                while j < n and expr[j].isspace():
+                    j += 1
+
+                if j >= n or expr[j] != "(":
+                    continue
+
+                upper_name = name.upper()
+                if allowed is not None and upper_name not in allowed:
+                    i = j + 1
+                    continue
+
+                depth = 0
+                quote_char = None
+                k = j
+                while k < n:
+                    c = expr[k]
+                    if quote_char:
+                        if c == quote_char and (k == 0 or expr[k - 1] != "\\"):
+                            quote_char = None
+                    elif c in ("'", '"'):
+                        quote_char = c
+                    elif c == "(":
+                        depth += 1
+                    elif c == ")":
+                        depth -= 1
+                        if depth == 0:
+                            full_text = expr[name_start:k + 1]
+                            calls.append({
+                                "function": upper_name,
+                                "start": name_start,
+                                "end": k + 1,
+                                "text": full_text,
+                                "arguments": expr[j + 1:k],
+                            })
+                            i = k + 1
+                            break
+                    k += 1
+                else:
+                    # Unbalanced call; let the normal validation/evaluation
+                    # path report the syntax problem.
+                    i = j + 1
+            else:
+                i += 1
+
+        return calls
     
     def _validate_no_nested_aggregates(self, expr: str) -> None:
         """
         Validate that navigation functions don't contain aggregate functions.
         SQL:2016 prohibits aggregates inside FIRST, LAST, PREV, NEXT.
         """
-        # Check if this is a navigation function
-        nav_pattern = r'\b(FIRST|LAST|PREV|NEXT)\s*\('
-        if re.search(nav_pattern, expr, re.IGNORECASE):
-            # Check for aggregates inside
-            agg_pattern = r'\b(' + '|'.join(self.STANDARD_AGGREGATES) + r')\s*\('
-            if re.search(agg_pattern, expr, re.IGNORECASE):
+        navigation_calls = self._find_balanced_function_calls(
+            expr, {"FIRST", "LAST", "PREV", "NEXT"}
+        )
+        for call in navigation_calls:
+            nested_aggregates = self._find_balanced_function_calls(
+                call["arguments"], self.STANDARD_AGGREGATES
+            )
+            if nested_aggregates:
                 raise AggregateValidationError(
                     "Aggregate functions cannot be nested inside navigation functions"
                 )
@@ -672,12 +752,9 @@ class ProductionAggregateEvaluator:
         import ast
         import operator
         
-        # Check if this contains arithmetic operators between aggregates
-        # Pattern to match aggregate functions: FUNC_NAME(arguments)
-        agg_pattern = r'\b([A-Z_]+)\s*\([^)]*\)'
-        
-        # Find all aggregate function calls in the expression
-        agg_matches = list(re.finditer(agg_pattern, expr, re.IGNORECASE))
+        # Find full aggregate calls using balanced parentheses.  This keeps
+        # expressions such as ``sum(NEXT(A.value, 1))`` intact.
+        agg_matches = self._find_balanced_function_calls(expr, self.STANDARD_AGGREGATES)
         
         # Check if there are arithmetic operators
         arithmetic_ops = ['+', '-', '*', '/', '%', '**']
@@ -691,7 +768,7 @@ class ProductionAggregateEvaluator:
         if len(agg_matches) == 1:
             # Check if the aggregate is part of a larger arithmetic expression
             agg_match = agg_matches[0]
-            agg_start, agg_end = agg_match.span()
+            agg_start, agg_end = agg_match["start"], agg_match["end"]
             
             # Check if there's arithmetic before or after the aggregate
             before_agg = expr[:agg_start].strip()
@@ -712,7 +789,7 @@ class ProductionAggregateEvaluator:
             agg_values = {}
             
             for i, match in enumerate(agg_matches):
-                agg_expr = match.group(0)
+                agg_expr = match["text"]
                 placeholder = f"__AGG_{i}__"
                 
                 # Evaluate this individual aggregate
