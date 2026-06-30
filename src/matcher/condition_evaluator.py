@@ -102,6 +102,38 @@ class ConditionEvaluator(ast.NodeVisitor):
         # Build optimized indices
         self._build_evaluation_indices()
 
+    def reset(
+        self,
+        context: RowContext,
+        evaluation_mode='DEFINE',
+        recursion_depth=0,
+    ) -> "ConditionEvaluator":
+        """
+        Reuse this evaluator for another row/context evaluation.
+
+        Compiled conditions are evaluated many times while the DFA scans rows.
+        Reusing the evaluator avoids repeated object allocation while preserving
+        the same public semantics.  The evaluation indices are rebuilt because
+        variable assignments may change as a match grows.
+        """
+        if not isinstance(context, RowContext):
+            raise ValueError(f"Expected RowContext, got {type(context)}")
+
+        self.context = context
+        self.current_row = None
+        self.evaluation_mode = evaluation_mode
+        self.recursion_depth = recursion_depth
+        self.visit_stack.clear()
+        self.stats = {
+            "evaluations": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "navigation_calls": 0,
+            "math_function_calls": 0
+        }
+        self._build_evaluation_indices()
+        return self
+
     
     def _build_evaluation_indices(self) -> None:
         """Build optimized indices for fast evaluation."""
@@ -2096,23 +2128,34 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
         
         # Parse the condition
         tree = ast.parse(python_condition, mode='eval')
+        is_boolean_expression = _is_boolean_expression(tree.body)
+        thread_state = threading.local()
         
         # Create a function that evaluates the condition with the given row and context
         def evaluate_condition(row, ctx):
-            # Create evaluator with the given context
-            evaluator = ConditionEvaluator(ctx, evaluation_mode)
-            
-            # Set the current row
-            evaluator.current_row = row
-            
-            # Evaluate the condition
+            # Reuse one evaluator per compiled condition and thread.  If the
+            # same condition is re-entered recursively, fall back to a temporary
+            # evaluator to avoid corrupting the active evaluation state.
+            in_use = getattr(thread_state, "in_use", False)
+            if in_use:
+                evaluator = ConditionEvaluator(ctx, evaluation_mode)
+            else:
+                evaluator = getattr(thread_state, "evaluator", None)
+                if evaluator is None:
+                    evaluator = ConditionEvaluator(ctx, evaluation_mode)
+                    thread_state.evaluator = evaluator
+                else:
+                    evaluator.reset(ctx, evaluation_mode)
+
+            thread_state.in_use = True
             try:
+                evaluator.current_row = row
                 result = evaluator.visit(tree.body)
                 
                 # Determine if we should return boolean or actual value based on expression structure
                 # If the top-level expression is a boolean operation, comparison, etc., return boolean
                 # If it's a simple value expression (like standalone CLASSIFIER(U)), return the actual value
-                if _is_boolean_expression(tree.body):
+                if is_boolean_expression:
                     return bool(result)
                 else:
                     # For standalone value expressions, return the actual value
@@ -2121,7 +2164,12 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
             except Exception as e:
                 logger.error(f"Error evaluating condition '{condition_str}': {e}")
                 return False
+            finally:
+                thread_state.in_use = False
                 
+        evaluate_condition.original_condition = condition_str
+        evaluate_condition.python_condition = python_condition
+        evaluate_condition.is_boolean_expression = is_boolean_expression
         return evaluate_condition
     except SyntaxError as e:
         # Log the error and return a function that always returns False

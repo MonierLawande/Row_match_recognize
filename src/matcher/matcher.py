@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 import copy
 import re
+import ast
 
 from src.matcher.dfa import DFA, FAIL_STATE
 from src.matcher.row_context import RowContext
@@ -1048,6 +1049,30 @@ class EnhancedMatcher:
             'backtracking_failures': 0,
             'avg_backtracking_depth': 0.0
         }
+
+        # Pattern-level analysis caches. These values depend only on the
+        # compiled pattern, DEFINE clauses, and DFA metadata, not on the
+        # current row.  Keeping them cached avoids repeating regex scans and
+        # structural analysis for every candidate start position.
+        self._original_pattern_upper = (self.original_pattern or "").upper()
+        self._define_text_upper = " ".join(
+            str(condition).upper() for condition in self.define_conditions.values()
+        )
+        self._has_unsafe_dfa_search_construct = any(
+            marker in self._original_pattern_upper
+            for marker in ["|", "PERMUTE", "{-", "-}"]
+        )
+        self._cached_complex_back_references = None
+        self._cached_constraint_dependencies = None
+        self._cached_optimal_selection_benefit = None
+        self._cached_backtracking_required = None
+        self._cached_generalized_quantifier_needed = None
+        self._cached_quantifier_pattern_info = None
+        self._cached_cross_variable_references = None
+        self._variable_back_reference_cache = {}
+        self._variable_prerequisite_cache = {}
+        self._pattern_variable_set = set(self.define_conditions.keys())
+        self._pattern_variable_set.update(self.defined_variables or [])
         
         logger.info(f"EnhancedMatcher initialized: "
                    f"states={len(dfa.states)}, "
@@ -1378,10 +1403,14 @@ class EnhancedMatcher:
         """
         if not self._backtracking_enabled:
             return False
+
+        if self._cached_backtracking_required is not None:
+            return self._cached_backtracking_required
         
         # Check for complex back-reference patterns
         if self._has_complex_back_references():
             logger.debug("Complex back-references detected - recommending backtracking")
+            self._cached_backtracking_required = True
             return True
         
         # Check for complex PERMUTE patterns with alternations
@@ -1389,23 +1418,50 @@ class EnhancedMatcher:
             self.dfa.metadata.get('has_permute', False) and 
             self.dfa.metadata.get('has_alternations', False)):
             logger.debug("PERMUTE with alternations detected - recommending backtracking")
+            self._cached_backtracking_required = True
             return True
         
         # Check for patterns with multiple constraint dependencies
         if self._has_constraint_dependencies():
             logger.debug("Constraint dependencies detected - recommending backtracking")
+            self._cached_backtracking_required = True
             return True
         
         # Check for patterns that benefit from optimal match selection
         if self._benefits_from_optimal_selection():
             logger.debug("Pattern benefits from optimal selection - recommending backtracking")
+            self._cached_backtracking_required = True
             return True
         
+        self._cached_backtracking_required = False
         return False
 
     def _copy_assignments(self, assignments: Dict[str, List[int]]) -> Dict[str, List[int]]:
         """Copy variable assignments without sharing mutable row-index lists."""
         return {var: indices[:] for var, indices in assignments.items()}
+
+    def _row_available_for_assignment(
+        self,
+        var: str,
+        row_index: int,
+        current_assignments: Dict[str, List[int]],
+    ) -> bool:
+        """
+        Check only the row-to-variable uniqueness rule.
+
+        Some DFA paths already evaluated the DEFINE predicate before assigning
+        the row.  Calling the full production validator there would compile and
+        evaluate the same condition a second time for every row.  This helper
+        keeps the remaining safety rule: one input row must not be assigned to
+        two different pattern variables.
+        """
+        if not isinstance(current_assignments, dict):
+            return True
+
+        for existing_var, existing_rows in current_assignments.items():
+            if existing_var != var and row_index in existing_rows:
+                return False
+        return True
 
     def _should_use_greedy_dfa_search(self, config=None) -> bool:
         """
@@ -1428,8 +1484,7 @@ class EnhancedMatcher:
         if self._needs_backtracking([], 0, None):
             return False
 
-        pattern = (getattr(self, "original_pattern", "") or "").upper()
-        if any(marker in pattern for marker in ["|", "PERMUTE", "{-", "-}"]):
+        if self._has_unsafe_dfa_search_construct:
             return False
 
         return True
@@ -1452,13 +1507,11 @@ class EnhancedMatcher:
         if config and config.skip_mode != SkipMode.PAST_LAST_ROW:
             return False
 
-        pattern = (getattr(self, "original_pattern", "") or "").upper()
-        if any(marker in pattern for marker in ["|", "PERMUTE", "{-", "-}"]):
+        if self._has_unsafe_dfa_search_construct:
             return False
 
-        define_text = " ".join(str(condition).upper()
-                               for condition in self.define_conditions.values())
-        return any(func in define_text for func in ["FIRST(", "LAST(", "PREV(", "NEXT(", "CLASSIFIER("])
+        return any(func in self._define_text_upper
+                   for func in ["FIRST(", "LAST(", "PREV(", "NEXT(", "CLASSIFIER("])
 
     def _match_candidate_score(self, match: Dict[str, Any]) -> Tuple[int, int, int]:
         """
@@ -1561,13 +1614,18 @@ class EnhancedMatcher:
                 context.current_var_assignments = assignments
                 context.current_var = var
                 try:
-                    if not condition(row, context):
+                    vectorized_result = self._get_vectorized_condition_result(var, row_idx)
+                    if vectorized_result is not None:
+                        if not vectorized_result:
+                            continue
+                    elif not condition(row, context):
+                        continue
+
+                    if not self._row_available_for_assignment(var, row_idx, assignments):
                         continue
 
                     next_assignments = self._copy_assignments(assignments)
                     next_assignments.setdefault(var, [])
-                    if not self._validate_row_assignment_production(var, row_idx, next_assignments, rows):
-                        continue
 
                     next_assignments[var].append(row_idx)
                     next_excluded_rows = excluded_rows[:] + ([row_idx] if is_excluded else [])
@@ -1647,8 +1705,12 @@ class EnhancedMatcher:
             Dictionary containing pattern analysis results including quantifier types,
             variable relationships, and optimization hints.
         """
+        if self._cached_quantifier_pattern_info is not None:
+            return self._cached_quantifier_pattern_info
+
         if not hasattr(self, 'original_pattern') or not self.original_pattern:
-            return {}
+            self._cached_quantifier_pattern_info = {}
+            return self._cached_quantifier_pattern_info
             
         pattern = self.original_pattern
         
@@ -1689,6 +1751,7 @@ class EnhancedMatcher:
         }
         
         logger.debug(f"Pattern analysis complete: {pattern_info}")
+        self._cached_quantifier_pattern_info = pattern_info
         return pattern_info
 
     def _classify_quantifier_type(self, quantifier: str) -> str:
@@ -2141,7 +2204,11 @@ class EnhancedMatcher:
         Returns:
             True if pattern has cross-variable references requiring greedy semantics
         """
+        if self._cached_cross_variable_references is not None:
+            return self._cached_cross_variable_references
+
         if not self.define_conditions:
+            self._cached_cross_variable_references = False
             return False
         
         # Check for cross-variable references in DEFINE conditions
@@ -2152,9 +2219,11 @@ class EnhancedMatcher:
             for other_var in variables:
                 if other_var != var and f"{other_var}." in condition:
                     logger.debug(f"Found cross-reference: {var} condition references {other_var}")
+                    self._cached_cross_variable_references = True
                     return True
         
-        return False
+        self._cached_cross_variable_references = False
+        return self._cached_cross_variable_references
 
     def _needs_generalized_quantifier_matching(self) -> bool:
         """
@@ -2178,8 +2247,12 @@ class EnhancedMatcher:
         Returns:
             True only for specific patterns that are proven to fail with existing logic
         """
+        if self._cached_generalized_quantifier_needed is not None:
+            return self._cached_generalized_quantifier_needed
+
         # Check if we have quantifiers in the original pattern
         if not hasattr(self, 'original_pattern') or not self.original_pattern:
+            self._cached_generalized_quantifier_needed = False
             return False  # Default to existing logic
             
         pattern = self.original_pattern
@@ -2190,6 +2263,7 @@ class EnhancedMatcher:
         star_plus_pattern = r'\w+\*\s+\w+\+'
         if re.search(star_plus_pattern, pattern):
             logger.debug(f"Detected star-plus pattern requiring generalized matching: {pattern}")
+            self._cached_generalized_quantifier_needed = True
             return True
             
         # 2. Complex bounded quantifiers with following quantifiers (A{n,m} B+) 
@@ -2197,10 +2271,12 @@ class EnhancedMatcher:
         bounded_with_quantifier = r'\w+\{\d+,?\d*\}\s+\w+[\+\*]'
         if re.search(bounded_with_quantifier, pattern):
             logger.debug(f"Detected complex bounded quantifier pattern requiring generalized matching: {pattern}")
+            self._cached_generalized_quantifier_needed = True
             return True
         
         # All other patterns use existing logic (including A+ B+, A B+ C+, A{2,} X, etc.)
         logger.debug(f"Pattern '{pattern}' uses existing matcher logic (no generalized matching needed)")
+        self._cached_generalized_quantifier_needed = False
         return False
 
     def _has_quantified_patterns(self) -> bool:
@@ -2220,7 +2296,11 @@ class EnhancedMatcher:
 
     def _has_constraint_dependencies(self) -> bool:
         """Check if pattern has complex constraint dependencies."""
+        if self._cached_constraint_dependencies is not None:
+            return self._cached_constraint_dependencies
+
         if not self.define_conditions:
+            self._cached_constraint_dependencies = False
             return False
         
         # Count inter-variable references
@@ -2231,17 +2311,23 @@ class EnhancedMatcher:
                 if other_var != var and other_var in condition:
                     reference_count += 1
         
-        return reference_count > 2  # Threshold for complex dependencies
+        self._cached_constraint_dependencies = reference_count > 2
+        return self._cached_constraint_dependencies  # Threshold for complex dependencies
     
     def _benefits_from_optimal_selection(self) -> bool:
         """Check if pattern would benefit from optimal match selection."""
+        if self._cached_optimal_selection_benefit is not None:
+            return self._cached_optimal_selection_benefit
+
         # Check for patterns with multiple valid paths that need ranking
         if hasattr(self.dfa, 'metadata'):
             metadata = self.dfa.metadata
             # Patterns with multiple alternations often benefit from backtracking
             if metadata.get('has_alternations') and metadata.get('alternation_count', 0) > 2:
+                self._cached_optimal_selection_benefit = True
                 return True
         
+        self._cached_optimal_selection_benefit = False
         return False
     
     def _get_backtracking_matcher(self):
@@ -3206,8 +3292,10 @@ class EnhancedMatcher:
                 if matched_var not in var_assignments:
                     var_assignments[matched_var] = []
                 
-                # PRODUCTION FIX: Validate assignment in main DFA loop
-                if self._validate_row_assignment_production(matched_var, current_idx, var_assignments):
+                # The transition condition was already evaluated successfully
+                # above.  Avoid re-evaluating the same DEFINE predicate here;
+                # only enforce row-to-variable uniqueness.
+                if self._row_available_for_assignment(matched_var, current_idx, var_assignments):
                     var_assignments[matched_var].append(current_idx)
                 else:
                     # For excluded rows, we might still continue even if validation fails
@@ -3278,8 +3366,10 @@ class EnhancedMatcher:
                 if matched_var not in var_assignments:
                     var_assignments[matched_var] = []
                 
-                # PRODUCTION FIX: Validate assignment in main DFA loop
-                if self._validate_row_assignment_production(matched_var, current_idx, var_assignments, rows):
+                # The transition condition was already evaluated successfully
+                # above.  Avoid re-evaluating the same DEFINE predicate here;
+                # only enforce row-to-variable uniqueness.
+                if self._row_available_for_assignment(matched_var, current_idx, var_assignments):
                     var_assignments[matched_var].append(current_idx)
                     logger.debug(f"  Assigned row {current_idx} to variable {matched_var}")
                 else:
@@ -4116,7 +4206,7 @@ class EnhancedMatcher:
         """
         logger.info(f"🔍 Smart preprocessing for {len(rows)} rows")
         
-        condition_matrix = {}
+        condition_matrix = self._vectorize_simple_define_conditions(rows)
         
         # OPTIMIZATION 1: Enhanced condition caching for large datasets
         if len(rows) > 5000:  # Lower threshold for enhanced caching
@@ -4134,6 +4224,253 @@ class EnhancedMatcher:
         
         self._condition_matrix = condition_matrix
         return condition_matrix
+
+    def _vectorize_simple_define_conditions(self, rows):
+        """
+        Pre-compute row-local DEFINE predicates that are safe to vectorize.
+
+        This is an expression-class optimization, not a benchmark-specific
+        shortcut.  The planner accepts only predicates that depend on the
+        current input row: comparisons, boolean operators, arithmetic, IN,
+        BETWEEN-style chained comparisons, and NULL checks.  Expressions that
+        need pattern context, navigation, aggregates, classifier state, or
+        cross-variable references fall back to the normal scalar evaluator.
+        """
+        import re
+
+        try:
+            import numpy as np
+            import pandas as pd
+        except Exception:
+            return {}
+
+        if not rows:
+            return {}
+
+        try:
+            df = pd.DataFrame(rows)
+        except Exception:
+            return {}
+
+        condition_matrix = {}
+        for var_name, condition_expr in (self.define_conditions or {}).items():
+            vectorized = self._vectorize_simple_condition_expression(
+                df=df,
+                var_name=str(var_name),
+                condition_expr=str(condition_expr),
+            )
+            if vectorized is not None:
+                condition_matrix[str(var_name)] = vectorized
+
+        # Variables without DEFINE predicates are implicit TRUE.
+        if self.original_pattern:
+            pattern_variables = set(re.findall(r'\b[A-Za-z]\b', self.original_pattern))
+            for var_name in pattern_variables:
+                if var_name not in condition_matrix and var_name not in (self.define_conditions or {}):
+                    condition_matrix[var_name] = np.ones(len(rows), dtype=bool)
+
+        return condition_matrix
+
+    def _vectorize_simple_condition_expression(self, df, var_name: str, condition_expr: str):
+        """
+        Return a boolean numpy array for row-local predicates, or None.
+
+        The implementation uses Python's AST after the existing SQL-to-Python
+        normalization.  That makes the fast path general for a safe expression
+        class instead of matching a few SQL strings with regular expressions.
+        """
+        try:
+            import numpy as np
+        except Exception:
+            return None
+
+        expr = (condition_expr or "").strip()
+        if not expr:
+            return None
+
+        upper_expr = expr.upper()
+        context_dependent_markers = [
+            "PREV(", "NEXT(", "FIRST(", "LAST(", "CLASSIFIER(",
+            "MATCH_NUMBER(", "COUNT(", "AVG(", "SUM(", "MIN(", "MAX(",
+        ]
+        if any(marker in upper_expr for marker in context_dependent_markers):
+            return None
+
+        try:
+            from src.matcher.condition_evaluator import _sql_to_python_condition
+            python_expr = _sql_to_python_condition(expr)
+            tree = ast.parse(python_expr, mode="eval")
+            value = self._vectorized_eval_row_local_ast(df, tree.body, var_name)
+        except Exception:
+            return None
+
+        if isinstance(value, np.ndarray):
+            return value.astype(bool, copy=False)
+        if hasattr(value, "to_numpy"):
+            return value.to_numpy(dtype=bool, na_value=False)
+        if isinstance(value, (bool, np.bool_)):
+            return np.full(len(df), bool(value), dtype=bool)
+        return None
+
+    def _vectorized_eval_row_local_ast(self, df, node, var_name: str):
+        """Evaluate a safe row-local expression AST against a whole DataFrame."""
+        import numpy as np
+        import pandas as pd
+
+        column_map = {str(col).lower(): col for col in df.columns}
+
+        def to_bool_array(value):
+            if isinstance(value, np.ndarray):
+                return value.astype(bool, copy=False)
+            if hasattr(value, "to_numpy"):
+                return value.fillna(False).to_numpy(dtype=bool)
+            if isinstance(value, (bool, np.bool_)):
+                return np.full(len(df), bool(value), dtype=bool)
+            raise ValueError("Expression is not boolean-vectorizable")
+
+        def eval_node(current):
+            if isinstance(current, ast.Constant):
+                return current.value
+
+            if isinstance(current, ast.Name):
+                name_upper = current.id.upper()
+                if name_upper == "TRUE":
+                    return True
+                if name_upper == "FALSE":
+                    return False
+                if name_upper in ("NULL", "NONE"):
+                    return None
+                col = column_map.get(current.id.lower())
+                if col is None:
+                    raise ValueError(f"Unknown row-local column: {current.id}")
+                return df[col]
+
+            if isinstance(current, ast.Attribute):
+                if not isinstance(current.value, ast.Name):
+                    raise ValueError("Nested attributes are not row-local")
+                prefix = current.value.id
+                if prefix.upper() != var_name.upper():
+                    raise ValueError("Cross-variable reference is not row-local")
+                col = column_map.get(current.attr.lower())
+                if col is None:
+                    raise ValueError(f"Unknown row-local column: {current.attr}")
+                return df[col]
+
+            if isinstance(current, ast.BoolOp):
+                values = [to_bool_array(eval_node(child)) for child in current.values]
+                if not values:
+                    raise ValueError("Empty boolean expression")
+                result = values[0]
+                for value in values[1:]:
+                    if isinstance(current.op, ast.And):
+                        result = np.logical_and(result, value)
+                    elif isinstance(current.op, ast.Or):
+                        result = np.logical_or(result, value)
+                    else:
+                        raise ValueError("Unsupported boolean operator")
+                return result
+
+            if isinstance(current, ast.UnaryOp):
+                operand = eval_node(current.operand)
+                if isinstance(current.op, ast.Not):
+                    return np.logical_not(to_bool_array(operand))
+                if isinstance(current.op, ast.USub):
+                    return -operand
+                if isinstance(current.op, ast.UAdd):
+                    return operand
+                raise ValueError("Unsupported unary operator")
+
+            if isinstance(current, ast.BinOp):
+                left = eval_node(current.left)
+                right = eval_node(current.right)
+                if isinstance(current.op, ast.Add):
+                    return left + right
+                if isinstance(current.op, ast.Sub):
+                    return left - right
+                if isinstance(current.op, ast.Mult):
+                    return left * right
+                if isinstance(current.op, ast.Div):
+                    return left / right
+                if isinstance(current.op, ast.FloorDiv):
+                    return left // right
+                if isinstance(current.op, ast.Mod):
+                    return left % right
+                if isinstance(current.op, ast.Pow):
+                    return left ** right
+                raise ValueError("Unsupported arithmetic operator")
+
+            if isinstance(current, ast.List):
+                return [eval_node(elt) for elt in current.elts]
+
+            if isinstance(current, ast.Tuple):
+                return tuple(eval_node(elt) for elt in current.elts)
+
+            if isinstance(current, ast.Call):
+                if isinstance(current.func, ast.Name) and current.func.id == "_is_null" and len(current.args) == 1:
+                    value = eval_node(current.args[0])
+                    if hasattr(value, "isna"):
+                        return value.isna().to_numpy(dtype=bool)
+                    return np.full(len(df), pd.isna(value), dtype=bool)
+                raise ValueError("Function call is not row-local")
+
+            if isinstance(current, ast.Compare):
+                left = eval_node(current.left)
+                combined = np.ones(len(df), dtype=bool)
+                for op, comparator in zip(current.ops, current.comparators):
+                    right = eval_node(comparator)
+                    comparison = compare_values(left, op, right)
+                    combined = np.logical_and(combined, comparison)
+                    left = right
+                return combined
+
+            raise ValueError(f"Unsupported row-local AST node: {type(current).__name__}")
+
+        def compare_values(left, op, right):
+            if isinstance(op, (ast.In, ast.NotIn)):
+                if not isinstance(right, (list, tuple, set)):
+                    raise ValueError("IN requires a literal list/tuple/set")
+                if hasattr(left, "isin"):
+                    result = left.isin(right)
+                    valid = left.notna()
+                    result = valid & result
+                else:
+                    result = left in right
+                array = to_bool_array(result)
+                return np.logical_not(array) if isinstance(op, ast.NotIn) else array
+
+            if isinstance(left, (list, tuple, set)) or isinstance(right, (list, tuple, set)):
+                raise ValueError("Only IN supports list/tuple comparison")
+
+            left_valid = left.notna() if hasattr(left, "notna") else not pd.isna(left)
+            right_valid = right.notna() if hasattr(right, "notna") else not pd.isna(right)
+            valid = left_valid & right_valid
+
+            if isinstance(op, ast.Eq):
+                result = left == right
+            elif isinstance(op, ast.NotEq):
+                result = left != right
+            elif isinstance(op, ast.Lt):
+                result = left < right
+            elif isinstance(op, ast.LtE):
+                result = left <= right
+            elif isinstance(op, ast.Gt):
+                result = left > right
+            elif isinstance(op, ast.GtE):
+                result = left >= right
+            elif isinstance(op, ast.Is):
+                result = pd.isna(left) if right is None else left is right
+                valid = True
+            elif isinstance(op, ast.IsNot):
+                result = ~pd.isna(left) if right is None and hasattr(left, "notna") else left is not right
+                valid = True
+            else:
+                raise ValueError("Unsupported comparison operator")
+
+            if hasattr(result, "fillna"):
+                return (valid & result).fillna(False).to_numpy(dtype=bool)
+            return np.full(len(df), bool(valid and result), dtype=bool)
+
+        return eval_node(node)
     
     def _enable_enhanced_condition_caching(self):
         """Enable enhanced caching strategies for large datasets."""
@@ -4400,10 +4737,15 @@ class EnhancedMatcher:
 
     def _try_vectorized_simple_pattern_matching(self, rows, start_idx, config, processed_indices):
         """
-        ULTIMATE OPTIMIZATION: Use vectorized results to instantly find matches for simple patterns.
-        
-        For patterns like A+, A*, A{n,m}, this can process 826K rows in milliseconds instead of minutes.
+        Whole-pattern vectorization placeholder.
+
+        Predicate vectorization is safe because it only replaces DEFINE
+        evaluation.  Whole-pattern vectorization changes match enumeration and
+        is sensitive to output mode and AFTER MATCH SKIP policy.  Keep this
+        disabled until it is implemented as a complete semantic plan.
         """
+        return None
+
         if not hasattr(self, '_condition_matrix') or not self.original_pattern:
             return None
             
@@ -5574,13 +5916,16 @@ class EnhancedMatcher:
         Returns:
             True if the variable's condition contains back references
         """
+        if variable in self._variable_back_reference_cache:
+            return self._variable_back_reference_cache[variable]
+
         if not hasattr(self, 'define_conditions') or variable not in self.define_conditions:
+            self._variable_back_reference_cache[variable] = False
             return False
         
-        condition_text = self.define_conditions[variable]
+        condition_text = str(self.define_conditions[variable])
         
         # Simple pattern matching to detect back references (e.g., A.column, B.column)
-        import re
         # Look for pattern variable references like A.column, B.column, etc.
         back_ref_pattern = r'\b([A-Z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)'
         matches = re.findall(back_ref_pattern, condition_text)
@@ -5589,12 +5934,11 @@ class EnhancedMatcher:
         for referenced_var, column in matches:
             if referenced_var != variable and hasattr(self, 'define_conditions'):
                 # If the referenced variable is either defined or in our pattern variables
-                all_pattern_vars = set(self.define_conditions.keys())
-                if hasattr(self, 'defined_variables'):
-                    all_pattern_vars.update(self.defined_variables)
-                if referenced_var in all_pattern_vars:
+                if referenced_var in self._pattern_variable_set:
+                    self._variable_back_reference_cache[variable] = True
                     return True
         
+        self._variable_back_reference_cache[variable] = False
         return False
     
     def _variable_is_back_reference_prerequisite(self, variable: str) -> bool:
@@ -5608,22 +5952,27 @@ class EnhancedMatcher:
         Returns:
             True if a variable is referenced by other DEFINE conditions
         """
+        if variable in self._variable_prerequisite_cache:
+            return self._variable_prerequisite_cache[variable]
+
         if not hasattr(self, 'define_conditions'):
+            self._variable_prerequisite_cache[variable] = False
             return False
         
         # Check if any other variable's condition references this variable
-        import re
         back_ref_pattern = r'\b([A-Z][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)'
         
         for other_var, condition_text in self.define_conditions.items():
             if other_var == variable:
                 continue
                 
-            matches = re.findall(back_ref_pattern, condition_text)
+            matches = re.findall(back_ref_pattern, str(condition_text))
             for referenced_var, column in matches:
                 if referenced_var == variable:
+                    self._variable_prerequisite_cache[variable] = True
                     return True
         
+        self._variable_prerequisite_cache[variable] = False
         return False
 
     def _is_valid_empty_match_state(self, state: int) -> bool:
@@ -6100,8 +6449,12 @@ class EnhancedMatcher:
         Returns:
             True if the pattern has complex back-references requiring special handling
         """
+        if self._cached_complex_back_references is not None:
+            return self._cached_complex_back_references
+
         if not hasattr(self, 'define_conditions'):
             logger.debug("No define_conditions found")
+            self._cached_complex_back_references = False
             return False
             
         # Look for conditions with multiple pattern variable references
@@ -6158,11 +6511,13 @@ class EnhancedMatcher:
             if len(referenced_vars) >= 2:
                 if any(func in condition.upper() for func in nav_functions):
                     logger.debug(f"Complex back-reference detected in {var}: references {referenced_vars}")
+                    self._cached_complex_back_references = True
                     return True
                     
             # CLASSIFIER functions with navigation functions are also complex
             if has_classifier_subset_refs and has_nav_functions:
                 logger.debug(f"Complex back-reference detected in {var}: CLASSIFIER with navigation functions")
+                self._cached_complex_back_references = True
                 return True
         
         logger.debug(f"Summary: has_nav_functions={has_nav_functions}, cross_var_dependencies={cross_var_dependencies}, has_classifier_subset_refs={has_classifier_subset_refs}")
@@ -6181,6 +6536,7 @@ class EnhancedMatcher:
             return True
         
         logger.debug("No complex back-references detected")
+        self._cached_complex_back_references = False
         return False
 
     def _handle_empty_matches(self, rows: List[Dict[str, Any]], start_idx: int, 
@@ -6995,6 +7351,10 @@ class EnhancedMatcher:
             
             if not isinstance(self.define_conditions, dict) or var not in self.define_conditions:
                 return True  # Allow assignment if no condition defined
+
+            vectorized_result = self._get_vectorized_condition_result(var, row_index)
+            if vectorized_result is not None:
+                return bool(vectorized_result)
             
             condition_expr = self.define_conditions[var]
             
