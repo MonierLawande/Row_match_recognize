@@ -5,6 +5,8 @@ import re
 import time
 import itertools
 import hashlib
+import copy
+from functools import lru_cache
 from typing import List, Dict, Any, Optional, Set, Tuple, Union
 
 # Polars import for performance optimization
@@ -40,6 +42,27 @@ from src.utils.performance_optimizer import (
 
 # Module logger
 logger = get_logger(__name__)
+
+
+def _normalize_query_cache_key(query: str) -> str:
+    """Normalize SQL text for cache lookup without changing SQL semantics."""
+    return query.strip()
+
+
+@lru_cache(maxsize=256)
+def _cached_parse_full_query(query_key: str):
+    """Parse SQL once per query text and cache the AST template."""
+    return parse_full_query(query_key)
+
+
+def _parse_query_cached(query: str):
+    """
+    Return a fresh AST for a query, using a cached parsed template.
+
+    Execution code may attach metadata to the AST, so callers receive a deep
+    copy instead of the cached object itself.
+    """
+    return copy.deepcopy(_cached_parse_full_query(_normalize_query_cache_key(query)))
 
 def _create_dataframe_with_polars_optimization(data, columns=None):
     """Create DataFrame with Polars optimization for better performance"""
@@ -759,7 +782,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         # --- PARSE QUERY ---
         parsing_start = time.time()
         try:
-            ast = parse_full_query(query)
+            ast = _parse_query_cached(query)
             if not ast.match_recognize:
                 raise ValueError("No MATCH_RECOGNIZE clause found in the query.")
             mr_clause = ast.match_recognize

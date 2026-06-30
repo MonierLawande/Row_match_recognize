@@ -1058,6 +1058,10 @@ class EnhancedMatcher:
         self._define_text_upper = " ".join(
             str(condition).upper() for condition in self.define_conditions.values()
         )
+        self._define_uses_navigation = any(
+            marker in self._define_text_upper
+            for marker in ("PREV(", "NEXT(", "FIRST(", "LAST(")
+        )
         self._has_unsafe_dfa_search_construct = any(
             marker in self._original_pattern_upper
             for marker in ["|", "PERMUTE", "{-", "-}"]
@@ -1074,6 +1078,8 @@ class EnhancedMatcher:
         self._pattern_variable_set = set(self.define_conditions.keys())
         self._pattern_variable_set.update(self.defined_variables or [])
         self._compiled_measure_plan_cache = {}
+        self._compiled_linear_quantifier_plan = None
+        self._compiled_linear_quantifier_plan_ready = False
         
         logger.info(f"EnhancedMatcher initialized: "
                    f"states={len(dfa.states)}, "
@@ -1494,6 +1500,243 @@ class EnhancedMatcher:
                 return True
 
         return not saw_known_condition
+
+    def _get_linear_quantifier_plan(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Compile a plain sequential quantified pattern into a small execution plan.
+
+        This optimization is intentionally conservative.  It accepts only a
+        linear sequence of variables with SQL quantifiers, for example
+        ``A+ B+`` or ``A{1,5} B* C+``.  Patterns with grouping, alternation,
+        PERMUTE, anchors, exclusions, or cross-variable/navigation DEFINE
+        clauses fall back to the existing general matcher.
+        """
+        if self._compiled_linear_quantifier_plan_ready:
+            return self._compiled_linear_quantifier_plan
+
+        self._compiled_linear_quantifier_plan_ready = True
+        pattern = (self.original_pattern or "").strip()
+        if not pattern:
+            self._compiled_linear_quantifier_plan = None
+            return None
+
+        upper_pattern = pattern.upper()
+        if any(marker in upper_pattern for marker in ("PERMUTE", "{-", "-}", "|", "^", "$")):
+            self._compiled_linear_quantifier_plan = None
+            return None
+
+        text = pattern.strip()
+        if text.startswith("(") and text.endswith(")"):
+            inner = text[1:-1].strip()
+            if "(" in inner or ")" in inner:
+                self._compiled_linear_quantifier_plan = None
+                return None
+            text = inner
+        elif "(" in text or ")" in text:
+            self._compiled_linear_quantifier_plan = None
+            return None
+
+        if not text:
+            self._compiled_linear_quantifier_plan = None
+            return None
+
+        token_re = re.compile(
+            r'\s*([A-Za-z_][A-Za-z0-9_$]*)(\{\d+(?:,\d*)?\}|\+\?|\*\?|\+|\*|\?)?\s*'
+        )
+        pos = 0
+        tokens: List[Dict[str, Any]] = []
+        while pos < len(text):
+            match = token_re.match(text, pos)
+            if not match or match.start() != pos:
+                self._compiled_linear_quantifier_plan = None
+                return None
+            var_name = match.group(1)
+            quantifier = match.group(2) or ""
+            min_count, max_count, greedy = self._quantifier_bounds_for_linear_plan(quantifier)
+            tokens.append({
+                "var": var_name,
+                "min": min_count,
+                "max": max_count,
+                "greedy": greedy,
+            })
+            pos = match.end()
+
+        if not tokens:
+            self._compiled_linear_quantifier_plan = None
+            return None
+
+        define_text_by_var = {
+            str(var): str(condition).upper()
+            for var, condition in (self.define_conditions or {}).items()
+        }
+        token_vars = {token["var"] for token in tokens}
+        unsafe_markers = ("PREV(", "NEXT(", "FIRST(", "LAST(", "CLASSIFIER(", "MATCH_NUMBER(")
+        for var_name in token_vars:
+            condition_text = define_text_by_var.get(var_name)
+            if not condition_text:
+                continue
+            if any(marker in condition_text for marker in unsafe_markers):
+                self._compiled_linear_quantifier_plan = None
+                return None
+            for other_var in token_vars:
+                if other_var != var_name and re.search(rf'\b{re.escape(other_var)}\s*\.', condition_text):
+                    self._compiled_linear_quantifier_plan = None
+                    return None
+
+        self._compiled_linear_quantifier_plan = tokens
+        return tokens
+
+    @staticmethod
+    def _quantifier_bounds_for_linear_plan(quantifier: str) -> Tuple[int, Optional[int], bool]:
+        """Return min, max, greedy for a SQL row-pattern quantifier."""
+        greedy = not quantifier.endswith("?") or quantifier == "?"
+        if quantifier in ("", None):
+            return 1, 1, True
+        if quantifier == "+":
+            return 1, None, True
+        if quantifier == "+?":
+            return 1, None, False
+        if quantifier == "*":
+            return 0, None, True
+        if quantifier == "*?":
+            return 0, None, False
+        if quantifier == "?":
+            return 0, 1, True
+        if quantifier.startswith("{") and quantifier.endswith("}"):
+            inner = quantifier[1:-1]
+            if "," in inner:
+                min_part, max_part = inner.split(",", 1)
+                min_count = int(min_part)
+                max_count = int(max_part) if max_part else None
+            else:
+                min_count = int(inner)
+                max_count = min_count
+            return min_count, max_count, True
+        return 1, 1, True
+
+    def _linear_plan_row_matches_var(self, var_name: str, row_idx: int, row_count: int) -> Optional[bool]:
+        """Use precomputed row-local DEFINE results for a linear plan variable."""
+        if row_idx < 0 or row_idx >= row_count:
+            return False
+        condition_matrix = getattr(self, '_condition_matrix', None)
+        if condition_matrix is None:
+            return None
+        var_results = condition_matrix.get(var_name)
+        if var_results is None:
+            # SQL standard: omitted DEFINE means TRUE.
+            if var_name not in (self.define_conditions or {}):
+                return True
+            return None
+        if row_idx >= len(var_results):
+            return False
+        return bool(var_results[row_idx])
+
+    def _can_use_linear_quantifier_plan(self, config=None) -> bool:
+        """Return True when the compiled linear plan is semantically safe."""
+        if getattr(self, '_condition_matrix', None) is None:
+            return False
+        if not self._get_linear_quantifier_plan():
+            return False
+        if self.has_empty_alternation or self.has_exclusions or self.is_permute_pattern:
+            return False
+        if config and getattr(config, "rows_per_match", RowsPerMatch.ONE_ROW) != RowsPerMatch.ONE_ROW:
+            return False
+        if config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST):
+            return False
+        return True
+
+    def _find_single_match_linear_quantifier(
+        self,
+        rows: List[Dict[str, Any]],
+        start_idx: int,
+        config=None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fast matcher for plain row-local linear quantified patterns."""
+        if not self._can_use_linear_quantifier_plan(config):
+            return None
+        plan = self._get_linear_quantifier_plan()
+
+        row_count = len(rows)
+        memo: Dict[Tuple[int, int], Optional[List[Tuple[str, int, int]]]] = {}
+
+        def max_run_for_var(var_name: str, pos: int) -> Optional[int]:
+            count = 0
+            while pos + count < row_count:
+                matches = self._linear_plan_row_matches_var(var_name, pos + count, row_count)
+                if matches is None:
+                    return None
+                if not matches:
+                    break
+                count += 1
+            return count
+
+        def match_from(token_idx: int, pos: int) -> Optional[List[Tuple[str, int, int]]]:
+            cache_key = (token_idx, pos)
+            if cache_key in memo:
+                cached = memo[cache_key]
+                return cached[:] if cached is not None else None
+
+            if token_idx >= len(plan):
+                memo[cache_key] = []
+                return []
+
+            token = plan[token_idx]
+            var_name = token["var"]
+            run_length = max_run_for_var(var_name, pos)
+            if run_length is None:
+                memo[cache_key] = None
+                return None
+
+            min_count = token["min"]
+            max_count = token["max"]
+            upper = run_length if max_count is None else min(run_length, max_count)
+            if upper < min_count:
+                memo[cache_key] = None
+                return None
+
+            if token["greedy"]:
+                counts = range(upper, min_count - 1, -1)
+            else:
+                counts = range(min_count, upper + 1)
+
+            for count in counts:
+                suffix = match_from(token_idx + 1, pos + count)
+                if suffix is not None:
+                    result = [(var_name, pos, count)] + suffix
+                    memo[cache_key] = result
+                    return result[:]
+
+            memo[cache_key] = None
+            return None
+
+        segments = match_from(0, start_idx)
+        if segments is None:
+            return None
+
+        assignments: Dict[str, List[int]] = {}
+        all_indices: List[int] = []
+        for var_name, segment_start, count in segments:
+            if count <= 0:
+                assignments.setdefault(var_name, [])
+                continue
+            indices = list(range(segment_start, segment_start + count))
+            assignments.setdefault(var_name, []).extend(indices)
+            all_indices.extend(indices)
+
+        if not all_indices:
+            return None
+
+        return {
+            "start": start_idx,
+            "end": max(all_indices),
+            "variables": assignments,
+            "state": self.start_state,
+            "is_empty": False,
+            "excluded_vars": set(),
+            "excluded_rows": [],
+            "has_empty_alternation": False,
+            "linear_quantifier_plan": True,
+        }
 
     def _should_use_greedy_dfa_search(self, config=None) -> bool:
         """
@@ -2924,21 +3167,29 @@ class EnhancedMatcher:
     def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext, config=None) -> Optional[Dict[str, Any]]:
         """Find a single match using optimized transitions with backtracking support."""
         match_start_time = time.time()
+        debug_enabled = DEBUG_ENABLED
         
-        logger.debug(f"_find_single_match called with start_idx={start_idx}")
+        if debug_enabled:
+            logger.debug(f"_find_single_match called with start_idx={start_idx}")
         
         # PRODUCTION FIX: Special handling for PERMUTE patterns with alternations
         # These patterns require testing all combinations in lexicographical order
         has_permute_alternations = (hasattr(self.dfa, 'metadata') and 
             self.dfa.metadata.get('has_permute', False) and 
             self._has_alternations_in_permute())
-        logger.debug(f"has_permute_alternations: {has_permute_alternations}")
+        if debug_enabled:
+            logger.debug(f"has_permute_alternations: {has_permute_alternations}")
         
         if has_permute_alternations:
-            logger.debug("PERMUTE pattern with alternations detected - using specialized handler")
+            if debug_enabled:
+                logger.debug("PERMUTE pattern with alternations detected - using specialized handler")
             match = self._handle_permute_with_alternations(rows, start_idx, context, config)
             if match:
                 return self._record_timing_and_return("find_match", match_start_time, match)
+
+        linear_match = self._find_single_match_linear_quantifier(rows, start_idx, config)
+        if linear_match:
+            return self._record_timing_and_return("find_match", match_start_time, linear_match)
 
         if self._should_use_greedy_dfa_search(config):
             match = self._find_single_match_greedy_dfa_search(rows, start_idx, context, config)
@@ -2948,7 +3199,8 @@ class EnhancedMatcher:
         # PRODUCTION ENHANCEMENT: Generalized quantifier matching system
         # Replaces hardcoded A+ B+ logic with comprehensive SQL:2016 quantifier support
         if self._needs_generalized_quantifier_matching():
-            logger.debug(f"Using generalized quantifier matching for complex pattern")
+            if debug_enabled:
+                logger.debug("Using generalized quantifier matching for complex pattern")
             match = self._find_single_match_generalized_quantifiers(rows, start_idx, context, config)
             if match:
                 return self._record_timing_and_return("find_match", match_start_time, match)
@@ -2966,10 +3218,12 @@ class EnhancedMatcher:
         
         # Check if backtracking is needed for this pattern
         needs_backtracking = self._needs_backtracking(rows, start_idx, context)
-        logger.debug(f"_needs_backtracking returned: {needs_backtracking}")
+        if debug_enabled:
+            logger.debug(f"_needs_backtracking returned: {needs_backtracking}")
         
         if needs_backtracking:
-            logger.debug("Using backtracking matcher for complex pattern")
+            if debug_enabled:
+                logger.debug("Using backtracking matcher for complex pattern")
             self.backtracking_stats['patterns_requiring_backtracking'] += 1
             
             backtracking_matcher = self._get_backtracking_matcher()
@@ -2994,10 +3248,12 @@ class EnhancedMatcher:
         # PRODUCTION FIX: Special handling for complex back-reference patterns
         # These patterns require constraint satisfaction and backtracking
         has_complex_back_refs = self._has_complex_back_references()
-        logger.debug(f"has_complex_back_references: {has_complex_back_refs}")
+        if debug_enabled:
+            logger.debug(f"has_complex_back_references: {has_complex_back_refs}")
         
         if has_complex_back_refs:
-            logger.debug("Complex back-reference pattern detected - using constraint-based handler")
+            if debug_enabled:
+                logger.debug("Complex back-reference pattern detected - using constraint-based handler")
             match = self._handle_complex_back_references(rows, start_idx, context, config)
             if match:
                 return self._record_timing_and_return("find_match", match_start_time, match)
@@ -3005,8 +3261,10 @@ class EnhancedMatcher:
         state = self.start_state
         current_idx = start_idx
         var_assignments = {}
+        condition_matrix = getattr(self, '_condition_matrix', None)
         
-        logger.debug(f"Starting match at index {start_idx}, state: {self._get_state_description(state)}")
+        if debug_enabled:
+            logger.debug(f"Starting match at index {start_idx}, state: {self._get_state_description(state)}")
         
         # Update context with subset variables from DFA metadata
         if hasattr(self.dfa, 'metadata') and 'subset_vars' in self.dfa.metadata:
@@ -3036,11 +3294,12 @@ class EnhancedMatcher:
         has_end_anchor = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("has_end_anchor", False)
         
         # Debug anchor detection
-        logger.debug(f"Anchor metadata: has_end_anchor={has_end_anchor}, has_both_anchors={has_both_anchors}")
-        if hasattr(self, '_anchor_metadata'):
-            logger.debug(f"Full anchor metadata: {self._anchor_metadata}")
-        else:
-            logger.debug("No _anchor_metadata found")
+        if debug_enabled:
+            logger.debug(f"Anchor metadata: has_end_anchor={has_end_anchor}, has_both_anchors={has_both_anchors}")
+            if hasattr(self, '_anchor_metadata'):
+                logger.debug(f"Full anchor metadata: {self._anchor_metadata}")
+            else:
+                logger.debug("No _anchor_metadata found")
         
         # Track excluded rows for proper exclusion handling
         excluded_rows = []
@@ -3055,14 +3314,17 @@ class EnhancedMatcher:
             row = rows[current_idx]
             context.current_idx = current_idx
             
-            logger.debug(f"Processing row {current_idx} with value {row.get('value', 'N/A')}")
+            if debug_enabled:
+                logger.debug(f"Processing row {current_idx} with value {row.get('value', 'N/A')}")
             
             # Update context with current variable assignments for condition evaluation
             context.variables = var_assignments
             context.current_var_assignments = var_assignments
             
-            # Set current_match to provide access to rows in the current match for navigation functions
-            if start_idx <= current_idx:
+            # Set current_match only when DEFINE clauses need navigation
+            # functions.  Building it for row-local predicates is pure overhead
+            # on large scans.
+            if self._define_uses_navigation and start_idx <= current_idx:
                 # Build current_match with variable assignments
                 current_match = []
                 
@@ -3084,8 +3346,9 @@ class EnhancedMatcher:
                 
                 context.current_match = current_match
             
-            logger.debug(f"Testing row {current_idx}, data: {row}")
-            logger.debug(f"  Current var_assignments: {var_assignments}")
+            if debug_enabled:
+                logger.debug(f"Testing row {current_idx}, data: {row}")
+                logger.debug(f"  Current var_assignments: {var_assignments}")
             
             # Use indexed transitions for faster lookups
             next_state = None
@@ -3111,8 +3374,19 @@ class EnhancedMatcher:
                     elif hasattr(self, 'excluded_vars'):
                         is_excluded = var in self.excluded_vars
                 
-                logger.debug(f"  Evaluating condition for var: {var}")
+                if debug_enabled:
+                    logger.debug(f"  Evaluating condition for var: {var}")
                 try:
+                    if condition_matrix is not None:
+                        var_results = condition_matrix.get(var)
+                        if var_results is not None and current_idx < len(var_results):
+                            if bool(var_results[current_idx]):
+                                valid_transitions.append((var, target, is_excluded))
+                            continue
+                        elif var_results is None and var not in self.define_conditions:
+                            valid_transitions.append((var, target, is_excluded))
+                            continue
+
                     # PERFORMANCE OPTIMIZATION: Fast condition evaluation with minimal overhead
                     
                     # Optimized cache key generation - avoid expensive hash operations
@@ -3142,11 +3416,15 @@ class EnhancedMatcher:
                         
                         if vectorized_result is not None:
                             # ULTRA-FAST PATH: Instant lookup from pre-computed matrix
-                            result = vectorized_result
-                            logger.debug(f"⚡ VECTORIZED: Variable {var} at row {current_idx} = {result}")
+                            if vectorized_result:
+                                valid_transitions.append((var, target, is_excluded))
+                            if debug_enabled:
+                                logger.debug(f"⚡ VECTORIZED: Variable {var} at row {current_idx} = {vectorized_result}")
+                            continue
                         else:
                             # ENHANCED CACHING PATH: Optimized condition evaluation with intelligent caching
-                            logger.debug(f"Variable {var} exclusion status: {is_excluded}")
+                            if debug_enabled:
+                                logger.debug(f"Variable {var} exclusion status: {is_excluded}")
                             
                             # Set the current variable being evaluated for self-references
                             context.current_var = var
@@ -3200,7 +3478,8 @@ class EnhancedMatcher:
             
             # Choose the best transition from valid ones with enhanced back reference support
             if valid_transitions:
-                logger.debug(f"Found {len(valid_transitions)} valid transitions: {[v[0] for v in valid_transitions]}")
+                if debug_enabled:
+                    logger.debug(f"Found {len(valid_transitions)} valid transitions: {[v[0] for v in valid_transitions]}")
                 
                 # PRODUCTION FIX: Implement proper transition selection for back references
                 # For patterns with back references, we need to select transitions that enable
@@ -3222,7 +3501,8 @@ class EnhancedMatcher:
                     has_back_reference = self._variable_has_back_reference(var)
                     is_prerequisite = self._variable_is_back_reference_prerequisite(var)
                     
-                    logger.debug(f"  Transition {var}: accepting={is_accepting}, has_back_ref={has_back_reference}, is_prerequisite={is_prerequisite}")
+                    if debug_enabled:
+                        logger.debug(f"  Transition {var}: accepting={is_accepting}, has_back_ref={has_back_reference}, is_prerequisite={is_prerequisite}")
                     
                     if is_accepting:
                         categorized_transitions['accepting'].append((var, target, is_excluded))
@@ -3233,7 +3513,8 @@ class EnhancedMatcher:
                     else:
                         categorized_transitions['dependent'].append((var, target, is_excluded))
                 
-                logger.debug(f"Categorized transitions: {categorized_transitions}")
+                if debug_enabled:
+                    logger.debug(f"Categorized transitions: {categorized_transitions}")
                 
                 # Try transitions in order of priority for back reference satisfaction:
                 # PRODUCTION FIX: Prioritize variables that lead to accepting states
@@ -3244,7 +3525,8 @@ class EnhancedMatcher:
                 
                 for category in ['accepting', 'prerequisite', 'dependent', 'simple']:
                     if categorized_transitions[category]:
-                        logger.debug(f"Processing category '{category}' with {len(categorized_transitions[category])} transitions")
+                        if debug_enabled:
+                            logger.debug(f"Processing category '{category}' with {len(categorized_transitions[category])} transitions")
                         # PRODUCTION FIX: SQL:2016 compliant greedy quantifier semantics
                         # For A+ B+ patterns, implement proper greedy matching with backtracking simulation
                         def transition_sort_key(x):
@@ -3268,7 +3550,8 @@ class EnhancedMatcher:
                                     # - Different state transitions (A+ -> B+) get priority 1 (lower)
                                     state_priority = 0 if same_state else 1
                                     
-                                    logger.debug(f"Cross-ref quantifier: {var_name} same_state={same_state} priority={state_priority}")
+                                    if debug_enabled:
+                                        logger.debug(f"Cross-ref quantifier: {var_name} same_state={same_state} priority={state_priority}")
                                     
                                     # Secondary priority: alphabetical order for deterministic behavior
                                     alphabetical_priority = ord(var_name[0]) if var_name else 999
@@ -4744,9 +5027,11 @@ class EnhancedMatcher:
         
         This replaces expensive condition evaluation with instant array lookup.
         """
-        if hasattr(self, '_condition_matrix') and var_name in self._condition_matrix:
-            if row_idx < len(self._condition_matrix[var_name]):
-                return bool(self._condition_matrix[var_name][row_idx])
+        condition_matrix = getattr(self, '_condition_matrix', None)
+        if condition_matrix is not None:
+            var_results = condition_matrix.get(var_name)
+            if var_results is not None and row_idx < len(var_results):
+                return bool(var_results[row_idx])
         
         # Fallback to original evaluation if vectorization unavailable
         return None
@@ -4984,10 +5269,6 @@ class EnhancedMatcher:
                 start_idx += 1
                 continue
 
-            # Find next match using optimized transitions
-            context = RowContext(rows=rows, defined_variables=self.defined_variables)
-            context.subsets = self.subsets.copy() if self.subsets else {}
-            
             # VECTORIZED OPTIMIZATION: Try ultra-fast vectorized matching for simple patterns
             if hasattr(self, '_condition_matrix'):
                 vectorized_result = self._try_vectorized_simple_pattern_matching(rows, start_idx, config, processed_indices)
@@ -5018,9 +5299,22 @@ class EnhancedMatcher:
                     
                     start_idx = next_start_idx
                     continue
+
+            # COMPILED PLAN: For plain row-local quantified patterns, use the
+            # compiled matcher directly.  This avoids constructing RowContext
+            # and entering the general DFA/backtracking dispatcher for every
+            # candidate start position.
+            used_linear_plan = self._can_use_linear_quantifier_plan(config)
+            if used_linear_plan:
+                match = self._find_single_match_linear_quantifier(rows, start_idx, config)
+            else:
+                match = None
             
             # FALLBACK: Standard DFA traversal for complex patterns
-            match = self._find_single_match(rows, start_idx, context, config)
+            if match is None and not used_linear_plan:
+                context = RowContext(rows=rows, defined_variables=self.defined_variables)
+                context.subsets = self.subsets.copy() if self.subsets else {}
+                match = self._find_single_match(rows, start_idx, context, config)
             if not match:
                 # Move to next position without marking as processed (unmatched rows will be handled later)
                 start_idx += 1

@@ -926,8 +926,7 @@ class MeasureEvaluator:
         
         # Handle arithmetic expressions containing aggregates (like "AVG(value) * 0.9")
         # First check if this contains aggregate functions as part of a larger arithmetic expression
-        agg_arith_pattern = r'.*\b(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\([^)]+\).*[+\-*/].*'
-        if re.match(agg_arith_pattern, expr, re.IGNORECASE):
+        if self._contains_aggregate_arithmetic(expr):
             # This is an arithmetic expression containing aggregates
             logger.debug(f"Detected arithmetic expression with aggregates: {expr}")
             result = self._evaluate_arithmetic_with_aggregates(expr, is_running)
@@ -939,10 +938,10 @@ class MeasureEvaluator:
         # Check if this is a standalone aggregate function call (not part of a larger expression)
         # Only match if the entire expression is an aggregate function to avoid breaking complex expressions like "AVG(value) * 0.9"
         # NOTE: FIRST and LAST are navigation functions, not aggregate functions, so they should NOT be included here
-        agg_match = re.match(r'^(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\(([^)]+)\)$', expr, re.IGNORECASE)
-        if agg_match:
-            func_name = agg_match.group(1).lower()
-            args_str = agg_match.group(2).strip()
+        agg_call = self._parse_standalone_aggregate_call(expr)
+        if agg_call:
+            func_name = agg_call["function"].lower()
+            args_str = agg_call["arguments"].strip()
             
             # Use the comprehensive aggregate evaluator
             result = self._evaluate_aggregate(func_name, args_str, is_running)
@@ -2262,9 +2261,12 @@ class MeasureEvaluator:
             The computed result or None if evaluation fails
         """
         try:
-            # First, find all aggregate function calls in the expression
-            agg_pattern = r'\b(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\([^)]+\)'
-            agg_functions = list(re.finditer(agg_pattern, expr, re.IGNORECASE))
+            # First, find all aggregate function calls in the expression using
+            # balanced parentheses. Regex-based parsing breaks for expressions
+            # such as ``sum(NEXT(A.value, 1))``.
+            agg_functions = self._find_balanced_function_calls(
+                expr, {"SUM", "COUNT", "MIN", "MAX", "AVG", "STDDEV", "VAR"}
+            )
             
             if not agg_functions:
                 return None
@@ -2275,28 +2277,25 @@ class MeasureEvaluator:
             
             # Replace each aggregate function with a placeholder and compute its value
             for i, match in enumerate(agg_functions):
-                agg_func = match.group(0)
+                agg_func = match["text"]
                 placeholder = f"__AGG_{i}__"
                 
-                # Parse the aggregate function
-                func_match = re.match(r'(SUM|COUNT|MIN|MAX|AVG|STDDEV|VAR)\s*\(([^)]+)\)', agg_func, re.IGNORECASE)
-                if func_match:
-                    func_name = func_match.group(1).lower()
-                    args_str = func_match.group(2).strip()
-                    
-                    # Evaluate the aggregate function
-                    try:
-                        agg_result = self._evaluate_aggregate(func_name, args_str, is_running)
-                        if agg_result is None:
-                            logger.debug(f"Aggregate {agg_func} returned None")
-                            return None
-                        substitutions[placeholder] = agg_result
-                    except Exception as e:
-                        logger.warning(f"Failed to evaluate aggregate {agg_func}: {e}")
+                func_name = match["function"].lower()
+                args_str = match["arguments"].strip()
+                
+                # Evaluate the aggregate function
+                try:
+                    agg_result = self._evaluate_aggregate(func_name, args_str, is_running)
+                    if agg_result is None:
+                        logger.debug(f"Aggregate {agg_func} returned None")
                         return None
-                    
-                    # Replace the aggregate function call with the placeholder
-                    working_expr = working_expr.replace(agg_func, placeholder, 1)
+                    substitutions[placeholder] = agg_result
+                except Exception as e:
+                    logger.warning(f"Failed to evaluate aggregate {agg_func}: {e}")
+                    return None
+                
+                # Replace the aggregate function call with the placeholder
+                working_expr = working_expr.replace(agg_func, placeholder, 1)
             
             # Now substitute the actual values and evaluate
             for placeholder, value in substitutions.items():
@@ -2321,3 +2320,97 @@ class MeasureEvaluator:
             logger.warning(f"Failed to process arithmetic expression with aggregates: {expr}, error: {e}")
             return None
 
+    def _contains_aggregate_arithmetic(self, expr: str) -> bool:
+        """Return True when an expression combines aggregate calls with arithmetic."""
+        aggregate_calls = self._find_balanced_function_calls(
+            expr, {"SUM", "COUNT", "MIN", "MAX", "AVG", "STDDEV", "VAR"}
+        )
+        if not aggregate_calls:
+            return False
+
+        arithmetic_ops = {"+", "-", "*", "/"}
+        masked = list(expr)
+        for call in aggregate_calls:
+            for pos in range(call["start"], call["end"]):
+                masked[pos] = " "
+        return any(op in "".join(masked) for op in arithmetic_ops)
+
+    def _parse_standalone_aggregate_call(self, expr: str) -> Optional[Dict[str, Any]]:
+        """Parse a whole-expression aggregate call with balanced arguments."""
+        text = expr.strip()
+        calls = self._find_balanced_function_calls(
+            text, {"SUM", "COUNT", "MIN", "MAX", "AVG", "STDDEV", "VAR"}
+        )
+        if len(calls) != 1:
+            return None
+        call = calls[0]
+        if call["start"] == 0 and call["end"] == len(text):
+            return call
+        return None
+
+    def _find_balanced_function_calls(
+        self,
+        expr: str,
+        function_names: Optional[Set[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Find outer function calls using balanced parentheses and quote tracking."""
+        calls: List[Dict[str, Any]] = []
+        if not expr:
+            return calls
+
+        allowed = {name.upper() for name in function_names} if function_names else None
+        n = len(expr)
+        i = 0
+
+        while i < n:
+            ch = expr[i]
+            if ch == "_" or ch.isalpha():
+                name_start = i
+                i += 1
+                while i < n and (expr[i] == "_" or expr[i].isalnum()):
+                    i += 1
+
+                name = expr[name_start:i]
+                j = i
+                while j < n and expr[j].isspace():
+                    j += 1
+
+                if j >= n or expr[j] != "(":
+                    continue
+
+                upper_name = name.upper()
+                if allowed is not None and upper_name not in allowed:
+                    i = j + 1
+                    continue
+
+                depth = 0
+                quote_char = None
+                k = j
+                while k < n:
+                    c = expr[k]
+                    if quote_char:
+                        if c == quote_char and (k == 0 or expr[k - 1] != "\\"):
+                            quote_char = None
+                    elif c in ("'", '"'):
+                        quote_char = c
+                    elif c == "(":
+                        depth += 1
+                    elif c == ")":
+                        depth -= 1
+                        if depth == 0:
+                            calls.append({
+                                "function": upper_name,
+                                "start": name_start,
+                                "end": k + 1,
+                                "text": expr[name_start:k + 1],
+                                "arguments": expr[j + 1:k],
+                            })
+                            i = k + 1
+                            break
+                    k += 1
+                else:
+                    i = j + 1
+            else:
+                i += 1
+
+        return calls
