@@ -1073,6 +1073,7 @@ class EnhancedMatcher:
         self._variable_prerequisite_cache = {}
         self._pattern_variable_set = set(self.define_conditions.keys())
         self._pattern_variable_set.update(self.defined_variables or [])
+        self._compiled_measure_plan_cache = {}
         
         logger.info(f"EnhancedMatcher initialized: "
                    f"states={len(dfa.states)}, "
@@ -1462,6 +1463,37 @@ class EnhancedMatcher:
             if existing_var != var and row_index in existing_rows:
                 return False
         return True
+
+    def _can_start_match_at(self, row_index: int) -> bool:
+        """
+        Fast conservative start-position pruning.
+
+        If all transitions leaving the start state have precomputed row-local
+        DEFINE results and all are false for this row, a match cannot start
+        here.  If any start condition is complex, missing, or unknown, return
+        True and let the full matcher decide.
+        """
+        if row_index < 0:
+            return False
+
+        if self.dfa.states[self.start_state].is_accept:
+            return True
+
+        start_transitions = self.transition_index.get(self.start_state)
+        if not start_transitions:
+            return True
+
+        saw_known_condition = False
+        for transition_tuple in start_transitions:
+            var = transition_tuple[0]
+            vectorized_result = self._get_vectorized_condition_result(var, row_index)
+            if vectorized_result is None:
+                return True
+            saw_known_condition = True
+            if bool(vectorized_result):
+                return True
+
+        return not saw_known_condition
 
     def _should_use_greedy_dfa_search(self, config=None) -> bool:
         """
@@ -4166,29 +4198,13 @@ class EnhancedMatcher:
     def _setup_advanced_optimizations(self) -> None:
         """Setup heavy optimizations for production use - streamlined for speed."""
         try:
-            from src.utils.memory_management import get_resource_manager
-            
-            # Simplified resource management for production
-            self._resource_manager = get_resource_manager()
-            
-            # Streamlined object pooling
-            def create_condition_result():
-                return {'result': None, 'timestamp': 0.0}
-            
-            def reset_condition_result(obj):
-                obj['result'] = None
-                obj['timestamp'] = 0.0
-            
-            self._condition_cache_pool = self._resource_manager.get_pool(
-                name='condition_cache',
-                factory=create_condition_result,
-                reset_func=reset_condition_result,
-                max_size=100,  # Smaller pool for faster allocation
-                adaptive=False  # Disable adaptive sizing for consistent performance
-            )
-            
-            # Skip monitoring to reduce overhead
-            logger.debug("Production optimizations enabled (lightweight mode)")
+            # Keep the hot condition-cache path lightweight.  Earlier versions
+            # used a generic object pool for tiny ``{"result": ..., "timestamp": ...}``
+            # dictionaries.  Profiling showed the pool lock/resource-management
+            # overhead was higher than storing booleans directly in the cache.
+            self._condition_cache_pool = None
+            self._resource_manager = None
+            logger.debug("Production optimizations enabled (plain condition cache)")
             
         except Exception as e:
             logger.debug(f"Advanced optimizations not available: {e}")
@@ -4964,6 +4980,10 @@ class EnhancedMatcher:
                 start_idx += 1
                 continue
 
+            if hasattr(self, '_condition_matrix') and not self._can_start_match_at(start_idx):
+                start_idx += 1
+                continue
+
             # Find next match using optimized transitions
             context = RowContext(rows=rows, defined_variables=self.defined_variables)
             context.subsets = self.subsets.copy() if self.subsets else {}
@@ -5379,6 +5399,162 @@ class EnhancedMatcher:
         
         return result
 
+    def _get_compiled_measure_plan(self, alias: str, expr: str, semantics: str) -> Optional[Dict[str, Any]]:
+        """
+        Compile simple standard measure expressions once per matcher.
+
+        The general ``MeasureEvaluator`` supports a broad SQL expression
+        surface, but common MATCH_RECOGNIZE measures such as ``FIRST(A.x)``,
+        ``LAST(B.x)``, ``COUNT(*)``, and ``COUNT(A.x)`` can be evaluated
+        directly from the match variable assignment.  This method only accepts
+        exact, row-local aggregate/navigation forms and returns ``None`` for
+        anything complex so the existing evaluator remains the source of truth.
+        """
+        if not isinstance(expr, str):
+            return None
+
+        cache_key = (alias, expr, semantics)
+        if cache_key in self._compiled_measure_plan_cache:
+            return self._compiled_measure_plan_cache[cache_key]
+
+        text = expr.strip()
+        explicit_semantics = None
+        prefix_match = re.match(r'^(RUNNING|FINAL)\s+(.+)$', text, re.IGNORECASE)
+        if prefix_match:
+            explicit_semantics = prefix_match.group(1).upper()
+            text = prefix_match.group(2).strip()
+
+        plan: Optional[Dict[str, Any]] = None
+
+        if re.match(r'^MATCH_NUMBER\s*\(\s*\)\s*$', text, re.IGNORECASE):
+            plan = {"kind": "MATCH_NUMBER", "semantics": explicit_semantics or semantics}
+        elif re.match(r'^COUNT\s*\(\s*\*\s*\)\s*$', text, re.IGNORECASE):
+            plan = {"kind": "COUNT_STAR", "semantics": explicit_semantics or semantics}
+        else:
+            count_var_star = re.match(
+                r'^COUNT\s*\(\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*\*\s*\)\s*$',
+                text,
+                re.IGNORECASE,
+            )
+            if count_var_star:
+                plan = {
+                    "kind": "COUNT_VAR_STAR",
+                    "var": count_var_star.group(1),
+                    "semantics": explicit_semantics or semantics,
+                }
+            else:
+                count_field = re.match(
+                    r'^COUNT\s*\(\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\)\s*$',
+                    text,
+                    re.IGNORECASE,
+                )
+                if count_field:
+                    plan = {
+                        "kind": "COUNT_FIELD",
+                        "var": count_field.group(1),
+                        "field": count_field.group(2),
+                        "semantics": explicit_semantics or semantics,
+                    }
+                else:
+                    first_last = re.match(
+                        r'^(FIRST|LAST)\s*\(\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\)\s*$',
+                        text,
+                        re.IGNORECASE,
+                    )
+                    if first_last:
+                        plan = {
+                            "kind": first_last.group(1).upper(),
+                            "var": first_last.group(2),
+                            "field": first_last.group(3),
+                            "semantics": explicit_semantics or semantics,
+                        }
+
+        self._compiled_measure_plan_cache[cache_key] = plan
+        return plan
+
+    @staticmethod
+    def _resolve_mapping_key(mapping: Dict[str, Any], requested_key: str) -> Optional[str]:
+        """Resolve exact key first, then case-insensitive key as SQL fallback."""
+        if requested_key in mapping:
+            return requested_key
+        requested_upper = requested_key.upper()
+        for existing_key in mapping.keys():
+            if str(existing_key).upper() == requested_upper:
+                return existing_key
+        return None
+
+    @staticmethod
+    def _is_non_null_measure_value(value: Any) -> bool:
+        """Return True when a value should be counted by COUNT(expression)."""
+        if value is None:
+            return False
+        try:
+            # NaN is the common scalar value that is not equal to itself.
+            if value != value:
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _get_measure_row_value(self, rows: List[Dict[str, Any]], row_idx: int, field_name: str) -> Any:
+        """Fetch a field value from a matched row with SQL-style case fallback."""
+        if row_idx < 0 or row_idx >= len(rows):
+            return None
+        row = rows[row_idx]
+        if not isinstance(row, dict):
+            return None
+        field_key = self._resolve_mapping_key(row, field_name)
+        if field_key is None:
+            return None
+        return row.get(field_key)
+
+    def _evaluate_compiled_measure_plan(
+        self,
+        plan: Dict[str, Any],
+        match: Dict[str, Any],
+        rows: List[Dict[str, Any]],
+        match_number: int,
+    ) -> Any:
+        """Evaluate a precompiled simple measure plan directly from the match."""
+        kind = plan["kind"]
+        variables = match.get("variables", {}) or {}
+
+        if kind == "MATCH_NUMBER":
+            return match_number
+
+        if kind == "COUNT_STAR":
+            matched_indices = set()
+            for indices in variables.values():
+                matched_indices.update(indices)
+            return len(matched_indices)
+
+        var_name = plan.get("var")
+        var_key = self._resolve_mapping_key(variables, var_name) if var_name else None
+        indices = variables.get(var_key, []) if var_key is not None else []
+
+        if kind == "COUNT_VAR_STAR":
+            return len(indices)
+
+        if kind == "COUNT_FIELD":
+            field_name = plan["field"]
+            return sum(
+                1
+                for idx in indices
+                if self._is_non_null_measure_value(self._get_measure_row_value(rows, idx, field_name))
+            )
+
+        if kind == "FIRST":
+            if not indices:
+                return None
+            return self._get_measure_row_value(rows, min(indices), plan["field"])
+
+        if kind == "LAST":
+            if not indices:
+                return None
+            return self._get_measure_row_value(rows, max(indices), plan["field"])
+
+        raise ValueError(f"Unsupported compiled measure plan kind: {kind}")
+
     def _process_one_row_match(self, match, rows, measures, match_number):
         """Process one row per match to exactly match Trino's output format."""
         if match["start"] >= len(rows):
@@ -5409,54 +5585,66 @@ class EnhancedMatcher:
         # Get variable assignments for easy access
         var_assignments = match.get("variables", {})
         
-        # Create context for measure evaluation
-        context = RowContext(defined_variables=self.defined_variables)
-        context.rows = rows
-        context.variables = var_assignments
-        context.match_number = match_number
-        context.current_idx = match["end"]  # Use the last row for FINAL semantics
-        context.subsets = self.subsets.copy() if self.subsets else {}
-        
-        # Set PERMUTE pattern information
-        context.is_permute_pattern = self.is_permute_pattern
-        
-        # Set pattern_variables from the original_pattern string
-        if isinstance(self.original_pattern, str) and 'PERMUTE' in self.original_pattern:
-            permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', self.original_pattern, re.IGNORECASE)
-            if permute_match:
-                # Extract variables and their requirements (required vs optional)
-                var_text = permute_match.group(1)
-                variables = [v.strip() for v in var_text.split(',')]
-                context.pattern_variables = variables
-                context.original_permute_variables = variables.copy()
-                
-                # Determine variable requirements (required vs optional)
-                variable_requirements = {}
-                for var in variables:
-                    # Check if variable has optional quantifier (?, *, etc.)
-                    if var.endswith('?') or var.endswith('*'):
-                        clean_var = var.rstrip('?*+')
-                        variable_requirements[clean_var] = False  # Optional
-                        # Update the variables list with clean names
-                        idx = context.pattern_variables.index(var)
-                        context.pattern_variables[idx] = clean_var
-                        context.original_permute_variables[idx] = clean_var
-                    else:
-                        variable_requirements[var] = True  # Required
-                
-                context.variable_requirements = variable_requirements
-        elif hasattr(self.original_pattern, 'metadata'):
-            context.pattern_variables = self.original_pattern.metadata.get('base_variables', [])
-        
-        # Create evaluator with caching
-        evaluator = MeasureEvaluator(context, final=True)
+        context = None
+        evaluator = None
+
+        def get_measure_evaluator() -> MeasureEvaluator:
+            """Create the general evaluator only when a measure needs it."""
+            nonlocal context, evaluator
+            if evaluator is not None:
+                return evaluator
+
+            context = RowContext(defined_variables=self.defined_variables)
+            context.rows = rows
+            context.variables = var_assignments
+            context.match_number = match_number
+            context.current_idx = match["end"]  # Use the last row for FINAL semantics
+            context.subsets = self.subsets.copy() if self.subsets else {}
+
+            # Set PERMUTE pattern information
+            context.is_permute_pattern = self.is_permute_pattern
+
+            # Set pattern_variables from the original_pattern string
+            if isinstance(self.original_pattern, str) and 'PERMUTE' in self.original_pattern:
+                permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', self.original_pattern, re.IGNORECASE)
+                if permute_match:
+                    # Extract variables and their requirements (required vs optional)
+                    var_text = permute_match.group(1)
+                    variables = [v.strip() for v in var_text.split(',')]
+                    context.pattern_variables = variables
+                    context.original_permute_variables = variables.copy()
+
+                    # Determine variable requirements (required vs optional)
+                    variable_requirements = {}
+                    for var in variables:
+                        # Check if variable has optional quantifier (?, *, etc.)
+                        if var.endswith('?') or var.endswith('*'):
+                            clean_var = var.rstrip('?*+')
+                            variable_requirements[clean_var] = False  # Optional
+                            # Update the variables list with clean names
+                            idx = context.pattern_variables.index(var)
+                            context.pattern_variables[idx] = clean_var
+                            context.original_permute_variables[idx] = clean_var
+                        else:
+                            variable_requirements[var] = True  # Required
+
+                    context.variable_requirements = variable_requirements
+            elif hasattr(self.original_pattern, 'metadata'):
+                context.pattern_variables = self.original_pattern.metadata.get('base_variables', [])
+
+            evaluator = MeasureEvaluator(context, final=True)
+            return evaluator
         
         # Process measures
         for alias, expr in measures.items():
             try:
                 # Evaluate the expression with appropriate semantics
                 semantics = self.measure_semantics.get(alias, "FINAL")
-                result[alias] = evaluator.evaluate(expr, semantics)
+                plan = self._get_compiled_measure_plan(alias, expr, semantics)
+                if plan is not None:
+                    result[alias] = self._evaluate_compiled_measure_plan(plan, match, rows, match_number)
+                else:
+                    result[alias] = get_measure_evaluator().evaluate(expr, semantics)
                 logger.debug(f"Setting {alias} to {result[alias]} from evaluator")
                 
             except Exception as e:
