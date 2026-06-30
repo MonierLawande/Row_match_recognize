@@ -34,6 +34,7 @@ import re
 import math
 import numpy as np
 import time
+import copy
 from enum import Enum
 from dataclasses import dataclass
 
@@ -448,6 +449,11 @@ class ProductionAggregateEvaluator:
         Returns:
             Dict with 'function', 'arguments', and optionally 'filter' keys, or None if invalid
         """
+        cache_key = ("parse_aggregate", expr)
+        cached = self._expression_cache.get(cache_key)
+        if cached is not None:
+            return copy.deepcopy(cached)
+
         # Remove RUNNING/FINAL prefix if present
         clean_expr = re.sub(r'^\s*(RUNNING|FINAL)\s+', '', expr.strip(), flags=re.IGNORECASE)
         
@@ -511,8 +517,11 @@ class ProductionAggregateEvaluator:
         
         logger.debug(f"Parsed aggregate function {func_name} with args: {arguments}" + 
                     (f", filter: {filter_condition}" if filter_condition else ""))
-        
-        return result
+
+        if len(self._expression_cache) < MAX_CACHE_SIZE:
+            self._expression_cache[cache_key] = copy.deepcopy(result)
+
+        return copy.deepcopy(result)
     
     def _parse_function_arguments(self, args_str: str) -> List[str]:
         """
@@ -2192,15 +2201,21 @@ def enhance_measure_evaluator_with_production_aggregates():
             
             if func_name in ProductionAggregateEvaluator.STANDARD_AGGREGATES or func_name in ProductionAggregateEvaluator.MATHEMATICAL_FUNCTIONS:
                 logger.debug(f"Using production aggregate evaluator for: {expr} -> {func_name}")
-                # Create fresh production aggregate evaluator with current context
-                prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
+                # Reuse one production aggregate evaluator per MeasureEvaluator
+                # context.  This preserves parse/validation caches across the
+                # measures of the same output row instead of rebuilding them for
+                # every aggregate expression.
+                prod_agg_evaluator = getattr(self, '_prod_agg_evaluator', None)
+                if prod_agg_evaluator is None or prod_agg_evaluator.context is not self.context:
+                    prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
+                    self._prod_agg_evaluator = prod_agg_evaluator
                 
                 try:
                     result = prod_agg_evaluator.evaluate_aggregate(expr, semantics)
-                    logger.info(f"ENHANCED_EVAL_DEBUG: Production aggregate result for {expr}: {result} (type: {type(result)})")
+                    logger.debug(f"ENHANCED_EVAL_DEBUG: Production aggregate result for {expr}: {result} (type: {type(result)})")
                     # Ensure we return the exact result from production aggregator
                     if result is None:
-                        logger.info(f"ENHANCED_EVAL_DEBUG: Returning None from production aggregator")
+                        logger.debug(f"ENHANCED_EVAL_DEBUG: Returning None from production aggregator")
                     return result
                 except (AggregateValidationError, AggregateArgumentError) as e:
                     logger.warning(f"ENHANCED_EVAL: Aggregate validation error for {expr}: {e}")
@@ -2217,9 +2232,9 @@ def enhance_measure_evaluator_with_production_aggregates():
             logger.debug(f"Expression doesn't match pure aggregate pattern: {expr}")
         
         # Use original implementation for complex expressions and non-aggregates
-        logger.info(f"ENHANCED_EVAL_DEBUG: Falling back to original evaluator for: {expr}")
+        logger.debug(f"ENHANCED_EVAL_DEBUG: Falling back to original evaluator for: {expr}")
         original_result = original_evaluate(self, expr, semantics)
-        logger.info(f"ENHANCED_EVAL_DEBUG: Original evaluator returned: {original_result} (type: {type(original_result)})")
+        logger.debug(f"ENHANCED_EVAL_DEBUG: Original evaluator returned: {original_result} (type: {type(original_result)})")
         return original_result
     
     # Patch the method
