@@ -1852,9 +1852,10 @@ class EnhancedMatcher:
         rows: List[Dict[str, Any]],
         start_idx: int,
         config=None,
+        assume_safe: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Fast matcher for plain row-local linear quantified patterns."""
-        if not self._can_use_linear_quantifier_plan(config):
+        if not assume_safe and not self._can_use_linear_quantifier_plan(config):
             return None
         plan = self._get_linear_quantifier_plan()
 
@@ -1948,6 +1949,192 @@ class EnhancedMatcher:
             "has_empty_alternation": False,
             "linear_quantifier_plan": True,
         }
+
+    def _can_use_row_local_dfa_fast_path(self, config=None) -> bool:
+        """
+        Return True when the DFA can be evaluated directly from precomputed
+        row-local DEFINE results.
+
+        This is a general production optimization for context-free patterns,
+        not a benchmark-specific branch.  The normal matcher spends most of
+        its time creating/updating RowContext objects and dispatching scalar
+        condition evaluation for every attempted match.  When every explicit
+        DEFINE predicate has already been accepted by the safe row-local
+        vectorizer, the DFA transition truth values are simply boolean-array
+        lookups.  In that case we can simulate the DFA directly and preserve
+        the same transition-ordering rules used by the generic loop.
+
+        The gate is intentionally conservative.  Navigation functions,
+        cross-variable DEFINE dependencies, exclusions, anchors, subsets,
+        non-default skip modes, and ALL ROWS output still use the existing
+        matcher because their semantics depend on full match context.
+        """
+        condition_matrix = getattr(self, "_condition_matrix", None)
+        if not self._can_reuse_row_context_for_matching(condition_matrix):
+            return False
+
+        if config:
+            if getattr(config, "rows_per_match", RowsPerMatch.ONE_ROW) != RowsPerMatch.ONE_ROW:
+                return False
+            if config.skip_mode != SkipMode.PAST_LAST_ROW:
+                return False
+
+        if self.has_empty_alternation or self.has_exclusions or self.is_permute_pattern:
+            return False
+        if self.dfa.states[self.start_state].is_accept:
+            # Accepting start states can produce SQL empty matches.  The
+            # generic matcher contains the required output-mode and skip-mode
+            # handling for those cases; the row-local DFA fast path consumes
+            # only non-empty transitions and must not suppress empty matches.
+            return False
+        if self.has_reluctant_plus or self.has_reluctant_star:
+            return False
+        if self.subsets:
+            return False
+        if self._has_complex_back_references() or self._has_constraint_dependencies():
+            return False
+
+        anchor_metadata = getattr(self, "_anchor_metadata", {}) or {}
+        dfa_metadata = getattr(self.dfa, "metadata", {}) or {}
+        if (
+            anchor_metadata.get("has_start_anchor")
+            or anchor_metadata.get("has_end_anchor")
+            or dfa_metadata.get("has_start_anchor")
+            or dfa_metadata.get("has_end_anchor")
+        ):
+            return False
+
+        return True
+
+    def _row_local_transition_sort_key(
+        self,
+        transition_tuple: Tuple[str, int, bool, bool, bool],
+        current_state: int,
+        has_cross_ref_for_sort: bool,
+    ) -> Tuple[Any, ...]:
+        """Mirror the generic transition ordering without RowContext work."""
+        var_name, target_state, _is_excluded, _has_back_reference, _is_prerequisite = transition_tuple
+
+        if self.has_quantifiers and self.define_conditions:
+            if has_cross_ref_for_sort:
+                same_state = target_state == current_state
+                state_priority = 0 if same_state else 1
+                alphabetical_priority = ord(var_name[0]) if var_name else 999
+                return (state_priority, alphabetical_priority, var_name)
+
+            state_advance = target_state == current_state
+            alphabetical_priority = ord(var_name[0]) if var_name else 999
+            return (state_advance, alphabetical_priority, var_name)
+
+        state_advance = target_state == current_state
+        alternation_priority = self.alternation_order.get(var_name, 999)
+        if alternation_priority == 999:
+            alphabetical_priority = ord(var_name[0]) if var_name else 999
+            return (state_advance, alphabetical_priority, var_name)
+
+        return (state_advance, alternation_priority, var_name)
+
+    def _find_single_match_row_local_dfa(
+        self,
+        row_count: int,
+        start_idx: int,
+        config=None,
+        assume_safe: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Fast DFA traversal for row-local patterns.
+
+        The method consumes rows exactly like the generic DFA path, but the
+        only per-transition operation is a boolean lookup from the precomputed
+        condition matrix.  It returns None when no match can start at
+        ``start_idx`` and otherwise returns the longest accepted match found by
+        the DFA traversal.
+        """
+        if not assume_safe and not self._can_use_row_local_dfa_fast_path(config):
+            return None
+        if start_idx < 0 or start_idx >= row_count:
+            return None
+
+        runtime_transition_index = self._build_runtime_transition_index()
+        state = self.start_state
+        current_idx = start_idx
+        var_assignments: Dict[str, List[int]] = {}
+        excluded_rows: List[int] = []
+        longest_match: Optional[Dict[str, Any]] = None
+        has_cross_ref_for_sort = (
+            self.has_quantifiers
+            and bool(self.define_conditions)
+            and self._has_cross_variable_references()
+        )
+
+        while current_idx < row_count:
+            valid_transitions: List[Tuple[str, int, bool, bool, bool]] = []
+            for transition_tuple in runtime_transition_index.get(state, []):
+                (
+                    var,
+                    target,
+                    _condition,
+                    _transition,
+                    is_excluded,
+                    var_results,
+                    implicit_true,
+                    has_back_reference_flag,
+                    is_prerequisite_flag,
+                ) = transition_tuple
+
+                if implicit_true:
+                    valid_transitions.append((
+                        var,
+                        target,
+                        is_excluded,
+                        has_back_reference_flag,
+                        is_prerequisite_flag,
+                    ))
+                elif var_results is not None and current_idx < len(var_results) and bool(var_results[current_idx]):
+                    valid_transitions.append((
+                        var,
+                        target,
+                        is_excluded,
+                        has_back_reference_flag,
+                        is_prerequisite_flag,
+                    ))
+
+            if not valid_transitions:
+                break
+
+            if len(valid_transitions) == 1:
+                matched_var, next_state, is_excluded_match, _has_back_ref, _is_prereq = valid_transitions[0]
+            else:
+                matched_var, next_state, is_excluded_match, _has_back_ref, _is_prereq = min(
+                    valid_transitions,
+                    key=lambda candidate: self._row_local_transition_sort_key(
+                        candidate,
+                        state,
+                        has_cross_ref_for_sort,
+                    ),
+                )
+
+            var_assignments.setdefault(matched_var, []).append(current_idx)
+            if is_excluded_match:
+                excluded_rows.append(current_idx)
+
+            state = next_state
+            current_idx += 1
+
+            if self.dfa.states[state].is_accept:
+                longest_match = {
+                    "start": start_idx,
+                    "end": current_idx - 1,
+                    "variables": {k: v[:] for k, v in var_assignments.items()},
+                    "state": state,
+                    "is_empty": False,
+                    "excluded_vars": set(),
+                    "excluded_rows": excluded_rows[:],
+                    "has_empty_alternation": False,
+                    "row_local_dfa_fast_path": True,
+                }
+
+        return longest_match
 
     def _should_use_greedy_dfa_search(self, config=None) -> bool:
         """
@@ -4820,10 +5007,14 @@ class EnhancedMatcher:
         if not rows:
             return {}
 
-        try:
-            df = pd.DataFrame(rows)
-        except Exception:
-            return {}
+        source_df = getattr(self, "_source_dataframe", None)
+        if source_df is not None and len(source_df) == len(rows):
+            df = source_df
+        else:
+            try:
+                df = pd.DataFrame(rows)
+            except Exception:
+                return {}
 
         condition_matrix = {}
         for var_name, condition_expr in (self.define_conditions or {}).items():
@@ -5425,13 +5616,17 @@ class EnhancedMatcher:
         match_number = 1
         start_idx = 0
         processed_indices = set()  # Track processed indices to prevent infinite loops
-        unmatched_indices = set(range(len(rows)))
         self._matches = []  # Reset matches
 
         # Get configuration
         all_rows = config.rows_per_match != RowsPerMatch.ONE_ROW if config else False
         show_empty = config.show_empty if config else True
         include_unmatched = config.include_unmatched if config else False
+        unmatched_indices = set(range(len(rows))) if include_unmatched else None
+        track_processed_indices = (
+            include_unmatched
+            or bool(config and config.skip_mode != SkipMode.PAST_LAST_ROW)
+        )
 
         logger.info(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
 
@@ -5476,6 +5671,11 @@ class EnhancedMatcher:
         reusable_context = None
         if self._can_reuse_row_context_for_matching(condition_matrix):
             reusable_context = RowContext(rows=rows, defined_variables=self.defined_variables)
+        linear_plan_available = self._can_use_linear_quantifier_plan(config)
+        row_local_dfa_available = (
+            False if linear_plan_available
+            else self._can_use_row_local_dfa_fast_path(config)
+        )
 
         while start_idx < len(rows) and iteration_count < max_iterations:
             iteration_count += 1
@@ -5529,7 +5729,7 @@ class EnhancedMatcher:
             # TO_NEXT_ROW SHOULD allow overlaps - it creates overlapping matches by advancing only 1 position
             # TO_FIRST and TO_LAST also allow overlap behavior for variable-based skipping
             allow_overlap = config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST)
-            if start_idx in processed_indices and not allow_overlap:
+            if track_processed_indices and start_idx in processed_indices and not allow_overlap:
                 logger.debug(f"Skipping already processed index {start_idx}")
                 start_idx += 1
                 continue
@@ -5569,8 +5769,10 @@ class EnhancedMatcher:
                             matched_indices = set()
                             for var, indices in match["variables"].items():
                                 matched_indices.update(indices)
-                            unmatched_indices -= matched_indices
-                            processed_indices.update(matched_indices)
+                            if unmatched_indices is not None:
+                                unmatched_indices -= matched_indices
+                            if track_processed_indices:
+                                processed_indices.update(matched_indices)
                         
                         match_number += 1
                     
@@ -5581,14 +5783,35 @@ class EnhancedMatcher:
             # compiled matcher directly.  This avoids constructing RowContext
             # and entering the general DFA/backtracking dispatcher for every
             # candidate start position.
-            used_linear_plan = self._can_use_linear_quantifier_plan(config)
+            used_linear_plan = linear_plan_available
             if used_linear_plan:
-                match = self._find_single_match_linear_quantifier(rows, start_idx, config)
+                match = self._find_single_match_linear_quantifier(
+                    rows,
+                    start_idx,
+                    config,
+                    assume_safe=True,
+                )
             else:
                 match = None
+
+            # ROW-LOCAL DFA FAST PATH: for context-free patterns whose DEFINE
+            # predicates were safely vectorized, simulate the DFA directly
+            # from boolean arrays.  This keeps semantics guarded while avoiding
+            # RowContext construction and scalar dispatch for broad classes of
+            # future row-local patterns, including grouped/alternation patterns.
+            used_row_local_dfa = False
+            if match is None and not used_linear_plan:
+                used_row_local_dfa = row_local_dfa_available
+                if used_row_local_dfa:
+                    match = self._find_single_match_row_local_dfa(
+                        len(rows),
+                        start_idx,
+                        config,
+                        assume_safe=True,
+                    )
             
             # FALLBACK: Standard DFA traversal for complex patterns
-            if match is None and not used_linear_plan:
+            if match is None and not used_linear_plan and not used_row_local_dfa:
                 if reusable_context is not None:
                     context = self._reset_reusable_row_context(reusable_context, start_idx, self.subsets)
                 else:
@@ -5606,7 +5829,8 @@ class EnhancedMatcher:
             # Process the match
             if all_rows:
                 match_time_start = time.time()
-                logger.info(f"Processing match {match_number} with ALL ROWS PER MATCH")
+                if DEBUG_ENABLED:
+                    logger.debug(f"Processing match {match_number} with ALL ROWS PER MATCH")
                 match_rows = self._process_all_rows_match(match, rows, measures, match_number, config)
                 results.extend(match_rows)
                 self.timing["process_match"] += time.time() - match_time_start
@@ -5616,15 +5840,18 @@ class EnhancedMatcher:
                     matched_indices = set()
                     for var, indices in match["variables"].items():
                         matched_indices.update(indices)
-                    unmatched_indices -= matched_indices
-                    processed_indices.update(matched_indices)
+                    if unmatched_indices is not None:
+                        unmatched_indices -= matched_indices
+                    if track_processed_indices:
+                        processed_indices.update(matched_indices)
                     
                     # Also mark excluded rows as processed
-                    if match.get("excluded_rows"):
+                    if track_processed_indices and match.get("excluded_rows"):
                         processed_indices.update(match["excluded_rows"])
             else:
-                logger.info("\nProcessing match with ONE ROW PER MATCH:")
-                logger.info(f"Match: {match}")
+                if DEBUG_ENABLED:
+                    logger.debug("\nProcessing match with ONE ROW PER MATCH:")
+                    logger.debug(f"Match: {match}")
                 match_row = self._process_one_row_match(match, rows, measures, match_number)
                 if match_row:
                     results.append(match_row)
@@ -5632,18 +5859,21 @@ class EnhancedMatcher:
                         matched_indices = set()
                         for var, indices in match["variables"].items():
                             matched_indices.update(indices)
-                        unmatched_indices -= matched_indices
-                        processed_indices.update(matched_indices)
+                        if unmatched_indices is not None:
+                            unmatched_indices -= matched_indices
+                        if track_processed_indices:
+                            processed_indices.update(matched_indices)
                         
                         # Also mark excluded rows as processed
-                        if match.get("excluded_rows"):
+                        if track_processed_indices and match.get("excluded_rows"):
                             processed_indices.update(match["excluded_rows"])
 
             # Update start index based on skip mode
             old_start_idx = start_idx
             if match.get("is_empty", False):
                 # For empty matches, always move to the next position
-                processed_indices.add(start_idx)
+                if track_processed_indices:
+                    processed_indices.add(start_idx)
                 start_idx += 1
                 logger.debug(f"Empty match, advancing from {old_start_idx} to {start_idx}")
             else:
@@ -5655,12 +5885,12 @@ class EnhancedMatcher:
 
                 logger.debug(f"Non-empty match, advancing from {old_start_idx} to {start_idx}")
                 # Mark all indices in the match as processed (except for TO_NEXT_ROW which allows overlaps)
-                if not (config and config.skip_mode == SkipMode.TO_NEXT_ROW):
+                if track_processed_indices and not (config and config.skip_mode == SkipMode.TO_NEXT_ROW):
                     for idx in range(old_start_idx, match["end"] + 1):
                         processed_indices.add(idx)
                     
                 # Also mark excluded rows as processed
-                if match.get("excluded_rows"):
+                if track_processed_indices and match.get("excluded_rows"):
                     processed_indices.update(match["excluded_rows"])
                     logger.debug(f"Marked excluded rows as processed: {match['excluded_rows']}")
                 
@@ -5681,7 +5911,7 @@ class EnhancedMatcher:
             logger.info(f"UNLIMITED SCALE: Processed {iteration_count:,} iterations successfully with {len(results)} matches found")
 
         # Add unmatched rows only when explicitly requested via WITH UNMATCHED ROWS
-        if include_unmatched:
+        if include_unmatched and unmatched_indices is not None:
             for idx in sorted(unmatched_indices):
                 if idx not in processed_indices:  # Avoid duplicates
                     unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
@@ -6240,14 +6470,14 @@ class EnhancedMatcher:
                 if key not in result:  # Don't overwrite existing values
                     result[key] = value
         
-        # Print debug information
-        logger.info("\nMatch information:")
-        logger.info(f"Match number: {match_number}")
-        logger.info(f"Match start: {match['start']}, end: {match['end']}")
-        logger.info(f"Variables: {var_assignments}")
-        logger.info("\nResult row:")
-        for key, value in result.items():
-            logger.info(f"{key}: {value}")
+        if DEBUG_ENABLED:
+            logger.debug("\nMatch information:")
+            logger.debug(f"Match number: {match_number}")
+            logger.debug(f"Match start: {match['start']}, end: {match['end']}")
+            logger.debug(f"Variables: {var_assignments}")
+            logger.debug("\nResult row:")
+            for key, value in result.items():
+                logger.debug(f"{key}: {value}")
         
         return result
 
@@ -6426,7 +6656,8 @@ class EnhancedMatcher:
         # Sort indices for consistent processing
         matched_indices = sorted(set(matched_indices))
         
-        logger.info(f"Processing match {match_number}, included indices: {matched_indices}")
+        if DEBUG_ENABLED:
+            logger.debug(f"Processing match {match_number}, included indices: {matched_indices}")
         if excluded_rows:
             logger.debug(f"Excluded rows: {sorted(excluded_rows)}")
         
