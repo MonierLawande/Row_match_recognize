@@ -1086,6 +1086,8 @@ class EnhancedMatcher:
         self._runtime_transition_index_matrix_id = None
         self._variable_back_reference_flags = None
         self._variable_prerequisite_flags = None
+        self._row_local_transition_index = None
+        self._row_local_transition_index_cache_key = None
         
         logger.info(f"EnhancedMatcher initialized: "
                    f"states={len(dfa.states)}, "
@@ -1634,6 +1636,60 @@ class EnhancedMatcher:
 
         return not saw_known_condition
 
+    def _build_start_position_mask(self, row_count: int):
+        """
+        Precompute which row positions can start a match.
+
+        This is the vectorized equivalent of ``_can_start_match_at``.  It is
+        conservative: if any start transition has an unknown/complex predicate,
+        return None and let the existing per-row check handle it.  For common
+        row-local DEFINE predicates it avoids hundreds of thousands of Python
+        method calls on large inputs.
+        """
+        if row_count <= 0:
+            return None
+
+        if self.dfa.states[self.start_state].is_accept:
+            return None
+
+        start_transitions = self.transition_index.get(self.start_state)
+        if not start_transitions:
+            return None
+
+        condition_matrix = getattr(self, "_condition_matrix", None)
+        if condition_matrix is None:
+            return None
+
+        try:
+            import numpy as np
+        except Exception:
+            return None
+
+        define_conditions = self.define_conditions or {}
+        mask = np.zeros(row_count, dtype=bool)
+        saw_known_condition = False
+
+        for transition_tuple in start_transitions:
+            var = transition_tuple[0]
+            var_results = condition_matrix.get(var)
+            if var_results is None:
+                if var not in define_conditions:
+                    return np.ones(row_count, dtype=bool)
+                return None
+
+            values = np.asarray(var_results, dtype=bool)
+            if len(values) < row_count:
+                padded = np.zeros(row_count, dtype=bool)
+                padded[: len(values)] = values
+                values = padded
+            elif len(values) > row_count:
+                values = values[:row_count]
+
+            mask |= values
+            saw_known_condition = True
+
+        return mask if saw_known_condition else None
+
     def _get_linear_quantifier_plan(self) -> Optional[List[Dict[str, Any]]]:
         """
         Compile a plain sequential quantified pattern into a small execution plan.
@@ -2034,6 +2090,71 @@ class EnhancedMatcher:
 
         return (state_advance, alternation_priority, var_name)
 
+    def _build_row_local_transition_index(
+        self,
+        has_cross_ref_for_sort: bool,
+    ) -> Dict[int, List[Tuple[str, int, bool, Any, bool, Tuple[Any, ...]]]]:
+        """
+        Build a compact transition plan for the row-local DFA fast path.
+
+        The generic runtime transition index stores condition callables,
+        transition objects, and dependency flags needed by the full matcher.
+        The row-local path only needs variable name, target state, exclusion
+        flag, precomputed boolean array, implicit-TRUE flag, and deterministic
+        priority.  Compacting this once avoids millions of large tuple
+        unpacking operations in large scans.
+        """
+        condition_matrix = getattr(self, "_condition_matrix", None)
+        cache_key = (id(condition_matrix), bool(has_cross_ref_for_sort))
+        if (
+            self._row_local_transition_index is not None
+            and self._row_local_transition_index_cache_key == cache_key
+        ):
+            return self._row_local_transition_index
+
+        runtime_transition_index = self._build_runtime_transition_index()
+        compact_index: Dict[int, List[Tuple[str, int, bool, Any, bool, Tuple[Any, ...]]]] = {}
+
+        for state, transitions in runtime_transition_index.items():
+            compact_transitions = []
+            for transition_tuple in transitions:
+                (
+                    var,
+                    target,
+                    _condition,
+                    _transition,
+                    is_excluded,
+                    var_results,
+                    implicit_true,
+                    has_back_reference_flag,
+                    is_prerequisite_flag,
+                ) = transition_tuple
+                priority = self._row_local_transition_sort_key(
+                    (
+                        var,
+                        target,
+                        is_excluded,
+                        has_back_reference_flag,
+                        is_prerequisite_flag,
+                    ),
+                    state,
+                    has_cross_ref_for_sort,
+                )
+                compact_transitions.append((
+                    var,
+                    target,
+                    is_excluded,
+                    var_results,
+                    implicit_true,
+                    priority,
+                ))
+
+            compact_index[state] = compact_transitions
+
+        self._row_local_transition_index = compact_index
+        self._row_local_transition_index_cache_key = cache_key
+        return compact_index
+
     def _find_single_match_row_local_dfa(
         self,
         row_count: int,
@@ -2055,66 +2176,53 @@ class EnhancedMatcher:
         if start_idx < 0 or start_idx >= row_count:
             return None
 
-        runtime_transition_index = self._build_runtime_transition_index()
-        state = self.start_state
-        current_idx = start_idx
-        var_assignments: Dict[str, List[int]] = {}
-        excluded_rows: List[int] = []
-        longest_match: Optional[Dict[str, Any]] = None
         has_cross_ref_for_sort = (
             self.has_quantifiers
             and bool(self.define_conditions)
             and self._has_cross_variable_references()
         )
+        row_local_transition_index = self._build_row_local_transition_index(has_cross_ref_for_sort)
+        state = self.start_state
+        current_idx = start_idx
+        var_assignments: Dict[str, List[int]] = {}
+        excluded_rows: List[int] = []
+        accepted_end: Optional[int] = None
+        accepted_state: Optional[int] = None
 
         while current_idx < row_count:
-            valid_transitions: List[Tuple[str, int, bool, bool, bool]] = []
-            for transition_tuple in runtime_transition_index.get(state, []):
-                (
-                    var,
-                    target,
-                    _condition,
-                    _transition,
-                    is_excluded,
-                    var_results,
-                    implicit_true,
-                    has_back_reference_flag,
-                    is_prerequisite_flag,
-                ) = transition_tuple
+            best_transition: Optional[Tuple[str, int, bool, Any, bool, Tuple[Any, ...]]] = None
+            best_key: Optional[Tuple[Any, ...]] = None
+            state_transitions = row_local_transition_index.get(state, [])
+            for transition_tuple in state_transitions:
+                var, target, is_excluded, var_results, implicit_true, priority = transition_tuple
 
+                transition_matches = False
                 if implicit_true:
-                    valid_transitions.append((
-                        var,
-                        target,
-                        is_excluded,
-                        has_back_reference_flag,
-                        is_prerequisite_flag,
-                    ))
+                    transition_matches = True
                 elif var_results is not None and current_idx < len(var_results) and bool(var_results[current_idx]):
-                    valid_transitions.append((
-                        var,
-                        target,
-                        is_excluded,
-                        has_back_reference_flag,
-                        is_prerequisite_flag,
-                    ))
+                    transition_matches = True
 
-            if not valid_transitions:
+                if not transition_matches:
+                    continue
+
+                if best_transition is None:
+                    best_transition = transition_tuple
+                    best_key = priority
+                else:
+                    if priority < best_key:
+                        best_transition = transition_tuple
+                        best_key = priority
+
+            if best_transition is None:
                 break
 
-            if len(valid_transitions) == 1:
-                matched_var, next_state, is_excluded_match, _has_back_ref, _is_prereq = valid_transitions[0]
-            else:
-                matched_var, next_state, is_excluded_match, _has_back_ref, _is_prereq = min(
-                    valid_transitions,
-                    key=lambda candidate: self._row_local_transition_sort_key(
-                        candidate,
-                        state,
-                        has_cross_ref_for_sort,
-                    ),
-                )
+            matched_var, next_state, is_excluded_match, _var_results, _implicit_true, _priority = best_transition
 
-            var_assignments.setdefault(matched_var, []).append(current_idx)
+            assignment_list = var_assignments.get(matched_var)
+            if assignment_list is None:
+                assignment_list = []
+                var_assignments[matched_var] = assignment_list
+            assignment_list.append(current_idx)
             if is_excluded_match:
                 excluded_rows.append(current_idx)
 
@@ -2122,19 +2230,33 @@ class EnhancedMatcher:
             current_idx += 1
 
             if self.dfa.states[state].is_accept:
-                longest_match = {
-                    "start": start_idx,
-                    "end": current_idx - 1,
-                    "variables": {k: v[:] for k, v in var_assignments.items()},
-                    "state": state,
-                    "is_empty": False,
-                    "excluded_vars": set(),
-                    "excluded_rows": excluded_rows[:],
-                    "has_empty_alternation": False,
-                    "row_local_dfa_fast_path": True,
-                }
+                accepted_end = current_idx - 1
+                accepted_state = state
 
-        return longest_match
+        if accepted_end is None:
+            return None
+
+        # The DFA may have consumed rows after the last accepting state before
+        # failing.  Materialize only the rows that belong to the last accepted
+        # match.  Doing this once avoids copying the assignment dictionary on
+        # every accepting step in greedy quantified patterns.
+        accepted_variables = {
+            var: [idx for idx in indices if idx <= accepted_end]
+            for var, indices in var_assignments.items()
+        }
+        accepted_excluded_rows = [idx for idx in excluded_rows if idx <= accepted_end]
+
+        return {
+            "start": start_idx,
+            "end": accepted_end,
+            "variables": accepted_variables,
+            "state": accepted_state,
+            "is_empty": False,
+            "excluded_vars": set(),
+            "excluded_rows": accepted_excluded_rows,
+            "has_empty_alternation": False,
+            "row_local_dfa_fast_path": True,
+        }
 
     def _should_use_greedy_dfa_search(self, config=None) -> bool:
         """
@@ -5594,8 +5716,8 @@ class EnhancedMatcher:
         self._current_dataset_size = len(rows)
         
         # PRODUCTION ENHANCEMENT: Input validation
-        if not isinstance(rows, (list, tuple)):
-            raise TypeError(f"Expected list or tuple for rows, got {type(rows)}")
+        if not hasattr(rows, "__len__") or not hasattr(rows, "__getitem__"):
+            raise TypeError(f"Expected row sequence for rows, got {type(rows)}")
         if not rows:
             logger.info("Empty input rows - returning empty result")
             return []
@@ -5676,10 +5798,19 @@ class EnhancedMatcher:
             False if linear_plan_available
             else self._can_use_row_local_dfa_fast_path(config)
         )
+        start_position_mask = self._build_start_position_mask(len(rows))
+        start_positions = None
+        if start_position_mask is not None:
+            try:
+                import numpy as np
+                start_positions = np.flatnonzero(start_position_mask)
+            except Exception:
+                start_positions = None
 
         while start_idx < len(rows) and iteration_count < max_iterations:
             iteration_count += 1
-            logger.debug(f"Iteration {iteration_count}, start_idx={start_idx}")
+            if DEBUG_ENABLED:
+                logger.debug(f"Iteration {iteration_count}, start_idx={start_idx}")
 
             # UNLIMITED SCALE: Intelligent progress tracking and stagnation detection
             # Track progress to detect infinite loops without arbitrary iteration limits
@@ -5742,7 +5873,20 @@ class EnhancedMatcher:
                 start_idx += 1
                 continue
 
-            if hasattr(self, '_condition_matrix') and not self._can_start_match_at(start_idx):
+            if start_positions is not None:
+                if start_idx >= len(rows):
+                    break
+                if start_idx >= len(start_position_mask) or not bool(start_position_mask[start_idx]):
+                    next_pos = start_positions.searchsorted(start_idx)
+                    if next_pos >= len(start_positions):
+                        break
+                    start_idx = int(start_positions[next_pos])
+                    continue
+            elif start_position_mask is not None:
+                if start_idx >= len(start_position_mask) or not bool(start_position_mask[start_idx]):
+                    start_idx += 1
+                    continue
+            elif hasattr(self, '_condition_matrix') and not self._can_start_match_at(start_idx):
                 start_idx += 1
                 continue
 
@@ -6304,6 +6448,8 @@ class EnhancedMatcher:
         """Fetch a field value from a matched row with SQL-style case fallback."""
         if row_idx < 0 or row_idx >= len(rows):
             return None
+        if hasattr(rows, "get_value"):
+            return rows.get_value(row_idx, field_name)
         row = rows[row_idx]
         if not isinstance(row, dict):
             return None

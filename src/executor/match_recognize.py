@@ -44,6 +44,58 @@ from src.utils.performance_optimizer import (
 logger = get_logger(__name__)
 
 
+class DataFrameRowAccessor:
+    """
+    Lightweight row sequence backed by a pandas DataFrame.
+
+    The matcher historically receives ``list[dict]`` rows, which requires
+    materializing every input row before matching.  For ONE ROW PER MATCH
+    queries the engine usually needs only a small subset of rows for output
+    and measure evaluation.  This accessor keeps column arrays and creates row
+    dictionaries lazily only when a caller explicitly asks for a row.
+    """
+
+    def __init__(self, df: pd.DataFrame):
+        self._df = df
+        self._length = len(df)
+        self._columns = list(df.columns)
+        self._arrays = {column: df[column].to_numpy(copy=False) for column in self._columns}
+        self._case_map = {str(column).upper(): column for column in self._columns}
+        self._row_cache: Dict[int, Dict[str, Any]] = {}
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        cached = self._row_cache.get(index)
+        if cached is not None:
+            return cached
+        row = {column: self._arrays[column][index] for column in self._columns}
+        self._row_cache[index] = row
+        return row
+
+    def __iter__(self):
+        for idx in range(len(self)):
+            yield self[idx]
+
+    def get_value(self, row_idx: int, field_name: str) -> Any:
+        if row_idx < 0 or row_idx >= len(self):
+            return None
+        column = self._case_map.get(str(field_name).upper())
+        if column is None:
+            return None
+        return self._arrays[column][row_idx]
+
+
 def _normalize_query_cache_key(query: str) -> str:
     """Normalize SQL text for cache lookup without changing SQL semantics."""
     return query.strip()
@@ -585,6 +637,59 @@ def _should_use_parallel_execution(partitions, df, parallel_config) -> bool:
     
     return True
 
+def _is_already_ordered(df: pd.DataFrame, order_by: List[str]) -> bool:
+    """
+    Return True when a partition is already ordered by the MATCH_RECOGNIZE
+    ORDER BY columns.
+
+    This is a semantic-preserving optimization.  SQL row-pattern matching must
+    operate on ordered partitions, but many DataFrame workflows already provide
+    append/order-key sorted data.  In those cases calling sort_values again adds
+    O(n log n) work and allocates a new DataFrame unnecessarily.
+    """
+    if not order_by or len(df) <= 1:
+        return True
+
+    try:
+        if len(order_by) == 1:
+            column = order_by[0]
+            if column not in df.columns:
+                return False
+            return bool(df[column].is_monotonic_increasing)
+
+        missing_columns = [column for column in order_by if column not in df.columns]
+        if missing_columns:
+            return False
+
+        return bool(pd.MultiIndex.from_frame(df[order_by]).is_monotonic_increasing)
+    except Exception:
+        return False
+
+def _order_partition_if_needed(partition: pd.DataFrame, order_by: List[str]) -> pd.DataFrame:
+    """Order a partition only when it is not already ordered."""
+    if not order_by or _is_already_ordered(partition, order_by):
+        return partition
+    return partition.sort_values(by=order_by)
+
+def _can_use_lazy_partition_rows(matcher, match_config) -> bool:
+    """
+    Return True when partition rows can be accessed lazily.
+
+    Lazy rows avoid DataFrame.to_dict('records') for the common ONE ROW PER
+    MATCH path.  Queries that need full row reconstruction after matching
+    (ALL ROWS modes, unmatched rows, PERMUTE post-filters, or non-default skip
+    modes) keep the materialized representation.
+    """
+    pattern = (getattr(matcher, "original_pattern", "") or "").upper()
+    return (
+        match_config.rows_per_match == RowsPerMatch.ONE_ROW
+        and match_config.skip_mode == SkipMode.PAST_LAST_ROW
+        and "PERMUTE" not in pattern
+    )
+
+def _partition_rows_for_matching(partition: pd.DataFrame, use_lazy_rows: bool):
+    return DataFrameRowAccessor(partition) if use_lazy_rows else partition.to_dict('records')
+
 def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher, match_config, 
                                    measures, all_rows, all_matches, all_matched_indices, 
                                    metrics, parallel_manager, results):
@@ -598,8 +703,7 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
             continue
             
         # Order the partition
-        if order_by:
-            partition = partition.sort_values(by=order_by)
+        partition = _order_partition_if_needed(partition, order_by)
         
         partition_data.append((partition_idx, partition))
         
@@ -629,17 +733,22 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
     start_time = time.time()
     
     for partition_idx, partition in partition_data:
-        # Convert to rows
-        rows = partition.to_dict('records')
+        use_lazy_rows = _can_use_lazy_partition_rows(matcher, match_config)
+        rows = _partition_rows_for_matching(partition, use_lazy_rows)
         partition_start_idx = len(all_rows)
-        all_rows.extend(rows)
+        if not use_lazy_rows:
+            all_rows.extend(rows)
         
         # Find matches
-        partition_results = matcher.find_matches(
-            rows=rows,
-            config=match_config,
-            measures=measures
-        )
+        matcher._source_dataframe = partition
+        try:
+            partition_results = matcher.find_matches(
+                rows=rows,
+                config=match_config,
+                measures=measures
+            )
+        finally:
+            matcher._source_dataframe = None
         
         # Process matches and adjust indices
         if hasattr(matcher, "_matches"):
@@ -691,20 +800,24 @@ def _process_partitions_sequentially(partitions, partition_by, order_by, matcher
             continue
         
         # Order the partition
-        if order_by:
-            partition = partition.sort_values(by=order_by)
+        partition = _order_partition_if_needed(partition, order_by)
         
-        # Convert to rows
-        rows = partition.to_dict('records')
+        use_lazy_rows = _can_use_lazy_partition_rows(matcher, match_config)
+        rows = _partition_rows_for_matching(partition, use_lazy_rows)
         partition_start_idx = len(all_rows)  # Remember where this partition starts
-        all_rows.extend(rows)  # Store rows for post-processing
+        if not use_lazy_rows:
+            all_rows.extend(rows)  # Store rows for post-processing
         
         # Find matches
-        partition_results = matcher.find_matches(
-            rows=rows,
-            config=match_config,
-            measures=measures
-        )
+        matcher._source_dataframe = partition
+        try:
+            partition_results = matcher.find_matches(
+                rows=rows,
+                config=match_config,
+                measures=measures
+            )
+        finally:
+            matcher._source_dataframe = None
         
         # Store matches for post-processing with adjusted indices
         if hasattr(matcher, "_matches"):
@@ -1144,12 +1257,21 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
             metrics["partition_count"] = len(partitions)
             
-            # Phase 2: Data subset preprocessing caching
-            data_hash = hashlib.sha256(str(df.values.tobytes()).encode()).hexdigest()[:16] if not df.empty else "empty"
-            
-            # Check for cached preprocessing results
+            # Phase 2: Data subset preprocessing caching.
+            # Hashing the entire DataFrame is expensive on large inputs and is
+            # wasted when the cache policy would reject the dataset by size.
+            # Compute memory size first and hash only small partitioned inputs
+            # where preprocessing-cache reuse is realistic.
             cached_partitions = None
-            if caching_enabled and len(df) > 100:  # Only cache for larger datasets
+            data_size_mb = df.memory_usage(deep=True).sum() / (1024 * 1024) if not df.empty else 0
+            should_cache_preprocessing = (
+                caching_enabled
+                and len(df) > 100
+                and bool(partition_by)
+                and data_size_mb < 50
+            )
+            if should_cache_preprocessing:
+                data_hash = hashlib.sha256(df.to_csv(index=False).encode("utf-8")).hexdigest()[:16]
                 cached_partitions = DataSubsetCache.get_preprocessed_data(
                     data_hash, partition_by, order_by, {}
                 )
@@ -1160,11 +1282,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 else:
                     logger.debug(f"Data preprocessing cache MISS for {len(df)} rows")
                     # Cache the partitioned data for future use
-                    data_size_mb = df.memory_usage(deep=True).sum() / (1024 * 1024)
-                    if data_size_mb < 50:  # Only cache datasets smaller than 50MB
-                        DataSubsetCache.cache_preprocessed_data(
-                            data_hash, partition_by, order_by, {}, partitions, data_size_mb
-                        )
+                    DataSubsetCache.cache_preprocessed_data(
+                        data_hash, partition_by, order_by, {}, partitions, data_size_mb
+                    )
             
             # Phase 1: Parallel Execution Optimization
             # Check if parallel execution is beneficial
