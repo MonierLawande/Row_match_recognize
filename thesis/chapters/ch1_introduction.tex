@@ -8,7 +8,7 @@
 \label{chap:intro}
 
 Pattern matching is the process of analyzing a sequence of data
-points whether rows in a relational table or events in a data
+points, whether rows in a relational table or events in a data
 stream with the goal of recognizing specific shapes, trends, or
 behavior sequences within the data.  It plays a crucial role
 across many analytical domains: detecting chains of transactions
@@ -39,7 +39,7 @@ This gap is particularly significant for local analytical workflows.
 Many analytical workflows begin in Python, where users prepare data, test hypotheses, and develop downstream models before moving to larger-scale database or cloud platforms.  For data that fits comfortably in memory, requiring
 a separate SQL engine only to express row pattern logic can add
 deployment and data movement overhead.  The focus of this thesis is
-therefore not to replace enterprise or streaming systems, but to
+therefore not to replace enterprise or Database systems, but to
 bring a practical subset of declarative row pattern recognition into
 the Pandas environment where many analytical workflows already
 begin.
@@ -48,16 +48,15 @@ Without this declarative clause, detecting multi-row patterns
 requires complex combinations of SQL window functions, self-joins,
 or procedural loops over rows outside the database.  As the pattern
 grows past two or three steps, the corresponding code expands
-into many of lines filled with row-number calculations, timestamp
+into many lines filled with row number calculations, timestamp
 comparisons, and cascading \texttt{JOIN} conditions.  Such code
 is difficult to write, harder to maintain, and typically forces
 multiple table scans with poor
 performance~\cite{cao2012optimizationanalyticwindowfunctions}.
 
-In Python's data science ecosystem, the limitation is even more
-acute.  Pandas~\cite{McKinney2010} is a widely used library for
-in-process tabular data analysis, yet it provides no native
-sequential pattern primitive.  Analysts who need to detect
+In Python's data science ecosystem, the limitation is more noticeable.  Pandas~\cite{McKinney2010} is a widely used library for
+tabular data analysis in Python, yet it provides no native
+sequential pattern matching. Analysts who need to detect
 multi-step patterns must manually compose low-level operations:
 creating multiple shifted column copies (\texttt{df['value'].shift(-1)},
 \texttt{shift(-2)}, \ldots), building Boolean masks, stitching
@@ -94,9 +93,8 @@ for _, grp in df.groupby('customer_id'):
 result_df = pd.DataFrame(all_matches)
 \end{lstlisting}
 
-This hand-crafted approach is verbose (over 20 lines for a
-three-step pattern), prone to off-by-one alignment errors,
-and does not scale gracefully to longer or conditional patterns.
+ It takes over 20 lines of code to make a simple three step pattern. The Hand Crafted Approach is also likely to have mistakes where things are not lined up correctly. The Hand-Crafted Approach does not work well when we need to make longer patterns or patterns that have conditions.
+
 The same query expressed with \texttt{MATCH\_RECOGNIZE} is shown
 in Listing~\ref{lst:ch1-mr}: a single declarative statement that
 specifies the partition, ordering, pattern grammar, variable definitions, and output measures.
@@ -132,10 +130,7 @@ MATCH_RECOGNIZE (
 output_df = match_recognize(query, df)
 \end{lstlisting}
 
-The declarative form is not merely shorter syntactically: it
-separates what to find (the pattern) from how to
-find it (the engine), making patterns composable, auditable, and
-easy to extend.  A more complex pattern, such as four or five steps
+The declarative form is not just shorter in syntax: iIt helps to separate what you need to find which's the pattern,from how you find it, The patterns become composable, auditable and easy to extend. A more complex pattern, such as four or five steps
 with conditional alternation, requires no change to the surrounding
 Python code, only an update to the \texttt{PATTERN} and
 \texttt{DEFINE} clauses~\cite{michels2018new,petkovic2022rpr}.
@@ -152,9 +147,7 @@ gap.
 \section{Research Objectives and Contributions}
 \label{sec:intro-objectives}
 % ----------------------------------------------------------------
-
-This thesis addresses the gap between the SQL:2016
-\texttt{MATCH\_RECOGNIZE} standard and Python's Pandas ecosystem,
+This thesis aims to integrate SQL:2016\texttt{MATCH\_RECOGNIZE}style row pattern recognition into Python data analysis workflows using Pandas,
 bridging the expressiveness of relational pattern queries with the
 flexibility of in-memory analytics.  Three objectives guided the
 work; each is stated below together with the contribution that
@@ -165,60 +158,45 @@ fulfills it.
   \item \textbf{An in-process engine supporting core SQL:2016
     Feature~R010-style capabilities for Pandas DataFrames.}
     Without a declarative alternative in Python, a data scientist
-    must write the twenty-line hand-crafted loop in
-    Listing~\ref{lst:ch1-udf} merely to detect a simple
-    three-step declining-price pattern.  This thesis delivers
+    must write the many lines  hand-crafted loop like in
+    Listing~\ref{lst:ch1-udf} to detect a simple patterns like
+    three steps declining-price pattern.  This thesis delivers
     an in-process \texttt{MATCH\_RECOGNIZE}-style implementation
     supporting the core Feature~R010 behavior evaluated in this
-    thesis.  It runs entirely alongside Pandas---no external
-    database server or cloud subscription required---reducing that
-    loop to a single declarative call in Listing~\ref{lst:ch1-mr}
-    and eliminating the need for complex Python code or external
-    SQL-engine dependencies.
+    thesis.  It runs entirely alongside Pandas no external
+    database server or cloud subscription required reducing that
+    loop to a single declarative call like in Listing~\ref{lst:ch1-mr}
+    and avoiding the requirement for external SQL engine dependencies or intricate Python code.
 
-  \item \textbf{Broad evaluated coverage of SQL:2016-style pattern
-    constructs.}
-    The engine implements and evaluates a broad set of pattern
-    constructs: quantifiers (\texttt{*}, \texttt{+}, \texttt{?},
-    \texttt{\{n,m\}}), alternation (\texttt{|}), grouping,
-    anchors, exclusions (\texttt{\{- -\}}), and \texttt{PERMUTE}.
-    For example, a fraud analyst can express a probe-and-drain
-    sequence as
+ \item \textbf{Broad coverage and cross-engine correctness validation.}
+The engine implements and evaluates a broad subset of SQL:2016-style row-pattern
+constructs, including quantifiers (\texttt{*}, \texttt{+}, \texttt{?}, and
+\texttt{{n,m}}), alternation (\texttt{|}), grouping, anchors, exclusions
+(\texttt{{- -}}), and \texttt{PERMUTE}. For example, a fraud analyst can express
+a probe-and-drain sequence as
+\texttt{PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)}, and the engine
+parses, compiles, and executes the pattern directly over pandas DataFrames.
+Functional correctness is evaluated through targeted automated tests and
+cross-engine validation against Oracle and Trino.
+In total, more than 500 queries were executed across different pattern families,
+SQL constructs, and output scenarios. The results produced by the proposed engine
+were consistent with both Oracle and Trino for the evaluated cases, including
+detected matches, match ordering, measures, and output rows.
 
-    \medskip
-    \texttt{PATTERN (PROBE+ (TRANSFER | WITHDRAW)\{2,5\} DRAIN)}
-    \medskip
 
-    \noindent
-    and the engine parses, compiles, and executes it.  Functional
-    correctness is assessed through targeted automated tests
-    covering the supported features.  One acknowledged boundary:
-    patterns with three or
-    more levels of nested greedy quantifiers
-    (e.g., \texttt{(A+B*)+C?}) can trigger exponential
-    automata state-space growth; bounded quantifiers and simpler
-    nesting behave efficiently~\cite{michels2018new}.
+\item \textbf{Empirical validation using a real-world dataset.}
+performance is assessed through targeted automated tests, using the Amazon UK Products~2023
+catalog~\cite{asaniczka2023amazon}. This real-world e-commerce dataset contains
+approximately 2.2 million product records and provides suitable tabular data for
+evaluating price-based row-pattern recognition scenarios. 
 
-  \item \textbf{Safe predicate evaluation and empirical
-    validation at a real-world scale.}
-    User-written \texttt{DEFINE} predicates must be evaluated
-    \emph{securely}: passing strings directly to Python's
-    \texttt{eval()} is a code-injection vulnerability (a predicate
-    such as \texttt{\_\_import\_\_('os').system('echo hacked')}
-    would execute an arbitrary system command).  The engine instead parses
-    predicates into an AST and evaluates them through a controlled
-    interpreter that allows only permitted operations.  Correctness
-    is assessed through targeted automated tests, while performance
-    is evaluated using the Amazon UK Products~2023
-    catalog~\cite{asaniczka2023amazon}.  The performance study
-    uses five pattern families at five input sizes
-    (25K, 35K, 50K, 75K, and 100K rows) sampled from the
-    2.2-million-row catalog; all 25 performance runs completed
-    successfully, with throughput up to approximately
-    \textbf{12\,799~rows/sec} on a commodity laptop.
-    Future work will address performance on larger datasets,
-    memory consumption for high-variable patterns, and integration
-    with query-optimizer plan-level improvements.
+The performance evaluation was conducted using five pattern families across eight input scales, ranging from 25K to 300K rows, sampled from the complete Amazon UK Products catalog.
+In total, 40 performance test cases were executed,
+and all runs completed successfully.The results indicate
+near-linear scaling over the evaluated range, with expected runtime differences
+between simple, alternation, quantified, optional, and nested pattern families.
+
+
 
 \end{enumerate}
 
@@ -282,7 +260,7 @@ during the course of this research.
 \begin{description}
 
 \item[First Publication.]
-The primary outcome of this thesis has been published in the
+First paper has been published in the
 \textit{2026 IEEE 23rd Mediterranean Electrotechnical Conference
 (MELECON)}.  The paper, entitled ``Row Pattern Recognition for
 Pandas: Bringing MATCH\_\allowbreak RECOGNIZE to Python DataFrames''
