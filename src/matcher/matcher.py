@@ -1080,6 +1080,12 @@ class EnhancedMatcher:
         self._compiled_measure_plan_cache = {}
         self._compiled_linear_quantifier_plan = None
         self._compiled_linear_quantifier_plan_ready = False
+        self._linear_plan_run_lengths = None
+        self._linear_plan_run_lengths_row_count = None
+        self._runtime_transition_index = None
+        self._runtime_transition_index_matrix_id = None
+        self._variable_back_reference_flags = None
+        self._variable_prerequisite_flags = None
         
         logger.info(f"EnhancedMatcher initialized: "
                    f"states={len(dfa.states)}, "
@@ -1396,6 +1402,129 @@ class EnhancedMatcher:
         
         logger.debug(f"Built optimized transition index for {len(index)} states with anchor metadata")
         return index
+
+    def _get_variable_back_reference_flags(self) -> Tuple[Dict[str, bool], Dict[str, bool]]:
+        """
+        Return cached per-variable dependency flags used by hot transition
+        selection paths.
+
+        The existing dependency helpers are correct, but calling them for every
+        valid transition still costs millions of Python method calls on large
+        datasets.  This method materializes their results once per matcher
+        instance and keeps the hot loop as dictionary lookups.
+        """
+        if self._variable_back_reference_flags is not None and self._variable_prerequisite_flags is not None:
+            return self._variable_back_reference_flags, self._variable_prerequisite_flags
+
+        variables: Set[str] = set(self._pattern_variable_set)
+        variables.update(str(var) for var in (self.define_conditions or {}).keys())
+        for transitions in self.transition_index.values():
+            for transition_tuple in transitions:
+                if transition_tuple:
+                    variables.add(str(transition_tuple[0]))
+
+        self._variable_back_reference_flags = {
+            variable: self._variable_has_back_reference(variable)
+            for variable in variables
+        }
+        self._variable_prerequisite_flags = {
+            variable: self._variable_is_back_reference_prerequisite(variable)
+            for variable in variables
+        }
+        return self._variable_back_reference_flags, self._variable_prerequisite_flags
+
+    def _build_runtime_transition_index(self) -> Dict[int, List[Tuple[str, int, Callable, Any, bool, Any, bool, bool, bool]]]:
+        """
+        Build a per-input transition index with resolved condition arrays and
+        dependency flags.
+
+        This does not change matching semantics. It simply resolves data that
+        is otherwise rediscovered in the innermost row scan: the boolean vector
+        for row-local DEFINE predicates, whether a variable has an implicit
+        TRUE DEFINE, and whether it participates in back-reference ordering.
+        Complex DEFINE predicates keep ``var_results`` as ``None`` and still
+        use the scalar evaluator.
+        """
+        condition_matrix = getattr(self, "_condition_matrix", None)
+        matrix_id = id(condition_matrix)
+        if (
+            self._runtime_transition_index is not None
+            and self._runtime_transition_index_matrix_id == matrix_id
+        ):
+            return self._runtime_transition_index
+
+        back_ref_flags, prerequisite_flags = self._get_variable_back_reference_flags()
+        define_conditions = self.define_conditions or {}
+        runtime_index: Dict[int, List[Tuple[str, int, Callable, Any, bool, Any, bool, bool, bool]]] = {}
+
+        for state, transitions in self.transition_index.items():
+            runtime_transitions = []
+            for transition_tuple in transitions:
+                if len(transition_tuple) == 5:
+                    var, target, condition, transition, is_excluded = transition_tuple
+                else:
+                    var, target, condition, transition = transition_tuple
+                    is_excluded = False
+                    if transition and hasattr(transition, "metadata") and transition.metadata.get("is_excluded", False):
+                        is_excluded = True
+                    elif self.exclusion_handler:
+                        is_excluded = self.exclusion_handler.is_excluded(var)
+                    elif hasattr(self, "excluded_vars"):
+                        is_excluded = var in self.excluded_vars
+
+                var_results = condition_matrix.get(var) if condition_matrix is not None else None
+                implicit_true = var_results is None and var not in define_conditions
+                runtime_transitions.append((
+                    var,
+                    target,
+                    condition,
+                    transition,
+                    is_excluded,
+                    var_results,
+                    implicit_true,
+                    back_ref_flags.get(var, False),
+                    prerequisite_flags.get(var, False),
+                ))
+
+            runtime_index[state] = runtime_transitions
+
+        self._runtime_transition_index = runtime_index
+        self._runtime_transition_index_matrix_id = matrix_id
+        return runtime_index
+
+    def _can_reuse_row_context_for_matching(self, condition_matrix: Optional[Dict[str, Any]]) -> bool:
+        """
+        Return True when one RowContext can be safely reset and reused across
+        candidate start positions.
+
+        RowContext contains navigation and variable caches.  Reusing it for
+        context-dependent DEFINE predicates can leave stale cache entries, so
+        this optimization is enabled only when every explicit DEFINE predicate
+        was accepted by the safe row-local vectorizer.  In that case the hot
+        matching loop reads precomputed boolean arrays and does not depend on
+        RowContext navigation state for predicate truth.
+        """
+        if condition_matrix is None:
+            return False
+        if self._define_uses_navigation:
+            return False
+        define_conditions = self.define_conditions or {}
+        return all(var_name in condition_matrix for var_name in define_conditions)
+
+    @staticmethod
+    def _reset_reusable_row_context(
+        context: RowContext,
+        start_idx: int,
+        subsets: Optional[Dict[str, List[str]]],
+    ) -> RowContext:
+        """Reset mutable RowContext fields before reusing it for a new start."""
+        context.variables = {}
+        context.current_var_assignments = {}
+        context.current_match = None
+        context.current_idx = start_idx
+        context.current_var = None
+        context.subsets = subsets.copy() if subsets else {}
+        return context
     
     def _needs_backtracking(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> bool:
         """
@@ -1452,6 +1581,7 @@ class EnhancedMatcher:
         var: str,
         row_index: int,
         current_assignments: Dict[str, List[int]],
+        assigned_row_indices: Optional[Set[int]] = None,
     ) -> bool:
         """
         Check only the row-to-variable uniqueness rule.
@@ -1462,6 +1592,9 @@ class EnhancedMatcher:
         keeps the remaining safety rule: one input row must not be assigned to
         two different pattern variables.
         """
+        if assigned_row_indices is not None:
+            return row_index not in assigned_row_indices
+
         if not isinstance(current_assignments, dict):
             return True
 
@@ -1631,6 +1764,75 @@ class EnhancedMatcher:
             return False
         return bool(var_results[row_idx])
 
+    def _get_linear_plan_run_lengths(self, row_count: int) -> Optional[Dict[str, Any]]:
+        """
+        Return consecutive-true run lengths for each variable in a linear plan.
+
+        The compiled linear quantifier matcher frequently asks: "how many rows
+        from position i can still match variable A?"  Computing that by scanning
+        forward for every candidate start repeats work on large inputs.  This
+        method builds a reusable suffix-run table from the precomputed
+        row-local DEFINE matrix:
+
+        run_lengths[var][i] = number of consecutive rows starting at i that
+        satisfy var.
+
+        The optimization is semantic-preserving because it only uses the same
+        row-local condition matrix already accepted by the safe vectorizer.  If
+        a variable has a complex DEFINE predicate, the method returns None and
+        the caller falls back to scalar behavior.
+        """
+        plan = self._get_linear_quantifier_plan()
+        condition_matrix = getattr(self, '_condition_matrix', None)
+        if not plan or condition_matrix is None:
+            return None
+
+        cached = getattr(self, '_linear_plan_run_lengths', None)
+        cached_rows = getattr(self, '_linear_plan_run_lengths_row_count', None)
+        if cached is not None and cached_rows == row_count:
+            return cached
+
+        try:
+            import numpy as np
+        except Exception:
+            return None
+
+        run_lengths: Dict[str, Any] = {}
+        for token in plan:
+            var_name = token["var"]
+            if var_name in run_lengths:
+                continue
+
+            var_results = condition_matrix.get(var_name)
+            if var_results is None:
+                # SQL standard: omitted DEFINE means TRUE for every row.
+                if var_name not in (self.define_conditions or {}):
+                    run_lengths[var_name] = np.arange(row_count, 0, -1, dtype=np.int64)
+                    continue
+                return None
+
+            values = np.asarray(var_results, dtype=bool)
+            if len(values) < row_count:
+                padded = np.zeros(row_count, dtype=bool)
+                padded[: len(values)] = values
+                values = padded
+            elif len(values) > row_count:
+                values = values[:row_count]
+
+            runs = np.zeros(row_count, dtype=np.int64)
+            current_run = 0
+            for idx in range(row_count - 1, -1, -1):
+                if values[idx]:
+                    current_run += 1
+                else:
+                    current_run = 0
+                runs[idx] = current_run
+            run_lengths[var_name] = runs
+
+        self._linear_plan_run_lengths = run_lengths
+        self._linear_plan_run_lengths_row_count = row_count
+        return run_lengths
+
     def _can_use_linear_quantifier_plan(self, config=None) -> bool:
         """Return True when the compiled linear plan is semantically safe."""
         if getattr(self, '_condition_matrix', None) is None:
@@ -1657,9 +1859,18 @@ class EnhancedMatcher:
         plan = self._get_linear_quantifier_plan()
 
         row_count = len(rows)
+        run_lengths_by_var = self._get_linear_plan_run_lengths(row_count)
         memo: Dict[Tuple[int, int], Optional[List[Tuple[str, int, int]]]] = {}
 
         def max_run_for_var(var_name: str, pos: int) -> Optional[int]:
+            if run_lengths_by_var is not None:
+                runs = run_lengths_by_var.get(var_name)
+                if runs is None:
+                    return None
+                if pos < 0 or pos >= row_count:
+                    return 0
+                return int(runs[pos])
+
             count = 0
             while pos + count < row_count:
                 matches = self._linear_plan_row_matches_var(var_name, pos + count, row_count)
@@ -1836,12 +2047,12 @@ class EnhancedMatcher:
         max_states = max(10_000, min(250_000, max_depth * max(1, len(self.transition_index)) * 4))
         explored = 0
 
-        stack: List[Tuple[int, int, Dict[str, List[int]], List[int]]] = [
-            (self.start_state, start_idx, {}, [])
+        stack: List[Tuple[int, int, Dict[str, List[int]], Set[int], List[int]]] = [
+            (self.start_state, start_idx, {}, set(), [])
         ]
 
         while stack and explored < max_states:
-            state, row_idx, assignments, excluded_rows = stack.pop()
+            state, row_idx, assignments, assigned_row_indices, excluded_rows = stack.pop()
             explored += 1
 
             if self.dfa.states[state].is_accept:
@@ -1872,7 +2083,7 @@ class EnhancedMatcher:
 
             row = rows[row_idx]
             context.rows = rows
-            successors: List[Tuple[int, int, Dict[str, List[int]], List[int], str]] = []
+            successors: List[Tuple[int, int, Dict[str, List[int]], Set[int], List[int], str]] = []
 
             for transition_tuple in self.transition_index[state]:
                 if len(transition_tuple) == 5:
@@ -1896,15 +2107,17 @@ class EnhancedMatcher:
                     elif not condition(row, context):
                         continue
 
-                    if not self._row_available_for_assignment(var, row_idx, assignments):
+                    if not self._row_available_for_assignment(var, row_idx, assignments, assigned_row_indices):
                         continue
 
                     next_assignments = self._copy_assignments(assignments)
                     next_assignments.setdefault(var, [])
 
                     next_assignments[var].append(row_idx)
+                    next_assigned_row_indices = set(assigned_row_indices)
+                    next_assigned_row_indices.add(row_idx)
                     next_excluded_rows = excluded_rows[:] + ([row_idx] if is_excluded else [])
-                    successors.append((target, row_idx + 1, next_assignments, next_excluded_rows, var))
+                    successors.append((target, row_idx + 1, next_assignments, next_assigned_row_indices, next_excluded_rows, var))
                 except Exception as exc:
                     logger.debug(f"Greedy DFA transition evaluation failed for {var}: {exc}")
                     continue
@@ -1918,12 +2131,12 @@ class EnhancedMatcher:
                 key=lambda item: (
                     self.dfa.states[item[0]].is_accept,
                     item[0] != state,
-                    -self.alternation_order.get(item[4], 999),
-                    item[4],
+                    -self.alternation_order.get(item[5], 999),
+                    item[5],
                 )
             )
-            stack.extend((target, next_row, next_assignments, next_excluded_rows)
-                         for target, next_row, next_assignments, next_excluded_rows, _ in successors)
+            stack.extend((target, next_row, next_assignments, next_assigned_row_indices, next_excluded_rows)
+                         for target, next_row, next_assignments, next_assigned_row_indices, next_excluded_rows, _ in successors)
 
         if explored >= max_states:
             logger.warning(
@@ -2531,6 +2744,22 @@ class EnhancedMatcher:
             return False  # Default to existing logic
             
         pattern = self.original_pattern
+
+        # The generalized quantifier helper below is intentionally a narrow
+        # sequence-oriented fallback.  It does not fully model grouped
+        # alternation, PERMUTE, exclusions, or anchors.  Let those constructs
+        # use the main DFA/backtracking machinery, which preserves their
+        # SQL row-pattern semantics and avoids repeated failed helper attempts
+        # on every candidate start position.
+        upper_pattern = pattern.upper()
+        if any(marker in upper_pattern for marker in ("|", "PERMUTE", "{-", "-}", "^", "$")):
+            logger.debug(
+                "Pattern '%s' uses complex row-pattern constructs; "
+                "skipping simplified generalized quantifier helper",
+                pattern,
+            )
+            self._cached_generalized_quantifier_needed = False
+            return False
         
         # ONLY these specific problematic patterns need generalized matching:
         
@@ -3261,6 +3490,7 @@ class EnhancedMatcher:
         state = self.start_state
         current_idx = start_idx
         var_assignments = {}
+        assigned_row_indices: Set[int] = set()
         condition_matrix = getattr(self, '_condition_matrix', None)
         
         if debug_enabled:
@@ -3286,7 +3516,8 @@ class EnhancedMatcher:
             return self._record_timing_and_return("find_match", match_start_time, empty_match_result)
         
         longest_match = None
-        trans_index = self.transition_index[state]
+        runtime_transition_index = self._build_runtime_transition_index()
+        trans_index = runtime_transition_index.get(state, [])
         
         # Check if we have both start and end anchors in the pattern
         has_both_anchors = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("spans_partition", False)
@@ -3360,32 +3591,18 @@ class EnhancedMatcher:
             
             # Try all transitions and collect those that match the condition
             for transition_tuple in trans_index:
-                # Handle both old and new transition index formats for backward compatibility
-                if len(transition_tuple) == 5:
-                    var, target, condition, transition, is_excluded = transition_tuple
-                else:
-                    var, target, condition, transition = transition_tuple
-                    # Fall back to computing exclusion status
-                    is_excluded = False
-                    if transition and hasattr(transition, 'metadata') and transition.metadata.get('is_excluded', False):
-                        is_excluded = True
-                    elif hasattr(self, 'exclusion_handler') and self.exclusion_handler:
-                        is_excluded = self.exclusion_handler.is_excluded(var)
-                    elif hasattr(self, 'excluded_vars'):
-                        is_excluded = var in self.excluded_vars
+                var, target, condition, transition, is_excluded, var_results, implicit_true, has_back_reference_flag, is_prerequisite_flag = transition_tuple
                 
                 if debug_enabled:
                     logger.debug(f"  Evaluating condition for var: {var}")
                 try:
-                    if condition_matrix is not None:
-                        var_results = condition_matrix.get(var)
-                        if var_results is not None and current_idx < len(var_results):
-                            if bool(var_results[current_idx]):
-                                valid_transitions.append((var, target, is_excluded))
-                            continue
-                        elif var_results is None and var not in self.define_conditions:
-                            valid_transitions.append((var, target, is_excluded))
-                            continue
+                    if var_results is not None and current_idx < len(var_results):
+                        if bool(var_results[current_idx]):
+                            valid_transitions.append((var, target, is_excluded, has_back_reference_flag, is_prerequisite_flag))
+                        continue
+                    elif implicit_true:
+                        valid_transitions.append((var, target, is_excluded, has_back_reference_flag, is_prerequisite_flag))
+                        continue
 
                     # PERFORMANCE OPTIMIZATION: Fast condition evaluation with minimal overhead
                     
@@ -3417,7 +3634,7 @@ class EnhancedMatcher:
                         if vectorized_result is not None:
                             # ULTRA-FAST PATH: Instant lookup from pre-computed matrix
                             if vectorized_result:
-                                valid_transitions.append((var, target, is_excluded))
+                                valid_transitions.append((var, target, is_excluded, has_back_reference_flag, is_prerequisite_flag))
                             if debug_enabled:
                                 logger.debug(f"⚡ VECTORIZED: Variable {var} at row {current_idx} = {vectorized_result}")
                             continue
@@ -3467,7 +3684,7 @@ class EnhancedMatcher:
                     
                     # Skip redundant navigation error handling in production
                     if result:
-                        valid_transitions.append((var, target, is_excluded))
+                        valid_transitions.append((var, target, is_excluded, has_back_reference_flag, is_prerequisite_flag))
                         
                 except Exception as e:
                     logger.error(f"Error evaluating condition for {var}: {str(e)}")
@@ -3496,10 +3713,8 @@ class EnhancedMatcher:
                 }
                 
                 # Categorize transitions by their back reference requirements
-                for var, target, is_excluded in valid_transitions:
+                for var, target, is_excluded, has_back_reference, is_prerequisite in valid_transitions:
                     is_accepting = self.dfa.states[target].is_accept
-                    has_back_reference = self._variable_has_back_reference(var)
-                    is_prerequisite = self._variable_is_back_reference_prerequisite(var)
                     
                     if debug_enabled:
                         logger.debug(f"  Transition {var}: accepting={is_accepting}, has_back_ref={has_back_reference}, is_prerequisite={is_prerequisite}")
@@ -3529,6 +3744,13 @@ class EnhancedMatcher:
                             logger.debug(f"Processing category '{category}' with {len(categorized_transitions[category])} transitions")
                         # PRODUCTION FIX: SQL:2016 compliant greedy quantifier semantics
                         # For A+ B+ patterns, implement proper greedy matching with backtracking simulation
+                        transitions_for_category = categorized_transitions[category]
+                        has_cross_ref_for_sort = (
+                            self.has_quantifiers
+                            and bool(self.define_conditions)
+                            and self._has_cross_variable_references()
+                        )
+
                         def transition_sort_key(x):
                             var_name = x[0]
                             target_state = x[1]
@@ -3536,9 +3758,7 @@ class EnhancedMatcher:
                             # COMPREHENSIVE GREEDY QUANTIFIER FIX for A+ B+ patterns
                             if self.has_quantifiers and self.define_conditions:
                                 # Check if this is a cross-variable reference pattern (like A+ B+ with B > A)
-                                has_cross_ref = self._has_cross_variable_references()
-                                
-                                if has_cross_ref:
+                                if has_cross_ref_for_sort:
                                     # For patterns like A+ B+ where B depends on A, implement greedy semantics:
                                     # 1. Prefer continuing current quantifier over transitioning
                                     # 2. But ensure transitions are still possible for valid completion
@@ -3575,7 +3795,8 @@ class EnhancedMatcher:
                                 # For any PERMUTE pattern with alternations, use strict alphabetical order
                                 # This ensures A < B < C < D in all cases
                                 alphabetical_priority = ord(var_name[0]) if var_name else 999
-                                logger.debug(f"PERMUTE pattern: {var_name} gets alphabetical priority {alphabetical_priority}")
+                                if debug_enabled:
+                                    logger.debug(f"PERMUTE pattern: {var_name} gets alphabetical priority {alphabetical_priority}")
                                 return (state_advance, alphabetical_priority, var_name)
                             
                             # For non-PERMUTE patterns, use standard logic
@@ -3585,12 +3806,15 @@ class EnhancedMatcher:
                             
                             return (state_advance, alternation_priority, var_name)
                         
-                        sorted_transitions = sorted(
-                            categorized_transitions[category],
-                            key=transition_sort_key
-                        )
-                        best_transition = sorted_transitions[0]
-                        logger.debug(f"Selected {category} transition: {best_transition[0]} -> state {best_transition[1]} (alternation priority: {self.alternation_order.get(best_transition[0], 'N/A')})")
+                        if len(transitions_for_category) == 1:
+                            best_transition = transitions_for_category[0]
+                        else:
+                            best_transition = min(
+                                transitions_for_category,
+                                key=transition_sort_key
+                            )
+                        if debug_enabled:
+                            logger.debug(f"Selected {category} transition: {best_transition[0]} -> state {best_transition[1]} (alternation priority: {self.alternation_order.get(best_transition[0], 'N/A')})")
                         break
                 
                 if best_transition:
@@ -3598,7 +3822,8 @@ class EnhancedMatcher:
             
             # Handle exclusion matches properly - they should still advance the state
             if is_excluded_match:
-                logger.debug(f"  Found excluded variable {matched_var} - will exclude row {current_idx} from output")
+                if debug_enabled:
+                    logger.debug(f"  Found excluded variable {matched_var} - will exclude row {current_idx} from output")
                 # PRODUCTION FIX: Track excluded rows for proper handling in ALL ROWS PER MATCH mode
                 excluded_rows.append(current_idx)
                 
@@ -3610,22 +3835,25 @@ class EnhancedMatcher:
                 # The transition condition was already evaluated successfully
                 # above.  Avoid re-evaluating the same DEFINE predicate here;
                 # only enforce row-to-variable uniqueness.
-                if self._row_available_for_assignment(matched_var, current_idx, var_assignments):
+                if self._row_available_for_assignment(matched_var, current_idx, var_assignments, assigned_row_indices):
                     var_assignments[matched_var].append(current_idx)
+                    assigned_row_indices.add(current_idx)
                 else:
                     # For excluded rows, we might still continue even if validation fails
                     pass
                     
-                logger.debug(f"  Assigned excluded row {current_idx} to variable {matched_var} (for condition evaluation)")
+                if debug_enabled:
+                    logger.debug(f"  Assigned excluded row {current_idx} to variable {matched_var} (for condition evaluation)")
                 
                 # Update state and continue
                 state = next_state
                 current_idx += 1
-                trans_index = self.transition_index[state]
+                trans_index = runtime_transition_index.get(state, [])
                 
                 # Check if we've reached an accepting state after the exclusion
                 if self.dfa.states[state].is_accept:
-                    logger.debug(f"Reached accepting state {state} after exclusion at row {current_idx-1}")
+                    if debug_enabled:
+                        logger.debug(f"Reached accepting state {state} after exclusion at row {current_idx-1}")
                     # Don't create a match here - continue to see if we can match more
                 
                 continue
@@ -3633,13 +3861,15 @@ class EnhancedMatcher:
             # For star patterns, we need to handle the case where no transition matches
             # but we're in an accepting state
             if next_state is None and self.dfa.states[state].is_accept:
-                logger.debug(f"No valid transition from accepting state {state} at row {current_idx}")
+                if debug_enabled:
+                    logger.debug(f"No valid transition from accepting state {state} at row {current_idx}")
                 
                 # Update longest match to include all rows up to this point
                 if current_idx > start_idx:  # Only if we've matched at least one row
                     # For patterns with both start and end anchors, we need to check if we've reached the end
                     if has_both_anchors and current_idx < len(rows):
-                        logger.debug(f"Pattern has both anchors but we're not at the end of partition")
+                        if debug_enabled:
+                            logger.debug(f"Pattern has both anchors but we're not at the end of partition")
                         break  # Don't accept partial matches for ^...$ patterns
                     
                     # For patterns with only end anchor, we need to check if we're at the last row
@@ -3657,7 +3887,8 @@ class EnhancedMatcher:
                                 "has_empty_alternation": self.has_empty_alternation
                             }
                         else:
-                            logger.debug(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
+                            if debug_enabled:
+                                logger.debug(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
                     else:
                         # No end anchor, accept the match
                         longest_match = {
@@ -3673,7 +3904,8 @@ class EnhancedMatcher:
                     break
                 
             if next_state is None:
-                logger.debug(f"No valid transition from state {state} at row {current_idx}")
+                if debug_enabled:
+                    logger.debug(f"No valid transition from state {state} at row {current_idx}")
                 break
             
             # Record variable assignment (only for non-excluded variables)
@@ -3684,9 +3916,11 @@ class EnhancedMatcher:
                 # The transition condition was already evaluated successfully
                 # above.  Avoid re-evaluating the same DEFINE predicate here;
                 # only enforce row-to-variable uniqueness.
-                if self._row_available_for_assignment(matched_var, current_idx, var_assignments):
+                if self._row_available_for_assignment(matched_var, current_idx, var_assignments, assigned_row_indices):
                     var_assignments[matched_var].append(current_idx)
-                    logger.debug(f"  Assigned row {current_idx} to variable {matched_var}")
+                    assigned_row_indices.add(current_idx)
+                    if debug_enabled:
+                        logger.debug(f"  Assigned row {current_idx} to variable {matched_var}")
                 else:
                     # Skip this invalid assignment - this might break the match
                     # We should continue to see if we can find a valid path
@@ -3696,17 +3930,19 @@ class EnhancedMatcher:
             # Update state and move to next row
             state = next_state
             current_idx += 1
-            trans_index = self.transition_index[state]
+            trans_index = runtime_transition_index.get(state, [])
             
             # Update longest match if accepting state
             if self.dfa.states[state].is_accept:
                 # Check end anchor constraints ONLY when we reach an accepting state
                 if not self._check_anchors(state, current_idx - 1, len(rows), "end"):
-                    logger.debug(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
+                    if debug_enabled:
+                        logger.debug(f"End anchor check failed for accepting state {state} at row {current_idx-1}")
                     # Continue to next row, but don't update longest_match
                     continue
                 
-                logger.debug(f"Reached accepting state {state} at row {current_idx-1}")
+                if debug_enabled:
+                    logger.debug(f"Reached accepting state {state} at row {current_idx-1}")
                 
                 # PRODUCTION FIX: PERMUTE minimal matching for Trino compatibility
                 # For PERMUTE patterns, prefer the first accepting state ONLY if we have some minimal match
@@ -3715,7 +3951,8 @@ class EnhancedMatcher:
                     hasattr(self, 'original_pattern') and self.original_pattern and 
                     'PERMUTE' in self.original_pattern and '?' in self.original_pattern):
                     
-                    logger.debug(f"PERMUTE pattern with optional variables - checking minimal match conditions")
+                    if debug_enabled:
+                        logger.debug(f"PERMUTE pattern with optional variables - checking minimal match conditions")
                     
                     # Count the variables we've matched so far
                     matched_vars = len(var_assignments)
@@ -3741,9 +3978,11 @@ class EnhancedMatcher:
                             # This adds the missing 11th row
                             if not could_match_more or remaining_rows == 0:
                                 should_apply_minimal = True
-                                logger.debug(f"PERMUTE pattern: Single variable {list(var_types)[0]} match for Trino compatibility")
+                                if debug_enabled:
+                                    logger.debug(f"PERMUTE pattern: Single variable {list(var_types)[0]} match for Trino compatibility")
                             else:
-                                logger.debug(f"PERMUTE pattern: Single variable matched, but continuing to find more")
+                                if debug_enabled:
+                                    logger.debug(f"PERMUTE pattern: Single variable matched, but continuing to find more")
                         elif matched_vars >= 2:
                             # Check if we have the classic A-C minimal case (start-end without middle)
                             var_types = set(var_assignments.keys())
@@ -3751,18 +3990,22 @@ class EnhancedMatcher:
                                 # For A-C pattern, apply minimal matching but allow the sequence to continue
                                 # for additional non-overlapping patterns like C-B
                                 should_apply_minimal = True
-                                logger.debug(f"PERMUTE pattern: A-C minimal matching case detected")
+                                if debug_enabled:
+                                    logger.debug(f"PERMUTE pattern: A-C minimal matching case detected")
                             elif matched_vars >= 3:
                                 # For 3+ variables, always apply minimal matching
                                 should_apply_minimal = True
-                                logger.debug(f"PERMUTE pattern: {matched_vars} variables matched, applying minimal matching")
+                                if debug_enabled:
+                                    logger.debug(f"PERMUTE pattern: {matched_vars} variables matched, applying minimal matching")
                             else:
                                 # For 2 variables (not A-C), check if more matches are possible
                                 if not could_match_more:
                                     should_apply_minimal = True
-                                    logger.debug(f"PERMUTE pattern: {matched_vars} variables matched, no more rows available")
+                                    if debug_enabled:
+                                        logger.debug(f"PERMUTE pattern: {matched_vars} variables matched, no more rows available")
                                 else:
-                                    logger.debug(f"PERMUTE pattern: {matched_vars} variables matched, but continuing to find more")
+                                    if debug_enabled:
+                                        logger.debug(f"PERMUTE pattern: {matched_vars} variables matched, but continuing to find more")
                     
                     if should_apply_minimal:
                         
@@ -3777,7 +4020,8 @@ class EnhancedMatcher:
                             "has_empty_alternation": self.has_empty_alternation
                         }
                         
-                        logger.debug(f"PERMUTE minimal match: vars={list(var_assignments.keys())}, rows={current_idx - start_idx}")
+                        if debug_enabled:
+                            logger.debug(f"PERMUTE minimal match: vars={list(var_assignments.keys())}, rows={current_idx - start_idx}")
                         
                         # Return immediately for minimal matching - don't look for longer matches
                         return self._record_timing_and_return("find_match", match_start_time, minimal_match)
@@ -3786,14 +4030,16 @@ class EnhancedMatcher:
                 if has_both_anchors and current_idx < len(rows):
                     # If we have both anchors (^...$) and haven't reached the end of the partition,
                     # we need to continue matching to try to consume the entire partition
-                    logger.debug(f"Pattern has both anchors but we're not at the end of partition yet")
+                    if debug_enabled:
+                        logger.debug(f"Pattern has both anchors but we're not at the end of partition yet")
                     continue
                 
                 # For patterns with only end anchor, we need to check if we're at the last row
                 if has_end_anchor and not has_both_anchors:
                     # Only accept if we're at the last row
                     if current_idx - 1 != len(rows) - 1:
-                        logger.debug(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
+                        if debug_enabled:
+                            logger.debug(f"End anchor requires match to end at last row, but we're at row {current_idx-1}")
                         continue
                 
                 # PRODUCTION FIX: Proper reluctant quantifier handling
@@ -3805,7 +4051,8 @@ class EnhancedMatcher:
                     )
                     
                     if is_minimal_match:
-                        logger.debug(f"Reluctant plus: found minimal match at {start_idx}-{current_idx-1}")
+                        if debug_enabled:
+                            logger.debug(f"Reluctant plus: found minimal match at {start_idx}-{current_idx-1}")
                         longest_match = {
                             "start": start_idx,
                             "end": current_idx - 1,
@@ -3817,7 +4064,8 @@ class EnhancedMatcher:
                             "has_empty_alternation": self.has_empty_alternation,
                             "is_minimal": True
                         }
-                        logger.debug(f"  Reluctant plus minimal match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                        if debug_enabled:
+                            logger.debug(f"  Reluctant plus minimal match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                         break  # Take the minimal match
                 
                 # PRODUCTION FIX: For reluctant star quantifiers, prefer empty matches when possible
@@ -3826,14 +4074,16 @@ class EnhancedMatcher:
                     # If we're at the starting position and in an accepting state, prefer empty match
                     if current_idx - 1 == start_idx:
                         # This is a single-row match, but for *? we prefer empty matches
-                        logger.debug(f"Reluctant star pattern detected - preferring empty match over single-row match at position {start_idx}")
+                        if debug_enabled:
+                            logger.debug(f"Reluctant star pattern detected - preferring empty match over single-row match at position {start_idx}")
                         # Don't create a match here, let it fall through to create an empty match instead
                         next_state = None  # Force exit from main loop to create empty match
                         break
                     else:
                         # This is a multi-row match, but for *? we should have stopped earlier
                         # Take the minimal match (early termination)
-                        logger.debug(f"Reluctant star pattern detected - using early termination at first valid match")
+                        if debug_enabled:
+                            logger.debug(f"Reluctant star pattern detected - using early termination at first valid match")
                         longest_match = {
                             "start": start_idx,
                             "end": current_idx - 1,
@@ -3844,7 +4094,8 @@ class EnhancedMatcher:
                             "excluded_rows": excluded_rows.copy(),
                             "has_empty_alternation": self.has_empty_alternation
                         }
-                        logger.debug(f"  Reluctant star match (early termination): {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                        if debug_enabled:
+                            logger.debug(f"  Reluctant star match (early termination): {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                         break  # Early termination for reluctant star
                 
                 # PRODUCTION FIX: For SKIP TO NEXT ROW, use minimal matching to align with Trino behavior
@@ -3862,7 +4113,8 @@ class EnhancedMatcher:
                         "excluded_rows": excluded_rows.copy(),
                         "has_empty_alternation": self.has_empty_alternation
                     }
-                    logger.debug(f"  Minimal match for SKIP TO NEXT ROW: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                    if debug_enabled:
+                        logger.debug(f"  Minimal match for SKIP TO NEXT ROW: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                     # Break early for minimal matching with SKIP TO NEXT ROW
                     break
                 
@@ -3878,11 +4130,13 @@ class EnhancedMatcher:
                     "excluded_rows": excluded_rows.copy(),
                     "has_empty_alternation": self.has_empty_alternation
                 }
-                logger.debug(f"  Updated longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
+                if debug_enabled:
+                    logger.debug(f"  Updated longest match: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                 
                 # If we have both anchors and have reached the end of the partition, we can stop
                 if has_both_anchors and current_idx == len(rows):
-                    logger.debug(f"Found complete match spanning entire partition")
+                    if debug_enabled:
+                        logger.debug(f"Found complete match spanning entire partition")
                     break
                 
                 # For greedy matching, continue to try to find longer matches
@@ -3891,23 +4145,28 @@ class EnhancedMatcher:
         # For patterns with both anchors, verify we've consumed the entire partition
         if longest_match and has_both_anchors:
             if start_idx != 0 or longest_match["end"] != len(rows) - 1:
-                logger.debug(f"Match doesn't span entire partition for ^...$ pattern, rejecting")
+                if debug_enabled:
+                    logger.debug(f"Match doesn't span entire partition for ^...$ pattern, rejecting")
                 longest_match = None
         
         # For patterns with only end anchor, verify the match ends at the last row
         if longest_match and has_end_anchor and not has_both_anchors:
-            logger.debug(f"Checking end anchor for match ending at row {longest_match['end']}, partition ends at {len(rows) - 1}")
+            if debug_enabled:
+                logger.debug(f"Checking end anchor for match ending at row {longest_match['end']}, partition ends at {len(rows) - 1}")
             if longest_match["end"] != len(rows) - 1:
-                logger.debug(f"Match doesn't end at last row for $ pattern, rejecting")
+                if debug_enabled:
+                    logger.debug(f"Match doesn't end at last row for $ pattern, rejecting")
                 longest_match = None
             else:
-                logger.debug(f"Match correctly ends at last row for $ pattern, accepting")
+                if debug_enabled:
+                    logger.debug(f"Match correctly ends at last row for $ pattern, accepting")
         
         # Special handling for patterns with exclusions
         # If we have a match and it contains excluded rows, make sure they're properly tracked
         if longest_match and excluded_rows:
             longest_match["excluded_rows"] = sorted(set(excluded_rows))
-            logger.debug(f"Match contains excluded rows: {longest_match['excluded_rows']}")
+            if debug_enabled:
+                logger.debug(f"Match contains excluded rows: {longest_match['excluded_rows']}")
         
         # Handle SQL:2016 alternation precedence for empty patterns
         # For patterns with empty alternation like () | A, prefer empty pattern
@@ -3915,22 +4174,26 @@ class EnhancedMatcher:
         if empty_match and self.has_empty_alternation:
             # For empty alternation patterns, always prefer empty match regardless of non-empty matches
             prefer_empty = True
-            logger.debug(f"Empty alternation pattern detected - preferring empty match over any non-empty match")
+            if debug_enabled:
+                logger.debug(f"Empty alternation pattern detected - preferring empty match over any non-empty match")
         
         if prefer_empty:
-            logger.debug(f"Applying SQL:2016 empty pattern precedence")
-            logger.debug(f"Empty match: {empty_match}")
-            if longest_match:
-                logger.debug(f"Non-empty match (rejected): {longest_match}")
+            if debug_enabled:
+                logger.debug(f"Applying SQL:2016 empty pattern precedence")
+                logger.debug(f"Empty match: {empty_match}")
+                if longest_match:
+                    logger.debug(f"Non-empty match (rejected): {longest_match}")
             return self._record_timing_and_return("find_match", match_start_time, empty_match)
         
         # Standard precedence: prefer non-empty matches
         if longest_match and longest_match["end"] >= longest_match["start"]:  # Ensure it's a valid match
-            logger.debug(f"Found non-empty match: {longest_match}")
+            if debug_enabled:
+                logger.debug(f"Found non-empty match: {longest_match}")
             
             # Evaluate complex exclusions to determine which rows should be excluded from output
             if self.exclusion_handler and self.exclusion_handler.has_complex_exclusions():
-                logger.debug(f"Evaluating complex exclusions for match")
+                if debug_enabled:
+                    logger.debug(f"Evaluating complex exclusions for match")
                 
                 # Build sequence of (variable, row_index) for exclusion evaluation
                 sequence = []
@@ -3946,14 +4209,16 @@ class EnhancedMatcher:
                 for exclusion in self.exclusion_handler.complex_exclusions:
                     tree = exclusion['tree']
                     pattern_str = exclusion.get('pattern', str(tree))
-                    logger.debug(f"Evaluating exclusion pattern: {pattern_str}")
+                    if debug_enabled:
+                        logger.debug(f"Evaluating exclusion pattern: {pattern_str}")
                     
                     # Check which variable assignments should be excluded
                     # For exclusion pattern like "B+", we need to find all B variable assignments
                     excluded_vars_for_pattern = set()
                     self.exclusion_handler._collect_excluded_variables(tree, excluded_vars_for_pattern)
                     
-                    logger.debug(f"Variables to exclude for pattern '{pattern_str}': {excluded_vars_for_pattern}")
+                    if debug_enabled:
+                        logger.debug(f"Variables to exclude for pattern '{pattern_str}': {excluded_vars_for_pattern}")
                     
                     # Mark rows that correspond to excluded variables
                     for var, indices in longest_match["variables"].items():
@@ -3965,20 +4230,24 @@ class EnhancedMatcher:
                             base_var = var[:var.find('{')]
                         
                         if base_var in excluded_vars_for_pattern:
-                            logger.debug(f"Variable {var} (base: {base_var}) matches exclusion pattern")
+                            if debug_enabled:
+                                logger.debug(f"Variable {var} (base: {base_var}) matches exclusion pattern")
                             for row_idx in indices:
                                 if row_idx not in complex_excluded_rows:
                                     complex_excluded_rows.append(row_idx)
-                                    logger.debug(f"Complex exclusion: marking row {row_idx} (var: {var}) for exclusion")
+                                    if debug_enabled:
+                                        logger.debug(f"Complex exclusion: marking row {row_idx} (var: {var}) for exclusion")
                 
                 # Update excluded_rows in the match
                 if complex_excluded_rows:
                     existing_excluded = longest_match.get("excluded_rows", [])
                     all_excluded = sorted(set(existing_excluded + complex_excluded_rows))
                     longest_match["excluded_rows"] = all_excluded
-                    logger.debug(f"Updated excluded_rows: {all_excluded}")
+                    if debug_enabled:
+                        logger.debug(f"Updated excluded_rows: {all_excluded}")
                 else:
-                    logger.debug(f"No rows marked for exclusion by complex patterns")
+                    if debug_enabled:
+                        logger.debug(f"No rows marked for exclusion by complex patterns")
             return self._record_timing_and_return("find_match", match_start_time, longest_match)
         else:
             # PRODUCTION FIX: Only check for empty matches after we've tried to find a real match
@@ -4506,6 +4775,8 @@ class EnhancedMatcher:
         logger.info(f"🔍 Smart preprocessing for {len(rows)} rows")
         
         condition_matrix = self._vectorize_simple_define_conditions(rows)
+        self._linear_plan_run_lengths = None
+        self._linear_plan_run_lengths_row_count = None
         
         # OPTIMIZATION 1: Enhanced condition caching for large datasets
         if len(rows) > 5000:  # Lower threshold for enhanced caching
@@ -4522,6 +4793,9 @@ class EnhancedMatcher:
             self._prewarm_condition_evaluation(rows[:1000])  # Sample first 1000 rows
         
         self._condition_matrix = condition_matrix
+        self._runtime_transition_index = None
+        self._runtime_transition_index_matrix_id = None
+        self._build_runtime_transition_index()
         return condition_matrix
 
     def _vectorize_simple_define_conditions(self, rows):
@@ -5199,6 +5473,9 @@ class EnhancedMatcher:
             logger.info(f"Scale processing: {len(rows)} rows, max_iterations={max_iterations:,}")
         iteration_count = 0
         recent_starts = []  # Track recent start positions for TO_NEXT_ROW safety
+        reusable_context = None
+        if self._can_reuse_row_context_for_matching(condition_matrix):
+            reusable_context = RowContext(rows=rows, defined_variables=self.defined_variables)
 
         while start_idx < len(rows) and iteration_count < max_iterations:
             iteration_count += 1
@@ -5312,8 +5589,11 @@ class EnhancedMatcher:
             
             # FALLBACK: Standard DFA traversal for complex patterns
             if match is None and not used_linear_plan:
-                context = RowContext(rows=rows, defined_variables=self.defined_variables)
-                context.subsets = self.subsets.copy() if self.subsets else {}
+                if reusable_context is not None:
+                    context = self._reset_reusable_row_context(reusable_context, start_idx, self.subsets)
+                else:
+                    context = RowContext(rows=rows, defined_variables=self.defined_variables)
+                    context.subsets = self.subsets.copy() if self.subsets else {}
                 match = self._find_single_match(rows, start_idx, context, config)
             if not match:
                 # Move to next position without marking as processed (unmatched rows will be handled later)
