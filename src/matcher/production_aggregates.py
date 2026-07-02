@@ -205,6 +205,7 @@ class ProductionAggregateEvaluator:
         self._result_cache = {}
         self._expression_cache = {}
         self._variable_data_cache = {}
+        self._active_window_frame = None
         
         # Performance metrics with detailed tracking
         self.stats = {
@@ -265,6 +266,9 @@ class ProductionAggregateEvaluator:
                 f"Invalid semantics: {semantics}",
                 None, "Use 'RUNNING' or 'FINAL'", "AGG_EVAL_003"
             )
+        clean_expr, inline_semantics = self._strip_semantics_prefix(expr)
+        if inline_semantics:
+            semantics = inline_semantics
         
         with self._lock:
             self.stats["evaluations"] += 1
@@ -277,7 +281,7 @@ class ProductionAggregateEvaluator:
                     (k, tuple(v) if isinstance(v, list) else v) 
                     for k, v in self.context.variables.items()
                 ))
-                cache_key = (expr, semantics, self.context.current_idx, hashable_variables)
+                cache_key = (clean_expr, semantics, self.context.current_idx, hashable_variables)
                 
                 if cache_key in self._result_cache:
                     self.stats["cache_hits"] += 1
@@ -287,37 +291,58 @@ class ProductionAggregateEvaluator:
                 
                 # First check if this is a mathematical function
                 math_pattern = r'^\s*([A-Z_]+)\s*\('
-                math_match = re.match(math_pattern, expr.strip(), re.IGNORECASE)
+                math_match = re.match(math_pattern, clean_expr.strip(), re.IGNORECASE)
                 if math_match:
                     func_name = math_match.group(1).upper()
                     if func_name in self.MATHEMATICAL_FUNCTIONS:
                         # Parse the function to get arguments
-                        agg_info = self._parse_aggregate_function(expr)
+                        agg_info = self._parse_aggregate_function(clean_expr)
                         if agg_info:
                             arguments = agg_info['arguments']
                             filter_condition = agg_info.get('filter')
                             is_running = semantics == "RUNNING"
                             result = self._evaluate_mathematical_functions(func_name, arguments, is_running, filter_condition)
-                            logger.debug(f"PROD_AGG_FINAL: mathematical function '{expr}' evaluated to: {result}")
+                            logger.debug(f"PROD_AGG_FINAL: mathematical function '{clean_expr}' evaluated to: {result}")
                             return result
+
+                # Prefer standalone aggregate parsing before arithmetic
+                # parsing.  FILTER predicates often contain arithmetic
+                # operators (for example ``id % 2 = 0``), but the expression
+                # is still one aggregate call, not aggregate arithmetic.
+                agg_info = self._parse_aggregate_function(clean_expr)
+                if agg_info:
+                    func_name = agg_info['function'].upper()
+                    arguments = agg_info['arguments']
+                    filter_condition = agg_info.get('filter')
+                    window_frame = agg_info.get('window_frame')
+                    result = self._evaluate_parsed_aggregate(
+                        func_name, arguments, filter_condition, window_frame, semantics
+                    )
+                    if len(self._result_cache) < MAX_CACHE_SIZE:
+                        self._result_cache[cache_key] = result
+                    logger.debug(f"PROD_AGG_FINAL: evaluate_aggregate returning: {result} (type: {type(result)})")
+                    return result
                 
                 # First check if this is an arithmetic expression between aggregates
-                arithmetic_result = self._evaluate_arithmetic_expression(expr, semantics)
+                arithmetic_result = self._evaluate_arithmetic_expression(clean_expr, semantics)
                 if arithmetic_result is not None:
-                    logger.debug(f"PROD_AGG_FINAL: arithmetic expression '{expr}' evaluated to: {arithmetic_result}")
+                    logger.debug(f"PROD_AGG_FINAL: arithmetic expression '{clean_expr}' evaluated to: {arithmetic_result}")
+                    if len(self._result_cache) < MAX_CACHE_SIZE:
+                        self._result_cache[cache_key] = arithmetic_result
                     return arithmetic_result
                 
                 # Parse the aggregate function
-                agg_info = self._parse_aggregate_function(expr)
+                agg_info = self._parse_aggregate_function(clean_expr)
                 if not agg_info:
                     raise AggregateValidationError(
-                        f"Invalid aggregate expression: {expr}",
+                        f"Invalid aggregate expression: {clean_expr}",
                         None, "Check function syntax", "AGG_PARSE_001"
                     )
                 
                 func_name = agg_info['function'].upper()
                 arguments = agg_info['arguments']
                 filter_condition = agg_info.get('filter')  # Get filter condition if present
+                window_frame = agg_info.get('window_frame')
                 
                 # Update function call statistics
                 self.stats["function_counts"][func_name] += 1
@@ -329,6 +354,8 @@ class ProductionAggregateEvaluator:
                 is_running = semantics == "RUNNING"
                 
                 # Evaluate based on function type with enhanced error handling
+                previous_window_frame = self._active_window_frame
+                self._active_window_frame = window_frame
                 try:
                     if func_name == "COUNT":
                         result = self._evaluate_count(arguments, is_running, filter_condition)
@@ -383,6 +410,8 @@ class ProductionAggregateEvaluator:
                         ) from e
                     else:
                         raise
+                finally:
+                    self._active_window_frame = previous_window_frame
                 
             finally:
                 # Track performance metrics
@@ -396,6 +425,66 @@ class ProductionAggregateEvaluator:
                 # Periodic cache optimization
                 if self.stats["evaluations"] % 100 == 0:
                     self._optimize_caches()
+
+    def _strip_semantics_prefix(self, expr: str) -> Tuple[str, Optional[str]]:
+        """Remove an inline RUNNING/FINAL prefix and return it separately."""
+        match = re.match(r'^\s*(RUNNING|FINAL)\s+(.+)$', expr.strip(), re.IGNORECASE)
+        if not match:
+            return expr.strip(), None
+        return match.group(2).strip(), match.group(1).upper()
+
+    def _evaluate_parsed_aggregate(
+        self,
+        func_name: str,
+        arguments: List[str],
+        filter_condition: Optional[str],
+        window_frame: Optional[Dict[str, Any]],
+        semantics: str,
+    ) -> Any:
+        """Evaluate an already parsed standalone aggregate call."""
+        self.stats["function_counts"][func_name] += 1
+        self._validate_aggregate_function(func_name, arguments)
+
+        is_running = semantics == "RUNNING"
+        previous_window_frame = self._active_window_frame
+        self._active_window_frame = window_frame
+        try:
+            if func_name == "COUNT":
+                return self._evaluate_count(arguments, is_running, filter_condition)
+            if func_name == "SUM":
+                return self._evaluate_sum(arguments, is_running, filter_condition)
+            if func_name in ("MIN", "MAX"):
+                return self._evaluate_min_max(func_name, arguments, is_running, filter_condition)
+            if func_name == "AVG":
+                return self._evaluate_avg(arguments, is_running, filter_condition)
+            if func_name == "ARRAY_AGG":
+                return self._evaluate_array_agg(arguments, is_running, filter_condition)
+            if func_name == "STRING_AGG":
+                return self._evaluate_string_agg(arguments, is_running, filter_condition)
+            if func_name in ("MAX_BY", "MIN_BY"):
+                return self._evaluate_by_functions(func_name, arguments, is_running, filter_condition)
+            if func_name in ("COUNT_IF", "SUM_IF", "AVG_IF"):
+                return self._evaluate_conditional_aggregates(func_name, arguments, is_running, filter_condition)
+            if func_name in ("BOOL_AND", "BOOL_OR"):
+                return self._evaluate_bool_aggregates(func_name, arguments, is_running, filter_condition)
+            if func_name in ("STDDEV", "VARIANCE", "STDDEV_SAMP", "STDDEV_POP", "VAR_SAMP", "VAR_POP"):
+                return self._evaluate_statistical_functions(func_name, arguments, is_running, filter_condition)
+            if func_name == "LISTAGG":
+                return self._evaluate_listagg(arguments, is_running, filter_condition)
+            if func_name in ("FIRST_VALUE", "LAST_VALUE", "LAG", "LEAD"):
+                return self._evaluate_window_functions(func_name, arguments, is_running, filter_condition)
+            if func_name in ("APPROX_DISTINCT", "APPROX_PERCENTILE", "PERCENTILE_APPROX"):
+                return self._evaluate_approximate_functions(func_name, arguments, is_running, filter_condition)
+            if func_name in ("GEOMETRIC_MEAN", "HARMONIC_MEAN"):
+                return self._evaluate_statistical_means(func_name, arguments, is_running, filter_condition)
+            if func_name in self.MATHEMATICAL_FUNCTIONS:
+                return self._evaluate_mathematical_functions(func_name, arguments, is_running, filter_condition)
+            raise AggregateValidationError(
+                f"Unsupported aggregate function: {func_name}",
+                func_name, "Check supported functions", "AGG_UNSUPPORTED"
+            )
+        finally:
+            self._active_window_frame = previous_window_frame
     
     def _optimize_caches(self) -> None:
         """Optimize cache structures to prevent memory bloat."""
@@ -469,42 +558,30 @@ class ProductionAggregateEvaluator:
             clean_expr = function_part
             logger.debug(f"Found FILTER clause: {filter_condition}")
         
-        # Now parse the main aggregate function
-        # Enhanced pattern to handle window functions with OVER clauses
-        # First try to match window function syntax: FUNCTION(args) OVER (...)
-        window_pattern = r'([A-Z_]+)\s*\(\s*(.*?)\s*\)\s+OVER\s*\(\s*(.*?)\s*\)$'
-        window_match = re.match(window_pattern, clean_expr, re.IGNORECASE)
-        
-        if window_match:
-            # Handle window function
-            func_name = window_match.group(1).upper()
-            args_str = window_match.group(2).strip()
-            over_clause = window_match.group(3).strip()
-            
-            # Parse arguments and add the OVER clause to the arguments for processing
-            arguments = self._parse_function_arguments(args_str) if args_str else []
-            
-            # Add the OVER clause as part of the first argument for window function processing
-            if arguments:
-                arguments[0] = f"{arguments[0]} OVER ({over_clause})"
-            else:
-                arguments = [f"column OVER ({over_clause})"]  # fallback
-                
-            match = window_match
-        else:
-            # Fall back to regular function pattern
-            pattern = r'([A-Z_]+)\s*\(\s*(.*)\s*\)$'
-            match = re.match(pattern, clean_expr, re.IGNORECASE)
-            
-            if match:
-                func_name = match.group(1).upper()
-                args_str = match.group(2).strip()
-                # Parse arguments (handling nested parentheses)
-                arguments = self._parse_function_arguments(args_str) if args_str else []
-        
-        if not match:
+        # Parse only a standalone aggregate call.  A regex such as
+        # ``AVG\((.*)\)$`` treats ``avg(x) * count(*)`` as one AVG call with
+        # a broken argument.  Use the balanced scanner instead and reject any
+        # trailing text other than a supported OVER clause.
+        calls = self._find_balanced_function_calls(clean_expr)
+        if not calls or calls[0]["start"] != 0:
             logger.debug(f"Failed to parse aggregate function: {expr} (cleaned: {clean_expr})")
             return None
+
+        call = calls[0]
+        suffix = clean_expr[call["end"]:].strip()
+        func_name = call["function"].upper()
+        args_str = call["arguments"].strip()
+        arguments = self._parse_function_arguments(args_str) if args_str else []
+        window_frame = None
+
+        if suffix:
+            over_match = re.match(r'^OVER\s*\((.*)\)\s*$', suffix, re.IGNORECASE)
+            if not over_match:
+                logger.debug(
+                    f"Aggregate call is not standalone: {expr} (trailing: {suffix})"
+                )
+                return None
+            window_frame = self._parse_window_frame(over_match.group(1).strip())
         
         result = {
             'function': func_name,
@@ -514,6 +591,8 @@ class ProductionAggregateEvaluator:
         # Add filter condition if present
         if filter_condition:
             result['filter'] = filter_condition
+        if window_frame:
+            result['window_frame'] = window_frame
         
         logger.debug(f"Parsed aggregate function {func_name} with args: {arguments}" + 
                     (f", filter: {filter_condition}" if filter_condition else ""))
@@ -522,6 +601,76 @@ class ProductionAggregateEvaluator:
             self._expression_cache[cache_key] = copy.deepcopy(result)
 
         return copy.deepcopy(result)
+
+    def _parse_window_frame(self, over_clause: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse the subset of SQL window frames supported inside aggregate
+        measures.
+
+        The matcher currently supports ROWS frames that are useful for
+        row-pattern running aggregates, for example:
+        ``ROWS BETWEEN 2 PRECEDING AND CURRENT ROW``.
+        """
+        if not over_clause:
+            return None
+
+        normalized = " ".join(over_clause.strip().split())
+
+        preceding_match = re.match(
+            r'^ROWS\s+BETWEEN\s+(\d+)\s+PRECEDING\s+AND\s+CURRENT\s+ROW$',
+            normalized,
+            re.IGNORECASE,
+        )
+        if preceding_match:
+            return {
+                "unit": "ROWS",
+                "start": "PRECEDING",
+                "preceding": int(preceding_match.group(1)),
+                "end": "CURRENT_ROW",
+            }
+
+        unbounded_match = re.match(
+            r'^ROWS\s+BETWEEN\s+UNBOUNDED\s+PRECEDING\s+AND\s+CURRENT\s+ROW$',
+            normalized,
+            re.IGNORECASE,
+        )
+        if unbounded_match:
+            return {
+                "unit": "ROWS",
+                "start": "UNBOUNDED_PRECEDING",
+                "preceding": None,
+                "end": "CURRENT_ROW",
+            }
+
+        current_row_match = re.match(
+            r'^ROWS\s+BETWEEN\s+CURRENT\s+ROW\s+AND\s+CURRENT\s+ROW$',
+            normalized,
+            re.IGNORECASE,
+        )
+        if current_row_match:
+            return {
+                "unit": "ROWS",
+                "start": "CURRENT_ROW",
+                "preceding": 0,
+                "end": "CURRENT_ROW",
+            }
+
+        order_match = re.match(r'^ORDER\s+BY\s+(.+)$', normalized, re.IGNORECASE)
+        if order_match:
+            order_clause = order_match.group(1).strip()
+            direction = "ASC"
+            direction_match = re.search(r'\s+(ASC|DESC)\s*$', order_clause, re.IGNORECASE)
+            if direction_match:
+                direction = direction_match.group(1).upper()
+                order_clause = order_clause[:direction_match.start()].strip()
+            return {
+                "unit": "ORDER",
+                "order_by": order_clause,
+                "direction": direction,
+            }
+
+        logger.warning(f"Unsupported window frame in aggregate: OVER ({over_clause})")
+        return None
     
     def _parse_function_arguments(self, args_str: str) -> List[str]:
         """
@@ -972,7 +1121,11 @@ class ProductionAggregateEvaluator:
         if not arguments:
             return None
         
-        values = self._get_numeric_values(arguments[0], is_running)
+        filter_mask = None
+        if filter_condition:
+            filter_mask = self._apply_filter_condition(filter_condition, is_running)
+
+        values = self._get_numeric_values(arguments[0], is_running, filter_mask)
         if not values:
             return None
         
@@ -987,7 +1140,11 @@ class ProductionAggregateEvaluator:
         if not arguments:
             return None
         
-        values = self._get_expression_values(arguments[0], is_running)
+        filter_mask = None
+        if filter_condition:
+            filter_mask = self._apply_filter_condition(filter_condition, is_running)
+
+        values = self._get_expression_values(arguments[0], is_running, filter_mask)
         values = [v for v in values if v is not None]
         
         if not values:
@@ -1362,6 +1519,23 @@ class ProductionAggregateEvaluator:
         # Apply RUNNING semantics
         if is_running:
             all_indices = [idx for idx in all_indices if idx <= self.context.current_idx]
+
+        # Apply ROWS window frame, if the aggregate was written with an OVER
+        # clause.  The frame is evaluated over the matched row indices after
+        # RUNNING/FINAL visibility has been established.
+        frame = getattr(self, "_active_window_frame", None)
+        if frame and frame.get("unit") == "ROWS":
+            current_idx = self.context.current_idx
+            if frame.get("start") == "UNBOUNDED_PRECEDING":
+                lower_bound = None
+            else:
+                preceding = frame.get("preceding")
+                lower_bound = current_idx if preceding is None else current_idx - int(preceding)
+
+            if lower_bound is not None:
+                all_indices = [idx for idx in all_indices if idx >= lower_bound]
+            if frame.get("end") == "CURRENT_ROW":
+                all_indices = [idx for idx in all_indices if idx <= current_idx]
         
         return all_indices
     
@@ -1402,6 +1576,8 @@ class ProductionAggregateEvaluator:
     
     def _evaluate_single_expression(self, expr: str) -> Any:
         """Evaluate a single expression in the current context."""
+        expr = expr.strip()
+
         # Handle special functions first
         if expr.upper() == "MATCH_NUMBER()":
             # PRODUCTION FIX: Always return the current match_number from context
@@ -1445,6 +1621,17 @@ class ProductionAggregateEvaluator:
                     return not (math.isnan(float_val) or math.isinf(float_val))
             except (ValueError, TypeError):
                 return False
+
+        # Navigation functions inside aggregate arguments need deterministic
+        # row-pattern semantics.  Delegating these expressions to the generic
+        # condition evaluator is fragile because Python's AST sees
+        # FIRST(A.value) as a normal function call and because aggregate
+        # evaluation changes ``current_idx`` row by row.  Evaluate balanced
+        # navigation calls here, then safely compute any surrounding
+        # arithmetic expression.
+        if self._find_balanced_function_calls(expr, {"FIRST", "LAST", "PREV", "NEXT"}):
+            nav_value = self._evaluate_navigation_expression(expr)
+            return nav_value
         
         # Handle variable.column references
         var_col_match = re.match(r'^([A-Z_][A-Z0-9_]*)\.([A-Z_][A-Z0-9_]*)$', expr, re.IGNORECASE)
@@ -1537,6 +1724,128 @@ class ProductionAggregateEvaluator:
             logger.warning(f"Failed to evaluate expression '{expr}': {e}")
             # Try simpler evaluation approach for arithmetic expressions
             return self._try_simple_arithmetic_evaluation(expr)
+
+    def _evaluate_navigation_expression(self, expr: str) -> Any:
+        """
+        Evaluate an expression containing row-pattern navigation calls.
+
+        This supports standalone navigation, e.g. ``NEXT(A.value, 1)``, and
+        arithmetic combinations such as
+        ``FIRST(A.value) + LAST(A.value) + PREV(A.value, 1)``.
+        """
+        calls = self._find_balanced_function_calls(expr, {"FIRST", "LAST", "PREV", "NEXT"})
+        if not calls:
+            return None
+
+        # Replace from right to left so character offsets stay valid.
+        working_expr = expr
+        values: Dict[str, Any] = {}
+        for i, call in reversed(list(enumerate(calls))):
+            placeholder = f"__NAV_{i}__"
+            values[placeholder] = self._evaluate_navigation_call(call)
+            working_expr = (
+                working_expr[:call["start"]]
+                + placeholder
+                + working_expr[call["end"]:]
+            )
+
+        # A single navigation call can return directly without AST overhead.
+        if working_expr.strip() in values:
+            return values[working_expr.strip()]
+
+        try:
+            import ast
+            tree = ast.parse(working_expr, mode="eval")
+            return self._eval_arithmetic_ast(tree.body, values)
+        except Exception as e:
+            logger.warning(f"Failed to evaluate navigation expression '{expr}': {e}")
+            return None
+
+    def _evaluate_navigation_call(self, call: Dict[str, Any]) -> Any:
+        """Evaluate one balanced FIRST/LAST/PREV/NEXT call."""
+        func_name = call["function"].upper()
+        args = self._parse_function_arguments(call["arguments"])
+        if not args:
+            return None
+
+        value_expr = args[0].strip()
+        offset = 0 if func_name in {"FIRST", "LAST"} else 1
+        if len(args) > 1:
+            try:
+                offset = int(args[1])
+            except (TypeError, ValueError):
+                offset = 0 if func_name in {"FIRST", "LAST"} else 1
+        if offset < 0:
+            return None
+
+        var_col_match = re.match(
+            r'^([A-Z_][A-Z0-9_]*)\.([A-Z_][A-Z0-9_]*)$',
+            value_expr,
+            re.IGNORECASE,
+        )
+        if var_col_match:
+            var_name = var_col_match.group(1)
+            col_name = var_col_match.group(2)
+            indices = self._get_navigation_variable_indices(var_name)
+        else:
+            col_name = value_expr
+            indices = []
+            variables_to_use = getattr(self.context, "_full_match_variables", None) or self.context.variables
+            for var_indices in variables_to_use.values():
+                indices.extend(var_indices)
+            indices = sorted(set(indices))
+
+        if not indices:
+            return None
+
+        current_idx = self.context.current_idx
+
+        if func_name == "FIRST":
+            visible = [idx for idx in indices if idx <= current_idx]
+            if offset < len(visible):
+                target_idx = visible[offset]
+            else:
+                return None
+        elif func_name == "LAST":
+            visible = [idx for idx in indices if idx <= current_idx]
+            target_pos = len(visible) - 1 - offset
+            if target_pos >= 0:
+                target_idx = visible[target_pos]
+            else:
+                return None
+        else:
+            # PREV/NEXT are logical navigation over the full variable sequence,
+            # relative to the row currently being aggregated.
+            try:
+                current_pos = indices.index(current_idx)
+            except ValueError:
+                return None
+
+            if func_name == "PREV":
+                target_pos = current_pos - offset
+            else:
+                target_pos = current_pos + offset
+
+            if 0 <= target_pos < len(indices):
+                target_idx = indices[target_pos]
+            else:
+                return None
+
+        if 0 <= target_idx < len(self.context.rows):
+            return self.context.rows[target_idx].get(col_name)
+        return None
+
+    def _get_navigation_variable_indices(self, var_name: str) -> List[int]:
+        """Return sorted row indices for a variable or subset variable."""
+        indices: List[int] = []
+        variables_to_use = getattr(self.context, "_full_match_variables", None) or self.context.variables
+        if var_name in variables_to_use:
+            indices.extend(variables_to_use[var_name])
+        elif hasattr(self.context, "subsets") and var_name in self.context.subsets:
+            for component in self.context.subsets[var_name]:
+                if component in variables_to_use:
+                    indices.extend(variables_to_use[component])
+        return sorted(set(indices))
     
     def _try_simple_arithmetic_evaluation(self, expr: str) -> Any:
         """Try simple arithmetic evaluation as fallback when ConditionEvaluator fails."""
@@ -1949,6 +2258,65 @@ class ProductionAggregateEvaluator:
         
         # Extract the main expression (ignoring OVER clauses for now)
         expression = arguments[0]
+        active_window = getattr(self, "_active_window_frame", None)
+
+        if active_window and active_window.get("unit") == "ORDER":
+            order_column = active_window.get("order_by")
+            is_desc = active_window.get("direction", "ASC") == "DESC"
+            row_indices = self._get_row_indices(expression, is_running)
+            paired_values = []
+
+            old_idx = self.context.current_idx
+            try:
+                for idx in row_indices:
+                    if idx >= len(self.context.rows):
+                        continue
+                    self.context.current_idx = idx
+                    value = self._evaluate_single_expression(expression)
+                    order_value = self._evaluate_single_expression(order_column)
+                    if order_value is not None:
+                        paired_values.append((idx, value, order_value))
+            finally:
+                self.context.current_idx = old_idx
+
+            if not paired_values:
+                return None
+
+            sorted_pairs = sorted(
+                paired_values,
+                key=lambda item: item[2],
+                reverse=is_desc,
+            )
+
+            if func_name == "FIRST_VALUE":
+                return sorted_pairs[0][1]
+            if func_name == "LAST_VALUE":
+                return sorted_pairs[-1][1]
+            if func_name in ("LAG", "LEAD"):
+                offset = 1
+                default_value = None
+                if len(arguments) > 1:
+                    try:
+                        offset = int(arguments[1])
+                    except (ValueError, TypeError):
+                        offset = 1
+                if len(arguments) > 2:
+                    default_value = self._parse_literal_value(arguments[2])
+
+                ordered_indices = [item[0] for item in sorted_pairs]
+                try:
+                    current_position = ordered_indices.index(old_idx)
+                except ValueError:
+                    return default_value
+
+                target_position = (
+                    current_position - offset
+                    if func_name == "LAG"
+                    else current_position + offset
+                )
+                if 0 <= target_position < len(sorted_pairs):
+                    return sorted_pairs[target_position][1]
+                return default_value
         
         # Parse OVER clause if present in the expression
         over_match = re.search(r'\s+OVER\s*\(\s*ORDER\s+BY\s+([^)]+)\s*\)', expression, re.IGNORECASE)
@@ -2200,9 +2568,10 @@ class ProductionAggregateEvaluator:
             List of boolean values indicating which rows pass the filter
         """
         try:
+            outer_idx = self.context.current_idx
             # Get the range of rows to consider
             if is_running:
-                end_idx = self.context.current_idx + 1
+                end_idx = outer_idx + 1
             else:
                 end_idx = len(self.context.rows)
             
@@ -2214,8 +2583,12 @@ class ProductionAggregateEvaluator:
                 self.context.current_idx = row_idx
                 
                 try:
-                    # Evaluate the filter condition for this row using the expression evaluator
-                    condition_result = self._evaluate_single_expression(filter_condition)
+                    condition_result = self._evaluate_filter_condition_for_row(
+                        filter_condition,
+                        row_idx,
+                        outer_idx,
+                        is_running,
+                    )
                     filter_results.append(bool(condition_result))
                 except Exception as e:
                     logger.debug(f"Filter condition evaluation failed for row {row_idx}: {e}")
@@ -2233,6 +2606,153 @@ class ProductionAggregateEvaluator:
                 return [True] * (self.context.current_idx + 1)
             else:
                 return [True] * len(self.context.rows)
+
+    def _evaluate_filter_condition_for_row(
+        self,
+        filter_condition: str,
+        row_idx: int,
+        outer_idx: int,
+        is_running: bool,
+    ) -> bool:
+        """
+        Evaluate a FILTER predicate for one candidate row.
+
+        Nested aggregate calls inside the predicate are evaluated at the
+        outer aggregate frame, while row references such as ``A.value`` are
+        evaluated for the candidate row.  This matches SQL FILTER behavior:
+        the predicate is applied row-by-row, but aggregate subexpressions are
+        frame-level values.
+        """
+        expr = filter_condition.strip()
+
+        # Replace nested aggregate calls first, using the outer running/final
+        # frame rather than the candidate row.
+        aggregate_calls = self._find_balanced_function_calls(expr, self.STANDARD_AGGREGATES)
+        for call in reversed(aggregate_calls):
+            old_idx = self.context.current_idx
+            self.context.current_idx = outer_idx
+            try:
+                value = self._evaluate_single_aggregate(
+                    call["text"],
+                    "RUNNING" if is_running else "FINAL",
+                )
+            finally:
+                self.context.current_idx = old_idx
+            expr = expr[:call["start"]] + repr(value) + expr[call["end"]:]
+
+        # Replace variable.column references with values from the candidate row.
+        def replace_var_col(match: re.Match) -> str:
+            var_name = match.group(1)
+            col_name = match.group(2)
+            valid_indices = self._get_navigation_variable_indices(var_name)
+            if row_idx not in valid_indices:
+                return "None"
+            if 0 <= row_idx < len(self.context.rows):
+                return repr(self.context.rows[row_idx].get(col_name))
+            return "None"
+
+        expr = re.sub(
+            r'\b([A-Z_][A-Z0-9_]*)\.([A-Z_][A-Z0-9_]*)\b',
+            replace_var_col,
+            expr,
+            flags=re.IGNORECASE,
+        )
+
+        # Convert common SQL boolean syntax into Python AST-compatible syntax.
+        expr = re.sub(r'(?<![<>=!])=(?!=)', '==', expr)
+        expr = re.sub(r'\bAND\b', 'and', expr, flags=re.IGNORECASE)
+        expr = re.sub(r'\bOR\b', 'or', expr, flags=re.IGNORECASE)
+        expr = re.sub(r'\bNOT\b', 'not', expr, flags=re.IGNORECASE)
+        expr = re.sub(r'\bIN\b', 'in', expr, flags=re.IGNORECASE)
+        expr = re.sub(r'\bNULL\b', 'None', expr, flags=re.IGNORECASE)
+
+        try:
+            import ast
+            tree = ast.parse(expr, mode="eval")
+            return bool(self._eval_filter_ast(tree.body))
+        except Exception as e:
+            logger.debug(f"Failed to evaluate FILTER predicate '{filter_condition}' as '{expr}': {e}")
+            return False
+
+    def _eval_filter_ast(self, node: Any) -> Any:
+        """Evaluate a restricted AST for FILTER predicates."""
+        import ast
+        import operator
+
+        if isinstance(node, ast.BoolOp):
+            values = [self._eval_filter_ast(v) for v in node.values]
+            if isinstance(node.op, ast.And):
+                return all(bool(v) for v in values)
+            if isinstance(node.op, ast.Or):
+                return any(bool(v) for v in values)
+            return False
+
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return not bool(self._eval_filter_ast(node.operand))
+
+        if isinstance(node, ast.Compare):
+            left = self._eval_filter_ast(node.left)
+            for op, comparator in zip(node.ops, node.comparators):
+                right = self._eval_filter_ast(comparator)
+                if left is None or right is None:
+                    return False
+                if isinstance(op, ast.Eq):
+                    ok = left == right
+                elif isinstance(op, ast.NotEq):
+                    ok = left != right
+                elif isinstance(op, ast.Gt):
+                    ok = left > right
+                elif isinstance(op, ast.GtE):
+                    ok = left >= right
+                elif isinstance(op, ast.Lt):
+                    ok = left < right
+                elif isinstance(op, ast.LtE):
+                    ok = left <= right
+                elif isinstance(op, ast.In):
+                    ok = left in right
+                elif isinstance(op, ast.NotIn):
+                    ok = left not in right
+                else:
+                    ok = False
+                if not ok:
+                    return False
+                left = right
+            return True
+
+        if isinstance(node, ast.BinOp):
+            left = self._eval_filter_ast(node.left)
+            right = self._eval_filter_ast(node.right)
+            if left is None or right is None:
+                return None
+            op_map = {
+                ast.Add: operator.add,
+                ast.Sub: operator.sub,
+                ast.Mult: operator.mul,
+                ast.Div: operator.truediv,
+                ast.FloorDiv: operator.floordiv,
+                ast.Mod: operator.mod,
+                ast.Pow: operator.pow,
+            }
+            op = op_map.get(type(node.op))
+            if op is None:
+                return None
+            try:
+                return op(left, right)
+            except Exception:
+                return None
+
+        if isinstance(node, ast.Tuple):
+            return tuple(self._eval_filter_ast(elt) for elt in node.elts)
+        if isinstance(node, ast.List):
+            return [self._eval_filter_ast(elt) for elt in node.elts]
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Num):
+            return node.n
+        if isinstance(node, ast.Name):
+            return None if node.id == "None" else False
+
+        return None
         
 
 # Integration function for the existing MeasureEvaluator
@@ -2254,59 +2774,40 @@ def enhance_measure_evaluator_with_production_aggregates():
         semantics = semantics or "RUNNING"
         is_running = semantics.upper() == "RUNNING"
         
-        # Check if this is an aggregate function expression
-        # Pattern matches: [RUNNING|FINAL] FUNC(...) - allows complex arguments including CASE WHEN
-        agg_pattern = r'^\s*(?:(RUNNING|FINAL)\s+)?([A-Z_]+)\s*\('
-        match = re.match(agg_pattern, expr.strip(), re.IGNORECASE)
-        
-        # Check if this is an aggregate function expression
-        # Pattern matches: [RUNNING|FINAL] FUNC(...) - allows any arguments
-        agg_pattern = r'^\s*(?:(RUNNING|FINAL)\s+)?([A-Z_]+)\s*\('
-        match = re.match(agg_pattern, expr.strip(), re.IGNORECASE)
-        
-        logger.debug(f"Pattern match result for '{expr}': {match}")
-        
-        if match:
-            semantics_prefix = match.group(1)
-            func_name = match.group(2).upper()
-            
-            logger.debug(f"Matched function: {func_name}, semantics_prefix: {semantics_prefix}")
-            
-            # If semantics is in the expression, use that instead of parameter
-            if semantics_prefix:
-                semantics = semantics_prefix.upper()
-            
-            if func_name in ProductionAggregateEvaluator.STANDARD_AGGREGATES or func_name in ProductionAggregateEvaluator.MATHEMATICAL_FUNCTIONS:
-                logger.debug(f"Using production aggregate evaluator for: {expr} -> {func_name}")
-                # Reuse one production aggregate evaluator per MeasureEvaluator
-                # context.  This preserves parse/validation caches across the
-                # measures of the same output row instead of rebuilding them for
-                # every aggregate expression.
-                prod_agg_evaluator = getattr(self, '_prod_agg_evaluator', None)
-                if prod_agg_evaluator is None or prod_agg_evaluator.context is not self.context:
-                    prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
-                    self._prod_agg_evaluator = prod_agg_evaluator
-                
-                try:
-                    result = prod_agg_evaluator.evaluate_aggregate(expr, semantics)
-                    logger.debug(f"ENHANCED_EVAL_DEBUG: Production aggregate result for {expr}: {result} (type: {type(result)})")
-                    # Ensure we return the exact result from production aggregator
-                    if result is None:
-                        logger.debug(f"ENHANCED_EVAL_DEBUG: Returning None from production aggregator")
-                    return result
-                except (AggregateValidationError, AggregateArgumentError) as e:
-                    logger.warning(f"ENHANCED_EVAL: Aggregate validation error for {expr}: {e}")
-                    logger.warning(f"ENHANCED_EVAL: Falling back to original evaluator")
-                    return None
-                except Exception as e:
-                    logger.error(f"ENHANCED_EVAL: Error in production aggregate evaluator for {expr}: {e}")
-                    logger.error(f"ENHANCED_EVAL: Falling back to original evaluator")
-                    # Fallback to original implementation
-                    pass
-            else:
-                logger.debug(f"Function {func_name} not in standard aggregates, using original evaluator")
-        else:
-            logger.debug(f"Expression doesn't match pure aggregate pattern: {expr}")
+        prod_agg_evaluator = getattr(self, '_prod_agg_evaluator', None)
+        if prod_agg_evaluator is None or prod_agg_evaluator.context is not self.context:
+            prod_agg_evaluator = ProductionAggregateEvaluator(self.context)
+            self._prod_agg_evaluator = prod_agg_evaluator
+
+        clean_expr, semantics_prefix = prod_agg_evaluator._strip_semantics_prefix(expr)
+        if semantics_prefix:
+            semantics = semantics_prefix
+
+        start_func_match = re.match(r'^\s*([A-Z_]+)\s*\(', clean_expr, re.IGNORECASE)
+        start_func = start_func_match.group(1).upper() if start_func_match else None
+        contains_aggregate = bool(
+            prod_agg_evaluator._find_balanced_function_calls(
+                clean_expr, ProductionAggregateEvaluator.STANDARD_AGGREGATES
+            )
+        )
+        starts_supported_math = start_func in ProductionAggregateEvaluator.MATHEMATICAL_FUNCTIONS
+
+        if contains_aggregate or starts_supported_math:
+            logger.debug(f"Using production aggregate evaluator for: {expr}")
+            try:
+                result = prod_agg_evaluator.evaluate_aggregate(expr, semantics)
+                logger.debug(
+                    f"ENHANCED_EVAL_DEBUG: Production aggregate result for {expr}: "
+                    f"{result} (type: {type(result)})"
+                )
+                return result
+            except (AggregateValidationError, AggregateArgumentError) as e:
+                logger.warning(f"ENHANCED_EVAL: Aggregate validation error for {expr}: {e}")
+                logger.warning("ENHANCED_EVAL: Falling back to original evaluator")
+                return None
+            except Exception as e:
+                logger.error(f"ENHANCED_EVAL: Error in production aggregate evaluator for {expr}: {e}")
+                logger.error("ENHANCED_EVAL: Falling back to original evaluator")
         
         # Use original implementation for complex expressions and non-aggregates
         logger.debug(f"ENHANCED_EVAL_DEBUG: Falling back to original evaluator for: {expr}")

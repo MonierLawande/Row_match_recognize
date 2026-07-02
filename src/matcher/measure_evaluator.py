@@ -831,7 +831,15 @@ class MeasureEvaluator:
             return self.context.match_number
             
         # Special handling for ROW_NUMBER
-        if expr.upper().strip() == "ROW_NUMBER()":
+        expr_upper_stripped = expr.upper().strip()
+        if expr_upper_stripped.startswith("ROW_NUMBER() OVER"):
+            # In MATCH_RECOGNIZE output, ROW_NUMBER() OVER (...) is evaluated
+            # over the produced rows.  Within a single match context the
+            # closest stable equivalent is the partition-local match number;
+            # this avoids returning NULL for valid SQL window-style measures.
+            return self.context.match_number
+
+        if expr_upper_stripped == "ROW_NUMBER()":
             # ROW_NUMBER() returns the sequential number of the row within the match (1-based)
             # In RUNNING semantics, it returns the current row number within the visible portion
             # In FINAL semantics, it returns the row number within the complete match
