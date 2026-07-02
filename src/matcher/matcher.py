@@ -58,6 +58,7 @@ from abc import ABC, abstractmethod
 import copy
 import re
 import ast
+import math
 
 from src.matcher.dfa import DFA, FAIL_STATE
 from src.matcher.row_context import RowContext
@@ -1891,16 +1892,29 @@ class EnhancedMatcher:
 
     def _can_use_linear_quantifier_plan(self, config=None) -> bool:
         """Return True when the compiled linear plan is semantically safe."""
-        if getattr(self, '_condition_matrix', None) is None:
+        condition_matrix = getattr(self, '_condition_matrix', None)
+        if condition_matrix is None:
             return False
-        if not self._get_linear_quantifier_plan():
+        plan = self._get_linear_quantifier_plan()
+        if not plan:
             return False
         if self.has_empty_alternation or self.has_exclusions or self.is_permute_pattern:
             return False
-        if config and getattr(config, "rows_per_match", RowsPerMatch.ONE_ROW) != RowsPerMatch.ONE_ROW:
-            return False
         if config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST):
             return False
+
+        # The linear matcher is intentionally context-free: it reads only the
+        # precomputed row-local condition matrix.  If even one explicit DEFINE
+        # predicate in the plan was not vectorized, the compiled matcher cannot
+        # safely decide that variable.  In that case the generic DFA path must
+        # run instead.  This avoids partial-vectorization correctness bugs such
+        # as A being vectorized while B still requires scalar function calls.
+        define_conditions = self.define_conditions or {}
+        for token in plan:
+            var_name = token["var"]
+            if var_name in define_conditions and var_name not in condition_matrix:
+                return False
+
         return True
 
     def _find_single_match_linear_quantifier(
@@ -1985,21 +1999,32 @@ class EnhancedMatcher:
             return None
 
         assignments: Dict[str, List[int]] = {}
-        all_indices: List[int] = []
+        end_idx = start_idx - 1
         for var_name, segment_start, count in segments:
             if count <= 0:
                 assignments.setdefault(var_name, [])
                 continue
             indices = list(range(segment_start, segment_start + count))
             assignments.setdefault(var_name, []).extend(indices)
-            all_indices.extend(indices)
+            end_idx = max(end_idx, segment_start + count - 1)
 
-        if not all_indices:
-            return None
+        if end_idx < start_idx:
+            return {
+                "start": start_idx,
+                "end": start_idx - 1,
+                "variables": assignments,
+                "state": self.start_state,
+                "is_empty": True,
+                "empty_pattern_rows": [start_idx],
+                "excluded_vars": set(),
+                "excluded_rows": [],
+                "has_empty_alternation": self.has_empty_alternation,
+                "linear_quantifier_plan": True,
+            }
 
         return {
             "start": start_idx,
-            "end": max(all_indices),
+            "end": end_idx,
             "variables": assignments,
             "state": self.start_state,
             "is_empty": False,
@@ -2238,11 +2263,15 @@ class EnhancedMatcher:
         # failing.  Materialize only the rows that belong to the last accepted
         # match.  Doing this once avoids copying the assignment dictionary on
         # every accepting step in greedy quantified patterns.
-        accepted_variables = {
-            var: [idx for idx in indices if idx <= accepted_end]
-            for var, indices in var_assignments.items()
-        }
-        accepted_excluded_rows = [idx for idx in excluded_rows if idx <= accepted_end]
+        if accepted_end == current_idx - 1:
+            accepted_variables = var_assignments
+            accepted_excluded_rows = excluded_rows
+        else:
+            accepted_variables = {
+                var: [idx for idx in indices if idx <= accepted_end]
+                for var, indices in var_assignments.items()
+            }
+            accepted_excluded_rows = [idx for idx in excluded_rows if idx <= accepted_end]
 
         return {
             "start": start_idx,
@@ -5212,6 +5241,117 @@ class EnhancedMatcher:
                 return np.full(len(df), bool(value), dtype=bool)
             raise ValueError("Expression is not boolean-vectorizable")
 
+        def is_vector_like(value):
+            return isinstance(value, np.ndarray) or hasattr(value, "to_numpy")
+
+        def is_null_scalar(value):
+            try:
+                return bool(pd.isna(value))
+            except Exception:
+                return value is None
+
+        def scalar_value(value):
+            if is_vector_like(value):
+                raise ValueError("Function argument must be scalar")
+            return value
+
+        def string_value(value):
+            if hasattr(value, "astype") and hasattr(value, "str"):
+                return value.astype("string")
+            if isinstance(value, np.ndarray):
+                return pd.Series(value).astype("string")
+            if is_null_scalar(value):
+                return None
+            return str(value)
+
+        def numeric_unary(value, func):
+            if is_vector_like(value):
+                return func(value)
+            if is_null_scalar(value):
+                return None
+            return func(value)
+
+        def eval_row_local_call(func_name: str, args):
+            """Vectorize safe row-local scalar functions used in DEFINE predicates."""
+            name = func_name.upper()
+
+            if name == "LOWER" and len(args) == 1:
+                value = string_value(args[0])
+                return value.str.lower() if hasattr(value, "str") else (None if value is None else value.lower())
+
+            if name == "UPPER" and len(args) == 1:
+                value = string_value(args[0])
+                return value.str.upper() if hasattr(value, "str") else (None if value is None else value.upper())
+
+            if name == "TRIM" and len(args) == 1:
+                value = string_value(args[0])
+                return value.str.strip() if hasattr(value, "str") else (None if value is None else value.strip())
+
+            if name == "LTRIM" and len(args) == 1:
+                value = string_value(args[0])
+                return value.str.lstrip() if hasattr(value, "str") else (None if value is None else value.lstrip())
+
+            if name == "RTRIM" and len(args) == 1:
+                value = string_value(args[0])
+                return value.str.rstrip() if hasattr(value, "str") else (None if value is None else value.rstrip())
+
+            if name == "LENGTH" and len(args) == 1:
+                value = string_value(args[0])
+                return value.str.len() if hasattr(value, "str") else (None if value is None else len(value))
+
+            if name in ("SUBSTR", "SUBSTRING") and len(args) in (2, 3):
+                value = string_value(args[0])
+                start = int(scalar_value(args[1])) - 1
+                length = None if len(args) == 2 or args[2] is None else int(scalar_value(args[2]))
+                stop = None if length is None else start + length
+                return value.str.slice(start, stop) if hasattr(value, "str") else (
+                    None if value is None else value[start:stop]
+                )
+
+            if name == "LEFT" and len(args) == 2:
+                value = string_value(args[0])
+                count = int(scalar_value(args[1]))
+                return value.str.slice(0, count) if hasattr(value, "str") else (
+                    None if value is None else value[:count]
+                )
+
+            if name == "RIGHT" and len(args) == 2:
+                value = string_value(args[0])
+                count = int(scalar_value(args[1]))
+                return value.str.slice(-count) if hasattr(value, "str") else (
+                    None if value is None else value[-count:]
+                )
+
+            if name == "ABS" and len(args) == 1:
+                value = args[0]
+                return value.abs() if hasattr(value, "abs") else (None if is_null_scalar(value) else abs(value))
+
+            if name == "ROUND" and len(args) in (1, 2):
+                value = args[0]
+                digits = 0 if len(args) == 1 else int(scalar_value(args[1]))
+                return value.round(digits) if hasattr(value, "round") else (
+                    None if is_null_scalar(value) else round(value, digits)
+                )
+
+            if name in ("FLOOR", "CEILING", "CEIL", "SQRT", "EXP", "LN") and len(args) == 1:
+                func_map = {
+                    "FLOOR": np.floor,
+                    "CEILING": np.ceil,
+                    "CEIL": np.ceil,
+                    "SQRT": np.sqrt,
+                    "EXP": np.exp,
+                    "LN": np.log,
+                }
+                return numeric_unary(args[0], func_map[name])
+
+            if name == "POWER" and len(args) == 2:
+                return args[0] ** args[1]
+
+            if name == "MOD" and len(args) == 2:
+                return args[0] % args[1]
+
+            raise ValueError(f"Function {func_name} is not row-local vectorizable")
+
         def eval_node(current):
             if isinstance(current, ast.Constant):
                 return current.value
@@ -5295,6 +5435,9 @@ class EnhancedMatcher:
                     if hasattr(value, "isna"):
                         return value.isna().to_numpy(dtype=bool)
                     return np.full(len(df), pd.isna(value), dtype=bool)
+                if isinstance(current.func, ast.Name):
+                    args = [eval_node(arg) for arg in current.args]
+                    return eval_row_local_call(current.func.id, args)
                 raise ValueError("Function call is not row-local")
 
             if isinstance(current, ast.Compare):
@@ -5920,8 +6063,11 @@ class EnhancedMatcher:
                             if match_row:
                                 results.append(match_row)
                         
-                        # Update tracking
-                        if match.get("variables"):
+                        # Update tracking only when a caller requested
+                        # unmatched-row output or non-default processed-index
+                        # protection.  The default PAST LAST ROW path does not
+                        # need a matched-index set.
+                        if (unmatched_indices is not None or track_processed_indices) and match.get("variables"):
                             matched_indices = set()
                             for var, indices in match["variables"].items():
                                 matched_indices.update(indices)
@@ -5993,8 +6139,8 @@ class EnhancedMatcher:
                 results.extend(match_rows)
                 self.timing["process_match"] += time.time() - match_time_start
 
-                # Update unmatched indices efficiently
-                if match.get("variables"):
+                # Update unmatched indices efficiently only when tracking is active.
+                if (unmatched_indices is not None or track_processed_indices) and match.get("variables"):
                     matched_indices = set()
                     for var, indices in match["variables"].items():
                         matched_indices.update(indices)
@@ -6019,7 +6165,7 @@ class EnhancedMatcher:
                 )
                 if match_row:
                     results.append(match_row)
-                    if match.get("variables"):
+                    if (unmatched_indices is not None or track_processed_indices) and match.get("variables"):
                         matched_indices = set()
                         for var, indices in match["variables"].items():
                             matched_indices.update(indices)
@@ -6106,23 +6252,27 @@ class EnhancedMatcher:
         start_idx = match["start"]
         end_idx = match["end"]
         
-        logger.debug(f"Calculating skip position: mode={skip_mode}, skip_var={skip_var}, match_range=[{start_idx}:{end_idx}]")
+        if DEBUG_ENABLED:
+            logger.debug(f"Calculating skip position: mode={skip_mode}, skip_var={skip_var}, match_range=[{start_idx}:{end_idx}]")
         
         # Empty match handling - always move to next row
         if match.get("is_empty", False):
-            logger.debug(f"Empty match: skipping to position {start_idx + 1}")
+            if DEBUG_ENABLED:
+                logger.debug(f"Empty match: skipping to position {start_idx + 1}")
             return start_idx + 1
             
         if skip_mode == SkipMode.PAST_LAST_ROW:
             # Default behavior: skip past the last row of the match
             next_pos = end_idx + 1
-            logger.debug(f"PAST_LAST_ROW: skipping to position {next_pos}")
+            if DEBUG_ENABLED:
+                logger.debug(f"PAST_LAST_ROW: skipping to position {next_pos}")
             return next_pos
             
         elif skip_mode == SkipMode.TO_NEXT_ROW:
             # Skip to the row after the first row of the match
             next_pos = start_idx + 1
-            logger.debug(f"TO_NEXT_ROW: skipping to position {next_pos}")
+            if DEBUG_ENABLED:
+                logger.debug(f"TO_NEXT_ROW: skipping to position {next_pos}")
             return next_pos
             
         elif skip_mode == SkipMode.TO_FIRST and skip_var:
@@ -6373,7 +6523,8 @@ class EnhancedMatcher:
 
         The general ``MeasureEvaluator`` supports a broad SQL expression
         surface, but common MATCH_RECOGNIZE measures such as ``FIRST(A.x)``,
-        ``LAST(B.x)``, ``COUNT(*)``, and ``COUNT(A.x)`` can be evaluated
+        ``LAST(B.x)``, ``COUNT(*)``, ``COUNT(A.x)``, ``SUM(A.x)``,
+        ``AVG(A.x)``, ``MIN(A.x)``, and ``MAX(A.x)`` can be evaluated
         directly from the match variable assignment.  This method only accepts
         exact, row-local aggregate/navigation forms and returns ``None`` for
         anything complex so the existing evaluator remains the source of truth.
@@ -6436,6 +6587,20 @@ class EnhancedMatcher:
                             "field": first_last.group(3),
                             "semantics": explicit_semantics or semantics,
                         }
+                    else:
+                        aggregate_field = re.match(
+                            r'^(SUM|AVG|MIN|MAX)\s*'
+                            r'\(\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\)\s*$',
+                            text,
+                            re.IGNORECASE,
+                        )
+                        if aggregate_field:
+                            plan = {
+                                "kind": f"{aggregate_field.group(1).upper()}_FIELD",
+                                "var": aggregate_field.group(2),
+                                "field": aggregate_field.group(3),
+                                "semantics": explicit_semantics or semantics,
+                            }
 
         self._compiled_measure_plan_cache[cache_key] = plan
         return plan
@@ -6478,6 +6643,14 @@ class EnhancedMatcher:
             return None
         return row.get(field_key)
 
+    def _is_measure_row_field_non_null(self, rows: List[Dict[str, Any]], row_idx: int, field_name: str) -> bool:
+        """Check field non-nullness using a column mask when the row store supports it."""
+        if row_idx < 0 or row_idx >= len(rows):
+            return False
+        if hasattr(rows, "is_non_null"):
+            return bool(rows.is_non_null(row_idx, field_name))
+        return self._is_non_null_measure_value(self._get_measure_row_value(rows, row_idx, field_name))
+
     def _evaluate_compiled_measure_plan(
         self,
         plan: Dict[str, Any],
@@ -6493,6 +6666,12 @@ class EnhancedMatcher:
             return match_number
 
         if kind == "COUNT_STAR":
+            if match.get("is_empty", False):
+                return 0
+            start_idx = match.get("start")
+            end_idx = match.get("end")
+            if start_idx is not None and end_idx is not None:
+                return max(0, end_idx - start_idx + 1)
             matched_indices = set()
             for indices in variables.values():
                 matched_indices.update(indices)
@@ -6510,8 +6689,36 @@ class EnhancedMatcher:
             return sum(
                 1
                 for idx in indices
-                if self._is_non_null_measure_value(self._get_measure_row_value(rows, idx, field_name))
+                if self._is_measure_row_field_non_null(rows, idx, field_name)
             )
+
+        if kind in {"SUM_FIELD", "AVG_FIELD", "MIN_FIELD", "MAX_FIELD"}:
+            field_name = plan["field"]
+            values = [
+                self._get_measure_row_value(rows, idx, field_name)
+                for idx in indices
+            ]
+            values = [value for value in values if self._is_non_null_measure_value(value)]
+            if not values:
+                return None
+
+            if kind == "MIN_FIELD":
+                return min(values)
+            if kind == "MAX_FIELD":
+                return max(values)
+
+            numeric_values = []
+            for value in values:
+                try:
+                    numeric_values.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+            if not numeric_values:
+                return None
+            total = sum(numeric_values)
+            if kind == "SUM_FIELD":
+                return total
+            return total / len(numeric_values)
 
         if kind == "FIRST":
             if not indices:
@@ -6524,6 +6731,155 @@ class EnhancedMatcher:
             return self._get_measure_row_value(rows, max(indices), plan["field"])
 
         raise ValueError(f"Unsupported compiled measure plan kind: {kind}")
+
+    def _compile_simple_running_aggregate_plan(self, expr: str, semantics: str) -> Optional[Dict[str, Any]]:
+        """Compile common RUNNING aggregate measures into prefix plans.
+
+        This optimization is intentionally conservative: it only accepts simple
+        row-local forms such as ``RUNNING sum(A.value)``, ``avg(A.value)``,
+        ``count(*)``, and ``stddev(A.value)``.  Complex expressions, FILTER,
+        DISTINCT, navigation, and arithmetic continue through the general
+        evaluator.
+        """
+        if not isinstance(expr, str):
+            return None
+
+        text = expr.strip()
+        effective_semantics = semantics.upper() if semantics else "FINAL"
+        prefix_match = re.match(r'^(RUNNING|FINAL)\s+(.+)$', text, re.IGNORECASE)
+        if prefix_match:
+            effective_semantics = prefix_match.group(1).upper()
+            text = prefix_match.group(2).strip()
+
+        if effective_semantics != "RUNNING":
+            return None
+
+        count_star = re.match(r'^COUNT\s*\(\s*\*\s*\)\s*$', text, re.IGNORECASE)
+        if count_star:
+            return {"kind": "RUNNING_COUNT_STAR"}
+
+        count_var_star = re.match(
+            r'^COUNT\s*\(\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*\*\s*\)\s*$',
+            text,
+            re.IGNORECASE,
+        )
+        if count_var_star:
+            return {"kind": "RUNNING_COUNT_VAR_STAR", "var": count_var_star.group(1)}
+
+        func_match = re.match(
+            r'^(SUM|AVG|MIN|MAX|STDDEV|STDDEV_SAMP|STDDEV_POP|VARIANCE|VAR_SAMP|VAR_POP|COUNT)\s*'
+            r'\(\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\)\s*$',
+            text,
+            re.IGNORECASE,
+        )
+        if not func_match:
+            return None
+
+        return {
+            "kind": "RUNNING_AGG_FIELD",
+            "func": func_match.group(1).upper(),
+            "var": func_match.group(2),
+            "field": func_match.group(3),
+        }
+
+    def _precompute_simple_running_aggregate(
+        self,
+        plan: Dict[str, Any],
+        match: Dict[str, Any],
+        rows: List[Dict[str, Any]],
+        output_indices: List[int],
+    ) -> Dict[int, Any]:
+        """Precompute a simple RUNNING aggregate for all output rows in a match."""
+        variables = match.get("variables", {}) or {}
+        output_indices = sorted(output_indices)
+        if not output_indices:
+            return {}
+
+        def resolve_var_indices(var_name: Optional[str]) -> List[int]:
+            if not var_name:
+                matched = set()
+                for idxs in variables.values():
+                    matched.update(idxs)
+                return sorted(matched)
+            var_key = self._resolve_mapping_key(variables, var_name)
+            return sorted(variables.get(var_key, [])) if var_key is not None else []
+
+        kind = plan["kind"]
+        if kind == "RUNNING_COUNT_STAR":
+            relevant_indices = resolve_var_indices(None)
+            values_by_idx = {idx: 1 for idx in relevant_indices}
+            func = "COUNT_STAR"
+        elif kind == "RUNNING_COUNT_VAR_STAR":
+            relevant_indices = resolve_var_indices(plan.get("var"))
+            values_by_idx = {idx: 1 for idx in relevant_indices}
+            func = "COUNT_STAR"
+        else:
+            relevant_indices = resolve_var_indices(plan.get("var"))
+            field = plan["field"]
+            values_by_idx = {
+                idx: self._get_measure_row_value(rows, idx, field)
+                for idx in relevant_indices
+            }
+            func = plan["func"]
+
+        relevant_set = set(relevant_indices)
+        result: Dict[int, Any] = {}
+        count = 0
+        non_null_count = 0
+        total = 0.0
+        sum_sq = 0.0
+        current_min = None
+        current_max = None
+
+        for idx in output_indices:
+            if idx in relevant_set:
+                raw_value = values_by_idx.get(idx)
+                if func == "COUNT_STAR":
+                    count += 1
+                elif func == "COUNT":
+                    if self._is_non_null_measure_value(raw_value):
+                        count += 1
+                elif self._is_non_null_measure_value(raw_value):
+                    if func in {"SUM", "AVG", "STDDEV", "STDDEV_SAMP", "STDDEV_POP", "VARIANCE", "VAR_SAMP", "VAR_POP"}:
+                        try:
+                            numeric_value = float(raw_value)
+                        except (TypeError, ValueError):
+                            numeric_value = None
+                        if numeric_value is not None:
+                            non_null_count += 1
+                            total += numeric_value
+                            sum_sq += numeric_value * numeric_value
+                    elif func == "MIN":
+                        current_min = raw_value if current_min is None or raw_value < current_min else current_min
+                    elif func == "MAX":
+                        current_max = raw_value if current_max is None or raw_value > current_max else current_max
+
+            if func in {"COUNT_STAR", "COUNT"}:
+                result[idx] = count
+            elif func == "SUM":
+                result[idx] = total if non_null_count else None
+            elif func == "AVG":
+                result[idx] = (total / non_null_count) if non_null_count else None
+            elif func == "MIN":
+                result[idx] = current_min
+            elif func == "MAX":
+                result[idx] = current_max
+            elif func in {"STDDEV", "STDDEV_SAMP", "VARIANCE", "VAR_SAMP"}:
+                if non_null_count < 2:
+                    result[idx] = None
+                else:
+                    variance = (sum_sq - (total * total / non_null_count)) / (non_null_count - 1)
+                    variance = max(variance, 0.0)
+                    result[idx] = variance if func in {"VARIANCE", "VAR_SAMP"} else math.sqrt(variance)
+            elif func in {"STDDEV_POP", "VAR_POP"}:
+                if non_null_count < 1:
+                    result[idx] = None
+                else:
+                    variance = (sum_sq - (total * total / non_null_count)) / non_null_count
+                    variance = max(variance, 0.0)
+                    result[idx] = variance if func == "VAR_POP" else math.sqrt(variance)
+
+        return result
 
     def _prepare_measure_output_plans(self, measures):
         """Precompile measure expressions once per output pass.
@@ -6896,73 +7252,22 @@ class EnhancedMatcher:
             all_indices = list(range(match["start"], match["end"] + 1))
             logger.debug(f"Regular pattern: using range {all_indices}")
         
-        # Pre-calculate running aggregates for efficiency using production aggregates
+        # Pre-calculate simple RUNNING aggregates once per match.  Without
+        # this, ALL ROWS PER MATCH recomputes SUM/AVG/STDDEV prefixes for
+        # every output row, which is O(n^2) on long matches.
         running_aggregates = {}
         for alias, expr in measures.items():
-            # Handle any aggregate function that starts with a known function name
-            agg_functions = ['SUM', 'AVG', 'COUNT', 'MIN', 'MAX', 'ARRAY_AGG', 'STRING_AGG']
-            expr_upper = expr.upper().strip()
-            
-            is_aggregate = any(expr_upper.startswith(f"{func}(") for func in agg_functions)
-            
-            if is_aggregate:
-                # Use production aggregate evaluator for all aggregate expressions
-                from src.matcher.production_aggregates import ProductionAggregateEvaluator
-                
-                try:
-                    # Calculate running aggregate for each position using production evaluator
-                    running_aggregates[alias] = {}
-                    
-                    for idx in all_indices:
-                        # Create context for this position
-                        temp_context = RowContext(
-                            rows=rows,
-                            variables=match["variables"],
-                            current_idx=idx
-                        )
-                        temp_context.match_number = match_number  # PRODUCTION FIX: Set correct match_number for MATCH_NUMBER() evaluation
-                        temp_context.subsets = self.subsets.copy() if self.subsets else {}
-                        
-                        # Use production aggregate evaluator
-                        prod_evaluator = ProductionAggregateEvaluator(temp_context)
-                        result = prod_evaluator.evaluate_aggregate(expr, "RUNNING")
-                        
-                        # Preserve None for functions that should return NULL when all inputs are NULL
-                        # Only convert None to 0 for COUNT functions where it makes sense
-                        if result is None:
-                            if 'ARRAY_AGG' in expr_upper:
-                                running_aggregates[alias][idx] = []
-                            elif 'COUNT' in expr_upper:
-                                running_aggregates[alias][idx] = 0
-                            else:
-                                # For SUM, AVG, MIN, MAX, etc., preserve None to represent SQL NULL
-                                running_aggregates[alias][idx] = None
-                        else:
-                            running_aggregates[alias][idx] = result
-                        
-                except Exception as e:
-                    logger.warning(f"Failed to use production aggregates for running aggregate {alias}: {e}")
-                    # For backward compatibility, keep the old SUM-only fallback
-                    if expr_upper.startswith("SUM("):
-                        col_match = re.match(r'SUM\(([^)]+)\)', expr, re.IGNORECASE)
-                        if col_match:
-                            col_name = col_match.group(1).strip()
-                            
-                            # Calculate running sum for each position (simple case)
-                            total = 0
-                            running_aggregates[alias] = {}
-                            
-                            for idx in all_indices:
-                                # INCLUDE excluded rows in running sum calculation per SQL:2016
-                                # (They are excluded from output but INCLUDED in RUNNING aggregations)
-                                if idx < len(rows):
-                                    row_val = rows[idx].get(col_name)
-                                    if row_val is not None:
-                                        try:
-                                            total += float(row_val)
-                                        except (ValueError, TypeError):
-                                            pass
-                                running_aggregates[alias][idx] = total
+            semantics = self.measure_semantics.get(alias, "FINAL")
+            plan = self._compile_simple_running_aggregate_plan(expr, semantics)
+            if plan is None:
+                continue
+            try:
+                running_aggregates[alias] = self._precompute_simple_running_aggregate(
+                    plan, match, rows, all_indices
+                )
+            except Exception as e:
+                logger.warning(f"Failed to precompute running aggregate {alias}: {e}")
+                running_aggregates.pop(alias, None)
         
         # Process each row in the match range
         for idx in all_indices:
@@ -7000,6 +7305,14 @@ class EnhancedMatcher:
                             semantics = "FINAL"
                     
                     logger.debug(f"Row {idx}: Measure '{alias}' = '{expr}' using {semantics} semantics")
+
+                    if alias in running_aggregates and idx in running_aggregates[alias]:
+                        result[alias] = running_aggregates[alias][idx]
+                        logger.debug(
+                            f"Evaluated measure {alias} for row {idx} with {semantics} semantics "
+                            f"from precomputed prefix aggregate: {result[alias]}"
+                        )
+                        continue
                     
                     # For RUNNING semantics or complex navigation expressions, create a context with variables only up to current row
                     # Complex expressions with nested navigation or arithmetic should use temporal context

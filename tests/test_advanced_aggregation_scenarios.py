@@ -91,12 +91,17 @@ class TestAdvancedAggregationScenarios:
             'value': [100, 200, 150, 300, 250, 400]
         })
         
-        # Expected output
+        # Expected output under RUNNING semantics.
+        # For the first row, PREV(A.value, 1) is NULL, so the arithmetic
+        # argument to SUM is NULL and the running SUM is NULL.  NEXT() has no
+        # default argument and is evaluated relative to each row in the
+        # running aggregate input, so the first row contributes the second
+        # row's value to the complex calculation.
         expected = pd.DataFrame({
             'id': [1, 2, 3, 4, 5, 6],
             'current_value': [100, 200, 150, 300, 250, 400],
-            'sum_with_navigation': [200, 750, 1150, 1950, 2450, 3250],
-            'complex_calculation': [300.0, 950.0, 1300.0, 2050.0, 2650.0, 3400.0]
+            'sum_with_navigation': [None, 400, 850, 1400, 2050, 2800],
+            'complex_calculation': [300.0, 650.0, 1100.0, 1650.0, 2300.0, 2700.0]
         })
         
         result = match_recognize(query, df)
@@ -321,13 +326,15 @@ class TestAdvancedAggregationScenarios:
             'category': ['A', 'B', 'A', 'C', 'B', 'A']
         })
         
-        # Expected output
+        # Expected output.  The FILTER expression ``A.id % 2 = 0`` selects
+        # rows with even id values (2, 4, and 6), and category IN ('A', 'B')
+        # includes the final A row.
         expected = pd.DataFrame({
             'id': [1, 2, 3, 4, 5, 6],
-            'sum_even_positions': [None, 25, 25, 55, 75, 75],
+            'sum_even_positions': [None, 25, 25, 55, 55, 90],
             'count_above_avg': [0, 1, 1, 2, 2, 3],
             'weighted_sum': [10, 60, 105, 225, 325, 535],
-            'conditional_avg': [10.0, 17.5, 16.666666666666668, 16.666666666666668, 17.5, 20.0]
+            'conditional_avg': [10.0, 17.5, 16.666666666666668, 16.666666666666668, 17.5, 21.0]
         })
         
         result = match_recognize(query, df)
