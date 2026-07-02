@@ -1909,14 +1909,17 @@ class EnhancedMatcher:
         start_idx: int,
         config=None,
         assume_safe: bool = False,
+        run_lengths_by_var=None,
+        linear_plan=None,
     ) -> Optional[Dict[str, Any]]:
         """Fast matcher for plain row-local linear quantified patterns."""
         if not assume_safe and not self._can_use_linear_quantifier_plan(config):
             return None
-        plan = self._get_linear_quantifier_plan()
+        plan = linear_plan if linear_plan is not None else self._get_linear_quantifier_plan()
 
         row_count = len(rows)
-        run_lengths_by_var = self._get_linear_plan_run_lengths(row_count)
+        if run_lengths_by_var is None:
+            run_lengths_by_var = self._get_linear_plan_run_lengths(row_count)
         memo: Dict[Tuple[int, int], Optional[List[Tuple[str, int, int]]]] = {}
 
         def max_run_for_var(var_name: str, pos: int) -> Optional[int]:
@@ -2149,6 +2152,7 @@ class EnhancedMatcher:
                     priority,
                 ))
 
+            compact_transitions.sort(key=lambda item: item[5])
             compact_index[state] = compact_transitions
 
         self._row_local_transition_index = compact_index
@@ -2191,7 +2195,6 @@ class EnhancedMatcher:
 
         while current_idx < row_count:
             best_transition: Optional[Tuple[str, int, bool, Any, bool, Tuple[Any, ...]]] = None
-            best_key: Optional[Tuple[Any, ...]] = None
             state_transitions = row_local_transition_index.get(state, [])
             for transition_tuple in state_transitions:
                 var, target, is_excluded, var_results, implicit_true, priority = transition_tuple
@@ -2205,13 +2208,8 @@ class EnhancedMatcher:
                 if not transition_matches:
                     continue
 
-                if best_transition is None:
-                    best_transition = transition_tuple
-                    best_key = priority
-                else:
-                    if priority < best_key:
-                        best_transition = transition_tuple
-                        best_key = priority
+                best_transition = transition_tuple
+                break
 
             if best_transition is None:
                 break
@@ -5744,6 +5742,7 @@ class EnhancedMatcher:
         all_rows = config.rows_per_match != RowsPerMatch.ONE_ROW if config else False
         show_empty = config.show_empty if config else True
         include_unmatched = config.include_unmatched if config else False
+        compiled_one_row_measure_plans = None if all_rows else self._prepare_measure_output_plans(measures)
         unmatched_indices = set(range(len(rows))) if include_unmatched else None
         track_processed_indices = (
             include_unmatched
@@ -5794,6 +5793,12 @@ class EnhancedMatcher:
         if self._can_reuse_row_context_for_matching(condition_matrix):
             reusable_context = RowContext(rows=rows, defined_variables=self.defined_variables)
         linear_plan_available = self._can_use_linear_quantifier_plan(config)
+        linear_plan = self._get_linear_quantifier_plan() if linear_plan_available else None
+        linear_plan_run_lengths = (
+            self._get_linear_plan_run_lengths(len(rows))
+            if linear_plan_available
+            else None
+        )
         row_local_dfa_available = (
             False if linear_plan_available
             else self._can_use_row_local_dfa_fast_path(config)
@@ -5806,6 +5811,7 @@ class EnhancedMatcher:
                 start_positions = np.flatnonzero(start_position_mask)
             except Exception:
                 start_positions = None
+        whole_pattern_vectorized_available = False
 
         while start_idx < len(rows) and iteration_count < max_iterations:
             iteration_count += 1
@@ -5891,7 +5897,7 @@ class EnhancedMatcher:
                 continue
 
             # VECTORIZED OPTIMIZATION: Try ultra-fast vectorized matching for simple patterns
-            if hasattr(self, '_condition_matrix'):
+            if whole_pattern_vectorized_available and hasattr(self, '_condition_matrix'):
                 vectorized_result = self._try_vectorized_simple_pattern_matching(rows, start_idx, config, processed_indices)
                 if vectorized_result:
                     matches, next_start_idx = vectorized_result
@@ -5904,7 +5910,13 @@ class EnhancedMatcher:
                             match_rows = self._process_all_rows_match(match, rows, measures, match_number, config)
                             results.extend(match_rows)
                         else:
-                            match_row = self._process_one_row_match(match, rows, measures, match_number)
+                            match_row = self._process_one_row_match(
+                                match,
+                                rows,
+                                measures,
+                                match_number,
+                                compiled_one_row_measure_plans,
+                            )
                             if match_row:
                                 results.append(match_row)
                         
@@ -5934,6 +5946,8 @@ class EnhancedMatcher:
                     start_idx,
                     config,
                     assume_safe=True,
+                    run_lengths_by_var=linear_plan_run_lengths,
+                    linear_plan=linear_plan,
                 )
             else:
                 match = None
@@ -5996,7 +6010,13 @@ class EnhancedMatcher:
                 if DEBUG_ENABLED:
                     logger.debug("\nProcessing match with ONE ROW PER MATCH:")
                     logger.debug(f"Match: {match}")
-                match_row = self._process_one_row_match(match, rows, measures, match_number)
+                match_row = self._process_one_row_match(
+                    match,
+                    rows,
+                    measures,
+                    match_number,
+                    compiled_one_row_measure_plans,
+                )
                 if match_row:
                     results.append(match_row)
                     if match.get("variables"):
@@ -6505,7 +6525,25 @@ class EnhancedMatcher:
 
         raise ValueError(f"Unsupported compiled measure plan kind: {kind}")
 
-    def _process_one_row_match(self, match, rows, measures, match_number):
+    def _prepare_measure_output_plans(self, measures):
+        """Precompile measure expressions once per output pass.
+
+        The previous implementation looked up/compiled the same measure plan
+        for every match row.  That is correct but expensive for high-cardinality
+        ONE ROW PER MATCH queries.  Preparing the measure plan list once keeps
+        the semantics identical while removing repeated cache lookups from the
+        hot path.
+        """
+        if not measures:
+            return []
+        plans = []
+        for alias, expr in measures.items():
+            semantics = self.measure_semantics.get(alias, "FINAL")
+            plan = self._get_compiled_measure_plan(alias, expr, semantics)
+            plans.append((alias, expr, semantics, plan))
+        return plans
+
+    def _process_one_row_match(self, match, rows, measures, match_number, compiled_measure_plans=None):
         """Process one row per match to exactly match Trino's output format."""
         if match["start"] >= len(rows):
             return None
@@ -6518,19 +6556,34 @@ class EnhancedMatcher:
         if self.exclusion_handler and self.exclusion_handler.excluded_vars:
             match = self.exclusion_handler.filter_excluded_rows(match)
         
-        # Create a new empty result row
+        # Create a new empty result row.  When rows are backed by a
+        # DataFrameRowAccessor, fetch only the requested columns instead of
+        # materializing the whole start row as a dict for every match.
         result = {}
+        start_row = None
+
+        def get_start_column_value(col: str):
+            nonlocal start_row
+            if hasattr(rows, "get_value"):
+                value = rows.get_value(match["start"], col)
+                return (value, value is not None)
+            if start_row is None:
+                start_row = rows[match["start"]]
+            if isinstance(start_row, dict) and col in start_row:
+                return (start_row[col], True)
+            return (None, False)
 
         # Add partition columns if available
-        start_row = rows[match["start"]]
         for col in self.partition_columns:
-            if col in start_row:
-                result[col] = start_row[col]
-        
+            value, exists = get_start_column_value(col)
+            if exists:
+                result[col] = value
+
         # Add order columns if available (for proper column ordering in ONE ROW PER MATCH)
         for col in self.order_columns:
-            if col in start_row:
-                result[col] = start_row[col]
+            value, exists = get_start_column_value(col)
+            if exists:
+                result[col] = value
         
         # Get variable assignments for easy access
         var_assignments = match.get("variables", {})
@@ -6585,17 +6638,23 @@ class EnhancedMatcher:
             evaluator = MeasureEvaluator(context, final=True)
             return evaluator
         
-        # Process measures
-        for alias, expr in measures.items():
+        # Process measures.  In the normal find_matches path these plans are
+        # prepared once and passed in.  Direct callers still get the same
+        # behavior through this fallback.
+        measure_plans = (
+            compiled_measure_plans
+            if compiled_measure_plans is not None
+            else self._prepare_measure_output_plans(measures)
+        )
+        for alias, expr, semantics, plan in measure_plans:
             try:
                 # Evaluate the expression with appropriate semantics
-                semantics = self.measure_semantics.get(alias, "FINAL")
-                plan = self._get_compiled_measure_plan(alias, expr, semantics)
                 if plan is not None:
                     result[alias] = self._evaluate_compiled_measure_plan(plan, match, rows, match_number)
                 else:
                     result[alias] = get_measure_evaluator().evaluate(expr, semantics)
-                logger.debug(f"Setting {alias} to {result[alias]} from evaluator")
+                if DEBUG_ENABLED:
+                    logger.debug(f"Setting {alias} to {result[alias]} from evaluator")
                 
             except Exception as e:
                 logger.error(f"Error evaluating measure {alias}: {e}")
@@ -6611,7 +6670,8 @@ class EnhancedMatcher:
         # If no measures were specified, add a basic match indicator
         if not measures:
             # Add original data from one of the matched rows (typically the first row of the match)
-            start_row = rows[match["start"]]
+            if start_row is None:
+                start_row = rows[match["start"]]
             for key, value in start_row.items():
                 if key not in result:  # Don't overwrite existing values
                     result[key] = value

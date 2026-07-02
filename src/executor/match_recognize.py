@@ -1263,13 +1263,20 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             # Compute memory size first and hash only small partitioned inputs
             # where preprocessing-cache reuse is realistic.
             cached_partitions = None
-            data_size_mb = df.memory_usage(deep=True).sum() / (1024 * 1024) if not df.empty else 0
-            should_cache_preprocessing = (
+            # Computing deep DataFrame memory usage is itself an O(n) pass and
+            # can dominate small/medium unpartitioned queries.  The current
+            # preprocessing cache is useful only for partitioned inputs, so
+            # avoid paying the memory-estimation cost when caching cannot be
+            # used anyway.
+            data_size_mb = 0
+            should_check_preprocessing_cache = (
                 caching_enabled
                 and len(df) > 100
                 and bool(partition_by)
-                and data_size_mb < 50
             )
+            if should_check_preprocessing_cache:
+                data_size_mb = df.memory_usage(deep=True).sum() / (1024 * 1024) if not df.empty else 0
+            should_cache_preprocessing = should_check_preprocessing_cache and data_size_mb < 50
             if should_cache_preprocessing:
                 data_hash = hashlib.sha256(df.to_csv(index=False).encode("utf-8")).hexdigest()[:16]
                 cached_partitions = DataSubsetCache.get_preprocessed_data(
