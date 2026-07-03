@@ -1934,9 +1934,9 @@ class EnhancedMatcher:
         row_count = len(rows)
         if run_lengths_by_var is None:
             run_lengths_by_var = self._get_linear_plan_run_lengths(row_count)
-        memo: Dict[Tuple[int, int], Optional[List[Tuple[str, int, int]]]] = {}
+        memo = {}
 
-        def max_run_for_var(var_name: str, pos: int) -> Optional[int]:
+        def max_run_for_var(var_name, pos):
             if run_lengths_by_var is not None:
                 runs = run_lengths_by_var.get(var_name)
                 if runs is None:
@@ -1955,7 +1955,7 @@ class EnhancedMatcher:
                 count += 1
             return count
 
-        def match_from(token_idx: int, pos: int) -> Optional[List[Tuple[str, int, int]]]:
+        def match_from(token_idx, pos):
             cache_key = (token_idx, pos)
             if cache_key in memo:
                 cached = memo[cache_key]
