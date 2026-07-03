@@ -65,7 +65,7 @@ python -c "import pandas_match_recognize; print('TestPyPI version:', pandas_matc
 
 # Step 11: Production PyPI  
 python -m twine upload dist/*
-pip install pandas-match-recognize==$NEW_VERSION --force-reinstall
+pip install pandas_match_recognize==$NEW_VERSION --force-reinstall
 python -c "import pandas_match_recognize; print('✅ Production version:', pandas_match_recognize.__version__)"
 
 echo "🎉 SUCCESS! Published version $NEW_VERSION"
