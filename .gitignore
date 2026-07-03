@@ -2,6 +2,7 @@
 ___pycache__/
 */___pycache__/
 ../*/___pycache__/
+**/__pycache__/**
 # Ignore Python bytecode files
 
 *.py[cod]
@@ -125,13 +126,4 @@ Thumbs.db
 *.log
 temp/
 tmp/
-src/config/__pycache__/*.pyc
-src/executor/__pycache__/*.pyc
-src/grammar/__pycache__/*.pyc
-src/matcher/__pycache__/*.pyc
 
-src/monitoring/__pycache__/*.pyc
-src/parser/__pycache__/*.pyc
-src/pattern/__pycache__/*.pyc
-src/utils/__pycache__/*.pyc
-tests/__pycache__/*.pyc
