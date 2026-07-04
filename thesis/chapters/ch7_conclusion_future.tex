@@ -46,15 +46,21 @@ and semantic subset.
 
 The performance evaluation further supports the practical viability of
 the approach for medium-scale in-memory workloads.  Chapter~\ref{chap:evaluation}
-reported 40 successful pattern--size runs using five pattern families
-and eight dataset sizes from 25\,K to 300\,K rows.  Across these runs,
-the implementation achieved an average throughput of 9\,444~rows/s,
-with throughput remaining relatively stable as input size increased.
-The main variation came from pattern structure: simple and optional
-patterns were fastest, while quantified and nested patterns incurred
-additional transition and predicate-evaluation overhead.  The memory
-measurements were also bounded for the evaluated range, with peak
-memory remaining below 75\,MB across the 40 reported scenarios.
+reported 40 successful pattern--size benchmark cells (each the median
+of three measured runs) using five pattern families and eight dataset
+sizes from 50\,K to 2\,M rows.  Across these runs, the implementation
+achieved an average throughput of 457\,018~rows/s, with throughput
+remaining stable as input size increased.  The main variation came
+from pattern structure: alternation was by far the fastest family,
+while complex nested patterns incurred additional transition and
+predicate-evaluation overhead.  In the cross-system comparison under
+the same nominal resource budget, the engine's average execution
+time was within about 5\% of Trino's, and the engine was faster
+than Trino on the alternation and complex-nested families; Oracle
+was the fastest system in this benchmark.  The memory measurements
+were also bounded for the evaluated range, with engine-reported
+query memory remaining below 80\,MB across the 40 reported
+scenarios.
 
 Architecturally, the system benefits from a separation between parsing,
 semantic validation, automata construction, matching, and result
@@ -97,8 +103,6 @@ linked either to the correctness comparisons, the implementation
 description, or the measured benchmark results.
 
 {\small
-\setlength{\LTleft}{0pt}
-\setlength{\LTright}{0pt}
 \begin{longtable}{@{}p{0.18\textwidth}p{0.27\textwidth}p{0.25\textwidth}p{0.20\textwidth}@{}}
 \caption{Validation mapping between thesis claims, supporting
 evidence, and scope boundaries}
@@ -136,16 +140,21 @@ Unsupported syntax, uncommon edge cases, and cost-based optimizer behavior
 remain outside the thesis scope. \\
 \midrule
 Performance &
-The 40-run Amazon UK Products benchmark over five pattern families and
-eight dataset sizes from 25\,K to 300\,K rows. &
-Execution time scales predictably over the measured range, with
-average throughput of 9\,444~rows/s. &
+The 40-cell Amazon UK Products benchmark over five pattern families
+and eight dataset sizes from 50\,K to 2\,M rows, reported as medians
+of three measured runs. &
+Execution time scales predictably over the measured range
+($R^2 \geq 0.99$ for the proposed engine on each of its five pattern
+families), with average throughput of
+457\,018~rows/s and an average execution time within about 5\% of
+Trino's under the same nominal budget; Oracle was fastest. &
 The benchmark does not establish performance for very large,
 distributed, or highly adversarial workloads. \\
 \midrule
 Memory use &
-Memory measurements for all 40 benchmark scenarios, including the
-maximum observed peak memory of 74.51\,MB. &
+Query-memory and footprint measurements for all 40 benchmark
+scenarios, including the maximum observed query memory of
+79.84\,MB. &
 Memory use remains bounded for the evaluated workloads. &
 The measurements are empirical and do not define a formal upper bound
 for all possible patterns or datasets. \\
@@ -225,7 +234,7 @@ its own expression evaluator rather than reusing a general SQL
 execution engine.
 
 \textbf{Performance boundaries.}
-The benchmark demonstrates predictable behavior from 25\,K to 300\,K
+The benchmark demonstrates predictable behavior from 50\,K to 2\,M
 rows on the evaluated workstation.  Larger datasets, wider schemas,
 more partitions, and highly ambiguous patterns may expose bottlenecks
 from Python execution, \texttt{pandas} group processing, row-context
@@ -234,10 +243,12 @@ compiled columnar systems can still provide higher throughput for
 large-scale workloads.
 
 \textbf{Memory behavior.}
-Memory usage remained bounded in the reported benchmark, but the
-measurements were non-monotonic across pattern families and dataset
-sizes.  This behavior is consistent with garbage collection timing,
-intermediate state representation, partition grouping, and result-set
+Memory usage remained bounded in the reported benchmark, and the
+engine-reported query memory grows with input size as expected.
+Readings near the measurement floor are, however, quantized to the
+allocation granularity of each runtime (memory-pool chunks for the
+databases, resident pages for Python), and small values can also be
+affected by garbage-collection timing and result-set
 materialization.  Therefore, the reported memory results should be
 interpreted as empirical measurements for the tested workloads rather
 than as a formal upper bound for all possible patterns.
@@ -269,9 +280,11 @@ Oracle, and hand-written \texttt{pandas} baselines.  Second, the
 declarative SQL formulation substantially reduces the amount of
 procedural Python code needed to express sequential row-pattern
 analysis.  Third, the benchmark over the Amazon UK Products Dataset
-shows stable medium-scale performance across 40 pattern--size runs,
-with an average throughput of 9\,444~rows/s and bounded memory use in
-the measured range.
+shows stable performance across 40 pattern--size cells from 50\,K to
+2\,M rows, with an average throughput of 457\,018~rows/s, execution
+times competitive with Trino under the same nominal resource budget
+(Oracle was the fastest system), and bounded memory use in the
+measured range.
 
 The proposed approach is therefore best understood as a bridge between
 SQL row-pattern recognition and DataFrame-centered analytics.  It does

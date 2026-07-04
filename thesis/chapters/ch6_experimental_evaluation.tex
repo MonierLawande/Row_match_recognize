@@ -9,16 +9,20 @@
 
 This chapter evaluates the proposed
 \texttt{MATCH\_\allowbreak{}RECOGNIZE}
-implementation across five dimensions: output correctness on selected
-Trino-aligned reference queries, coverage of the supported SQL:2016
+implementation across five dimensions: output correctness validated
+against Trino and Oracle on selected reference queries, coverage of
+the supported SQL:2016
 row-pattern subset, row-pattern type coverage, performance and
 scalability, and developer usability.
 Section~\ref{sec:eval-methodology}
 describes the evaluation methodology, including the hardware
 environment and the metrics used.
-Section~\ref{sec:eval-dataset} presents the benchmark dataset and
-test patterns.
-Section~\ref{sec:eval-correctness} reports correctness results.
+Section~\ref{sec:eval-dataset} presents the datasets and test
+patterns.
+Section~\ref{sec:eval-correctness} validates the concept example by
+example on the small datasets.
+Section~\ref{sec:eval-coverage} reports feature-coverage,
+pattern-type-coverage, and usability results.
 Section~\ref{sec:eval-performance} presents performance results.
 Section~\ref{sec:eval-comparison} compares the system with existing
 tools.
@@ -29,47 +33,136 @@ tools.
 % ----------------------------------------------------------------
 
 This chapter evaluates the proposed
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} implementation
-through five complementary criteria.
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} implementation through five
+complementary criteria---correctness, SQL:2016 feature coverage,
+pattern-type coverage, performance and scalability, and usability.
+Section~\ref{subsec:eval-metrics} defines each criterion together
+with the way it is measured, and
+Section~\ref{subsec:eval-environment} describes the hardware and
+software environment.
 
-\begin{enumerate}
-  \item \textbf{Correctness.}
-    Results are compared row-by-row with Trino across selected
-    pattern types to check matched rows, pattern alignment, and
-    measure calculations for the supported feature subset.
+% ................................
+\subsection{Evaluation Criteria and Metrics}
+\label{subsec:eval-metrics}
+% ................................
 
-  \item \textbf{SQL:2016 feature coverage.}
-    Support for key \texttt{MATCH\_\allowbreak{}RECOGNIZE} clauses is verified
-    against the implemented subset, including \texttt{PARTITION~BY},
-    \texttt{ORDER~BY},
-    \texttt{PATTERN}, \texttt{DEFINE}, \texttt{MEASURES},
-    \texttt{SUBSET}, output modes (\texttt{ONE~ROW~PER~MATCH} /
-    \texttt{ALL~ROWS~PER~MATCH}), after-match skip policies, and
-    navigation
-    functions~\cite{iso2016,ISO2021,monierashraf2025rowmatch}.
+Each test case is assessed on the five complementary criteria
+introduced above, defined here together with the way each is
+measured.
 
-  \item \textbf{Pattern-type coverage.}
-    A variety of row-pattern types are exercised, including simple
-    sequences, quantified repetitions
-    (\texttt{*}, \texttt{+}, \texttt{?}, \texttt{\{n,m\}}),
-    ascending/descending trends, recovery patterns, alternation,
-    exclusion blocks (\texttt{\{-\ldots-\}}), anchored patterns,
-    and \texttt{PERMUTE} constructs.
+\paragraph{Correctness.}
+The result DataFrame produced by the implementation is compared
+against two independent SQL references---Trino~473 and
+Oracle~XE~21c---using an exact row-level equality check (same rows,
+same column values, and same order where order is deterministic).
+This dimension uses the two small synthetic tables---the
+\texttt{orders} table (Table~\ref{tab:orders}) for the dip example
+(Table~\ref{tab:sql-match-recognize-examples}) and the
+\texttt{stock\_price} table (Table~\ref{tab:stock_price}) for the
+stock-price case (Section~\ref{subsec:eval-stock-price})---as well as
+the Amazon benchmark data, whose 40 pattern--size results are checked
+against Trino and Oracle (Section~\ref{subsec:eval-cross-system}).
+The hand-written Pandas baseline is not used as a correctness oracle;
+it appears only in the usability dimension
+(Section~\ref{subsec:eval-usability}) to contrast the procedural
+Pandas code with the single declarative
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} statement.
 
-  \item \textbf{Performance and scalability.}
-    Execution time is measured across increasing DataFrame sizes
-    and pattern complexities to characterize how the engine scales
-    with data volume and pattern structure.
+\paragraph{SQL:2016 feature coverage.}
+Support for the key \texttt{MATCH\_\allowbreak{}RECOGNIZE}
+clauses---\texttt{PARTITION~BY}, \texttt{ORDER~BY}, \texttt{PATTERN},
+\texttt{DEFINE}, \texttt{MEASURES}, \texttt{SUBSET}, the output modes
+(\texttt{ONE~ROW~PER~MATCH} / \texttt{ALL~ROWS~PER~MATCH}),
+after-match skip policies, and navigation
+functions~\cite{iso2016,ISO2021,monierashraf2025rowmatch}---is
+verified against the implemented subset.  Each clause and sub-feature
+is marked as \emph{supported}, \emph{partially supported}, or
+\emph{unsupported} based on whether the implementation supports the
+feature and whether the exercised behavior matches the reference
+tests.  The clauses are exercised by the reference examples above and
+the Trino-aligned test suite, and the resulting statuses are
+summarized in Table~\ref{tab:feature_coverage}.
 
-  \item \textbf{Usability (developer effort).}
-    The lines of code required to express equivalent logic as
-    idiomatic Pandas serve as a baseline.  Hand-written Pandas
-    solutions typically require substantially more code
-    (e.g.\ chained \texttt{groupby}/\texttt{shift}/joins) than a
-    single \texttt{MATCH\_\allowbreak{}RECOGNIZE} statement, so reducing LOC
-    is a core goal of the RPR
-    approach~\cite{iso2016,ISO2021,melton2017sqlrpr,Python_UDF}.
-\end{enumerate}
+\paragraph{Pattern-type coverage.}
+Test cases are grouped by row-pattern type---simple sequences,
+quantified repetitions
+(\texttt{*}, \texttt{+}, \texttt{?}, \texttt{\{n,m\}}),
+ascending/descending trends, recovery patterns, alternation,
+exclusion blocks (\texttt{\{-\ldots-\}}), anchored patterns, and
+\texttt{PERMUTE} constructs.  A pattern type is considered covered if
+at least one test case exercises it and produces correct output.  The
+types are drawn from the illustrative examples and the five benchmark
+pattern families, and each is mapped to its test artifact in
+Table~\ref{tab:pattern_type_coverage}.
+
+\paragraph{Performance and scalability.}
+These measurements use the large real-world Amazon UK Products dataset
+(Section~\ref{subsec:eval-real-dataset}) across five pattern families
+and eight dataset sizes.
+Execution time is recorded as \emph{client-observed end-to-end query
+latency} in wall-clock seconds for each pattern--size run: it
+includes result transfer and client-side DataFrame construction, and
+is therefore not pure engine execution time.  Every cell of the benchmark matrix is executed
+once as a warmup and then three times as measured runs; the reported
+time is the \emph{median} of the three measured runs, and the
+minimum and maximum are recorded alongside it to document
+run-to-run spread; every reported time is thus a warmed-run latency
+(measured after one warmup) rather than a cold-start time.  A single
+warmup reduces cold-start effects such as import, JIT, and cache
+population but is not claimed to reach full steady state.
+Throughput for a cell is its dataset size divided by this median
+time, and \emph{average throughput} for a system is the arithmetic
+mean of its 40 per-cell throughput values.  Summary tables report
+averages of these medians across pattern families or dataset sizes;
+all totals and averages are computed from the full-precision
+measurements and only the displayed values are rounded, so a column
+of rounded entries need not sum exactly to a rounded total.  The
+scaling behavior is characterized both descriptively and by an
+ordinary-least-squares regression of median execution time against
+row count across the eight dataset sizes, whose coefficient of
+determination ($R^2$) is reported per pattern family.  Three measured
+repetitions per cell keep the full benchmark matrix tractable; a
+larger repetition count would provide stronger variability estimates
+and is noted as a methodological refinement for future work.
+
+\paragraph{Memory.}
+Two distinct memory metrics are recorded for every run, on the same
+Amazon benchmark cells used for the timing measurements.
+\emph{Query memory} is the peak additional memory attributable to
+executing the measured query, excluding the already-loaded data and
+the idle engine; it is taken from each system's own memory
+accounting (process RSS peak delta for the Pandas engine, the
+per-query \texttt{peakMemoryBytes} counter reported by Trino, and
+the \texttt{session pga memory max} high-water delta of a fresh
+session in Oracle).  These are \emph{system-native memory
+indicators} of the same concept rather than one instrument: each
+engine counts memory at a different level (operating-system pages,
+reserved user memory, allocated work areas), so the values support
+order-of-magnitude, per-system trend comparisons, not exact
+cross-system equality.  \emph{Footprint memory} is the practical
+deployment footprint of having the system running at all: the
+absolute process RSS peak for the Pandas engine, and for Trino and
+Oracle the peak container memory sampled while the measured query
+ran, on containers that keep running across dataset sizes within a
+pass.  Footprint memory is reported separately and is not a
+per-query or algorithm-level metric.
+
+\paragraph{Usability (developer effort).}
+The number of non-blank, non-comment lines in the equivalent
+idiomatic Pandas solution is recorded and compared with the
+single-statement \texttt{MATCH\_\allowbreak{}RECOGNIZE} query.  This
+dimension uses the \texttt{stock\_price} example of
+Section~\ref{subsec:eval-stock-price}: the declarative
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} statement
+(Listing~\ref{lst:stock-mr}) is compared line-for-line with the
+hand-written Pandas baseline (Listing~\ref{lst:stock-pandas}), and the
+resulting counts are reported in Table~\ref{tab:loc_comparison}.
+Hand-written Pandas solutions typically require substantially more
+code (e.g.\ chained \texttt{groupby}/\texttt{shift}/joins) than a
+single declarative statement, so reducing lines of code is a core
+goal of the row-pattern-recognition
+approach~\cite{iso2016,ISO2021,melton2017sqlrpr,Python_UDF}; the
+comparison provides a concrete measure of developer-effort reduction.
 
 % ................................
 \subsection{Environment and Configuration}
@@ -77,31 +170,21 @@ through five complementary criteria.
 % ................................
 
 The experiments were performed on a workstation running Ubuntu
-24.04.2 LTS with an Intel Core i7-11800H (8 physical cores,
-16 hardware threads, base frequency 2.30\,GHz) and 16\,GB of
-DDR4 RAM at 3200\,MHz.
+24.04.4 LTS with an Intel Core i7-11800H processor.  For the
+cross-system benchmark, every system is restricted to one CPU core
+and a 32\,GB memory budget; the enforcement mechanisms are detailed
+in Section~\ref{subsec:eval-complexity}.
 
 The software environment comprised:
 \begin{itemize}
-  \item \textbf{Baseline SQL engine:} Trino~473.
+  \item \textbf{Baseline SQL engines:} Trino~473 and Oracle~XE~21c
+    (both run as Docker containers).
   \item \textbf{Runtimes:} Java~11.0.25 LTS and Python~3.12.7.
-  \item \textbf{Core Python libraries:} \texttt{pandas}~2.2.3,
-    \texttt{numpy}~1.26.4,
+  \item \textbf{Core Python libraries:} \texttt{pandas}~2.3.3,
+    \texttt{numpy}~2.1.3,
     \texttt{antlr4-python3-\allowbreak{}runtime}~4.13.2,
     \texttt{antlr4-\allowbreak{}tools}~0.2.1,
     and \texttt{pytest}~8.3.4.
-  \item \textbf{Analysis and visualization tooling:}
-    Jupyter,
-    \texttt{unittest},
-    \texttt{matplotlib}~3.10.0,
-    \texttt{plotly}~5.24.1, and
-    \texttt{seaborn}~0.13.2.
-  \item \textbf{Standard library modules used:}
-    \texttt{typing}, \texttt{dataclasses}, \texttt{re},
-    \texttt{operator}, \texttt{math}, \texttt{itertools},
-    \texttt{collections}, \texttt{enum}, \texttt{time},
-    \texttt{sys}, \texttt{os}, \texttt{logging}, and
-    \texttt{traceback}.
 \end{itemize}
 
 The \texttt{MATCH\_\allowbreak{}RECOGNIZE} implementation uses ANTLR4 for
@@ -109,44 +192,12 @@ parsing Trino SQL, \texttt{pandas} for DataFrame management, and
 custom AST/NFA/DFA modules for pattern detection (see
 Chapter~\ref{chap:methodology}).
 
-% ................................
-\subsection{Evaluation Metrics}
-\label{subsec:eval-metrics}
-% ................................
-
-Each test case is assessed on the five dimensions defined above.
-
-\paragraph{Correctness.}
-The result DataFrame produced by the implementation is compared
-with the result set returned by Trino using an exact row-level
-equality check---same rows, same column values, and same order
-where order is deterministic.
-
-\paragraph{SQL:2016 feature coverage.}
-Each clause and sub-feature of \texttt{MATCH\_\allowbreak{}RECOGNIZE} is marked
-as \emph{supported}, \emph{partially supported}, or
-\emph{unsupported} based on whether the implementation supports the
-feature and whether the exercised behavior matches the Trino-aligned
-reference tests.
-
-\paragraph{Pattern-type coverage.}
-Test cases are grouped by row-pattern type
-(sequence, repetition, trend, recovery, alternation, exclusion,
-anchor, \texttt{PERMUTE}).  A pattern type is considered covered
-if at least one test case exercises it and produces correct output.
-
-\paragraph{Performance and scalability.}
-Execution time is recorded as wall-clock seconds for each
-pattern--size run.  Summary tables report averages across pattern
-families or dataset sizes, and the resulting measurements are used
-to characterize how the engine scales with data volume and pattern
-structure.
-
-\paragraph{Usability.}
-The number of non-blank, non-comment lines in the equivalent
-idiomatic Pandas solution is recorded and compared with the
-single-statement \texttt{MATCH\_\allowbreak{}RECOGNIZE} query, providing a
-concrete measure of developer effort reduction.
+Unless stated otherwise, all experiments use this configuration.  For
+the correctness comparisons in particular, equivalent input data are
+loaded into Trino, Oracle, and a Pandas DataFrame using matching
+schemas, and the result sets are then compared by row order and
+measure values after normalizing case-only column-name differences
+between the SQL and Pandas outputs.
 
 % ----------------------------------------------------------------
 \section{Dataset and Test Patterns}
@@ -154,20 +205,33 @@ concrete measure of developer effort reduction.
 % ----------------------------------------------------------------
 
 % ................................
-\subsection{Dataset}
+\subsection{Datasets}
 \label{subsec:eval-dataset-orders}
 % ................................
 
-An \texttt{orders} table is used to demonstrate and validate
-pattern-matching queries.  The dataset comprises three
-attributes~\cite{trino2021row}: \texttt{customer\_id}
+This section describes, one by one, the three datasets used in the
+evaluation: two small synthetic tables that can be verified by hand
+(\texttt{orders} and \texttt{stock\_price}) and the large real-world
+Amazon UK Products dataset, which supplies realistic data volumes (up
+to 2\,million rows) for the timing and memory measurements.  The
+concept is then validated example by example, dataset by dataset, in
+Section~\ref{sec:eval-correctness}, and the large-scale performance
+benchmark on the Amazon dataset follows in
+Section~\ref{sec:eval-performance}.
+
+\paragraph{Dataset 1: the \texttt{orders} table.}
+The \texttt{orders} table supports the first worked example.  It
+comprises three attributes~\cite{trino2021row}: \texttt{customer\_id}
 (\texttt{VARCHAR}), which identifies the customer (two distinct
-values: \texttt{cust\_1} and \texttt{cust\_2});
-\texttt{order\_date} (\texttt{DATE}), the date the order was placed
-(ranging from 2020-05-11 to 2020-05-18); and \texttt{price}
-(\texttt{INTEGER}), the purchase amount on that date.
-Table~\ref{tab:orders} shows the eight records used in the
-correctness demonstrations.
+values, \texttt{cust\_1} and \texttt{cust\_2}); \texttt{order\_date}
+(\texttt{DATE}), the date the order was placed (ranging from
+2020-05-11 to 2020-05-18); and \texttt{price} (\texttt{INTEGER}), the
+purchase amount on that date.  Each customer appears multiple times in
+chronological order---\texttt{cust\_1} spans five dates and
+\texttt{cust\_2} spans three---which enables focused validation of
+partitioning, ordering, and pattern detection (e.g.\ sequences of
+rising or falling prices per customer).  Table~\ref{tab:orders} shows
+the eight records used.
 
 \begin{table}[H]
   \centering
@@ -190,90 +254,15 @@ correctness demonstrations.
   \end{tabularx}
 \end{table}
 
-Each customer appears multiple times in chronological order:
-\texttt{cust\_1} spans five dates and \texttt{cust\_2} spans three.
-This structure enables focused validation of partitioning, ordering,
-and pattern detection (e.g.\ sequences of rising or falling prices per
-customer).  In the experiments, data are loaded via a
-\texttt{VALUES} clause in Trino and checked against the Pandas
-implementation.
-
-\begin{lstlisting}[basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
-  caption={Creating the in-memory table in Trino}]
-CREATE TABLE memory.default.orders (
-    customer_id VARCHAR,
-    order_date  DATE,
-    price       INTEGER
-);
-\end{lstlisting}
-
-\begin{lstlisting}[basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
-  caption={Inserting data into the table}]
-INSERT INTO memory.default.orders VALUES
-    ('cust_1', DATE '2020-05-11', 100),
-    ('cust_1', DATE '2020-05-12', 200),
-    ('cust_2', DATE '2020-05-13',   8),
-    ('cust_1', DATE '2020-05-14', 100),
-    ('cust_2', DATE '2020-05-15',   4),
-    ('cust_1', DATE '2020-05-16',  50),
-    ('cust_1', DATE '2020-05-17', 100),
-    ('cust_2', DATE '2020-05-18',   6);
-\end{lstlisting}
-
-% ----------------------------------------------------------------
-\section{Correctness Results}
-\label{sec:eval-correctness}
-% ----------------------------------------------------------------
-
-This section assesses output correctness by comparing results from
-three independent approaches---the proposed engine, Trino~473, and a
-hand-written Pandas baseline---on the same SQL
-\texttt{MATCH\_\allowbreak{}RECOGNIZE}
-query and dataset.
-
-% ................................
-\subsection{Experimental Setup}
-\label{subsec:correctness-setup}
-% ................................
-
-The correctness experiments use the same hardware and software
-configuration described in Section~\ref{subsec:eval-environment}.
-For each reference query, the input data are loaded into both Trino
-and a Pandas DataFrame with equivalent schemas.  The result sets are
-then compared by row order and measure values after normalizing
-case-only column-name differences between SQL and Pandas outputs.
-
-% ................................
-\subsection{Use Case: Stock Price Analysis}
-\label{subsec:eval-stock-price}
-% ................................
-
-The \texttt{stock\_price} table is used to demonstrate and validate
-pattern-matching queries with the
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} clause.
-The table includes three columns: \texttt{company}, \texttt{price\_date},
-and \texttt{price}, representing a history of daily stock prices for
-market analysis.  Here, \texttt{company} specifies the company name,
-\texttt{price\_date} is the trading date, and \texttt{price} records
-the stock's value on that day~\cite{petkovic2022rpr}.
-
-This example detects bullish momentum by identifying a three-row
-window in which the second and third rows increase relative to their
-immediate predecessors.  The query partitions records by company
-(\texttt{PARTITION BY company}), orders them chronologically
-(\texttt{ORDER BY price\_date}), and applies \texttt{PATTERN (A B C)}
-with \texttt{DEFINE} predicates on \texttt{B} and \texttt{C}.  The
-variable \texttt{A} has no explicit \texttt{DEFINE} predicate and
-therefore uses the standard implicit always-true behavior.  Key
-attributes---starting price, ending price, and match ID---are produced
-in the \texttt{MEASURES} clause.  A structured \texttt{pandas}
-DataFrame serves as input to \texttt{MATCH\_\allowbreak{}RECOGNIZE}, enabling
-automated detection of upward trends across firms for the supported
-row-pattern subset.
-Additional use cases are available in the project
-repository~\cite{monierashraf2025rowmatch}.
+\paragraph{Dataset 2: the \texttt{stock\_price} table.}
+The \texttt{stock\_price} table supports the second worked example.
+It represents a history of daily stock prices for market analysis and
+includes three columns: \texttt{company} (the company name),
+\texttt{price\_date} (the trading date), and \texttt{price} (the
+stock's value on that day)~\cite{petkovic2022rpr}.  Two companies,
+\texttt{A} and \texttt{B}, are recorded over ten trading days,
+yielding twenty rows that support per-company trend detection.
+Table~\ref{tab:stock_price} shows the data.
 
 \begin{table}[H]
   \centering
@@ -307,285 +296,100 @@ repository~\cite{monierashraf2025rowmatch}.
   \end{tabular}
 \end{table}
 
-\noindent\textbf{Load the dataset as a Pandas DataFrame.}
+\paragraph{Dataset 3: the Amazon UK Products dataset.}
+The Amazon UK Products Dataset is a large e-commerce dataset
+containing information about products listed on Amazon's UK
+marketplace~\cite{asaniczka2023amazon}, commonly used for data
+analysis, machine learning, and benchmarking.  It is provided as a
+single CSV file with roughly 2.2\,million product records.  Each
+record includes: \texttt{asin} (Amazon Standard Identification Number;
+unique product ID); \texttt{title} (product name); \texttt{imgUrl}
+(primary product image URL); \texttt{productURL} (canonical product
+page URL); \texttt{stars} (average customer rating, 1--5,
+floating-point); \texttt{reviews} (number of customer reviews,
+non-negative integer); \texttt{price} (listed price in GBP, numeric);
+\texttt{isBestSeller} (bestseller indicator, boolean);
+\texttt{boughtInLastMonth} (approximate purchases in the last 30 days,
+integer); and \texttt{categoryName} (top-level category label, e.g.\
+Electronics, Books, Clothing).  This dataset is representative for
+price-trend analysis, brand/feature-popularity studies, pattern
+recognition, and recommender-system benchmarking.  It supplies the
+data volume for the performance and scalability benchmark
+(Section~\ref{subsec:eval-real-dataset}); the derived
+\texttt{category} column and the construction of the eight dataset
+sizes are described with the benchmark patterns in
+Section~\ref{subsec:eval-pattern-defs}.
 
-\begin{lstlisting}[language=Python,
-  basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
-  caption={[Python baseline dataset]Python baseline dataset.},
-  label={lst:dataset}]
-import pandas as pd
-data = {
-    "Company": [
-        "A","B","A","B","A","B","A","B","A","B",
-        "A","B","A","B","A","B","A","B","A","B"
-    ],
-    "Price_date": [
-        "2020-10-01","2020-10-01","2020-10-02","2020-10-02","2020-10-03",
-        "2020-10-03","2020-10-04","2020-10-04","2020-10-05","2020-10-05",
-        "2020-10-06","2020-10-06","2020-10-07","2020-10-07","2020-10-08",
-        "2020-10-08","2020-10-09","2020-10-09","2020-10-10","2020-10-10"
-    ],
-    "Price": [
-        50,89,36,24,39,37,42,63,30,65,
-        47,56,71,50,80,54,75,30,63,32
-    ]
-}
-df = pd.DataFrame(data)
-df["Price_date"] = pd.to_datetime(df["Price_date"])
-\end{lstlisting}
+% ----------------------------------------------------------------
+\section{Validation of Concept}
+\label{sec:eval-correctness}
+% ----------------------------------------------------------------
 
-\noindent\textbf{Using the proposed \texttt{MATCH\_\allowbreak{}RECOGNIZE}.}
+This section validates the implementation example by example and
+dataset by dataset.  Each worked example runs the same
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} query through the proposed engine
+and the two SQL references and checks the evaluation criteria of
+Section~\ref{subsec:eval-metrics}: output correctness against
+Trino~473 and Oracle~XE~21c, the clauses and pattern type the query
+exercises, and---for the second example---developer effort against a
+hand-written Pandas baseline.  Beyond these two examples, the engine's
+output was validated against the same references across more than 500
+queries spanning the supported feature and pattern set, with the
+proposed engine, Trino, and Oracle producing identical results
+throughout; the same references also serve for all 40 queries of the
+cross-system benchmark in Section~\ref{subsec:eval-cross-system}.
 
-\begin{lstlisting}[language=Python,
-  basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
-  caption={[Using the proposed MATCH\_RECOGNIZE]Using the proposed \texttt{MATCH\_\allowbreak{}RECOGNIZE}.}]
-from src.executor.match_recognize import match_recognize
+% ................................
+\subsection{Example 1: Dip Pattern on the \texttt{orders} Dataset}
+\label{subsec:eval-dip}
+% ................................
 
-query = """
-SELECT *
-FROM stock_price
-MATCH_RECOGNIZE (
-  PARTITION BY Company
-  ORDER BY Price_date
-  MEASURES
-    FIRST(A.Price) AS start_price,
-    LAST(A.Price)  AS end_price,
-    MATCH_NUMBER() AS match_id
-  PATTERN (A B C)
-  DEFINE
-    B AS B.Price > PREV(B.Price),
-    C AS C.Price > PREV(C.Price)
-); """
-result = match_recognize(query, df)
-print(result)
-\end{lstlisting}
-
-\noindent\textbf{Results (proposed engine):}
-\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10}]
-  Company  start_price  end_price  match_id
-0       A           36         36         1
-1       A           30         30         2
-2       B           24         24         1
-\end{lstlisting}
-
-\noindent\textbf{Using Trino and Oracle as Baselines.}
-
-In the second step, the same pattern-matching query was applied using the
-same data in the Trino environment to validate the correctness of the proposed
-approach.  The stock price history was created as an in-memory table
-using \texttt{CREATE TABLE} and populated through \texttt{INSERT INTO},
-ensuring that the schema and data (company, date, and price) remained
-consistent with the Pandas DataFrame used earlier.  The
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} query was then executed in Trino to detect
-the same three-row increasing-window pattern per company.  In
-addition, the same query was validated in Oracle Database via
-\texttt{MATCH\_\allowbreak{}RECOGNIZE}~\cite{petkovic2022rpr,monierashraf2025oracle},
-using an equivalent \texttt{stock\_price} table with the same schema and
-rows; the Oracle results matched the expected behavior, strengthening
-cross-system validation under standard \texttt{MATCH\_\allowbreak{}RECOGNIZE}
-semantics~\cite{monierashraf2025oracle}.
+The first example detects a `dip'---three consecutive orders with
+successively lower prices---on the \texttt{orders} dataset
+(Dataset~1, Table~\ref{tab:orders}).  The table is created and
+populated in Trino through the \texttt{CREATE TABLE} and
+\texttt{INSERT} statements of Listings~\ref{lst:orders-create}
+and~\ref{lst:orders-insert}, and the same rows are loaded into a
+Pandas DataFrame.
 
 \begin{lstlisting}[basicstyle=\ttfamily\small,
   backgroundcolor=\color{gray!10},
-  caption={[Create table in Trino]Creating the in-memory table in Trino.}]
-CREATE TABLE memory.default.stock_price (
-    Company    VARCHAR,
-    Price_date DATE,
-    Price      INTEGER
+  caption={Creating the in-memory table in Trino},
+  label={lst:orders-create}]
+CREATE TABLE memory.default.orders (
+    customer_id VARCHAR,
+    order_date  DATE,
+    price       INTEGER
 );
 \end{lstlisting}
 
 \begin{lstlisting}[basicstyle=\ttfamily\small,
   backgroundcolor=\color{gray!10},
-  caption={[Insert rows in Trino]Inserting data into the table.}]
-INSERT INTO memory.default.stock_price (Company, Price_date, Price) VALUES
-('A', DATE '2020-10-01', 50),
-('B', DATE '2020-10-01', 89),
-('A', DATE '2020-10-02', 36),
-('B', DATE '2020-10-02', 24),
-...
-('A', DATE '2020-10-10', 63),
-('B', DATE '2020-10-10', 32);
+  caption={Inserting data into the table},
+  label={lst:orders-insert}]
+INSERT INTO memory.default.orders VALUES
+    ('cust_1', DATE '2020-05-11', 100),
+    ('cust_1', DATE '2020-05-12', 200),
+    ('cust_2', DATE '2020-05-13',   8),
+    ('cust_1', DATE '2020-05-14', 100),
+    ('cust_2', DATE '2020-05-15',   4),
+    ('cust_1', DATE '2020-05-16',  50),
+    ('cust_1', DATE '2020-05-17', 100),
+    ('cust_2', DATE '2020-05-18',   6);
 \end{lstlisting}
 
-\begin{lstlisting}[basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
-  caption={[Execute MATCH\_RECOGNIZE in Trino]Executing the same \texttt{MATCH\_\allowbreak{}RECOGNIZE} query in Trino.}]
-SELECT *
-FROM memory.default.stock_price
-MATCH_RECOGNIZE (
-  PARTITION BY company
-  ORDER BY price_date
-  MEASURES
-    FIRST(A.price) AS start_price,
-    LAST(A.price)  AS end_price,
-    MATCH_NUMBER() AS match_id
-  PATTERN (A B C)
-  DEFINE
-    B AS B.price > PREV(B.price),
-    C AS C.price > PREV(C.price)
-);
-\end{lstlisting}
-
-\noindent\textbf{Results (Trino):}
-\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10}]
- company | start_price | end_price | match_id
----------+-------------+-----------+----------
- A       |          36 |        36 |        1
- A       |          30 |        30 |        2
- B       |          24 |        24 |        1
-\end{lstlisting}
-
-\noindent\textbf{Python DataFrame Baseline.}
-As a Python baseline, the same pattern logic was implemented directly in
-\texttt{pandas}, without using \texttt{MATCH\_\allowbreak{}RECOGNIZE}.  The input
-DataFrame (Listing~\ref{lst:dataset}) is converted to \texttt{datetime}
-and sorted by company and trading date.  For each company, the
-baseline computes a Boolean signal
-\texttt{inc\,:=\,diff(Price)\,>\,0} and marks candidate
-starts where the next two differences are positive, corresponding to
-the SQL pattern rows $A,B,C$ with $B>A$ and $C>B$.  Candidates are
-processed sequentially with a
-non-overlapping policy, advancing
-\texttt{next\_start\_pos\,=\,i\,+\,3} to emulate
-\texttt{AFTER MATCH SKIP PAST LAST ROW}.  For each accepted start, the
-implementation outputs \texttt{company}, \texttt{match\_id}, and
-measures \texttt{start\_price} and \texttt{end\_price} from the start
-row~(A), returning the resulting matches as a
-\texttt{DataFrame}~\cite{Python_UDF}.
-
-\begin{lstlisting}[language=Python,
-  basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
-  caption={[Equivalent logic in pandas]Equivalent pattern matching in Python/pandas.}]
-import pandas as pd
-
-def detect_two_consecutive_increases(
-    df: pd.DataFrame,
-    company_col: str = "Company",
-    date_col:    str = "Price_date",
-    price_col:   str = "Price",
-) -> pd.DataFrame:
-    gdf = df.copy()
-    gdf[date_col] = pd.to_datetime(gdf[date_col])
-    gdf = gdf.sort_values([company_col, date_col]).reset_index(drop=True)
-    out_rows = []
-    for company, g in gdf.groupby(company_col, sort=False):
-        g = g.reset_index(drop=True)
-        inc = g[price_col].diff() > 0
-        start_mask = (inc.shift(-1).fillna(False)
-                      & inc.shift(-2).fillna(False))
-        candidates = [int(i) for i, ok in enumerate(start_mask)
-                      if ok and i + 2 < len(g)]
-        match_id, next_start_pos = 0, 0
-        for i in candidates:
-            if i < next_start_pos:
-                continue
-            match_id += 1
-            out_rows.append({
-                "company":     company,
-                "start_price": g.loc[i, price_col],
-                "end_price":   g.loc[i, price_col],
-                "match_id":    match_id,
-            })
-            next_start_pos = i + 3   # AFTER MATCH SKIP PAST LAST ROW
-    return pd.DataFrame(out_rows)
-
-result = detect_two_consecutive_increases(df)
-print(result)
-\end{lstlisting}
-
-\noindent\textbf{Results (Python/pandas):}
-\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10}]
-  company  start_price  end_price  match_id
-0       A           36         36         1
-1       A           30         30         2
-2       B           24         24         1
-\end{lstlisting}
-
-For this reference scenario, the proposed engine, Trino~473, and the
-hand-written Pandas baseline produce identical output.  This provides
-evidence that partitioning, ordering, implicit \texttt{DEFINE}
-behavior, navigation with \texttt{PREV}, \texttt{MATCH\_NUMBER()}, and
-measure materialization are handled correctly for this supported
-pattern family.
-
-% ----------------------------------------------------------------
-\section{Performance Results}
-\label{sec:eval-performance}
-% ----------------------------------------------------------------
-
-Performance was evaluated on the Amazon UK Products Dataset using
-five pattern families and eight input sizes (50\,K, 100\,K, 200\,K,
-400\,K, 800\,K, 1\,M, 1.5\,M, and 2\,M rows).  The complexity
-model, execution-time, throughput, and memory results are reported in
-Sections~\ref{subsec:eval-real-dataset}--\ref{subsec:eval-key-findings},
-and a full cross-system comparison against Trino~473 and Oracle~XE~21c
-under equal CPU/memory resources is reported in
-Section~\ref{subsec:eval-cross-system}.
-Across the 40 measured pattern--size runs, the proposed engine completed
-all tests successfully, with an average throughput of approximately
-125\,826~rows/s and a total measured execution time of about
-253.62\,s.  The results show predictable scaling over the evaluated
-range: simpler and bounded quantified patterns remain fastest, while
-complex nested patterns incur higher transition and condition-evaluation
-overhead.
-
-% ----------------------------------------------------------------
-\section{Comparison with Existing Systems}
-\label{sec:eval-comparison}
-% ----------------------------------------------------------------
-
-The evaluated system is not intended to replace full SQL engines such
-as Oracle or Trino, nor streaming platforms such as Flink.  Its design
-goal is narrower: it brings a practical subset of SQL row-pattern
-matching into in-memory Python analytics workflows over
-\texttt{pandas} DataFrames.
-
-Compared with Trino and Oracle, the proposed implementation avoids the
-need to load data into a database server before running
-\texttt{MATCH\_\allowbreak{}RECOGNIZE}.  This makes it convenient for notebook and
-DataFrame-centered analysis, but it also means that the implementation
-supports only the subset described in Chapters~\ref{chap:methodology}
-and~\ref{chap:implementation}.  Trino and Oracle remain more complete
-SQL systems with mature optimizers, distributed execution, and broader
-standard coverage.  Compared with hand-written Pandas logic, the SQL
-form is more declarative and reusable: partitioning, ordering, pattern
-variables, skip behavior, and measures are expressed in one query
-rather than in custom procedural code for each pattern.
-
-% ----------------------------------------------------------------
-\section{Use Cases and Applications}
-\label{sec:eval-usecases}
-% ----------------------------------------------------------------
-
-The \texttt{MATCH\_\allowbreak{}RECOGNIZE} implementation is applicable to several
-sequential-analysis settings, such as log analysis, time-series
-processing, and financial sequence analysis, where recurring row
-patterns are important.
-
-To assess correctness, each pattern-matching query was executed using
-three independent approaches.  First, a \textbf{Python-UDF baseline}:
-custom functions were implemented---built from \texttt{groupby},
-\texttt{rolling}, and \texttt{shift}---to detect the same sequences
-directly in \texttt{pandas} DataFrames; this required adjusting the
-code for each query to reproduce the intended
-semantics~\cite{Python_UDF}.  Second, a \textbf{Trino baseline}: the
-equivalent \texttt{MATCH\_\allowbreak{}RECOGNIZE} statement was run in Trino
-(version~473) and treated its output as the reference result.  Third,
-the \textbf{proposed engine}: \texttt{MATCH\_\allowbreak{}RECOGNIZE} was executed
-on the same SQL string and DataFrame; the system parses the query,
-compiles a DFA, and performs the matching within \texttt{pandas}.
-
-\noindent Throughout the evaluated scenarios, the results from the
-three approaches were compared on a row-by-row basis.  For the
-reference cases reported in this chapter, the
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} output matched the Trino result
-(see Table~\ref{tab:sql-match-recognize-examples}).  In contrast, the
-UDF method involved significantly more code and was more prone to
-errors during development~\cite{Python_UDF}.
+Table~\ref{tab:sql-match-recognize-examples} lists the
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} query together with the results
+produced by Trino, the proposed engine, and the hand-written
+Python-UDF baseline.  All three produce the same single match
+(\texttt{cust\_1}, 2020-05-12 to 2020-05-16, bottom price~50), and
+Oracle returns the same row.  For the \emph{correctness} criterion the
+proposed engine's output is therefore identical to both SQL
+references; the query also exercises the \texttt{PARTITION~BY},
+\texttt{ORDER~BY}, \texttt{PATTERN}, \texttt{DEFINE}, and
+\texttt{MEASURES} clauses and covers the simple-sequence pattern
+type.  The Python-UDF result illustrates the equivalent hand-written
+alternative.
 
 \begin{longtable}{|p{0.95\textwidth}|}
 \caption{SQL \texttt{MATCH\_\allowbreak{}RECOGNIZE} Pattern Examples~\cite{monierashraf2025rowmatch}}
@@ -642,38 +446,468 @@ cust_1      | 2020-05-12 | 2020-05-16 | 50
 \hline
 \end{longtable}
 
+% ................................
+\subsection{Example 2: Stock-Price Analysis on the \texttt{stock\_price} Dataset}
+\label{subsec:eval-stock-price}
+% ................................
+
+The second example uses the \texttt{stock\_price} table (Dataset~2,
+Table~\ref{tab:stock_price}) to demonstrate and validate
+pattern-matching queries with the
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} clause.
+
+This example detects bullish momentum by identifying a three-row
+window in which the second and third rows increase relative to their
+immediate predecessors.  The query partitions records by company
+(\texttt{PARTITION BY company}), orders them chronologically
+(\texttt{ORDER BY price\_date}), and applies \texttt{PATTERN (A B C)}
+with \texttt{DEFINE} predicates on \texttt{B} and \texttt{C}.  The
+variable \texttt{A} has no explicit \texttt{DEFINE} predicate and
+therefore uses the standard implicit always-true behavior.  Key
+attributes---starting price, ending price, and match ID---are produced
+in the \texttt{MEASURES} clause.  A structured \texttt{pandas}
+DataFrame serves as input to \texttt{MATCH\_\allowbreak{}RECOGNIZE}, enabling
+automated detection of upward trends across firms for the supported
+row-pattern subset.
+Additional use cases are available in the project
+repository~\cite{monierashraf2025rowmatch}.
+
+\noindent\textbf{Load the dataset as a Pandas DataFrame.}
+
+\begin{lstlisting}[language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Python baseline dataset]Python baseline dataset.},
+  label={lst:dataset}]
+import pandas as pd
+data = {
+    "Company": [
+        "A","B","A","B","A","B","A","B","A","B",
+        "A","B","A","B","A","B","A","B","A","B"
+    ],
+    "Price_date": [
+        "2020-10-01","2020-10-01","2020-10-02","2020-10-02","2020-10-03",
+        "2020-10-03","2020-10-04","2020-10-04","2020-10-05","2020-10-05",
+        "2020-10-06","2020-10-06","2020-10-07","2020-10-07","2020-10-08",
+        "2020-10-08","2020-10-09","2020-10-09","2020-10-10","2020-10-10"
+    ],
+    "Price": [
+        50,89,36,24,39,37,42,63,30,65,
+        47,56,71,50,80,54,75,30,63,32
+    ]
+}
+df = pd.DataFrame(data)
+df["Price_date"] = pd.to_datetime(df["Price_date"])
+\end{lstlisting}
+
+\noindent\textbf{Using the proposed \texttt{MATCH\_\allowbreak{}RECOGNIZE}.}
+
+\begin{lstlisting}[language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Using the proposed MATCH\_RECOGNIZE]Using the proposed \texttt{MATCH\_\allowbreak{}RECOGNIZE}.},
+  label={lst:stock-mr}]
+from src.executor.match_recognize import match_recognize
+
+query = """
+SELECT *
+FROM stock_price
+MATCH_RECOGNIZE (
+  PARTITION BY Company
+  ORDER BY Price_date
+  MEASURES
+    FIRST(A.Price) AS start_price,
+    LAST(C.Price)  AS end_price,
+    MATCH_NUMBER() AS match_id
+  PATTERN (A B C)
+  DEFINE
+    B AS B.Price > PREV(B.Price),
+    C AS C.Price > PREV(C.Price)
+); """
+result = match_recognize(query, df)
+print(result)
+\end{lstlisting}
+
+\noindent\textbf{Results (proposed engine):}
+\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10}]
+  Company  start_price  end_price  match_id
+0       A           36         42         1
+1       A           30         71         2
+2       B           24         63         1
+\end{lstlisting}
+
+\noindent\textbf{Using Trino and Oracle as Baselines.}
+
+In the second step, the same pattern-matching query was applied using the
+same data in the Trino environment to validate the correctness of the proposed
+approach.  The stock price history was created as an in-memory table
+using \texttt{CREATE TABLE} and populated through \texttt{INSERT INTO},
+ensuring that the schema and data (company, date, and price) remained
+consistent with the Pandas DataFrame used earlier.  The
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} query was then executed in Trino to detect
+the same three-row increasing-window pattern per company.  In
+addition, the same query was validated in Oracle Database via
+\texttt{MATCH\_\allowbreak{}RECOGNIZE}~\cite{petkovic2022rpr,monierashraf2025oracle},
+using an equivalent \texttt{stock\_price} table with the same schema and
+rows; the Oracle results matched the expected behavior, strengthening
+cross-system validation under standard \texttt{MATCH\_\allowbreak{}RECOGNIZE}
+semantics~\cite{monierashraf2025oracle}.
+
+\begin{lstlisting}[basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Create table in Trino]Creating the in-memory table in Trino.}]
+CREATE TABLE memory.default.stock_price (
+    Company    VARCHAR,
+    Price_date DATE,
+    Price      INTEGER
+);
+\end{lstlisting}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Insert rows in Trino]Inserting data into the table.}]
+INSERT INTO memory.default.stock_price (Company, Price_date, Price) VALUES
+('A', DATE '2020-10-01', 50),
+('B', DATE '2020-10-01', 89),
+('A', DATE '2020-10-02', 36),
+('B', DATE '2020-10-02', 24),
+...
+('A', DATE '2020-10-10', 63),
+('B', DATE '2020-10-10', 32);
+\end{lstlisting}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Execute MATCH\_RECOGNIZE in Trino]Executing the same \texttt{MATCH\_\allowbreak{}RECOGNIZE} query in Trino.}]
+SELECT *
+FROM memory.default.stock_price
+MATCH_RECOGNIZE (
+  PARTITION BY company
+  ORDER BY price_date
+  MEASURES
+    FIRST(A.price) AS start_price,
+    LAST(C.price)  AS end_price,
+    MATCH_NUMBER() AS match_id
+  PATTERN (A B C)
+  DEFINE
+    B AS B.price > PREV(B.price),
+    C AS C.price > PREV(C.price)
+);
+\end{lstlisting}
+
+\noindent\textbf{Results (Trino):}
+\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10}]
+ company | start_price | end_price | match_id
+---------+-------------+-----------+----------
+ A       |          36 |        42 |        1
+ A       |          30 |        71 |        2
+ B       |          24 |        63 |        1
+\end{lstlisting}
+
+\noindent\textbf{Python DataFrame Baseline.}
+As a Python baseline, the same pattern logic was implemented directly in
+\texttt{pandas}, without using \texttt{MATCH\_\allowbreak{}RECOGNIZE}.  The input
+DataFrame (Listing~\ref{lst:dataset}) is converted to \texttt{datetime}
+and sorted by company and trading date.  For each company, the
+baseline computes a Boolean signal
+\texttt{inc\,:=\,diff(Price)\,>\,0} and marks candidate
+starts where the next two differences are positive, corresponding to
+the SQL pattern rows $A,B,C$ with $B>A$ and $C>B$.  Candidates are
+processed sequentially with a
+non-overlapping policy, advancing
+\texttt{next\_start\_pos\,=\,i\,+\,3} to emulate
+\texttt{AFTER MATCH SKIP PAST LAST ROW}.  For each accepted start, the
+implementation outputs \texttt{company}, \texttt{match\_id}, and the
+measures \texttt{start\_price} from the start row~(A) and
+\texttt{end\_price} from the final row of the match~(C), returning
+the resulting matches as a \texttt{DataFrame}~\cite{Python_UDF}.
+
+\begin{lstlisting}[language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{gray!10},
+  caption={[Equivalent logic in pandas]Equivalent pattern matching in Python/pandas.},
+  label={lst:stock-pandas}]
+import pandas as pd
+
+def detect_two_consecutive_increases(
+    df: pd.DataFrame,
+    company_col: str = "Company",
+    date_col:    str = "Price_date",
+    price_col:   str = "Price",
+) -> pd.DataFrame:
+    gdf = df.copy()
+    gdf[date_col] = pd.to_datetime(gdf[date_col])
+    gdf = gdf.sort_values([company_col, date_col]).reset_index(drop=True)
+    out_rows = []
+    for company, g in gdf.groupby(company_col, sort=False):
+        g = g.reset_index(drop=True)
+        inc = g[price_col].diff() > 0
+        start_mask = (inc.shift(-1).fillna(False)
+                      & inc.shift(-2).fillna(False))
+        candidates = [int(i) for i, ok in enumerate(start_mask)
+                      if ok and i + 2 < len(g)]
+        match_id, next_start_pos = 0, 0
+        for i in candidates:
+            if i < next_start_pos:
+                continue
+            match_id += 1
+            out_rows.append({
+                "company":     company,
+                "start_price": g.loc[i, price_col],
+                "end_price":   g.loc[i + 2, price_col],
+                "match_id":    match_id,
+            })
+            next_start_pos = i + 3   # AFTER MATCH SKIP PAST LAST ROW
+    return pd.DataFrame(out_rows)
+
+result = detect_two_consecutive_increases(df)
+print(result)
+\end{lstlisting}
+
+\noindent\textbf{Results (Python/pandas):}
+\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10}]
+  company  start_price  end_price  match_id
+0       A           36         42         1
+1       A           30         71         2
+2       B           24         63         1
+\end{lstlisting}
+
+For this scenario, the proposed engine matches both SQL
+references---Trino~473 and Oracle---exactly; the hand-written Pandas
+baseline, shown here to illustrate the procedural alternative,
+produces the same result.  This provides evidence that partitioning,
+ordering, implicit \texttt{DEFINE} behavior, navigation with
+\texttt{PREV}, \texttt{MATCH\_NUMBER()}, and measure materialization
+are handled correctly for this supported pattern family.
+
+% ----------------------------------------------------------------
+\section{Coverage and Usability Results}
+\label{sec:eval-coverage}
+% ----------------------------------------------------------------
+
+This section reports explicit results for the remaining three
+evaluation dimensions defined in Section~\ref{sec:eval-methodology}:
+SQL:2016 feature coverage, pattern-type coverage, and usability.
+
+% ................................
+\subsection{SQL Feature Coverage}
+\label{subsec:eval-feature-coverage}
+% ................................
+
+Table~\ref{tab:feature_coverage} summarizes the support status of
+the main \texttt{MATCH\_\allowbreak{}RECOGNIZE} clauses in the current
+implementation.  The statuses reflect the implemented subset
+described in Chapters~\ref{chap:methodology}
+and~\ref{chap:implementation} as exercised by the Trino-aligned
+reference tests; \emph{partially supported} means that commonly used
+forms are implemented and verified while less common variants remain
+outside the validated scope.
+
+\begin{table}[H]
+\centering
+\caption{Support status of \texttt{MATCH\_RECOGNIZE} features in the
+  proposed engine}
+\label{tab:feature_coverage}
+{\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Feature} & \textbf{Status} & \textbf{Exercised by} \\
+\midrule
+\texttt{PARTITION BY} & supported & reference queries, tests \\
+\texttt{ORDER BY} & supported & all benchmark queries \\
+Quantifiers \texttt{* + ? \{n,m\}} & supported & benchmark families \\
+Alternation \texttt{(A|B)} & supported & benchmark families \\
+Grouping / nesting & supported & \texttt{complex\_nested} \\
+Exclusion \texttt{\{- \ldots -\}} & supported & test suite \\
+Anchors \texttt{\^{}}, \texttt{\$} & supported & test suite \\
+\texttt{PERMUTE} & supported (complexity guards) & test suite \\
+\texttt{DEFINE} predicates & supported & all benchmark queries \\
+Navigation \texttt{PREV/NEXT/FIRST/LAST} & supported & stock case, tests \\
+\texttt{MEASURES} core aggregates & supported & benchmark queries \\
+\texttt{RUNNING}/\texttt{FINAL} semantics & partially supported & test suite \\
+General SQL expressions & partially supported & test suite \\
+\texttt{SUBSET} & supported & test suite \\
+\texttt{ONE ROW PER MATCH} & supported & all benchmark queries \\
+\texttt{ALL ROWS PER MATCH} & supported & test suite \\
+\texttt{AFTER MATCH SKIP} modes & supported & test suite \\
+\texttt{MATCH\_NUMBER()}, \texttt{CLASSIFIER()} & supported & stock case, tests \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+% ................................
+\subsection{Pattern-Type Coverage}
+\label{subsec:eval-pattern-coverage}
+% ................................
+
+Table~\ref{tab:pattern_type_coverage} maps each row-pattern type
+from Section~\ref{subsec:eval-metrics} to the test artifact that
+exercises it.  A type counts as covered when at least one test case
+exercises it and produces output identical to the reference systems.
+
+\begin{table}[H]
+\centering
+\caption{Pattern-type coverage}
+\label{tab:pattern_type_coverage}
+{\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Pattern type} & \textbf{Exercised by} & \textbf{Covered} \\
+\midrule
+Simple sequence & \texttt{simple\_sequence} family; dip example & yes \\
+Quantified repetition & \texttt{quantified} family & yes \\
+Ascending/descending trend & stock-price case & yes \\
+Recovery (V-shape) & Trino-aligned test suite & yes \\
+Alternation & \texttt{alternation} family & yes \\
+Exclusion & Trino-aligned test suite & yes \\
+Anchors & Trino-aligned test suite & yes \\
+\texttt{PERMUTE} & Trino-aligned test suite & yes \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+% ................................
+\subsection{Usability: Lines-of-Code Comparison}
+\label{subsec:eval-usability}
+% ................................
+
+Table~\ref{tab:loc_comparison} quantifies the developer-effort
+dimension using the stock-price example of
+Section~\ref{subsec:eval-stock-price}, counting non-blank,
+non-comment lines in the listings shown in this chapter.  The
+declarative statement expresses the same logic in less than half the
+code of the hand-written baseline, and the baseline required
+case-specific index bookkeeping and manual skip handling.  As noted
+in Chapter~\ref{chap:conclusions}, this is a code-level comparison,
+not a controlled user study.
+
+\begin{table}[H]
+\centering
+\caption{Lines-of-code comparison for the stock-price example}
+\label{tab:loc_comparison}
+{\small
+\begin{tabular}{lrl}
+\toprule
+\textbf{Implementation} & \textbf{LOC} & \textbf{Notes} \\
+\midrule
+\texttt{MATCH\_RECOGNIZE} statement & 14 & single declarative query \\
+Hand-written \texttt{pandas} baseline & 33 & \texttt{groupby}/\texttt{shift}/index bookkeeping \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+% ----------------------------------------------------------------
+\section{Performance Results}
+\label{sec:eval-performance}
+% ----------------------------------------------------------------
+
+Performance was evaluated on the Amazon UK Products Dataset using
+five pattern families and eight input sizes (50\,K, 100\,K, 200\,K,
+400\,K, 800\,K, 1\,M, 1.5\,M, and 2\,M rows).  The complexity
+model, execution-time, throughput, and memory results are reported in
+Sections~\ref{subsec:eval-real-dataset}--\ref{subsec:eval-key-findings},
+and a full cross-system comparison against Trino~473 and Oracle~XE~21c
+under the same nominal CPU/memory budget is reported in
+Section~\ref{subsec:eval-cross-system}.
+Across the 40 pattern--size cells (each reported as the median of
+three measured runs), the proposed engine completed all tests
+successfully, with an average throughput of approximately
+457\,018~rows/s; the sum of the 40 reported median cell times was
+about 80.32\,s (this figure aggregates the reported medians, not the
+total duration of all repetitions).  The results show predictable,
+approximately linear scaling over the evaluated range
+($R^2 \geq 0.99$ for the proposed engine's time-versus-size fit on
+each of its five pattern families): alternation remains the fastest
+family, while complex
+nested patterns incur higher transition and condition-evaluation
+overhead.
+
+% ----------------------------------------------------------------
+\section{Comparison with Existing Systems}
+\label{sec:eval-comparison}
+% ----------------------------------------------------------------
+
+The evaluated system is not intended to replace full SQL engines such
+as Oracle or Trino, nor streaming platforms such as Flink.  Its design
+goal is narrower: it brings a practical subset of SQL row-pattern
+matching into in-memory Python analytics workflows over
+\texttt{pandas} DataFrames.
+
+Compared with Trino and Oracle, the proposed implementation avoids the
+need to load data into a database server before running
+\texttt{MATCH\_\allowbreak{}RECOGNIZE}.  This makes it convenient for notebook and
+DataFrame-centered analysis, but it also means that the implementation
+supports only the subset described in Chapters~\ref{chap:methodology}
+and~\ref{chap:implementation}.  Trino and Oracle remain more complete
+SQL systems with mature optimizers, distributed execution, and broader
+standard coverage.  Compared with hand-written Pandas logic, the SQL
+form is more declarative and reusable: partitioning, ordering, pattern
+variables, skip behavior, and measures are expressed in one query
+rather than in custom procedural code for each pattern.
+
+% ----------------------------------------------------------------
+\section{Use Cases and Applications}
+\label{sec:eval-usecases}
+% ----------------------------------------------------------------
+
+The \texttt{MATCH\_\allowbreak{}RECOGNIZE} implementation is applicable to several
+sequential-analysis settings, such as log analysis, time-series
+processing, and financial sequence analysis, where recurring row
+patterns are important.
+
+To assess correctness, the output of the \textbf{proposed engine}
+was compared against two independent SQL references: \textbf{Trino}~473
+and \textbf{Oracle~XE~21c}, each of which runs the equivalent
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} statement.  The proposed engine
+itself parses the SQL string, compiles a DFA, and performs the
+matching within \texttt{pandas} on the same DataFrame.  These
+references validate the stock-price case
+(Section~\ref{subsec:eval-stock-price}) and all 40 queries of the
+cross-system benchmark (Section~\ref{subsec:eval-cross-system}); the
+dip example of Section~\ref{subsec:eval-dip}
+(Table~\ref{tab:sql-match-recognize-examples}) additionally shows the
+proposed engine agreeing with the Trino reference and the equivalent
+Python-UDF baseline.  A \textbf{hand-written
+Pandas (Python-UDF) baseline}---custom functions built from
+\texttt{groupby}, \texttt{rolling}, and \texttt{shift} that detect the
+same sequences directly in \texttt{pandas} DataFrames, adjusted for
+each query~\cite{Python_UDF}---is shown alongside these examples to
+illustrate the procedural alternative and the developer effort it
+requires, not as a correctness oracle.
+
+\noindent Throughout the evaluated scenarios, the results were
+compared on a row-by-row basis, and the proposed engine's
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} output matched the Trino and
+Oracle references in every case.  In contrast, the hand-written UDF
+method involved significantly more code and was more prone to errors
+during development~\cite{Python_UDF}.
+
 % ................................................................
 \subsection{Performance Results Using Real Dataset}
 \label{subsec:eval-real-dataset}
 % ................................................................
 
-The Amazon UK Products Dataset is a large e-commerce dataset
-containing information about products listed on Amazon's UK
-marketplace~\cite{asaniczka2023amazon}, commonly used for data
-analysis, machine learning, and benchmarking.  It is provided as a
-single CSV file with roughly 2.2\,million product records.  Each
-record includes: \texttt{asin} (Amazon Standard Identification Number;
-unique product ID); \texttt{title} (product name); \texttt{imgUrl}
-(primary product image URL); \texttt{productURL} (canonical product
-page URL); \texttt{stars} (average customer rating, 1--5,
-floating-point); \texttt{reviews} (number of customer reviews,
-non-negative integer); \texttt{price} (listed price in GBP, numeric);
-\texttt{isBestSeller} (bestseller indicator, boolean);
-\texttt{boughtInLastMonth} (approximate purchases in the last 30 days,
-integer); and \texttt{categoryName} (top-level category label, e.g.\
-Electronics, Books, Clothing).  This dataset is representative for
-price-trend analysis, brand/feature-popularity studies, pattern
-recognition, and recommender-system benchmarking.
+The large-scale performance benchmark runs on the Amazon UK Products
+dataset (Dataset~3), described in
+Section~\ref{subsec:eval-dataset-orders}; the derived
+\texttt{category} column and dataset-size construction used here are
+detailed with the benchmark patterns in
+Section~\ref{subsec:eval-pattern-defs}.
 
 The methodology involved testing 40 test cases across 5 SQL patterns
 and 8 input sizes (50\,K, 100\,K, 200\,K, 400\,K, 800\,K, 1\,M, 1.5\,M,
-and 2\,M rows).  All tests completed successfully.  The
-implementation achieved an average throughput of 125\,826~rows/s, and
-the measured query runtime over all 40 test cases was approximately
-253.62\,s.  The results indicate
-near-linear scaling over the evaluated range, with the expected
-performance differences between simple, alternation, quantified,
-optional, and nested patterns.
+and 2\,M rows), with each case reported as the median of three
+measured runs after one warmup.  All tests completed successfully.
+The implementation achieved an average throughput of
+457\,018~rows/s, and the sum of the 40 reported median cell times
+was approximately 80.32\,s.  The results indicate approximately
+linear scaling over the evaluated range ($R^2 \geq 0.99$ for the
+proposed engine on each of its five pattern families), with the
+expected performance differences between simple, alternation,
+quantified, optional, and nested patterns.
 
 % ................................................................
 \subsection{Pattern Definitions}
@@ -681,9 +915,7 @@ optional, and nested patterns.
 % ................................................................
 
 {\small
-\setlength{\LTleft}{0pt}
-\setlength{\LTright}{0pt}
-\begin{longtable}{@{\extracolsep{\fill}}llp{0.55\textwidth}}
+\begin{longtable}{llp{0.55\textwidth}}
 \caption{SQL Pattern Definitions and Detection Goals}
 \label{tab:pattern_definitions} \\
 \toprule
@@ -698,59 +930,79 @@ optional, and nested patterns.
 \endfoot
 
 simple\_sequence & \texttt{A+ B+} &
-\textbf{Goal:} Detect transitions from unrated/poor to very poor products.
+\textbf{Goal:} Detect transitions from budget to low-mid price
+listings.
 \newline
-\textbf{Use:} Identify sequences where no-rating/poor products (0--1.0
-stars) are followed by very poor products (1.1--2.0 stars), useful for
-detecting problematic product sequences or data quality issues in
-listings. \\
+\textbf{Use:} Identify runs where budget products
+(price~$\le$~\pounds10) are immediately followed by low-mid products
+(\pounds10--25) in the listing order, useful for locating price-band
+boundaries and clustered cheap listings. \\
 \midrule
 
 alternation & \texttt{A (B|C)+ D} &
-\textbf{Goal:} Detect quality improvement patterns.
+\textbf{Goal:} Detect budget-to-upper-mid transitions through mixed
+middle bands.
 \newline
-\textbf{Use:} Find sequences starting with unrated/poor products,
-followed by mixed very poor/below-average products, ending with
-average-to-good products.  Useful for analyzing quality improvement
-patterns in product browsing sequences or sorted lists. \\
+\textbf{Use:} Find sequences that start with a budget product,
+continue with a mix of low-mid and mid products (\pounds10--50), and
+end with an upper-mid product (\pounds50--100).  Exercises
+alternation inside a quantified group. \\
 \midrule
 
-quantified & \texttt{A\{2,5\} B* C+} &
-\textbf{Goal:} Detect constrained low-quality patterns.
+quantified & \texttt{A\{1,5\} B* C+} &
+\textbf{Goal:} Detect bounded budget runs followed by mid-band
+products.
 \newline
-\textbf{Use:} Find sequences with 2--5 unrated/poor products,
-optionally followed by very poor products, then below-average products.
-Enforces minimum unrated product counts for identifying problematic
-product clusters. \\
+\textbf{Use:} Find sequences with 1--5 budget products, optionally
+followed by low-mid products, then one or more mid products
+(\pounds25--50).  Exercises bounded, optional, and unbounded
+quantifiers in one pattern. \\
 \midrule
 
 optional\_pattern & \texttt{A+ B? C*} &
-\textbf{Goal:} Flexible low-to-moderate quality transition detection.
+\textbf{Goal:} Flexible budget-run detection with optional band
+transitions.
 \newline
-\textbf{Use:} Broad pattern matching starting with unrated/poor
-products with optional transitions through worse ratings.  High recall
-for various low-quality sequence scenarios in e-commerce data. \\
+\textbf{Use:} Broad matching of budget runs with an optional low-mid
+product and optional mid products.  High recall; produces the
+largest match sets in the benchmark. \\
 \midrule
 
 complex\_nested & \texttt{(A|B)+ (C\{1,3\} D*)+} &
-\textbf{Goal:} Complex quality improvement analysis.
+\textbf{Goal:} Nested grouping of low-price runs followed by
+mid/upper-mid groups.
 \newline
-\textbf{Use:} Detect sequences of unrated/very poor products followed
-by groups of improving quality (below-average to good).  Useful for
-multi-level quality grouping and advanced sorting pattern detection in
-product listings. \\
+\textbf{Use:} Detect runs of low-priced products
+(price~$\le$~\pounds25) followed by one or more groups of 1--3 mid
+products with optional upper-mid products.  Exercises nested
+alternation combined with bounded repetition; the most expensive
+pattern family. \\
 \end{longtable}
 }
 
 \noindent
-All patterns analyze product quality based on star ratings where
-$A$~= No Rating/Poor (0--1.0 stars),
-$B$~= Very Poor (1.1--2.0 stars),
-$C$~= Below Average (2.1--3.0 stars),
-$D$~= Average to Good (3.1--4.0 stars),
-$E$~= Excellent (4.1--5.0 stars).
-Categories were created using equal-width binning on the \texttt{stars}
-column.  Table~\ref{tab:pattern_definitions} provides detailed
+All patterns operate on a derived \texttt{category} column computed
+from the product \texttt{price} with fixed thresholds:
+$A$~= budget (price~$\le$~\pounds10),
+$B$~= low-mid (\pounds10~$<$~price~$\le$~\pounds25),
+$C$~= mid (\pounds25~$<$~price~$\le$~\pounds50),
+$D$~= upper-mid (\pounds50~$<$~price~$\le$~\pounds100), and
+$E$~= premium (price~$>$~\pounds100).
+Each row also carries a sequential \texttt{seq\_id} that preserves
+the original row order of the source CSV.  The eight dataset sizes
+are nested prefixes of the same file: the size-$n$ dataset is the
+first $n$ rows of the source CSV (no random sampling, so no seed is
+involved), and \texttt{seq\_id} is assigned as $0,1,\dots,n-1$ in
+that order.  The benchmark queries use \texttt{ORDER~BY seq\_id} and
+no \texttt{PARTITION~BY} clause, so each dataset forms a single
+logical partition and the patterns match runs of consecutive rows in
+this fixed order.  The sequence is
+therefore a \emph{controlled benchmark sequence} derived from the
+CSV listing order of the product catalog; it is not a temporal event
+sequence, and no claim is made that adjacent rows are related in
+time.  What matters for the benchmark is that all three systems
+process the identical row sequence.
+Table~\ref{tab:pattern_definitions} provides detailed
 specifications of all five SQL patterns used in the evaluation,
 including their formal syntax and intended detection goals.  Each
 pattern represents a different complexity level and use case, ranging
@@ -798,91 +1050,167 @@ Measures real-world performance for the evaluated benchmark. \\
 \end{table}
 
 \paragraph{Theoretical analysis.}
-The current implementation can be viewed as four main steps:
+As implemented, the execution path has five main steps:
 
 \begin{enumerate}
   \item parse the SQL query and extract the
     \texttt{MATCH\_\allowbreak{}RECOGNIZE} clauses;
-  \item compile the row pattern into an internal automaton;
-  \item partition and order the input rows;
-  \item scan the ordered rows and build the output matches.
+  \item compile the row pattern into an internal automaton
+    (NFA, then DFA);
+  \item partition the input and order each partition;
+  \item vectorize the \texttt{DEFINE} predicates over the ordered
+    rows and derive the set of positions that can start a match;
+  \item scan the candidate start positions, run the automaton, and
+    build the output matches and measures.
 \end{enumerate}
 
 Let $n$ be the number of input rows, $p$ the number of partitions,
-$n_i$ the number of rows in partition $i$, $k$ the number of matches
-produced, and $\ell$ the average number of rows returned per match.
-Thus, $\sum_{i=1}^{p} n_i = n$.  For the five benchmark patterns used
-in this chapter, the pattern size is fixed while the dataset size grows
-from 50\,K to 2\,M rows.  The full execution path can be summarized
-as:
-\[
-  \text{time} \approx
-  \text{compile pattern once}
-  + \text{partition/order rows}
-  + \text{scan rows}
-  + \text{build output}.
-\]
+$n_i$ the number of rows in partition $i$, $d$ the number of
+\texttt{DEFINE} variables, $k$ the number of matches produced, and
+$\ell$ the average number of rows returned per match.  Thus,
+$\sum_{i=1}^{p} n_i = n$.  For the five benchmark patterns used in
+this chapter the pattern is fixed while the dataset size grows from
+50\,K to 2\,M rows.
 
-The important point is the \texttt{ORDER BY} step.  The current
-implementation uses \texttt{pandas} \texttt{sort\_values} to order each
-partition before matching.  If there are multiple partitions, the
-sorting cost is:
+Steps~1 and~2 depend only on the query, not on $n$.  Automaton
+compilation exhibits combinatorial worst-case growth in the pattern
+size---exponential in general, and factorial for \texttt{PERMUTE},
+which enumerates all permutations of its arguments---so the
+implementation applies complexity guards and conservative fallbacks;
+for the fixed benchmark patterns this cost is a small constant paid
+once.
+
+Step~3 is the ordering step, and the implementation treats it
+conditionally rather than always sorting.  Each partition is first
+tested for monotonicity in the \texttt{ORDER~BY} columns
+($O(n_i)$); \texttt{pandas} \texttt{sort\_values} is invoked
+\emph{only} when the partition is not already ordered, at a cost of
 \[
-  O\!\left(\sum_{i=1}^{p} n_i \log n_i\right).
+  O\!\left(\sum_{i=1}^{p} n_i \log n_i\right) \le O(n \log n).
 \]
-This is at most $O(n \log n)$.  If there is only one partition, it is
-the same as sorting the whole input.  Therefore, the conservative
-theoretical cost for the current full pipeline is:
+When every partition is already ordered the sort is skipped and the
+step reduces to the $O(n)$ monotonicity check.  The benchmark queries
+order by a sequential \texttt{seq\_id} whose values are already
+monotonic, so this run takes the $O(n)$ path---which is precisely why
+the measured scaling is approximately linear rather than
+$n \log n$.
+
+Step~4 evaluates the row-local \texttt{DEFINE} predicates as
+vectorized column operations, producing a Boolean start-position mask
+in $O(nd)$ time and letting the scan skip positions that cannot begin
+a match; $d$ is a small constant for the benchmark patterns.
+
+Step~5 visits the candidate start positions.  Each match attempt runs
+the automaton over the rows it consumes, using $O(1)$ precomputed
+predicate lookups and a greedy plan for consecutive quantifiers
+(e.g.\ \texttt{A+ B+}) that avoids exponential backtracking.  Under
+the default \texttt{AFTER MATCH SKIP PAST LAST ROW} used by the
+benchmark, accepted matches are non-overlapping and the scan advances
+past each match, so the total scan and output work is
 \[
-  O(n \log n + n + k\ell).
+  O(n + k\ell),
 \]
-Here, $O(n \log n)$ is the ordering cost, $O(n)$ is the scan over the
-ordered rows, and $O(k\ell)$ is the cost of building the output.  If
-the data is already ordered before the matcher is called, the scan and
-output part alone is closer to $O(n+k\ell)$, but unordered daily data
-still requires sorting or another ordering strategy.
+where $O(n)$ covers the position scan and $O(k\ell)$ the construction
+of matched rows and measures.  Combining the steps, the conservative
+end-to-end bound is
+\[
+  O(n \log n + nd + k\ell),
+\]
+which on already-ordered input such as the benchmark data---where the
+sort is skipped and the ordering step is the $O(n)$ monotonicity
+check---reduces to $O(n + nd + k\ell)$, and collapses further to
+$O(n + k\ell)$ (linear in $n$) for fixed $d$.  This
+bound is not universal: overlapping skip modes (e.g.\ \texttt{SKIP TO
+NEXT ROW}) and heavily ambiguous patterns can revisit rows and raise
+the per-position cost above the linear regime.
 
 For daily workloads, where new rows often arrive out of order, the
 most practical future improvement is incremental ordering.  Historical
-data can be stored in sorted form.  When a new daily batch arrives,
-only the new batch is sorted, then it is merged with the already
-ordered history.  This does not remove ordering completely, but it
-avoids sorting the full history again for every run.
+data can be stored in sorted form; when a new daily batch arrives,
+only the new batch is sorted and then merged with the already ordered
+history.  This does not remove ordering completely, but it avoids
+sorting the full history again for every run.
 
-The extra space used by the matcher comes mainly from partition/order
-structures, compiled pattern state, and output rows:
+The extra space used by the matcher comes mainly from the partition
+and ordering structures, the compiled automaton and vectorized
+predicate matrix, and the output rows:
 \[
   \text{extra space} \approx O(n + \text{pattern state} + k\ell).
 \]
 The input DataFrame itself also uses memory proportional to the number
-of rows and columns.
+of rows and columns.  Because the benchmark uses no
+\texttt{PARTITION~BY} clause, it forms a single partition and runs on
+one core; the engine's parallel-partition path is engaged only when
+more than one partition is present and is therefore not exercised
+here.
 
 
 \paragraph{Empirical and cross-system analysis.}
 The empirical analysis measures the implemented systems directly.  In
-this chapter, the final benchmark consists of 120 successful measured
-runs: three systems, five pattern families, and eight dataset sizes
-from 50\,K to 2\,M rows.  The proposed Pandas engine, Trino~473, and
+this chapter, the final benchmark consists of 120 successful
+benchmark cells: three systems, five pattern families, and eight
+dataset sizes from 50\,K to 2\,M rows, where each cell is the median
+of three measured executions after one warmup (360 measured
+executions in total).  The proposed Pandas engine, Trino~473, and
 Oracle~XE~21c were evaluated on the same generated CSV datasets and
-the same \texttt{MATCH\_\allowbreak{}RECOGNIZE} query bodies.  Each
-system was run separately under the same resource policy: 1 CPU core
-and 32\,GB of memory.  Database loading time is excluded from the
-reported query times; the measurements report query execution after
-the data has been loaded into the target system.
+the same \texttt{MATCH\_\allowbreak{}RECOGNIZE} query bodies.
+
+The resource policy was enforced as follows.  The three systems ran
+strictly sequentially, one at a time, with the other database
+containers stopped.  The Pandas engine was pinned to CPU core~0 via
+\texttt{sched\_setaffinity}, with the numerical-library
+thread pools (\texttt{OMP}, \texttt{OpenBLAS}, \texttt{MKL},
+\texttt{NumExpr}) limited to one thread; the database containers
+were pinned to the same core with
+\texttt{docker update -{}-cpuset-cpus=0} combined with a one-CPU
+quota (\texttt{-{}-cpus=1}).  Every system was given the same
+nominal 32\,GB memory budget, enforced by the mechanism native to
+each deployment: an address-space \texttt{rlimit} for the Python
+process, and a container memory limit with \texttt{-{}-memory-swap}
+equal to the limit (no extra swap) for the databases.  These
+mechanisms are equivalent in budget but not identical in enforcement
+semantics.  The 32\,GB figure is therefore an
+\emph{engine/container} memory budget: it caps the Pandas engine
+process and each database container.  The budget is below the
+workstation's 64\,GB of installed RAM, so it is an actually enforced
+cap.  For the database runs, the separate Python client that issues
+the query and materializes the result DataFrame is pinned to core~0
+via \texttt{sched\_setaffinity} (the same call that pins the Pandas
+engine), applied once to the benchmark process at start-up; container
+pinning alone would not constrain this host-side client, and the
+client's own memory is not itself placed under the 32\,GB
+\texttt{rlimit}.  Client and database engine therefore time-share the
+single core~0, and, correspondingly, the container footprint values
+cover only the database process and exclude this client, whose
+result-construction memory is counted in neither database memory
+metric.
+Reported times are client-observed wall-clock
+durations of query execution including result retrieval, measured
+tightly around the query call so that sampling overhead was
+minimized.  The timer
+stops only after the client has fully materialized the result set
+(fetching all rows and constructing the client-side DataFrame), and
+every system returns the same normalized result columns and row
+counts for each cell (Table~\ref{tab:match_counts}), so result
+retrieval is included in the timing on equal terms.  Database
+loading time is excluded from the reported query times; the
+measurements report query execution after the data has been loaded
+into the target system.
 
 The theoretical model explains the expected growth, while the empirical
 results show the current implementation's observed behavior.  The
 Pandas engine shows stable throughput across the evaluated range,
 which is consistent with a scan-dominated execution path for these
-fixed-size patterns.  Trino and Oracle show stronger throughput at the
-larger dataset sizes, but their memory readings include the resident
-database engines, not only the pattern query.  Therefore, the time and
-memory results are useful as a practical cross-system comparison, but
-the memory columns should be interpreted with the measurement caveat
-noted below.
+fixed-size patterns, while Trino and Oracle sustain higher average
+throughput on most pattern--size combinations, with
+\texttt{complex\_nested} as the main exception for Trino.  Memory is reported using the two metrics defined in
+Section~\ref{subsec:eval-metrics}: the engine-reported
+system-native \emph{query-memory indicators}, and the
+\emph{operational footprint}, which documents the cost of the
+resident process or database container and is reported separately.
 
 % ................................................................
-\subsection{Cross-System Comparison Under Equal Resources}
+\subsection{Cross-System Comparison Under a Common Resource Budget}
 \label{subsec:eval-cross-system}
 % ................................................................
 
@@ -894,9 +1222,45 @@ query files, and combined summary files.  The common query body for
 each pattern is stored once and the per-system query files differ only
 in the source table reference required by each system.
 
-% Proposed Pandas engine: total=113.37, avg=2.83, avgthr=316{,}400, minthr=170{,}621, maxthr=705{,}901, maxmem=113.89
-% Trino~473: total=125.00, avg=3.12, avgthr=239{,}837, minthr=23{,}491, maxthr=624{,}497, maxmem=25{,}886.72
-% Oracle XE~21c: total=80.77, avg=2.02, avgthr=427{,}302, minthr=25{,}419, maxthr=1{,}571{,}973, maxmem=2{,}228.22
+Because runtime and memory depend directly on how many matches each
+pattern produces, Table~\ref{tab:match_counts} reports the number of
+matches for every pattern--size combination.  All queries use
+\texttt{ONE ROW PER MATCH}, so the match count equals the number of
+returned result rows; the counts are identical across the three
+systems (this is exactly what the correctness comparison verifies).
+\texttt{optional\_pattern} produces the largest output sets and
+\texttt{alternation} the smallest, which explains much of the
+per-pattern variation in the time and memory tables that follow.
+
+{\small
+\begin{table}[H]
+\centering
+\caption{Matches (= returned result rows, \texttt{ONE ROW PER
+  MATCH}) by pattern and dataset size; identical across all three
+  systems}
+\label{tab:match_counts}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{rrrrrr}
+\toprule
+\textbf{Size (rows)} & \textbf{simple\_seq.} & \textbf{alternation} & \textbf{quantified} & \textbf{optional\_pat.} & \textbf{complex\_nested} \\
+\midrule
+50{,}000 & 4{,}322 & 612 & 2{,}219 & 7{,}081 & 3{,}800 \\
+100{,}000 & 9{,}067 & 1{,}828 & 5{,}643 & 15{,}247 & 9{,}420 \\
+200{,}000 & 16{,}093 & 3{,}692 & 10{,}064 & 27{,}172 & 17{,}759 \\
+400{,}000 & 34{,}391 & 5{,}803 & 19{,}012 & 52{,}950 & 32{,}360 \\
+800{,}000 & 66{,}330 & 9{,}782 & 32{,}804 & 99{,}214 & 58{,}616 \\
+1{,}000{,}000 & 80{,}188 & 12{,}433 & 40{,}420 & 120{,}571 & 73{,}835 \\
+1{,}500{,}000 & 121{,}420 & 18{,}431 & 61{,}988 & 183{,}084 & 109{,}974 \\
+2{,}000{,}000 & 160{,}097 & 25{,}719 & 84{,}393 & 244{,}296 & 150{,}477 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+}
+
+% Corrected run (timing measured tightly around the query call; cpuset-pinned containers)
+% pandas: total=80.32, avg=2.01, avgthr=457{,}018, minthr=269{,}303, maxthr=939{,}046, maxqmem=79.84, maxfmem=954.59, medspread=9.1%
+% Trino~473: total=76.46, avg=1.91, avgthr=561{,}007, minthr=115{,}018, maxthr=935{,}473, maxqmem=39.63, maxfmem=26{,}705.92, medspread=19.6%
+% Oracle XE~21c: total=32.80, avg=0.82, avgthr=1{,}217{,}217, minthr=341{,}233, maxthr=1{,}824{,}526, maxqmem=53.19, maxfmem=2{,}533.38, medspread=5.2%
 
 {\scriptsize
 \setlength{\tabcolsep}{4pt}
@@ -918,19 +1282,22 @@ in the source table reference required by each system.
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 231{,}082 & 3.24 & 277{,}655 & 2.42 & 472{,}790 & 1.57 \\
-alternation & 652{,}472 & 1.11 & 305{,}004 & 2.23 & 552{,}684 & 1.62 \\
-quantified & 242{,}249 & 3.06 & 225{,}619 & 2.76 & 417{,}298 & 1.86 \\
-optional\_pattern & 206{,}407 & 3.46 & 278{,}413 & 2.33 & 501{,}299 & 1.67 \\
-complex\_nested & 249{,}792 & 3.31 & 112{,}493 & 5.88 & 192{,}438 & 3.38 \\
+simple\_sequence & 347{,}586 & 2.21 & 583{,}969 & 1.29 & 1{,}187{,}137 & 0.61 \\
+alternation & 886{,}110 & 0.84 & 683{,}041 & 1.04 & 1{,}640{,}598 & 0.43 \\
+quantified & 352{,}573 & 2.13 & 563{,}511 & 1.28 & 1{,}117{,}724 & 0.68 \\
+optional\_pattern & 323{,}430 & 2.31 & 755{,}790 & 0.89 & 1{,}539{,}712 & 0.46 \\
+complex\_nested & 375{,}394 & 2.54 & 218{,}724 & 5.06 & 600{,}915 & 1.92 \\
 \end{longtable}
 }
 
 Table~\ref{tab:pattern_summary} summarizes each pattern family across
-all eight dataset sizes.  The proposed engine is fastest on
-\texttt{alternation} in this run, while the database systems show their
-largest relative cost on \texttt{complex\_nested}.  This indicates that
-both implementation strategy and pattern structure affect the measured
+all eight dataset sizes.  Oracle records the lowest average time on
+every pattern family in this run.  The proposed engine is overall
+competitive with Trino and faster than Trino on two of the five
+families: \texttt{alternation} and \texttt{complex\_nested}, the
+family where Trino shows by far its largest relative cost
+(5.06\,s versus 2.54\,s on average).  This indicates that both
+implementation strategy and pattern structure affect the measured
 runtime.
 
 {\scriptsize
@@ -953,21 +1320,29 @@ runtime.
 \endhead
 \bottomrule
 \endfoot
-50{,}000 & 297{,}528 & 0.20 & 28{,}206 & 1.79 & 28{,}329 & 1.82 \\
-100{,}000 & 296{,}358 & 0.40 & 56{,}707 & 1.77 & 53{,}951 & 1.86 \\
-200{,}000 & 325{,}143 & 0.72 & 136{,}479 & 1.49 & 118{,}768 & 1.72 \\
-400{,}000 & 312{,}568 & 1.58 & 239{,}335 & 1.87 & 258{,}883 & 1.57 \\
-800{,}000 & 325{,}465 & 3.01 & 346{,}526 & 3.22 & 511{,}696 & 1.77 \\
-1{,}000{,}000 & 328{,}545 & 3.65 & 261{,}826 & 4.20 & 666{,}585 & 1.71 \\
-1{,}500{,}000 & 327{,}299 & 5.60 & 386{,}346 & 4.93 & 935{,}043 & 2.34 \\
-2{,}000{,}000 & 318{,}297 & 7.52 & 463{,}268 & 5.73 & 845{,}157 & 3.37 \\
+50{,}000 & 486{,}782 & 0.12 & 369{,}611 & 0.15 & 961{,}559 & 0.06 \\
+100{,}000 & 447{,}002 & 0.26 & 469{,}592 & 0.22 & 1{,}270{,}633 & 0.08 \\
+200{,}000 & 485{,}418 & 0.47 & 637{,}447 & 0.34 & 1{,}397{,}178 & 0.15 \\
+400{,}000 & 479{,}144 & 0.96 & 623{,}043 & 0.76 & 1{,}202{,}414 & 0.37 \\
+800{,}000 & 439{,}526 & 2.17 & 636{,}742 & 1.90 & 1{,}188{,}704 & 0.92 \\
+1{,}000{,}000 & 428{,}447 & 2.67 & 565{,}566 & 2.43 & 1{,}180{,}593 & 1.11 \\
+1{,}500{,}000 & 438{,}122 & 4.19 & 618{,}027 & 4.28 & 1{,}276{,}182 & 1.70 \\
+2{,}000{,}000 & 451{,}707 & 5.22 & 568{,}028 & 5.22 & 1{,}260{,}473 & 2.17 \\
 \end{longtable}
 }
 
 Table~\ref{tab:size_summary} groups the same measurements by dataset
-size.  The proposed engine's throughput remains stable as the input
-increases, while Trino and Oracle amortize fixed query-planning and
-execution overhead over larger inputs.
+size.  Oracle records the lowest average time at every size.  The
+proposed engine's throughput remains stable (roughly
+428\,K--487\,K rows/s) as the input increases.  Relative to Trino,
+the engine records a lower average time at the smallest size
+(50\,K) and at 1.5\,M rows, an identical average at 2\,M rows, and
+a higher average at the intermediate sizes (100\,K--1\,M).  Relative
+to Oracle, the engine stays within a factor of
+approximately 2.0--3.3$\times$ by average execution time
+(equivalently about 2.0--2.9$\times$ by throughput) across the
+evaluated range, using the per-size averages of
+Table~\ref{tab:size_summary}.
 
 {\scriptsize
 \setlength{\tabcolsep}{3pt}
@@ -985,50 +1360,50 @@ execution overhead over larger inputs.
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 50{,}000 & 0.21 & 2.13 & 1.27 \\
-simple\_sequence & 100{,}000 & 0.46 & 1.92 & 1.65 \\
-simple\_sequence & 200{,}000 & 0.81 & 1.27 & 1.27 \\
-simple\_sequence & 400{,}000 & 1.90 & 1.27 & 1.27 \\
-simple\_sequence & 800{,}000 & 3.54 & 2.10 & 1.27 \\
-simple\_sequence & 1{,}000{,}000 & 4.10 & 3.89 & 1.27 \\
-simple\_sequence & 1{,}500{,}000 & 6.38 & 3.51 & 1.27 \\
-simple\_sequence & 2{,}000{,}000 & 8.48 & 3.28 & 3.27 \\
+simple\_sequence & 50{,}000 & 0.14 & 0.12 & 0.09 \\
+simple\_sequence & 100{,}000 & 0.30 & 0.19 & 0.07 \\
+simple\_sequence & 200{,}000 & 0.54 & 0.29 & 0.13 \\
+simple\_sequence & 400{,}000 & 1.17 & 0.66 & 0.37 \\
+simple\_sequence & 800{,}000 & 2.25 & 1.22 & 0.66 \\
+simple\_sequence & 1{,}000{,}000 & 2.98 & 1.85 & 0.80 \\
+simple\_sequence & 1{,}500{,}000 & 4.72 & 2.05 & 1.15 \\
+simple\_sequence & 2{,}000{,}000 & 5.62 & 3.92 & 1.59 \\
 \midrule
-alternation & 50{,}000 & 0.09 & 1.64 & 1.97 \\
-alternation & 100{,}000 & 0.17 & 1.74 & 1.93 \\
-alternation & 200{,}000 & 0.31 & 1.64 & 1.88 \\
-alternation & 400{,}000 & 0.61 & 1.45 & 1.75 \\
-alternation & 800{,}000 & 1.13 & 1.28 & 1.50 \\
-alternation & 1{,}000{,}000 & 1.46 & 3.28 & 1.39 \\
-alternation & 1{,}500{,}000 & 2.13 & 3.28 & 1.27 \\
-alternation & 2{,}000{,}000 & 3.00 & 3.52 & 1.27 \\
+alternation & 50{,}000 & 0.06 & 0.11 & 0.05 \\
+alternation & 100{,}000 & 0.12 & 0.22 & 0.06 \\
+alternation & 200{,}000 & 0.22 & 0.27 & 0.11 \\
+alternation & 400{,}000 & 0.44 & 0.49 & 0.25 \\
+alternation & 800{,}000 & 0.88 & 0.96 & 0.46 \\
+alternation & 1{,}000{,}000 & 1.23 & 1.53 & 0.59 \\
+alternation & 1{,}500{,}000 & 1.60 & 1.96 & 0.82 \\
+alternation & 2{,}000{,}000 & 2.19 & 2.78 & 1.12 \\
 \midrule
-quantified & 50{,}000 & 0.23 & 1.72 & 1.95 \\
-quantified & 100{,}000 & 0.47 & 1.75 & 1.91 \\
-quantified & 200{,}000 & 0.77 & 1.63 & 1.84 \\
-quantified & 400{,}000 & 1.62 & 1.89 & 1.67 \\
-quantified & 800{,}000 & 3.20 & 3.28 & 1.28 \\
-quantified & 1{,}000{,}000 & 3.85 & 3.28 & 1.27 \\
-quantified & 1{,}500{,}000 & 5.79 & 3.28 & 1.69 \\
-quantified & 2{,}000{,}000 & 8.51 & 5.28 & 3.27 \\
+quantified & 50{,}000 & 0.15 & 0.13 & 0.05 \\
+quantified & 100{,}000 & 0.32 & 0.20 & 0.09 \\
+quantified & 200{,}000 & 0.52 & 0.31 & 0.16 \\
+quantified & 400{,}000 & 1.09 & 0.63 & 0.37 \\
+quantified & 800{,}000 & 2.34 & 1.28 & 0.77 \\
+quantified & 1{,}000{,}000 & 2.72 & 1.89 & 0.94 \\
+quantified & 1{,}500{,}000 & 4.28 & 2.72 & 1.30 \\
+quantified & 2{,}000{,}000 & 5.61 & 3.10 & 1.74 \\
 \midrule
-optional\_pattern & 50{,}000 & 0.26 & 1.81 & 1.96 \\
-optional\_pattern & 100{,}000 & 0.54 & 1.76 & 1.93 \\
-optional\_pattern & 200{,}000 & 0.97 & 1.62 & 1.86 \\
-optional\_pattern & 400{,}000 & 2.34 & 1.46 & 1.72 \\
-optional\_pattern & 800{,}000 & 3.57 & 2.15 & 1.53 \\
-optional\_pattern & 1{,}000{,}000 & 4.50 & 3.28 & 1.37 \\
-optional\_pattern & 1{,}500{,}000 & 6.73 & 3.28 & 1.27 \\
-optional\_pattern & 2{,}000{,}000 & 8.77 & 3.28 & 1.73 \\
+optional\_pattern & 50{,}000 & 0.16 & 0.13 & 0.04 \\
+optional\_pattern & 100{,}000 & 0.32 & 0.20 & 0.08 \\
+optional\_pattern & 200{,}000 & 0.61 & 0.26 & 0.13 \\
+optional\_pattern & 400{,}000 & 1.17 & 0.50 & 0.26 \\
+optional\_pattern & 800{,}000 & 2.70 & 0.87 & 0.50 \\
+optional\_pattern & 1{,}000{,}000 & 2.90 & 1.07 & 0.67 \\
+optional\_pattern & 1{,}500{,}000 & 4.78 & 1.62 & 0.85 \\
+optional\_pattern & 2{,}000{,}000 & 5.87 & 2.43 & 1.16 \\
 \midrule
-complex\_nested & 50{,}000 & 0.18 & 1.65 & 1.95 \\
-complex\_nested & 100{,}000 & 0.36 & 1.66 & 1.89 \\
-complex\_nested & 200{,}000 & 0.73 & 1.27 & 1.76 \\
-complex\_nested & 400{,}000 & 1.43 & 3.28 & 1.43 \\
-complex\_nested & 800{,}000 & 3.62 & 7.29 & 3.27 \\
-complex\_nested & 1{,}000{,}000 & 4.32 & 7.29 & 3.27 \\
-complex\_nested & 1{,}500{,}000 & 6.96 & 11.29 & 6.18 \\
-complex\_nested & 2{,}000{,}000 & 8.86 & 13.30 & 7.28 \\
+complex\_nested & 50{,}000 & 0.09 & 0.25 & 0.05 \\
+complex\_nested & 100{,}000 & 0.22 & 0.29 & 0.11 \\
+complex\_nested & 200{,}000 & 0.44 & 0.58 & 0.24 \\
+complex\_nested & 400{,}000 & 0.93 & 1.50 & 0.59 \\
+complex\_nested & 800{,}000 & 2.71 & 5.16 & 2.20 \\
+complex\_nested & 1{,}000{,}000 & 3.55 & 5.81 & 2.55 \\
+complex\_nested & 1{,}500{,}000 & 5.57 & 13.04 & 4.40 \\
+complex\_nested & 2{,}000{,}000 & 6.83 & 13.86 & 5.22 \\
 \end{longtable}
 }
 
@@ -1059,50 +1434,50 @@ remains the most expensive pattern family.
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 50{,}000 & 233{,}089 & 23{,}491 & 39{,}400 \\
-simple\_sequence & 100{,}000 & 217{,}739 & 52{,}076 & 60{,}704 \\
-simple\_sequence & 200{,}000 & 246{,}911 & 157{,}033 & 157{,}513 \\
-simple\_sequence & 400{,}000 & 210{,}128 & 314{,}003 & 315{,}012 \\
-simple\_sequence & 800{,}000 & 226{,}010 & 381{,}624 & 630{,}175 \\
-simple\_sequence & 1{,}000{,}000 & 243{,}857 & 257{,}037 & 787{,}438 \\
-simple\_sequence & 1{,}500{,}000 & 235{,}080 & 427{,}120 & 1{,}181{,}114 \\
-simple\_sequence & 2{,}000{,}000 & 235{,}843 & 608{,}857 & 610{,}963 \\
+simple\_sequence & 50{,}000 & 367{,}167 & 402{,}568 & 538{,}036 \\
+simple\_sequence & 100{,}000 & 337{,}806 & 522{,}866 & 1{,}377{,}367 \\
+simple\_sequence & 200{,}000 & 367{,}139 & 701{,}129 & 1{,}484{,}868 \\
+simple\_sequence & 400{,}000 & 342{,}528 & 606{,}718 & 1{,}077{,}829 \\
+simple\_sequence & 800{,}000 & 356{,}013 & 655{,}381 & 1{,}209{,}269 \\
+simple\_sequence & 1{,}000{,}000 & 336{,}125 & 540{,}300 & 1{,}253{,}002 \\
+simple\_sequence & 1{,}500{,}000 & 317{,}891 & 733{,}234 & 1{,}300{,}997 \\
+simple\_sequence & 2{,}000{,}000 & 356{,}015 & 509{,}556 & 1{,}255{,}724 \\
 \midrule
-alternation & 50{,}000 & 575{,}725 & 30{,}514 & 25{,}419 \\
-alternation & 100{,}000 & 589{,}710 & 57{,}311 & 51{,}815 \\
-alternation & 200{,}000 & 637{,}209 & 121{,}733 & 106{,}545 \\
-alternation & 400{,}000 & 655{,}038 & 275{,}572 & 228{,}398 \\
-alternation & 800{,}000 & 705{,}901 & 624{,}497 & 533{,}974 \\
-alternation & 1{,}000{,}000 & 685{,}506 & 305{,}112 & 721{,}564 \\
-alternation & 1{,}500{,}000 & 703{,}845 & 456{,}795 & 1{,}181{,}781 \\
-alternation & 2{,}000{,}000 & 666{,}843 & 568{,}496 & 1{,}571{,}973 \\
+alternation & 50{,}000 & 884{,}024 & 470{,}685 & 930{,}990 \\
+alternation & 100{,}000 & 825{,}139 & 464{,}904 & 1{,}700{,}118 \\
+alternation & 200{,}000 & 894{,}190 & 744{,}208 & 1{,}821{,}240 \\
+alternation & 400{,}000 & 915{,}416 & 816{,}619 & 1{,}622{,}200 \\
+alternation & 800{,}000 & 907{,}350 & 830{,}287 & 1{,}734{,}401 \\
+alternation & 1{,}000{,}000 & 811{,}614 & 651{,}855 & 1{,}704{,}849 \\
+alternation & 1{,}500{,}000 & 939{,}046 & 766{,}251 & 1{,}824{,}526 \\
+alternation & 2{,}000{,}000 & 912{,}100 & 719{,}516 & 1{,}786{,}464 \\
 \midrule
-quantified & 50{,}000 & 215{,}929 & 29{,}031 & 25{,}646 \\
-quantified & 100{,}000 & 211{,}740 & 57{,}206 & 52{,}371 \\
-quantified & 200{,}000 & 259{,}048 & 123{,}035 & 108{,}670 \\
-quantified & 400{,}000 & 247{,}338 & 211{,}278 & 238{,}966 \\
-quantified & 800{,}000 & 250{,}159 & 243{,}832 & 625{,}383 \\
-quantified & 1{,}000{,}000 & 259{,}622 & 304{,}525 & 787{,}718 \\
-quantified & 1{,}500{,}000 & 259{,}087 & 457{,}387 & 888{,}899 \\
-quantified & 2{,}000{,}000 & 235{,}068 & 378{,}655 & 610{,}733 \\
+quantified & 50{,}000 & 341{,}417 & 377{,}993 & 1{,}049{,}346 \\
+quantified & 100{,}000 & 314{,}064 & 510{,}062 & 1{,}146{,}957 \\
+quantified & 200{,}000 & 381{,}240 & 637{,}124 & 1{,}261{,}426 \\
+quantified & 400{,}000 & 366{,}378 & 633{,}088 & 1{,}074{,}766 \\
+quantified & 800{,}000 & 342{,}572 & 625{,}236 & 1{,}042{,}444 \\
+quantified & 1{,}000{,}000 & 367{,}503 & 528{,}225 & 1{,}058{,}474 \\
+quantified & 1{,}500{,}000 & 350{,}592 & 551{,}837 & 1{,}157{,}299 \\
+quantified & 2{,}000{,}000 & 356{,}815 & 644{,}521 & 1{,}151{,}077 \\
 \midrule
-optional\_pattern & 50{,}000 & 191{,}058 & 27{,}664 & 25{,}501 \\
-optional\_pattern & 100{,}000 & 184{,}992 & 56{,}683 & 51{,}836 \\
-optional\_pattern & 200{,}000 & 206{,}996 & 123{,}377 & 107{,}241 \\
-optional\_pattern & 400{,}000 & 170{,}621 & 273{,}855 & 232{,}481 \\
-optional\_pattern & 800{,}000 & 224{,}286 & 372{,}891 & 524{,}476 \\
-optional\_pattern & 1{,}000{,}000 & 222{,}361 & 305{,}213 & 730{,}648 \\
-optional\_pattern & 1{,}500{,}000 & 222{,}959 & 457{,}618 & 1{,}180{,}769 \\
-optional\_pattern & 2{,}000{,}000 & 227{,}981 & 610{,}001 & 1{,}157{,}442 \\
+optional\_pattern & 50{,}000 & 313{,}435 & 397{,}312 & 1{,}373{,}899 \\
+optional\_pattern & 100{,}000 & 310{,}897 & 499{,}954 & 1{,}230{,}753 \\
+optional\_pattern & 200{,}000 & 326{,}361 & 757{,}468 & 1{,}580{,}999 \\
+optional\_pattern & 400{,}000 & 340{,}444 & 792{,}343 & 1{,}560{,}231 \\
+optional\_pattern & 800{,}000 & 296{,}575 & 917{,}768 & 1{,}593{,}913 \\
+optional\_pattern & 1{,}000{,}000 & 345{,}153 & 935{,}473 & 1{,}494{,}798 \\
+optional\_pattern & 1{,}500{,}000 & 313{,}776 & 923{,}795 & 1{,}756{,}855 \\
+optional\_pattern & 2{,}000{,}000 & 340{,}799 & 822{,}211 & 1{,}726{,}244 \\
 \midrule
-complex\_nested & 50{,}000 & 271{,}840 & 30{,}328 & 25{,}681 \\
-complex\_nested & 100{,}000 & 277{,}608 & 60{,}258 & 53{,}029 \\
-complex\_nested & 200{,}000 & 275{,}550 & 157{,}215 & 113{,}872 \\
-complex\_nested & 400{,}000 & 279{,}715 & 121{,}969 & 279{,}559 \\
-complex\_nested & 800{,}000 & 220{,}967 & 109{,}788 & 244{,}474 \\
-complex\_nested & 1{,}000{,}000 & 231{,}380 & 137{,}241 & 305{,}559 \\
-complex\_nested & 1{,}500{,}000 & 215{,}522 & 132{,}810 & 242{,}652 \\
-complex\_nested & 2{,}000{,}000 & 225{,}753 & 150{,}332 & 274{,}674 \\
+complex\_nested & 50{,}000 & 527{,}866 & 199{,}496 & 915{,}524 \\
+complex\_nested & 100{,}000 & 447{,}105 & 350{,}173 & 897{,}972 \\
+complex\_nested & 200{,}000 & 458{,}159 & 347{,}304 & 837{,}358 \\
+complex\_nested & 400{,}000 & 430{,}954 & 266{,}448 & 677{,}044 \\
+complex\_nested & 800{,}000 & 295{,}123 & 155{,}040 & 363{,}495 \\
+complex\_nested & 1{,}000{,}000 & 281{,}839 & 171{,}978 & 391{,}841 \\
+complex\_nested & 1{,}500{,}000 & 269{,}303 & 115{,}018 & 341{,}233 \\
+complex\_nested & 2{,}000{,}000 & 292{,}807 & 144{,}336 & 382{,}855 \\
 \end{longtable}
 }
 
@@ -1115,81 +1490,217 @@ measured execution time, so higher values indicate faster evaluation.
 \label{subsec:eval-memory}
 % ................................................................
 
-\noindent\textbf{Memory Usage (MB)} is measured as process RSS peak
-delta for the Pandas engine and as Docker container peak memory for
-Trino and Oracle.  These are intentionally reported as practical
-resource footprints under the benchmark harness, but they are not
-strictly identical memory metrics: the database values include the
-running database process and its buffers in addition to the query.
+Memory is reported using the two metrics defined in
+Section~\ref{subsec:eval-metrics}.  \emph{Query memory}
+(Table~\ref{tab:memory_cache}) is the peak additional memory
+attributable to executing the measured query, taken from each
+system's own memory accounting: process RSS peak delta for the
+Pandas engine, the per-query \texttt{peakMemoryBytes} counter for
+Trino, and the session PGA high-water delta of a fresh session for
+Oracle.  All three exclude the stored table data and the idle
+engine.  They are, however, \emph{system-native indicators} rather
+than one instrument: RSS counts operating-system pages, Trino counts
+reserved user memory, and Oracle counts allocated work-area memory.
+The values should therefore be read as order-of-magnitude and
+per-system trend evidence, not as directly comparable measurements
+of identical quantities.
+\emph{Footprint memory} (Table~\ref{tab:memory_footprint}) is the
+absolute process RSS peak for the Pandas engine and the Docker
+container peak for Trino and Oracle; it documents the practical
+deployment cost of the resident engine and is \emph{not} a
+per-query or algorithm-level metric.
 
 {\scriptsize
 \setlength{\tabcolsep}{3pt}
 \begin{longtable}{llrrr}
-\caption{Memory (MB) by pattern, dataset size, and system}
+\caption{Query memory (MB) by pattern, dataset size, and system
+  (engine-reported peak memory of the measured query)}
 \label{tab:memory_cache} \\
 \toprule
 \textbf{Pattern} & \textbf{Size (rows)} & \textbf{Pandas} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
 \midrule
 \endfirsthead
-\caption*{Table~\thetable{} (continued): Memory (MB) by pattern, size, and system} \\
+\caption*{Table~\thetable{} (continued): Query memory (MB) by pattern, size, and system} \\
 \toprule
 \textbf{Pattern} & \textbf{Size (rows)} & \textbf{Pandas} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
 \midrule
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 50{,}000 & 0.20 & 8{,}095.74 & 2{,}067.46 \\
-simple\_sequence & 100{,}000 & 0.07 & 8{,}745.98 & 2{,}201.60 \\
-simple\_sequence & 200{,}000 & 0.06 & 9{,}634.82 & 2{,}208.77 \\
-simple\_sequence & 400{,}000 & 0.01 & 10{,}823.68 & 2{,}154.50 \\
-simple\_sequence & 800{,}000 & 0.99 & 13{,}137.92 & 2{,}157.57 \\
-simple\_sequence & 1{,}000{,}000 & 1.14 & 16{,}046.08 & 2{,}158.59 \\
-simple\_sequence & 1{,}500{,}000 & 3.03 & 20{,}183.04 & 2{,}199.55 \\
-simple\_sequence & 2{,}000{,}000 & 4.16 & 25{,}600.00 & 2{,}214.91 \\
+simple\_sequence & 50{,}000 & 0.77 & 0.63 & 0.88 \\
+simple\_sequence & 100{,}000 & 0.00 & 1.26 & 1.19 \\
+simple\_sequence & 200{,}000 & 0.00 & 6.21 & 3.75 \\
+simple\_sequence & 400{,}000 & 0.04 & 5.04 & 9.06 \\
+simple\_sequence & 800{,}000 & 1.01 & 13.50 & 19.69 \\
+simple\_sequence & 1{,}000{,}000 & 0.95 & 18.52 & 25.19 \\
+simple\_sequence & 1{,}500{,}000 & 2.96 & 27.78 & 38.19 \\
+simple\_sequence & 2{,}000{,}000 & 3.10 & 39.50 & 53.19 \\
 \midrule
-alternation & 50{,}000 & 0.01 & 8{,}098.82 & 2{,}140.16 \\
-alternation & 100{,}000 & 0.00 & 8{,}747.01 & 2{,}201.60 \\
-alternation & 200{,}000 & 0.00 & 9{,}634.82 & 2{,}207.74 \\
-alternation & 400{,}000 & 0.01 & 10{,}823.68 & 2{,}155.52 \\
-alternation & 800{,}000 & 0.00 & 13{,}137.92 & 2{,}158.59 \\
-alternation & 1{,}000{,}000 & 0.00 & 16{,}046.08 & 2{,}158.59 \\
-alternation & 1{,}500{,}000 & 0.00 & 20{,}183.04 & 2{,}161.66 \\
-alternation & 2{,}000{,}000 & 0.00 & 25{,}600.00 & 2{,}222.08 \\
+alternation & 50{,}000 & 0.00 & 0.63 & 0.00 \\
+alternation & 100{,}000 & 0.00 & 3.00 & 1.19 \\
+alternation & 200{,}000 & 0.00 & 2.52 & 3.75 \\
+alternation & 400{,}000 & 0.00 & 5.04 & 9.06 \\
+alternation & 800{,}000 & 0.00 & 13.49 & 19.69 \\
+alternation & 1{,}000{,}000 & 0.00 & 18.52 & 25.19 \\
+alternation & 1{,}500{,}000 & 0.00 & 27.77 & 38.19 \\
+alternation & 2{,}000{,}000 & 0.00 & 39.50 & 53.19 \\
 \midrule
-quantified & 50{,}000 & 0.00 & 8{,}099.84 & 2{,}144.26 \\
-quantified & 100{,}000 & 0.00 & 8{,}751.10 & 2{,}201.60 \\
-quantified & 200{,}000 & 0.00 & 9{,}636.86 & 2{,}212.86 \\
-quantified & 400{,}000 & 0.00 & 10{,}823.68 & 2{,}154.50 \\
-quantified & 800{,}000 & 1.95 & 13{,}137.92 & 2{,}157.57 \\
-quantified & 1{,}000{,}000 & 0.00 & 16{,}046.08 & 2{,}158.59 \\
-quantified & 1{,}500{,}000 & 6.93 & 20{,}183.04 & 2{,}161.66 \\
-quantified & 2{,}000{,}000 & 7.92 & 25{,}610.24 & 2{,}223.10 \\
+quantified & 50{,}000 & 0.00 & 0.83 & 0.00 \\
+quantified & 100{,}000 & 0.00 & 1.26 & 1.19 \\
+quantified & 200{,}000 & 0.00 & 2.52 & 3.75 \\
+quantified & 400{,}000 & 0.00 & 5.04 & 9.06 \\
+quantified & 800{,}000 & 0.00 & 13.49 & 19.69 \\
+quantified & 1{,}000{,}000 & 0.01 & 18.51 & 25.19 \\
+quantified & 1{,}500{,}000 & 1.96 & 27.76 & 38.19 \\
+quantified & 2{,}000{,}000 & 8.21 & 39.51 & 53.19 \\
 \midrule
-optional\_pattern & 50{,}000 & 1.01 & 8{,}100.86 & 2{,}192.38 \\
-optional\_pattern & 100{,}000 & 1.99 & 8{,}754.18 & 2{,}201.60 \\
-optional\_pattern & 200{,}000 & 4.93 & 9{,}636.86 & 2{,}213.89 \\
-optional\_pattern & 400{,}000 & 12.00 & 10{,}823.68 & 2{,}154.50 \\
-optional\_pattern & 800{,}000 & 22.03 & 13{,}137.92 & 2{,}156.54 \\
-optional\_pattern & 1{,}000{,}000 & 27.04 & 16{,}046.08 & 2{,}157.57 \\
-optional\_pattern & 1{,}500{,}000 & 41.03 & 20{,}183.04 & 2{,}162.69 \\
-optional\_pattern & 2{,}000{,}000 & 55.01 & 25{,}610.24 & 2{,}170.88 \\
+optional\_pattern & 50{,}000 & 2.12 & 0.83 & 0.00 \\
+optional\_pattern & 100{,}000 & 3.02 & 1.74 & 1.19 \\
+optional\_pattern & 200{,}000 & 6.02 & 2.52 & 3.75 \\
+optional\_pattern & 400{,}000 & 26.85 & 5.04 & 9.06 \\
+optional\_pattern & 800{,}000 & 21.68 & 13.49 & 19.69 \\
+optional\_pattern & 1{,}000{,}000 & 25.98 & 18.51 & 25.19 \\
+optional\_pattern & 1{,}500{,}000 & 38.00 & 27.76 & 38.19 \\
+optional\_pattern & 2{,}000{,}000 & 55.16 & 39.49 & 53.19 \\
 \midrule
-complex\_nested & 50{,}000 & 0.00 & 8{,}101.89 & 2{,}196.48 \\
-complex\_nested & 100{,}000 & 0.00 & 8{,}756.22 & 2{,}201.60 \\
-complex\_nested & 200{,}000 & 2.25 & 9{,}637.89 & 2{,}213.89 \\
-complex\_nested & 400{,}000 & 15.96 & 10{,}833.92 & 2{,}154.50 \\
-complex\_nested & 800{,}000 & 31.57 & 13{,}404.16 & 2{,}178.05 \\
-complex\_nested & 1{,}000{,}000 & 32.19 & 16{,}189.44 & 2{,}183.17 \\
-complex\_nested & 1{,}500{,}000 & 66.90 & 20{,}469.76 & 2{,}199.55 \\
-complex\_nested & 2{,}000{,}000 & 113.89 & 25{,}886.72 & 2{,}228.22 \\
+complex\_nested & 50{,}000 & 0.00 & 0.63 & 0.00 \\
+complex\_nested & 100{,}000 & 0.00 & 1.26 & 1.19 \\
+complex\_nested & 200{,}000 & 0.00 & 0.28 & 3.75 \\
+complex\_nested & 400{,}000 & 0.00 & 7.86 & 9.06 \\
+complex\_nested & 800{,}000 & 17.91 & 13.51 & 19.69 \\
+complex\_nested & 1{,}000{,}000 & 23.15 & 18.54 & 25.19 \\
+complex\_nested & 1{,}500{,}000 & 37.66 & 27.86 & 38.19 \\
+complex\_nested & 2{,}000{,}000 & 79.84 & 39.63 & 53.19 \\
 \end{longtable}
 }
 
-Table~\ref{tab:memory_cache} shows that the proposed engine uses much
-less measured memory than the database containers, while Trino's memory
-footprint grows substantially with the in-memory benchmark table.  This
-explains why Trino can be faster on larger inputs while also consuming
-much more memory under the selected memory-connector setup.
+Table~\ref{tab:memory_cache} shows that the average query-memory
+indicators generally increase with input size, as expected for a
+per-query working set.  For the most memory-intensive pattern
+families at the largest input (2\,M rows), the three indicators fall
+between roughly 40 and 80\,MB; this range describes only those
+worst-case cells, not the benchmark as a whole, where most readings
+are far smaller.  The Pandas engine recorded the smallest
+system-native indicator values on the sequence-style pattern
+families, while \texttt{optional\_pattern} and
+\texttt{complex\_nested}, which produce the largest match sets,
+bring its readings into the same order of magnitude as the database
+engines; at 2\,M rows the engine's \texttt{complex\_nested}
+indicator (79.84\,MB) is about 1.5$\times$ Oracle's (53.19\,MB) and
+about 2.0$\times$ Trino's (39.63\,MB).
+
+Values of 0.00 in Table~\ref{tab:memory_cache} do not mean that a
+query executed without memory; they mean that the query's working
+set stayed below the resolution of the corresponding counter.
+Oracle pre-allocates an initial block of PGA to every new session at
+connect time, so a small query whose \texttt{MATCH\_\allowbreak{}RECOGNIZE}
+work areas fit inside that initial allocation never raises the
+session's PGA high-water mark, and the measured delta is zero.
+Likewise, a Pandas run that fits into pages already resident in the
+Python process produces no RSS growth.  Readings close to this floor
+are also quantized to the runtime's allocation granularity (Oracle,
+for example, extends session PGA in small fixed-size chunks), so
+near-floor values should not be compared against each other.  At larger input sizes the database counters
+grow steadily with the input, while the RSS-based Pandas readings
+fluctuate more (values can rise, fall, or return to zero between
+neighboring cells) because RSS deltas depend on page reuse and
+garbage-collection timing inside the Python process; the overall
+upward trend beyond the measurement floor is what the metric is
+intended to show.
+
+{\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{longtable}{llrrr}
+\caption{Footprint memory (MB) by pattern, dataset size, and system
+  (process RSS peak for Pandas; peak container memory sampled during
+  the measured run for Trino/Oracle, whose containers keep running
+  across dataset sizes within a pass)}
+\label{tab:memory_footprint} \\
+\toprule
+\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Pandas} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\midrule
+\endfirsthead
+\caption*{Table~\thetable{} (continued): Footprint memory (MB) by pattern, size, and system} \\
+\toprule
+\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Pandas} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+simple\_sequence & 50{,}000 & 146.58 & 11{,}560.96 & 2{,}267.14 \\
+simple\_sequence & 100{,}000 & 168.59 & 11{,}939.84 & 2{,}483.20 \\
+simple\_sequence & 200{,}000 & 199.32 & 12{,}421.12 & 2{,}254.85 \\
+simple\_sequence & 400{,}000 & 268.40 & 13{,}629.44 & 2{,}254.85 \\
+simple\_sequence & 800{,}000 & 402.93 & 15{,}892.48 & 2{,}258.94 \\
+simple\_sequence & 1{,}000{,}000 & 469.36 & 18{,}585.60 & 2{,}259.97 \\
+simple\_sequence & 1{,}500{,}000 & 622.00 & 22{,}691.84 & 2{,}259.97 \\
+simple\_sequence & 2{,}000{,}000 & 797.02 & 26{,}705.92 & 2{,}289.66 \\
+\midrule
+alternation & 50{,}000 & 147.62 & 11{,}560.96 & 2{,}504.70 \\
+alternation & 100{,}000 & 169.07 & 11{,}939.84 & 2{,}345.98 \\
+alternation & 200{,}000 & 199.32 & 12{,}472.32 & 2{,}254.85 \\
+alternation & 400{,}000 & 263.47 & 13{,}680.64 & 2{,}254.85 \\
+alternation & 800{,}000 & 372.16 & 15{,}892.48 & 2{,}257.92 \\
+alternation & 1{,}000{,}000 & 440.69 & 18{,}636.80 & 2{,}258.94 \\
+alternation & 1{,}500{,}000 & 560.60 & 22{,}691.84 & 2{,}260.99 \\
+alternation & 2{,}000{,}000 & 715.37 & 26{,}705.92 & 2{,}237.44 \\
+\midrule
+quantified & 50{,}000 & 147.64 & 11{,}560.96 & 2{,}516.99 \\
+quantified & 100{,}000 & 169.07 & 11{,}939.84 & 2{,}249.73 \\
+quantified & 200{,}000 & 199.32 & 12{,}472.32 & 2{,}254.85 \\
+quantified & 400{,}000 & 262.47 & 13{,}680.64 & 2{,}254.85 \\
+quantified & 800{,}000 & 368.21 & 15{,}892.48 & 2{,}257.92 \\
+quantified & 1{,}000{,}000 & 434.78 & 18{,}739.20 & 2{,}258.94 \\
+quantified & 1{,}500{,}000 & 557.45 & 22{,}691.84 & 2{,}259.97 \\
+quantified & 2{,}000{,}000 & 717.05 & 26{,}705.92 & 2{,}237.44 \\
+\midrule
+optional\_pattern & 50{,}000 & 155.96 & 11{,}560.96 & 2{,}515.97 \\
+optional\_pattern & 100{,}000 & 179.78 & 11{,}939.84 & 2{,}246.66 \\
+optional\_pattern & 200{,}000 & 219.38 & 12{,}482.56 & 2{,}253.82 \\
+optional\_pattern & 400{,}000 & 303.00 & 13{,}680.64 & 2{,}254.85 \\
+optional\_pattern & 800{,}000 & 465.06 & 15{,}943.68 & 2{,}257.92 \\
+optional\_pattern & 1{,}000{,}000 & 546.09 & 18{,}739.20 & 2{,}258.94 \\
+optional\_pattern & 1{,}500{,}000 & 737.91 & 22{,}691.84 & 2{,}259.97 \\
+optional\_pattern & 2{,}000{,}000 & 954.59 & 26{,}705.92 & 2{,}238.46 \\
+\midrule
+complex\_nested & 50{,}000 & 155.98 & 11{,}560.96 & 2{,}533.38 \\
+complex\_nested & 100{,}000 & 174.86 & 11{,}939.84 & 2{,}253.82 \\
+complex\_nested & 200{,}000 & 211.41 & 12{,}482.56 & 2{,}254.85 \\
+complex\_nested & 400{,}000 & 272.52 & 13{,}680.64 & 2{,}254.85 \\
+complex\_nested & 800{,}000 & 405.15 & 16{,}271.36 & 2{,}277.38 \\
+complex\_nested & 1{,}000{,}000 & 477.90 & 19{,}015.68 & 2{,}283.52 \\
+complex\_nested & 1{,}500{,}000 & 630.54 & 22{,}691.84 & 2{,}297.86 \\
+complex\_nested & 2{,}000{,}000 & 816.95 & 26{,}705.92 & 2{,}281.47 \\
+\end{longtable}
+}
+
+Table~\ref{tab:memory_footprint} shows the practical deployment
+footprints.  The boundaries differ by construction: the Pandas value
+covers one Python process including the loaded input DataFrame,
+whereas the database values cover entire Docker containers.  The
+Pandas engine stays below 1\,GB even at 2\,M rows.  Trino's
+container grows to about 27\,GB: the benchmark table is held by its
+memory connector inside the JVM heap, the table is dropped and
+recreated before each dataset size is loaded, and the container
+keeps running across all sizes within the system's benchmark pass
+(it is restarted only between systems).  Each database value is the
+peak container memory sampled during that measured run, not a
+monotonic high-water counter: because the JVM rarely returns freed
+heap to the operating system, the readings carry allocations
+retained from earlier sizes, yet they can also fluctuate downward
+between neighboring cells because the container-level usage metric
+excludes reclaimable page cache that the kernel may free at any
+time.  Oracle's container stays near 2.2--2.5\,GB.  The two kinds
+of values therefore have different reset boundaries: the Pandas
+readings are per-run process peaks, while the database readings are
+per-run samples of a container whose memory state resets only when
+the container is restarted at the start of the pass, and they must
+not be interpreted as independent per-size footprints.  Restarting each container before every dataset
+size would yield independent per-size footprint measurements and is
+the recommended refinement for future benchmark runs; it was not
+applied here to keep the pass duration tractable.  These values
+document what it costs to have each system running as deployed here;
+per-query comparisons should use Table~\ref{tab:memory_cache}.
 
 % ................................................................
 \subsection{Key Findings}
@@ -1198,89 +1709,119 @@ much more memory under the selected memory-connector setup.
 
 \begin{table}[H]
 \centering
-\caption{Overall benchmark test statistics by system}
+\caption{Overall benchmark test statistics by system.  Footprint
+  values have different reset boundaries: per-run process peaks for
+  the Pandas engine, per-run peak samples of containers that persist
+  across dataset sizes for Trino/Oracle
+  (Section~\ref{subsec:eval-memory}).}
 \label{tab:overall_stats}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+\textbf{System} & \textbf{Tests} & \textbf{Sum of Median} & \textbf{Avg Time} & \textbf{Avg Thr.} & \textbf{Thr. Range} & \textbf{Max Query} & \textbf{Max Footpr.} \\
+& & \textbf{Times (s)} & \textbf{(s)} & \textbf{(rows/s)} & \textbf{(rows/s)} & \textbf{Mem.\ (MB)} & \textbf{Mem.\ (MB)} \\
+\midrule
+Proposed Pandas engine & 40 & 80.32 & 2.01 & 457{,}018 & 269{,}303--939{,}046 & 79.84 & 954.59 \\
+Trino~473 & 40 & 76.46 & 1.91 & 561{,}007 & 115{,}018--935{,}473 & 39.63 & 26{,}705.92 \\
+Oracle XE~21c & 40 & 32.80 & 0.82 & 1{,}217{,}217 & 341{,}233--1{,}824{,}526 & 53.19 & 2{,}533.38 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Cross-system benchmark summary under 1 CPU core and a
+  32\,GB memory limit.  Footprint values have different reset
+  boundaries: per-run process peaks for the Pandas engine, per-run
+  peak samples of containers that persist across dataset sizes for
+  Trino/Oracle.}
+\label{tab:cross_system_summary}
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{lrrrrrr}
 \toprule
-\textbf{System} & \textbf{Tests} & \textbf{Total Time} & \textbf{Avg Time} & \textbf{Avg Thr.} & \textbf{Thr. Range} & \textbf{Max Mem.} \\
-& & \textbf{(s)} & \textbf{(s)} & \textbf{(rows/s)} & \textbf{(rows/s)} & \textbf{(MB)} \\
+\textbf{System} & \textbf{Tests} & \textbf{Avg Time} & \textbf{Avg Throughput} & \textbf{Max Query} & \textbf{Max Footpr.} & \textbf{Correctness} \\
+& & \textbf{(s)} & \textbf{(rows/s)} & \textbf{Mem.\ (MB)} & \textbf{Mem.\ (MB)} & \\
 \midrule
-Proposed Pandas engine & 40 & 113.37 & 2.83 & 316{,}400 & 170{,}621--705{,}901 & 113.89 \\
-Trino~473 & 40 & 125.00 & 3.12 & 239{,}837 & 23{,}491--624{,}497 & 25{,}886.72 \\
-Oracle XE~21c & 40 & 80.77 & 2.02 & 427{,}302 & 25{,}419--1{,}571{,}973 & 2{,}228.22 \\
+Proposed Pandas engine & 40 & 2.01 & 457{,}018 & 79.84 & 954.59 & proposed output \\
+Trino~473 & 40 & 1.91 & 561{,}007 & 39.63 & 26{,}705.92 & 40/40 identical \\
+Oracle XE~21c & 40 & 0.82 & 1{,}217{,}217 & 53.19 & 2{,}533.38 & 40/40 identical \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 \end{table}
 
 \begin{table}[H]
 \centering
-\caption{Cross-system benchmark summary under 1 CPU core and 32\,GB memory}
-\label{tab:cross_system_summary}
-\begin{tabular}{lrrrrr}
-\toprule
-\textbf{System} & \textbf{Tests} & \textbf{Avg Time} & \textbf{Avg Throughput} & \textbf{Max Memory} & \textbf{Correctness} \\
-& & \textbf{(s)} & \textbf{(rows/s)} & \textbf{(MB)} & \\
-\midrule
-Proposed Pandas engine & 40 & 2.83 & 316{,}400 & 113.89 & baseline \\
-Trino~473 & 40 & 3.12 & 239{,}837 & 25{,}886.72 & 40/40 \\
-Oracle XE~21c & 40 & 2.02 & 427{,}302 & 2{,}228.22 & 40/40 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{table}[H]
-\centering
-\caption{Average execution time by pattern under 1 CPU core and 32\,GB memory}
+\caption{Average execution time by pattern under 1 CPU core and a 32\,GB memory limit}
 \label{tab:avg_time_by_pattern}
 \begin{tabular}{lrrr}
 \toprule
 \textbf{Pattern} & \textbf{Pandas (s)} & \textbf{Trino~473 (s)} & \textbf{Oracle XE~21c (s)} \\
 \midrule
-simple\_sequence & 3.24 & 2.42 & 1.57 \\
-alternation & 1.11 & 2.23 & 1.62 \\
-quantified & 3.06 & 2.76 & 1.86 \\
-optional\_pattern & 3.46 & 2.33 & 1.67 \\
-complex\_nested & 3.31 & 5.88 & 3.38 \\
+simple\_sequence & 2.21 & 1.29 & 0.61 \\
+alternation & 0.84 & 1.04 & 0.43 \\
+quantified & 2.13 & 1.28 & 0.68 \\
+optional\_pattern & 2.31 & 0.89 & 0.46 \\
+complex\_nested & 2.54 & 5.06 & 1.92 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[H]
 \centering
-\caption{Average execution time by dataset size under 1 CPU core and 32\,GB memory}
+\caption{Average execution time by dataset size under 1 CPU core and a 32\,GB memory limit}
 \label{tab:avg_time_by_size}
 \begin{tabular}{rrrr}
 \toprule
 \textbf{Size (rows)} & \textbf{Pandas (s)} & \textbf{Trino~473 (s)} & \textbf{Oracle XE~21c (s)} \\
 \midrule
-50{,}000 & 0.20 & 1.79 & 1.82 \\
-100{,}000 & 0.40 & 1.77 & 1.86 \\
-200{,}000 & 0.72 & 1.49 & 1.72 \\
-400{,}000 & 1.58 & 1.87 & 1.57 \\
-800{,}000 & 3.01 & 3.22 & 1.77 \\
-1{,}000{,}000 & 3.65 & 4.20 & 1.71 \\
-1{,}500{,}000 & 5.60 & 4.93 & 2.34 \\
-2{,}000{,}000 & 7.52 & 5.73 & 3.37 \\
+50{,}000 & 0.12 & 0.15 & 0.06 \\
+100{,}000 & 0.26 & 0.22 & 0.08 \\
+200{,}000 & 0.47 & 0.34 & 0.15 \\
+400{,}000 & 0.96 & 0.76 & 0.37 \\
+800{,}000 & 2.17 & 1.90 & 0.92 \\
+1{,}000{,}000 & 2.67 & 2.43 & 1.11 \\
+1{,}500{,}000 & 4.19 & 4.28 & 1.70 \\
+2{,}000{,}000 & 5.22 & 5.22 & 2.17 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[H]
 \centering
-\caption{Average measured memory by dataset size under 1 CPU core and 32\,GB memory}
+\caption{Average query memory by dataset size under 1 CPU core and a 32\,GB memory limit}
 \label{tab:avg_memory_by_size}
 \begin{tabular}{rrrr}
 \toprule
 \textbf{Size (rows)} & \textbf{Pandas (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle XE~21c (MB)} \\
 \midrule
-50{,}000 & 0.25 & 8{,}099.43 & 2{,}148.15 \\
-100{,}000 & 0.41 & 8{,}750.90 & 2{,}201.60 \\
-200{,}000 & 1.45 & 9{,}636.25 & 2{,}211.43 \\
-400{,}000 & 5.60 & 10{,}825.73 & 2{,}154.70 \\
-800{,}000 & 11.31 & 13{,}191.17 & 2{,}161.66 \\
-1{,}000{,}000 & 12.07 & 16{,}074.75 & 2{,}163.30 \\
-1{,}500{,}000 & 23.58 & 20{,}240.38 & 2{,}177.02 \\
-2{,}000{,}000 & 36.20 & 25{,}661.44 & 2{,}211.84 \\
+50{,}000 & 0.58 & 0.71 & 0.17 \\
+100{,}000 & 0.61 & 1.70 & 1.19 \\
+200{,}000 & 1.21 & 2.81 & 3.75 \\
+400{,}000 & 5.38 & 5.60 & 9.06 \\
+800{,}000 & 8.12 & 13.50 & 19.69 \\
+1{,}000{,}000 & 10.02 & 18.52 & 25.19 \\
+1{,}500{,}000 & 16.12 & 27.79 & 38.19 \\
+2{,}000{,}000 & 29.26 & 39.52 & 53.19 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Average footprint memory by dataset size under 1 CPU core and a 32\,GB memory limit}
+\label{tab:avg_footprint_by_size}
+\begin{tabular}{rrrr}
+\toprule
+\textbf{Size (rows)} & \textbf{Pandas (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle XE~21c (MB)} \\
+\midrule
+50{,}000 & 150.76 & 11{,}560.96 & 2{,}467.64 \\
+100{,}000 & 172.27 & 11{,}939.84 & 2{,}315.88 \\
+200{,}000 & 205.75 & 12{,}466.18 & 2{,}254.64 \\
+400{,}000 & 273.97 & 13{,}670.40 & 2{,}254.85 \\
+800{,}000 & 402.70 & 15{,}978.50 & 2{,}262.02 \\
+1{,}000{,}000 & 473.76 & 18{,}743.30 & 2{,}264.06 \\
+1{,}500{,}000 & 621.70 & 22{,}691.84 & 2{,}267.75 \\
+2{,}000{,}000 & 800.20 & 26{,}705.92 & 2{,}256.90 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1291,29 +1832,47 @@ complex\_nested & 3.31 & 5.88 & 3.38 \\
 \label{tab:cross_system_correctness}
 \begin{tabular}{lccc}
 \toprule
-\textbf{Pattern} & \textbf{Pandas Baseline} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\textbf{Pattern} & \textbf{Pandas Engine} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
 \midrule
-simple\_sequence & baseline & 8/8 matched & 8/8 matched \\
-alternation & baseline & 8/8 matched & 8/8 matched \\
-quantified & baseline & 8/8 matched & 8/8 matched \\
-optional\_pattern & baseline & 8/8 matched & 8/8 matched \\
-complex\_nested & baseline & 8/8 matched & 8/8 matched \\
+simple\_sequence & proposed output & 8/8 identical & 8/8 identical \\
+alternation & proposed output & 8/8 identical & 8/8 identical \\
+quantified & proposed output & 8/8 identical & 8/8 identical \\
+optional\_pattern & proposed output & 8/8 identical & 8/8 identical \\
+complex\_nested & proposed output & 8/8 identical & 8/8 identical \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 
 Tables~\ref{tab:overall_stats}--\ref{tab:cross_system_correctness}
-summarize the main findings.  All 120 measured runs completed
-successfully, and Trino and Oracle matched the proposed engine's
-normalized output for all 40 pattern--size combinations each.  Oracle
-had the lowest average execution time in this benchmark, followed by
-Trino and then the proposed Pandas engine.  The proposed engine used
-the smallest measured memory footprint because it executes directly in
-the Python process without a resident database server.  These results
-are not presented as a claim that one system is universally better;
-they show the trade-off observed under the selected workload, data
-sizes, and resource policy.
+summarize the main findings.  All 120 benchmark cells completed
+successfully, and Trino and Oracle produced output identical to the
+proposed engine's normalized output for all 40 pattern--size
+combinations each---all three systems produced identical result
+sets.  Oracle had the lowest average
+execution time in this benchmark (0.82\,s), followed by Trino
+(1.91\,s) and the proposed Pandas engine (2.01\,s): the engine's
+overall average is within about 5\% of Trino's, and the engine is
+faster than Trino on two of the five families
+(\texttt{alternation} and \texttt{complex\_nested}, the latter by
+roughly a factor of two), while Oracle sustains above one million
+rows per second on most combinations.  The system-native
+query-memory indicators of all three systems fall in the same order
+of magnitude, reaching at most 40--80\,MB for the most
+memory-intensive patterns at 2\,M rows---where the engine's
+\texttt{complex\_nested} indicator (79.84\,MB) is about
+1.5$\times$ Oracle's and 2.0$\times$ Trino's---while the
+operational
+footprints differ substantially: the Pandas engine peaks below
+1\,GB as a single Python process, the Oracle container stays near
+2.5\,GB (about 2.7$\times$ the Pandas peak), and the Trino
+container reaches about 27\,GB under its memory-connector setup.
+The recorded per-cell minimum and maximum times (released with the
+benchmark artifacts) show a median run-to-run spread of about 9\%
+for the Pandas engine, 20\% for Trino, and 5\% for Oracle.  These
+results are not presented as a claim that one system is universally
+better; they show the trade-off observed under the selected
+workload, data sizes, and resource configuration.
 
 % ----------------------------------------------------------------
 \section{Chapter Summary}
@@ -1324,15 +1883,24 @@ This chapter evaluated the proposed \texttt{MATCH\_\allowbreak{}RECOGNIZE}
 implementation through correctness checks, feature-coverage tests,
 complexity analysis, performance measurements, memory analysis, and
 comparison with existing systems.  The experiments used five pattern
-families across eight dataset sizes, producing 40 successful
-performance runs for the proposed engine and an additional
-cross-system comparison against Trino and Oracle under equal resource
-limits.
+families across eight dataset sizes, with every cell reported as the
+median of three measured runs, producing 40 successful benchmark
+cells for the proposed engine and a 120-cell cross-system comparison
+against Trino~473 and Oracle~XE~21c under the same nominal resource
+budget.
 
 The results show that the implementation preserves the evaluated
-semantics for several core pattern families while reducing developer
-effort compared with hand-written Pandas logic.  The cross-system
-comparison further shows that the evaluated outputs match Trino and
-Oracle for all five benchmark pattern families after the quantifier
-and optional-pattern fixes.  The next chapter summarizes the thesis
+semantics for the benchmark pattern families---Trino and Oracle
+produced output identical to the engine's normalized output in all
+40 pattern--size combinations each (all three systems returned
+identical result sets)---while reducing
+developer effort compared with hand-written Pandas logic.  Under the
+selected workload and resource configuration, the proposed engine
+sustained stable throughput of roughly 457\,000~rows/s with
+approximately linear scaling, an average execution time within about
+5\% of Trino's (Oracle was the fastest system in this benchmark),
+query-memory indicator values in the same order of magnitude as the
+database engines, and a substantially smaller operational footprint,
+since it runs inside a single Python process without a resident
+database server.  The next chapter summarizes the thesis
 contributions, discusses limitations, and outlines future work.

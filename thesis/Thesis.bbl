@@ -39,8 +39,7 @@
     \field{issn}{0975-8887}
     \field{number}{35}
     \field{pages}{31\bibrangedash 34}
-    \field{title}{Identifying Possible Financial Frauds using {SQL} Row Pattern
-  Recognition}
+    \field{title}{Identifying Possible Financial Frauds using {SQL} Row Pattern Recognition}
     \verb{url}
     \verb https://ijcaonline.org/archives/volume184/number35/32542-2022922446/
     \endverb
@@ -62,9 +61,7 @@
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
     \field{note}{\url{https://www.iso.org/standard/65143.html}}
-    \field{title}{{ISO/IEC TR 19075-5:2016} Information technology -- Database
-  languages -- SQL Technical Reports -- Part 5: Row Pattern Recognition in SQL,
-  Feature R010: Row pattern recognition in FROM clause}
+    \field{title}{{ISO/IEC TR 19075-5:2016} Information technology -- Database languages -- SQL Technical Reports -- Part 5: Row Pattern Recognition in SQL, Feature R010: Row pattern recognition in FROM clause}
     \field{year}{2016}
   \endentry
 
@@ -85,8 +82,7 @@
     \field{labeltitlesource}{title}
     \field{howpublished}{\url{https://www.iso.org/standard/78936.html}}
     \field{note}{ISO/IEC 19075-5:2021, Edition 1}
-    \field{title}{Information technology --- Guidance for the use of database
-  language SQL --- Part 5: Row pattern recognition}
+    \field{title}{Information technology --- Guidance for the use of database language SQL --- Part 5: Row pattern recognition}
     \field{year}{2021}
   \endentry
 
@@ -101,7 +97,7 @@
     \strng{fullhash}{O1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-  \field{howpublished}{\url{https://docs.oracle.com/en/middleware/fusion-middleware/osa/19.1/cqlreference/pattern-recognition-match_recognize.html}}
+    \field{howpublished}{\url{https://docs.oracle.com/en/middleware/fusion-middleware/osa/19.1/cqlreference/pattern-recognition-match_recognize.html}}
     \field{title}{Pattern Recognition With {MATCH\_RECOGNIZE}}
     \field{year}{2022}
   \endentry
@@ -126,8 +122,7 @@
     \verb 10.1007/978-1-4842-5617-6
     \endverb
     \field{isbn}{978-1-4842-5616-9}
-    \field{title}{Practical Oracle SQL: Mastering the Full Power of Oracle
-  Database}
+    \field{title}{Practical Oracle SQL: Mastering the Full Power of Oracle Database}
     \field{month}{01}
     \field{year}{2020}
   \endentry
@@ -143,7 +138,7 @@
     \strng{fullhash}{T1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-  \field{howpublished}{\url{https://trino.io/docs/current/sql/match-recognize.html}}
+    \field{howpublished}{\url{https://trino.io/docs/current/sql/match-recognize.html}}
     \field{title}{{MATCH\_RECOGNIZE}}
     \field{year}{2022}
   \endentry
@@ -159,7 +154,7 @@
     \strng{fullhash}{T1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-  \field{howpublished}{\url{https://trino.io/blog/2021/05/19/row_pattern_matching.html}}
+    \field{howpublished}{\url{https://trino.io/blog/2021/05/19/row_pattern_matching.html}}
     \field{title}{Row Pattern Recognition with {MATCH\_RECOGNIZE}}
     \field{year}{2021}
   \endentry
@@ -198,7 +193,7 @@
     \strng{fullhash}{A3}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-  \field{howpublished}{\url{https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/table/sql/queries/match_recognize/}}
+    \field{howpublished}{\url{https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/table/sql/queries/match_recognize/}}
     \field{title}{{MATCH\_RECOGNIZE}}
     \field{year}{2026}
   \endentry
@@ -216,8 +211,7 @@
     \strng{fullhash}{HG1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{note}{PostgreSQL General Mailing List, Message-ID:
-  7e495cb8-ca03-4e3e-aa7e-45bf75212da8@Spark}
+    \field{note}{PostgreSQL General Mailing List, Message-ID: 7e495cb8-ca03-4e3e-aa7e-45bf75212da8@Spark}
     \field{title}{Any interest in adding {\texttt{MATCH\_RECOGNIZE}}?}
     \verb{url}
     \verb https://www.postgresql.org/message-id/7e495cb8-ca03-4e3e-aa7e-45bf752
@@ -242,10 +236,8 @@
     \strng{fullhash}{FT1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{note}{Bachelor's thesis, Eberhard Karls Universit\"{a}t
-  T\"{u}bingen}
-    \field{title}{Bringing Row Pattern Recognition to {DuckDB}: Translating
-  {MATCH\_RECOGNIZE} to {WITH RECURSIVE}}
+    \field{note}{Bachelor's thesis, Eberhard Karls Universit\"{a}t T\"{u}bingen}
+    \field{title}{Bringing Row Pattern Recognition to {DuckDB}: Translating {MATCH\_RECOGNIZE} to {WITH RECURSIVE}}
     \field{year}{2025}
   \endentry
 
@@ -393,8 +385,7 @@
     \field{issn}{1610-1995}
     \field{number}{2}
     \field{pages}{163\bibrangedash 174}
-    \field{title}{Specification of Row Pattern Recognition in the {SQL}
-  Standard and its Implementations}
+    \field{title}{Specification of Row Pattern Recognition in the {SQL} Standard and its Implementations}
     \field{volume}{22}
     \field{journaltitle}{Datenbank-Spektrum}
     \field{month}{07}
@@ -413,8 +404,7 @@
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
     \field{howpublished}{Kaggle dataset}
-  \field{note}{\url{https://www.kaggle.com/datasets/asaniczka/amazon-uk-products-dataset-2023}
-  (accessed 2025-07-16)}
+    \field{note}{\url{https://www.kaggle.com/datasets/asaniczka/amazon-uk-products-dataset-2023} (accessed 2025-07-16)}
     \field{title}{{Amazon UK Products Dataset 2023}}
     \field{year}{2023}
   \endentry
@@ -447,13 +437,11 @@
     \strng{fullhash}{LMEhMAA1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{booktitle}{2026 IEEE 23rd Mediterranean Electrotechnical Conference
-  (MELECON)}
+    \field{booktitle}{2026 IEEE 23rd Mediterranean Electrotechnical Conference (MELECON)}
     \verb{doi}
     \verb 10.1109/MELECON64486.2026.11418885
     \endverb
-    \field{title}{Row Pattern Recognition for Pandas: Bringing MATCH\_RECOGNIZE
-  to Python DataFrames}
+    \field{title}{Row Pattern Recognition for Pandas: Bringing MATCH\_RECOGNIZE to Python DataFrames}
     \field{year}{2026}
   \endentry
 
@@ -468,7 +456,7 @@
     \strng{fullhash}{O2}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-  \field{howpublished}{\url{https://docs.oracle.com/database/121/DWHSG/pattern_match.htm}}
+    \field{howpublished}{\url{https://docs.oracle.com/database/121/DWHSG/pattern_match.htm}}
     \field{note}{Accessed: 2024}
     \field{title}{Pattern Matching in Oracle Database 12c}
     \field{year}{2013}
@@ -485,8 +473,7 @@
     \strng{fullhash}{I2}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{title}{{ISO/IEC 9075-2:2016} Information technology --- Database
-  languages --- {SQL} --- Part~2: Foundation ({SQL/Foundation})}
+    \field{title}{{ISO/IEC 9075-2:2016} Information technology --- Database languages --- {SQL} --- Part~2: Foundation ({SQL/Foundation})}
     \list{institution}{1}{%
       {International Organization for Standardization}%
     }
@@ -508,8 +495,7 @@
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
     \field{note}{Medium, Towards Data Science}
-    \field{title}{Funnel Analytics with {SQL}: {MATCH\_RECOGNIZE()} on
-  {Snowflake}}
+    \field{title}{Funnel Analytics with {SQL}: {MATCH\_RECOGNIZE()} on {Snowflake}}
     \verb{url}
     \verb https://medium.com/data-science/funnel-analytics-with-sql-match-recog
     \verb nize-on-snowflake-8bd576d9b7b1
@@ -692,7 +678,7 @@
     \strng{fullhash}{O1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-  \field{howpublished}{\url{https://docs.oracle.com/en/database/oracle/oracle-database/21/dwhsg/sql-pattern-matching-data-warehouses.html}}
+    \field{howpublished}{\url{https://docs.oracle.com/en/database/oracle/oracle-database/21/dwhsg/sql-pattern-matching-data-warehouses.html}}
     \field{note}{Oracle Database 21c Data Warehousing Guide}
     \field{title}{SQL Pattern Matching in Oracle Database}
     \field{year}{2021}
@@ -737,8 +723,7 @@
     \field{labeltitlesource}{title}
     \field{number}{4}
     \field{pages}{709}
-    \field{title}{Building Advanced Web Applications Using Data Ingestion and
-  Data Processing Tools}
+    \field{title}{Building Advanced Web Applications Using Data Ingestion and Data Processing Tools}
     \field{volume}{13}
     \field{journaltitle}{Electronics}
     \field{year}{2024}
@@ -757,8 +742,7 @@
     \strng{fullhash}{GE1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{title}{Evaluating {Apache Flink}, {Kafka Streams}, and {Spark
-  Streaming} for Scalable Machine Learning Workflows}
+    \field{title}{Evaluating {Apache Flink}, {Kafka Streams}, and {Spark Streaming} for Scalable Machine Learning Workflows}
     \field{year}{2025}
   \endentry
 
@@ -808,8 +792,7 @@
     \strng{fullhash}{SMLHSMKANTGS1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{booktitle}{Proceedings of the 33rd International Conference on
-  Scientific and Statistical Database Management}
+    \field{booktitle}{Proceedings of the 33rd International Conference on Scientific and Statistical Database Management}
     \verb{doi}
     \verb 10.1145/3468791.3468840
     \endverb
@@ -851,8 +834,7 @@
     \strng{fullhash}{MNLWRVV1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{title}{sql4ml: A declarative end-to-end workflow for machine
-  learning}
+    \field{title}{sql4ml: A declarative end-to-end workflow for machine learning}
     \verb{url}
     \verb https://api.semanticscholar.org/CorpusID:198968138
     \endverb
@@ -875,11 +857,9 @@
     \field{labeltitlesource}{title}
     \field{number}{6}
     \field{pages}{42\bibrangedash 53}
-    \field{title}{The Evolution and Modernization of Data Pipeline
-  Architectures}
+    \field{title}{The Evolution and Modernization of Data Pipeline Architectures}
     \field{volume}{13}
-    \field{journaltitle}{European Journal of Computer Science and Information
-  Technology}
+    \field{journaltitle}{European Journal of Computer Science and Information Technology}
     \field{year}{2025}
   \endentry
 
@@ -905,8 +885,7 @@
     \strng{fullhash}{RMMH1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{booktitle}{Proceedings of the 2019 International Conference on
-  Management of Data}
+    \field{booktitle}{Proceedings of the 2019 International Conference on Management of Data}
     \verb{doi}
     \verb 10.1145/3299869.3320212
     \endverb
@@ -977,8 +956,7 @@
     \strng{fullhash}{LJIYCRBQRJACS1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{booktitle}{2018 IEEE 34th International Conference on Data
-  Engineering (ICDE)}
+    \field{booktitle}{2018 IEEE 34th International Conference on Data Engineering (ICDE)}
     \verb{doi}
     \verb 10.1109/ICDE.2018.00179
     \endverb
@@ -1036,8 +1014,7 @@
     \verb{doi}
     \verb 10.48786/EDBT.2025.27
     \endverb
-    \field{title}{Evaluation of Dataframe Libraries for Data Preparation on a
-  Single Machine}
+    \field{title}{Evaluation of Dataframe Libraries for Data Preparation on a Single Machine}
     \verb{url}
     \verb https://openproceedings.org/2025/conf/edbt/paper-96.pdf
     \endverb
@@ -1453,8 +1430,7 @@
     \strng{fullhash}{PTHSFK1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{booktitle}{Proceedings of the 2014 {ACM} International Conference on
-  Object Oriented Programming Systems Languages {\&} Applications}
+    \field{booktitle}{Proceedings of the 2014 {ACM} International Conference on Object Oriented Programming Systems Languages {\&} Applications}
     \verb{doi}
     \verb 10.1145/2660193.2660202
     \endverb
@@ -1497,8 +1473,7 @@
     \strng{fullhash}{OFQJRPOGM1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-    \field{title}{An empirical evaluation of {Lex/Yacc} and {ANTLR} parser
-  generation tools}
+    \field{title}{An empirical evaluation of {Lex/Yacc} and {ANTLR} parser generation tools}
     \field{volume}{64}
     \field{journaltitle}{Computer Languages, Systems \& Structures}
     \field{year}{2021}
@@ -1551,7 +1526,7 @@
     \strng{fullhash}{A2}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-  \field{howpublished}{\url{https://github.com/antlr/grammars-v4/tree/master/sql/trino}}
+    \field{howpublished}{\url{https://github.com/antlr/grammars-v4/tree/master/sql/trino}}
     \field{title}{Trino SQL Grammar for ANTLR}
     \field{year}{2022}
   \endentry
@@ -1569,7 +1544,7 @@
     \strng{fullhash}{JJ1}
     \field{labelnamesource}{author}
     \field{labeltitlesource}{title}
-  \field{howpublished}{\url{https://hillside.net/plop/plop2003/Papers/Jones-ImplementingASTs.pdf}}
+    \field{howpublished}{\url{https://hillside.net/plop/plop2003/Papers/Jones-ImplementingASTs.pdf}}
     \field{title}{Abstract Syntax Tree Implementation Idioms}
     \field{year}{2003}
   \endentry
@@ -1688,8 +1663,7 @@
     \verb 10.1587/transinf.2020FCP0010
     \endverb
     \field{issn}{1745-1361}
-    \field{title}{A New Finite Automata Construction Using a Prefix and a
-  Suffix of Regular Expressions}
+    \field{title}{A New Finite Automata Construction Using a Prefix and a Suffix of Regular Expressions}
     \field{journaltitle}{IEICE Transactions on Information and Systems}
     \field{year}{2021}
   \endentry
@@ -1716,8 +1690,7 @@
     \endverb
     \field{isbn}{1581138709}
     \field{series}{ACMSE '04}
-    \field{title}{A simple way to construct NFA with fewer states and
-  transitions}
+    \field{title}{A simple way to construct NFA with fewer states and transitions}
     \verb{url}
     \verb https://doi.org/10.1145/986537.986588
     \endverb

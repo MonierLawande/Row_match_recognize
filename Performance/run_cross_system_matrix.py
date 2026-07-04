@@ -55,6 +55,12 @@ SQL_DIR = OUTPUT_DIR / "sql"
 TABLE_NAME = "benchmark_matrix"
 LOAD_COLUMNS = ["seq_id", "category", "stars", "price", "reviews", "category_name"]
 
+PANDAS_QUERY_MEMORY_METRIC = "process RSS peak delta MB during measured query"
+PANDAS_FOOTPRINT_MEMORY_METRIC = "process RSS absolute peak MB"
+TRINO_QUERY_MEMORY_METRIC = "Trino per-query peakMemoryBytes MB"
+ORACLE_QUERY_MEMORY_METRIC = "Oracle session PGA high-water delta MB (fresh session)"
+DB_FOOTPRINT_MEMORY_METRIC = "Docker container peak memory MB"
+
 DEFAULT_SIZES = [
     50_000,
     100_000,
@@ -170,10 +176,20 @@ class RunResult:
     pattern: str
     success: bool
     correctness_matches_pandas: bool | str | None
+    # Median over the measured runs; min/max show run-to-run spread.
     execution_time_seconds: float | None
+    execution_time_min_seconds: float | None
+    execution_time_max_seconds: float | None
+    measured_runs: int
     throughput_rows_per_second: float | None
-    memory_mb: float | None
-    memory_metric: str
+    # Comparable across systems: peak additional memory attributable to
+    # executing the measured query, excluding stored data and idle engine.
+    query_memory_mb: float | None
+    query_memory_metric: str
+    # Not comparable per-query: what it costs to have the system running
+    # (whole Python process for pandas, whole container for Trino/Oracle).
+    footprint_memory_mb: float | None
+    footprint_memory_metric: str
     result_rows: int | None
     error: str | None = None
 
@@ -216,12 +232,17 @@ def docker_start(container: str) -> None:
 
 
 def docker_update(container: str, cpu_count: int, memory_gb: int) -> None:
+    # Pin the container to the same physical cores the pandas engine is
+    # pinned to (sched_setaffinity uses cores 0..cpu_count-1), in addition to
+    # the CPU quota, so both mechanisms restrict to identical cores.
     memory = f"{memory_gb}g"
+    cpuset = ",".join(str(core) for core in range(cpu_count))
     run_command(
         [
             "docker",
             "update",
             f"--cpus={cpu_count}",
+            f"--cpuset-cpus={cpuset}",
             f"--memory={memory}",
             f"--memory-swap={memory}",
             container,
@@ -262,7 +283,15 @@ def docker_memory_mb(container_name: str) -> float | None:
     return parse_memory_to_mb(completed.stdout.strip())
 
 
-def run_with_container_memory_sampling(container_name: str, func) -> tuple[Any, float | None]:
+def run_with_container_memory_sampling(container_name: str, func) -> tuple[Any, float | None, float]:
+    """Run func while sampling container memory in a background thread.
+
+    Returns (result, peak_memory_mb, elapsed_seconds).  Elapsed time is
+    measured tightly around func itself: a single `docker stats` call takes
+    on the order of seconds, so including sampler-thread startup/shutdown in
+    the timed region would quantize every measurement to the sampler cycle
+    length instead of reporting the real query time.
+    """
     samples: list[float] = []
     stop_event = threading.Event()
 
@@ -276,11 +305,13 @@ def run_with_container_memory_sampling(container_name: str, func) -> tuple[Any, 
     thread = threading.Thread(target=sampler, daemon=True)
     thread.start()
     try:
+        start = time.perf_counter()
         result = func()
+        elapsed = time.perf_counter() - start
     finally:
         stop_event.set()
-        thread.join(timeout=2)
-    return result, max(samples) if samples else None
+        thread.join(timeout=10)
+    return result, max(samples) if samples else None, elapsed
 
 
 def get_rss_mb() -> float:
@@ -293,7 +324,14 @@ def get_rss_mb() -> float:
         return usage / 1024
 
 
-def run_with_process_memory_sampling(func) -> tuple[Any, float]:
+def run_with_process_memory_sampling(func) -> tuple[Any, float, float, float]:
+    """Run func while sampling process RSS in a background thread.
+
+    Returns (result, RSS peak delta MB, RSS absolute peak MB, elapsed
+    seconds).  As with container sampling, elapsed time is measured tightly
+    around func so sampler startup/shutdown does not inflate small
+    measurements.
+    """
     start_mb = get_rss_mb()
     samples: list[float] = []
     stop_event = threading.Event()
@@ -306,7 +344,9 @@ def run_with_process_memory_sampling(func) -> tuple[Any, float]:
     thread = threading.Thread(target=sampler, daemon=True)
     thread.start()
     try:
+        start = time.perf_counter()
         result = func()
+        elapsed = time.perf_counter() - start
     finally:
         stop_event.set()
         thread.join(timeout=1)
@@ -315,7 +355,7 @@ def run_with_process_memory_sampling(func) -> tuple[Any, float]:
     # RSS sampling can show tiny negative deltas when the Python runtime frees
     # memory during the measured query.  Report those artifacts as zero rather
     # than as negative memory usage.
-    return result, max(0.0, peak_mb - start_mb)
+    return result, max(0.0, peak_mb - start_mb), peak_mb, elapsed
 
 
 def make_price_category(price: pd.Series) -> pd.Series:
@@ -553,35 +593,121 @@ def fetch_dataframe(cursor, query: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
-def run_pandas_pattern(df: pd.DataFrame, pattern_name: str, warmup_runs: int) -> tuple[pd.DataFrame, float, float]:
+def trino_query_peak_mb(cursor) -> float | None:
+    """Peak user memory of the last executed query, from Trino's own
+    per-query memory accounting (client protocol stats)."""
+    stats = getattr(cursor, "stats", None) or {}
+    peak_bytes = stats.get("peakMemoryBytes")
+    if peak_bytes is None:
+        return None
+    return peak_bytes / 1024 / 1024
+
+
+ORACLE_PGA_MAX_SQL = """
+    SELECT ms.value
+    FROM v$mystat ms
+    JOIN v$statname sn ON ms.statistic# = sn.statistic#
+    WHERE sn.name = 'session pga memory max'
+"""
+
+
+def oracle_session_pga_max_mb(cursor) -> float | None:
+    """High-water mark of this session's PGA allocation.  MATCH_RECOGNIZE
+    workareas are PGA allocations, so the delta of this counter around a
+    query on a fresh session is the query's peak working memory."""
+    try:
+        cursor.execute(ORACLE_PGA_MAX_SQL)
+        row = cursor.fetchone()
+    except Exception:
+        return None
+    if row is None or row[0] is None:
+        return None
+    return float(row[0]) / 1024 / 1024
+
+
+# Each measurement below is (result, elapsed, query_memory_mb, footprint_mb).
+Measurement = tuple[pd.DataFrame, float, float | None, float | None]
+# What the pattern runners return: the median-by-time measurement expanded to
+# (result, median_time, min_time, max_time, query_memory_mb, footprint_mb).
+MedianMeasurement = tuple[pd.DataFrame, float, float, float, float | None, float | None]
+
+
+def pick_median(measurements: list[Measurement]) -> MedianMeasurement:
+    ordered = sorted(measurements, key=lambda m: m[1])
+    result, elapsed, query_memory, footprint = ordered[len(ordered) // 2]
+    times = [m[1] for m in measurements]
+    return result, elapsed, min(times), max(times), query_memory, footprint
+
+
+def run_pandas_pattern(
+    df: pd.DataFrame, pattern_name: str, warmup_runs: int, measured_runs: int
+) -> MedianMeasurement:
     from src.executor.match_recognize import match_recognize
 
     query = query_for_system("pandas", pattern_name)
     for _ in range(warmup_runs):
         match_recognize(query, df)
-    start = time.perf_counter()
-    result, memory_delta = run_with_process_memory_sampling(lambda: match_recognize(query, df))
-    elapsed = time.perf_counter() - start
-    return result, elapsed, memory_delta
+    measurements: list[Measurement] = []
+    for _ in range(measured_runs):
+        result, memory_delta, rss_peak, elapsed = run_with_process_memory_sampling(
+            lambda: match_recognize(query, df)
+        )
+        measurements.append((result, elapsed, memory_delta, rss_peak))
+    return pick_median(measurements)
 
 
-def run_db_pattern(
-    system: str,
+def run_trino_pattern(
     cursor,
     pattern_name: str,
     warmup_runs: int,
-    container_name: str,
-) -> tuple[pd.DataFrame, float, float | None]:
-    query = query_for_system(system, pattern_name)
+    measured_runs: int,
+) -> MedianMeasurement:
+    query = query_for_system("trino", pattern_name)
     for _ in range(warmup_runs):
         fetch_dataframe(cursor, query)
-    start = time.perf_counter()
-    result, peak_memory = run_with_container_memory_sampling(
-        container_name,
-        lambda: fetch_dataframe(cursor, query),
-    )
-    elapsed = time.perf_counter() - start
-    return result, elapsed, peak_memory
+    measurements: list[Measurement] = []
+    for _ in range(measured_runs):
+        result, container_peak, elapsed = run_with_container_memory_sampling(
+            "trino-473",
+            lambda: fetch_dataframe(cursor, query),
+        )
+        measurements.append((result, elapsed, trino_query_peak_mb(cursor), container_peak))
+    return pick_median(measurements)
+
+
+def run_oracle_pattern(
+    warmup_cursor,
+    pattern_name: str,
+    warmup_runs: int,
+    measured_runs: int,
+    password: str,
+    dsn: str,
+) -> MedianMeasurement:
+    query = query_for_system("oracle", pattern_name)
+    for _ in range(warmup_runs):
+        fetch_dataframe(warmup_cursor, query)
+
+    # 'session pga memory max' is a per-session high-water mark, so every
+    # measured run uses a fresh session: otherwise earlier runs would already
+    # have raised the mark and the delta would read as zero.
+    measurements: list[Measurement] = []
+    for _ in range(measured_runs):
+        conn = connect_oracle(password, dsn)
+        try:
+            cur = conn.cursor()
+            pga_baseline = oracle_session_pga_max_mb(cur)
+            result, container_peak, elapsed = run_with_container_memory_sampling(
+                "oracle-free",
+                lambda: fetch_dataframe(cur, query),
+            )
+            pga_after = oracle_session_pga_max_mb(cur)
+        finally:
+            conn.close()
+        query_memory = None
+        if pga_baseline is not None and pga_after is not None:
+            query_memory = max(0.0, pga_after - pga_baseline)
+        measurements.append((result, elapsed, query_memory, container_peak))
+    return pick_median(measurements)
 
 
 def save_result_csv(system: str, size: int, pattern_name: str, df: pd.DataFrame) -> Path:
@@ -621,7 +747,7 @@ def write_system_results(system_label: str, results: list[RunResult]) -> None:
     pd.DataFrame(records).to_csv(OUTPUT_DIR / f"{prefix}_results.csv", index=False)
 
 
-def run_pandas_system(sizes: list[int], warmup_runs: int) -> tuple[list[RunResult], dict[tuple[int, str], pd.DataFrame]]:
+def run_pandas_system(sizes: list[int], warmup_runs: int, measured_runs: int) -> tuple[list[RunResult], dict[tuple[int, str], pd.DataFrame]]:
     print("\n=== Running pandas system ===")
     docker_stop("trino-473", "oracle-free")
     all_results: list[RunResult] = []
@@ -633,7 +759,9 @@ def run_pandas_system(sizes: list[int], warmup_runs: int) -> tuple[list[RunResul
         for pattern_name, info in PATTERNS.items():
             print(f"    pattern={pattern_name}")
             try:
-                result_df, elapsed, memory_delta = run_pandas_pattern(df, pattern_name, warmup_runs)
+                result_df, elapsed, time_min, time_max, memory_delta, rss_peak = run_pandas_pattern(
+                    df, pattern_name, warmup_runs, measured_runs
+                )
                 normalized = normalize_result(result_df)
                 expected[(size, pattern_name)] = normalized
                 save_result_csv("pandas", size, pattern_name, normalized)
@@ -646,9 +774,14 @@ def run_pandas_system(sizes: list[int], warmup_runs: int) -> tuple[list[RunResul
                         success=True,
                         correctness_matches_pandas="baseline",
                         execution_time_seconds=elapsed,
+                        execution_time_min_seconds=time_min,
+                        execution_time_max_seconds=time_max,
+                        measured_runs=measured_runs,
                         throughput_rows_per_second=size / elapsed,
-                        memory_mb=memory_delta,
-                        memory_metric="process RSS peak delta MB",
+                        query_memory_mb=memory_delta,
+                        query_memory_metric=PANDAS_QUERY_MEMORY_METRIC,
+                        footprint_memory_mb=rss_peak,
+                        footprint_memory_metric=PANDAS_FOOTPRINT_MEMORY_METRIC,
                         result_rows=len(result_df),
                     )
                 )
@@ -663,9 +796,14 @@ def run_pandas_system(sizes: list[int], warmup_runs: int) -> tuple[list[RunResul
                         success=False,
                         correctness_matches_pandas="baseline",
                         execution_time_seconds=None,
+                        execution_time_min_seconds=None,
+                        execution_time_max_seconds=None,
+                        measured_runs=measured_runs,
                         throughput_rows_per_second=None,
-                        memory_mb=None,
-                        memory_metric="process RSS peak delta MB",
+                        query_memory_mb=None,
+                        query_memory_metric=PANDAS_QUERY_MEMORY_METRIC,
+                        footprint_memory_mb=None,
+                        footprint_memory_metric=PANDAS_FOOTPRINT_MEMORY_METRIC,
                         result_rows=None,
                         error=str(exc),
                     )
@@ -678,6 +816,7 @@ def run_trino_system(
     sizes: list[int],
     expected: dict[tuple[int, str], pd.DataFrame],
     warmup_runs: int,
+    measured_runs: int,
     chunk_size: int,
     cpu_count: int,
     memory_gb: int,
@@ -699,8 +838,8 @@ def run_trino_system(
         for pattern_name, info in PATTERNS.items():
             print(f"    pattern={pattern_name}")
             try:
-                result_df, elapsed, peak_memory = run_db_pattern(
-                    "trino", cur, pattern_name, warmup_runs, "trino-473"
+                result_df, elapsed, time_min, time_max, query_memory, container_peak = run_trino_pattern(
+                    cur, pattern_name, warmup_runs, measured_runs
                 )
                 normalized = normalize_result(result_df)
                 save_result_csv("trino", size, pattern_name, normalized)
@@ -714,9 +853,14 @@ def run_trino_system(
                         success=True,
                         correctness_matches_pandas=correct,
                         execution_time_seconds=elapsed,
+                        execution_time_min_seconds=time_min,
+                        execution_time_max_seconds=time_max,
+                        measured_runs=measured_runs,
                         throughput_rows_per_second=size / elapsed,
-                        memory_mb=peak_memory,
-                        memory_metric="Docker container peak memory MB",
+                        query_memory_mb=query_memory,
+                        query_memory_metric=TRINO_QUERY_MEMORY_METRIC,
+                        footprint_memory_mb=container_peak,
+                        footprint_memory_metric=DB_FOOTPRINT_MEMORY_METRIC,
                         result_rows=len(result_df),
                     )
                 )
@@ -731,9 +875,14 @@ def run_trino_system(
                         success=False,
                         correctness_matches_pandas=False,
                         execution_time_seconds=None,
+                        execution_time_min_seconds=None,
+                        execution_time_max_seconds=None,
+                        measured_runs=measured_runs,
                         throughput_rows_per_second=None,
-                        memory_mb=None,
-                        memory_metric="Docker container peak memory MB",
+                        query_memory_mb=None,
+                        query_memory_metric=TRINO_QUERY_MEMORY_METRIC,
+                        footprint_memory_mb=None,
+                        footprint_memory_metric=DB_FOOTPRINT_MEMORY_METRIC,
                         result_rows=None,
                         error=str(exc),
                     )
@@ -747,6 +896,7 @@ def run_oracle_system(
     sizes: list[int],
     expected: dict[tuple[int, str], pd.DataFrame],
     warmup_runs: int,
+    measured_runs: int,
     chunk_size: int,
     cpu_count: int,
     memory_gb: int,
@@ -770,8 +920,8 @@ def run_oracle_system(
         for pattern_name, info in PATTERNS.items():
             print(f"    pattern={pattern_name}")
             try:
-                result_df, elapsed, peak_memory = run_db_pattern(
-                    "oracle", cur, pattern_name, warmup_runs, "oracle-free"
+                result_df, elapsed, time_min, time_max, query_memory, container_peak = run_oracle_pattern(
+                    cur, pattern_name, warmup_runs, measured_runs, password, dsn
                 )
                 normalized = normalize_result(result_df)
                 save_result_csv("oracle", size, pattern_name, normalized)
@@ -785,9 +935,14 @@ def run_oracle_system(
                         success=True,
                         correctness_matches_pandas=correct,
                         execution_time_seconds=elapsed,
+                        execution_time_min_seconds=time_min,
+                        execution_time_max_seconds=time_max,
+                        measured_runs=measured_runs,
                         throughput_rows_per_second=size / elapsed,
-                        memory_mb=peak_memory,
-                        memory_metric="Docker container peak memory MB",
+                        query_memory_mb=query_memory,
+                        query_memory_metric=ORACLE_QUERY_MEMORY_METRIC,
+                        footprint_memory_mb=container_peak,
+                        footprint_memory_metric=DB_FOOTPRINT_MEMORY_METRIC,
                         result_rows=len(result_df),
                     )
                 )
@@ -802,9 +957,14 @@ def run_oracle_system(
                         success=False,
                         correctness_matches_pandas=False,
                         execution_time_seconds=None,
+                        execution_time_min_seconds=None,
+                        execution_time_max_seconds=None,
+                        measured_runs=measured_runs,
                         throughput_rows_per_second=None,
-                        memory_mb=None,
-                        memory_metric="Docker container peak memory MB",
+                        query_memory_mb=None,
+                        query_memory_metric=ORACLE_QUERY_MEMORY_METRIC,
+                        footprint_memory_mb=None,
+                        footprint_memory_metric=DB_FOOTPRINT_MEMORY_METRIC,
                         result_rows=None,
                         error=str(exc),
                     )
@@ -824,7 +984,8 @@ def write_summary(results: list[RunResult], args: argparse.Namespace) -> None:
             "memory_gb_per_system": args.memory_gb,
             "execution_mode": "sequential; one system at a time",
             "warmup_runs": args.warmup_runs,
-            "measured_runs": 1,
+            "measured_runs": args.measured_runs,
+            "reported_time": "median of measured runs (min/max recorded per cell)",
             "database_load_chunk_size": args.chunk_size,
             "sizes": args.sizes,
             "patterns": list(PATTERNS.keys()),
@@ -844,13 +1005,16 @@ def write_summary(results: list[RunResult], args: argparse.Namespace) -> None:
     aggregate_rows = []
     for system in sorted({r.system for r in successful}):
         group = [r for r in successful if r.system == system]
+        query_memories = [r.query_memory_mb for r in group if r.query_memory_mb is not None]
+        footprint_memories = [r.footprint_memory_mb for r in group if r.footprint_memory_mb is not None]
         aggregate_rows.append(
             {
                 "system": system,
                 "successful_tests": len(group),
                 "avg_time_seconds": sum(r.execution_time_seconds for r in group if r.execution_time_seconds) / len(group),
                 "avg_throughput_rows_per_second": sum(r.throughput_rows_per_second for r in group if r.throughput_rows_per_second) / len(group),
-                "max_memory_mb": max(r.memory_mb for r in group if r.memory_mb is not None),
+                "max_query_memory_mb": max(query_memories) if query_memories else None,
+                "max_footprint_memory_mb": max(footprint_memories) if footprint_memories else None,
                 "all_correct": all(r.correctness_matches_pandas in (True, "baseline") for r in group),
             }
         )
@@ -864,6 +1028,8 @@ def main() -> None:
     parser.add_argument("--cpus", type=int, default=1)
     parser.add_argument("--memory-gb", type=int, default=32)
     parser.add_argument("--warmup-runs", type=int, default=1)
+    parser.add_argument("--measured-runs", type=int, default=3,
+                        help="measured executions per cell; the median time is reported")
     parser.add_argument("--chunk-size", type=int, default=20000)
     parser.add_argument("--oracle-password", default="Oracle_12345")
     parser.add_argument("--oracle-dsn", default="localhost:1521/XEPDB1")
@@ -878,7 +1044,7 @@ def main() -> None:
     expected: dict[tuple[int, str], pd.DataFrame] = {}
 
     if "pandas" in args.systems:
-        pandas_results, expected = run_pandas_system(args.sizes, args.warmup_runs)
+        pandas_results, expected = run_pandas_system(args.sizes, args.warmup_runs, args.measured_runs)
         all_results.extend(pandas_results)
     else:
         for size in args.sizes:
@@ -893,6 +1059,7 @@ def main() -> None:
                 args.sizes,
                 expected,
                 args.warmup_runs,
+                args.measured_runs,
                 args.chunk_size,
                 args.cpus,
                 args.memory_gb,
@@ -905,6 +1072,7 @@ def main() -> None:
                 args.sizes,
                 expected,
                 args.warmup_runs,
+                args.measured_runs,
                 args.chunk_size,
                 args.cpus,
                 args.memory_gb,

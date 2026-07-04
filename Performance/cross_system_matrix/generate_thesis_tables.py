@@ -78,13 +78,27 @@ for pat in PATTERNS:
 
 print()
 print("="*80)
-print("TABLE 6.10-equivalent: Memory (MB) by Pattern x Size x System")
+print("TABLE 6.10-equivalent: Query Memory (MB) by Pattern x Size x System")
+print("(comparable metric: RSS delta / Trino peakMemoryBytes / Oracle PGA delta)")
 print("="*80)
 for pat in PATTERNS:
     for size in SIZES:
         vals = []
         for sysname, df in [('pandas', pandas_df), ('trino', trino_df), ('oracle', oracle_df)]:
-            v = df[(df.pattern_name == pat) & (df.dataset_size == size)].memory_mb.values
+            v = df[(df.pattern_name == pat) & (df.dataset_size == size)].query_memory_mb.values
+            vals.append(fmt(v[0]) if len(v) else 'NA')
+        print(f"{pat:20s} {size:>9,} : pandas={vals[0]:>10} trino={vals[1]:>10} oracle={vals[2]:>10}")
+
+print()
+print("="*80)
+print("TABLE 6.10b-equivalent: Footprint Memory (MB) by Pattern x Size x System")
+print("(operational footprint: process RSS peak / container peak; not per-query)")
+print("="*80)
+for pat in PATTERNS:
+    for size in SIZES:
+        vals = []
+        for sysname, df in [('pandas', pandas_df), ('trino', trino_df), ('oracle', oracle_df)]:
+            v = df[(df.pattern_name == pat) & (df.dataset_size == size)].footprint_memory_mb.values
             vals.append(fmt(v[0]) if len(v) else 'NA')
         print(f"{pat:20s} {size:>9,} : pandas={vals[0]:>10} trino={vals[1]:>10} oracle={vals[2]:>10}")
 
@@ -98,8 +112,9 @@ for sysname, df in [('pandas', pandas_df), ('trino', trino_df), ('oracle', oracl
     avg_thr = df.throughput_rows_per_second.mean()
     min_thr = df.throughput_rows_per_second.min()
     max_thr = df.throughput_rows_per_second.max()
-    max_mem = df.memory_mb.max()
-    print(f"{sysname}: total_time={fmt(total_time)} avg_time={fmt(avg_time)} avg_thr={fmt_int(round(avg_thr))} min_thr={fmt_int(round(min_thr))} max_thr={fmt_int(round(max_thr))} max_mem={fmt(max_mem)} tests={len(df)}")
+    max_query_mem = df.query_memory_mb.max()
+    max_footprint_mem = df.footprint_memory_mb.max()
+    print(f"{sysname}: total_time={fmt(total_time)} avg_time={fmt(avg_time)} avg_thr={fmt_int(round(avg_thr))} min_thr={fmt_int(round(min_thr))} max_thr={fmt_int(round(max_thr))} max_query_mem={fmt(max_query_mem)} max_footprint_mem={fmt(max_footprint_mem)} tests={len(df)}")
 
 print()
 print("="*80)
@@ -109,13 +124,14 @@ for sysname, df in [('pandas', pandas_df), ('trino', trino_df), ('oracle', oracl
     n = len(df)
     avg_time = df.execution_time_seconds.mean()
     avg_thr = df.throughput_rows_per_second.mean()
-    max_mem = df.memory_mb.max()
+    max_query_mem = df.query_memory_mb.max()
+    max_footprint_mem = df.footprint_memory_mb.max()
     correct = df.correctness_matches_pandas
     if sysname == 'pandas':
         correct_str = 'baseline'
     else:
         correct_str = f"{(correct == True).sum()}/{n} match"
-    print(f"{sysname}: n={n} avg_time={fmt(avg_time)} avg_thr={fmt_int(round(avg_thr))} max_mem={fmt(max_mem)} correctness={correct_str}")
+    print(f"{sysname}: n={n} avg_time={fmt(avg_time)} avg_thr={fmt_int(round(avg_thr))} max_query_mem={fmt(max_query_mem)} max_footprint_mem={fmt(max_footprint_mem)} correctness={correct_str}")
 
 print()
 print("="*80)
@@ -141,12 +157,23 @@ for size in SIZES:
 
 print()
 print("="*80)
-print("TABLE 6.15-equivalent: Avg memory by size (all systems)")
+print("TABLE 6.15-equivalent: Avg query memory by size (all systems)")
 print("="*80)
 for size in SIZES:
     row = []
     for sysname, df in [('pandas', pandas_df), ('trino', trino_df), ('oracle', oracle_df)]:
-        v = df[df.dataset_size == size].memory_mb.mean()
+        v = df[df.dataset_size == size].query_memory_mb.mean()
+        row.append(fmt(v))
+    print(f"{size:>10,} pandas={row[0]:>8} trino={row[1]:>8} oracle={row[2]:>8}")
+
+print()
+print("="*80)
+print("TABLE 6.15b-equivalent: Avg footprint memory by size (all systems)")
+print("="*80)
+for size in SIZES:
+    row = []
+    for sysname, df in [('pandas', pandas_df), ('trino', trino_df), ('oracle', oracle_df)]:
+        v = df[df.dataset_size == size].footprint_memory_mb.mean()
         row.append(fmt(v))
     print(f"{size:>10,} pandas={row[0]:>8} trino={row[1]:>8} oracle={row[2]:>8}")
 
