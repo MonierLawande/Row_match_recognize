@@ -1,0 +1,117 @@
+% ============================================================
+%  appendix_benchmark_tables.tex
+%  Appendix: Detailed Benchmark Tables (moved out of Chapter 6)
+% ============================================================
+% !TEX root = Thesis.tex
+
+\chapter{Detailed Benchmark Tables}
+\label{app:benchmark-tables}
+
+This appendix collects the detailed cross-system benchmark tables
+referenced in Chapter~\ref{chap:evaluation}.  They are reproduced here
+for completeness and reproducibility; the summary tables and key
+findings remain in the chapter body.  All figures are for the
+Amazon UK Products benchmark under one CPU core and a 32\,GB memory
+budget, with each cell reported as the mean of six measured runs.
+
+\section{Match Counts}
+\label{app:match-counts}
+
+Because runtime and memory depend on how many matches each pattern
+produces, Table~\ref{tab:match_counts} reports the match count
+(= returned result rows under \texttt{ONE ROW PER MATCH}) for every
+pattern--size combination.  The counts are identical across the three
+systems; \texttt{optional\_pattern} produces the largest output sets
+and \texttt{alternation} the smallest.
+
+{\small
+\begin{table}[H]
+\centering
+\caption{Matches (= returned result rows, \texttt{ONE ROW PER
+  MATCH}) by pattern and dataset size; identical across all three
+  systems}
+\label{tab:match_counts}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{rrrrrr}
+\toprule
+\textbf{Size (rows)} & \textbf{simple\_seq.} & \textbf{alternation} & \textbf{quantified} & \textbf{optional\_pat.} & \textbf{complex\_nested} \\
+\midrule
+50{,}000 & 4{,}322 & 612 & 2{,}219 & 7{,}081 & 3{,}800 \\
+100{,}000 & 9{,}067 & 1{,}828 & 5{,}643 & 15{,}247 & 9{,}420 \\
+200{,}000 & 16{,}093 & 3{,}692 & 10{,}064 & 27{,}172 & 17{,}759 \\
+400{,}000 & 34{,}391 & 5{,}803 & 19{,}012 & 52{,}950 & 32{,}360 \\
+800{,}000 & 66{,}330 & 9{,}782 & 32{,}804 & 99{,}214 & 58{,}616 \\
+1{,}000{,}000 & 80{,}188 & 12{,}433 & 40{,}420 & 120{,}571 & 73{,}835 \\
+1{,}500{,}000 & 121{,}420 & 18{,}431 & 61{,}988 & 183{,}084 & 109{,}974 \\
+2{,}000{,}000 & 160{,}097 & 25{,}719 & 84{,}393 & 244{,}296 & 150{,}477 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+}
+
+\section{Performance Summary by Pattern and by Dataset Size}
+\label{app:perf-summaries}
+
+Table~\ref{tab:pattern_summary} averages throughput and execution
+time over the eight dataset sizes for each pattern family, and
+Table~\ref{tab:size_summary} averages over the five pattern families
+for each dataset size, for all three systems.
+
+{\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{lrrrrrr}
+\caption{Pattern performance summary across all three systems (5 patterns $\times$ 8 dataset sizes = 40 tests per system)}
+\label{tab:pattern_summary} \\
+\toprule
+& \multicolumn{2}{c}{\textbf{Proposed Pandas Engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+\textbf{Pattern} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} \\
+\midrule
+\endfirsthead
+\caption*{Table~\thetable{} (continued): Pattern performance summary across systems} \\
+\toprule
+& \multicolumn{2}{c}{\textbf{Proposed Pandas Engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+\textbf{Pattern} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+simple\_sequence & 359{,}762 & 2.06 & 518{,}053 & 1.25 & 1{,}211{,}344 & 0.60 \\
+alternation & 915{,}314 & 0.79 & 643{,}607 & 1.00 & 1{,}685{,}068 & 0.43 \\
+quantified & 361{,}129 & 2.03 & 517{,}258 & 1.25 & 1{,}138{,}248 & 0.67 \\
+optional\_pattern & 335{,}449 & 2.14 & 738{,}919 & 0.85 & 1{,}582{,}848 & 0.45 \\
+complex\_nested & 369{,}498 & 2.48 & 222{,}655 & 4.45 & 614{,}076 & 1.86 \\
+\end{longtable}
+}
+
+{\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{rrrrrrr}
+\caption{Performance summary by dataset size across all three systems (averaged over 5 patterns)}
+\label{tab:size_summary} \\
+\toprule
+& \multicolumn{2}{c}{\textbf{Proposed Pandas Engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+\textbf{Size (rows)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} \\
+\midrule
+\endfirsthead
+\caption*{Table~\thetable{} (continued): Performance summary by dataset size across systems} \\
+\toprule
+& \multicolumn{2}{c}{\textbf{Proposed Pandas Engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+\textbf{Size (rows)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+50{,}000 & 454{,}710 & 0.12 & 203{,}639 & 0.25 & 1{,}022{,}414 & 0.05 \\
+100{,}000 & 437{,}802 & 0.26 & 369{,}113 & 0.32 & 1{,}289{,}743 & 0.08 \\
+200{,}000 & 481{,}512 & 0.48 & 549{,}506 & 0.39 & 1{,}388{,}628 & 0.15 \\
+400{,}000 & 482{,}388 & 0.96 & 579{,}220 & 0.77 & 1{,}302{,}432 & 0.34 \\
+800{,}000 & 465{,}625 & 2.05 & 596{,}718 & 1.92 & 1{,}204{,}273 & 0.90 \\
+1{,}000{,}000 & 479{,}286 & 2.49 & 603{,}993 & 2.29 & 1{,}266{,}626 & 1.06 \\
+1{,}500{,}000 & 469{,}599 & 3.82 & 655{,}404 & 3.64 & 1{,}266{,}984 & 1.67 \\
+2{,}000{,}000 & 474{,}922 & 5.01 & 667{,}194 & 4.52 & 1{,}229{,}434 & 2.17 \\
+\end{longtable}
+}

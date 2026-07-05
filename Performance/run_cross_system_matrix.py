@@ -176,8 +176,9 @@ class RunResult:
     pattern: str
     success: bool
     correctness_matches_pandas: bool | str | None
-    # Median over the measured runs; min/max show run-to-run spread.
+    # Mean over the measured runs; std and min/max show run-to-run spread.
     execution_time_seconds: float | None
+    execution_time_std_seconds: float | None
     execution_time_min_seconds: float | None
     execution_time_max_seconds: float | None
     measured_runs: int
@@ -627,33 +628,64 @@ def oracle_session_pga_max_mb(cursor) -> float | None:
 
 # Each measurement below is (result, elapsed, query_memory_mb, footprint_mb).
 Measurement = tuple[pd.DataFrame, float, float | None, float | None]
-# What the pattern runners return: the median-by-time measurement expanded to
-# (result, median_time, min_time, max_time, query_memory_mb, footprint_mb).
-MedianMeasurement = tuple[pd.DataFrame, float, float, float, float | None, float | None]
+# What the pattern runners return: the mean-over-runs measurement expanded to
+# (result, mean_time, std_time, min_time, max_time, query_memory_mb, footprint_mb).
+AggregateMeasurement = tuple[
+    pd.DataFrame, float, float, float, float, float | None, float | None
+]
 
 
-def pick_median(measurements: list[Measurement]) -> MedianMeasurement:
-    ordered = sorted(measurements, key=lambda m: m[1])
-    result, elapsed, query_memory, footprint = ordered[len(ordered) // 2]
+def _mean_or_none(values: list[float | None]) -> float | None:
+    present = [v for v in values if v is not None]
+    if not present:
+        return None
+    return sum(present) / len(present)
+
+
+def aggregate_mean(measurements: list[Measurement]) -> AggregateMeasurement:
+    """Report the arithmetic mean over the measured runs, with the sample
+    standard deviation and min/max as spread indicators.
+
+    Time and both memory metrics are averaged across the runs; the returned
+    result DataFrame is taken from the first run (results are identical across
+    runs for a correct engine, which the correctness check verifies).
+    """
     times = [m[1] for m in measurements]
-    return result, elapsed, min(times), max(times), query_memory, footprint
+    mean_time = sum(times) / len(times)
+    # Sample standard deviation (ddof=1); 0.0 when only one measured run.
+    if len(times) > 1:
+        variance = sum((t - mean_time) ** 2 for t in times) / (len(times) - 1)
+        std_time = math.sqrt(variance)
+    else:
+        std_time = 0.0
+    result = measurements[0][0]
+    query_memory = _mean_or_none([m[2] for m in measurements])
+    footprint = _mean_or_none([m[3] for m in measurements])
+    return result, mean_time, std_time, min(times), max(times), query_memory, footprint
+
+
+def _progress(msg: str) -> None:
+    """Per-run progress line (warmup / measured k of n), flushed immediately."""
+    print(f"      {msg}", flush=True)
 
 
 def run_pandas_pattern(
     df: pd.DataFrame, pattern_name: str, warmup_runs: int, measured_runs: int
-) -> MedianMeasurement:
+) -> AggregateMeasurement:
     from src.executor.match_recognize import match_recognize
 
     query = query_for_system("pandas", pattern_name)
-    for _ in range(warmup_runs):
+    for i in range(warmup_runs):
         match_recognize(query, df)
+        _progress(f"warmup {i + 1}/{warmup_runs} done")
     measurements: list[Measurement] = []
-    for _ in range(measured_runs):
+    for i in range(measured_runs):
         result, memory_delta, rss_peak, elapsed = run_with_process_memory_sampling(
             lambda: match_recognize(query, df)
         )
         measurements.append((result, elapsed, memory_delta, rss_peak))
-    return pick_median(measurements)
+        _progress(f"measured {i + 1}/{measured_runs} done ({elapsed * 1000:.1f} ms)")
+    return aggregate_mean(measurements)
 
 
 def run_trino_pattern(
@@ -661,18 +693,20 @@ def run_trino_pattern(
     pattern_name: str,
     warmup_runs: int,
     measured_runs: int,
-) -> MedianMeasurement:
+) -> AggregateMeasurement:
     query = query_for_system("trino", pattern_name)
-    for _ in range(warmup_runs):
+    for i in range(warmup_runs):
         fetch_dataframe(cursor, query)
+        _progress(f"warmup {i + 1}/{warmup_runs} done")
     measurements: list[Measurement] = []
-    for _ in range(measured_runs):
+    for i in range(measured_runs):
         result, container_peak, elapsed = run_with_container_memory_sampling(
             "trino-473",
             lambda: fetch_dataframe(cursor, query),
         )
         measurements.append((result, elapsed, trino_query_peak_mb(cursor), container_peak))
-    return pick_median(measurements)
+        _progress(f"measured {i + 1}/{measured_runs} done ({elapsed * 1000:.1f} ms)")
+    return aggregate_mean(measurements)
 
 
 def run_oracle_pattern(
@@ -682,16 +716,17 @@ def run_oracle_pattern(
     measured_runs: int,
     password: str,
     dsn: str,
-) -> MedianMeasurement:
+) -> AggregateMeasurement:
     query = query_for_system("oracle", pattern_name)
-    for _ in range(warmup_runs):
+    for i in range(warmup_runs):
         fetch_dataframe(warmup_cursor, query)
+        _progress(f"warmup {i + 1}/{warmup_runs} done")
 
     # 'session pga memory max' is a per-session high-water mark, so every
     # measured run uses a fresh session: otherwise earlier runs would already
     # have raised the mark and the delta would read as zero.
     measurements: list[Measurement] = []
-    for _ in range(measured_runs):
+    for i in range(measured_runs):
         conn = connect_oracle(password, dsn)
         try:
             cur = conn.cursor()
@@ -707,7 +742,8 @@ def run_oracle_pattern(
         if pga_baseline is not None and pga_after is not None:
             query_memory = max(0.0, pga_after - pga_baseline)
         measurements.append((result, elapsed, query_memory, container_peak))
-    return pick_median(measurements)
+        _progress(f"measured {i + 1}/{measured_runs} done ({elapsed * 1000:.1f} ms)")
+    return aggregate_mean(measurements)
 
 
 def save_result_csv(system: str, size: int, pattern_name: str, df: pd.DataFrame) -> Path:
@@ -759,7 +795,7 @@ def run_pandas_system(sizes: list[int], warmup_runs: int, measured_runs: int) ->
         for pattern_name, info in PATTERNS.items():
             print(f"    pattern={pattern_name}")
             try:
-                result_df, elapsed, time_min, time_max, memory_delta, rss_peak = run_pandas_pattern(
+                result_df, elapsed, time_std, time_min, time_max, memory_delta, rss_peak = run_pandas_pattern(
                     df, pattern_name, warmup_runs, measured_runs
                 )
                 normalized = normalize_result(result_df)
@@ -774,6 +810,7 @@ def run_pandas_system(sizes: list[int], warmup_runs: int, measured_runs: int) ->
                         success=True,
                         correctness_matches_pandas="baseline",
                         execution_time_seconds=elapsed,
+                        execution_time_std_seconds=time_std,
                         execution_time_min_seconds=time_min,
                         execution_time_max_seconds=time_max,
                         measured_runs=measured_runs,
@@ -796,6 +833,7 @@ def run_pandas_system(sizes: list[int], warmup_runs: int, measured_runs: int) ->
                         success=False,
                         correctness_matches_pandas="baseline",
                         execution_time_seconds=None,
+                        execution_time_std_seconds=None,
                         execution_time_min_seconds=None,
                         execution_time_max_seconds=None,
                         measured_runs=measured_runs,
@@ -838,7 +876,7 @@ def run_trino_system(
         for pattern_name, info in PATTERNS.items():
             print(f"    pattern={pattern_name}")
             try:
-                result_df, elapsed, time_min, time_max, query_memory, container_peak = run_trino_pattern(
+                result_df, elapsed, time_std, time_min, time_max, query_memory, container_peak = run_trino_pattern(
                     cur, pattern_name, warmup_runs, measured_runs
                 )
                 normalized = normalize_result(result_df)
@@ -853,6 +891,7 @@ def run_trino_system(
                         success=True,
                         correctness_matches_pandas=correct,
                         execution_time_seconds=elapsed,
+                        execution_time_std_seconds=time_std,
                         execution_time_min_seconds=time_min,
                         execution_time_max_seconds=time_max,
                         measured_runs=measured_runs,
@@ -875,6 +914,7 @@ def run_trino_system(
                         success=False,
                         correctness_matches_pandas=False,
                         execution_time_seconds=None,
+                        execution_time_std_seconds=None,
                         execution_time_min_seconds=None,
                         execution_time_max_seconds=None,
                         measured_runs=measured_runs,
@@ -920,7 +960,7 @@ def run_oracle_system(
         for pattern_name, info in PATTERNS.items():
             print(f"    pattern={pattern_name}")
             try:
-                result_df, elapsed, time_min, time_max, query_memory, container_peak = run_oracle_pattern(
+                result_df, elapsed, time_std, time_min, time_max, query_memory, container_peak = run_oracle_pattern(
                     cur, pattern_name, warmup_runs, measured_runs, password, dsn
                 )
                 normalized = normalize_result(result_df)
@@ -935,6 +975,7 @@ def run_oracle_system(
                         success=True,
                         correctness_matches_pandas=correct,
                         execution_time_seconds=elapsed,
+                        execution_time_std_seconds=time_std,
                         execution_time_min_seconds=time_min,
                         execution_time_max_seconds=time_max,
                         measured_runs=measured_runs,
@@ -957,6 +998,7 @@ def run_oracle_system(
                         success=False,
                         correctness_matches_pandas=False,
                         execution_time_seconds=None,
+                        execution_time_std_seconds=None,
                         execution_time_min_seconds=None,
                         execution_time_max_seconds=None,
                         measured_runs=measured_runs,
@@ -985,7 +1027,7 @@ def write_summary(results: list[RunResult], args: argparse.Namespace) -> None:
             "execution_mode": "sequential; one system at a time",
             "warmup_runs": args.warmup_runs,
             "measured_runs": args.measured_runs,
-            "reported_time": "median of measured runs (min/max recorded per cell)",
+            "reported_time": "mean of measured runs (min/max recorded per cell)",
             "database_load_chunk_size": args.chunk_size,
             "sizes": args.sizes,
             "patterns": list(PATTERNS.keys()),
@@ -1028,8 +1070,8 @@ def main() -> None:
     parser.add_argument("--cpus", type=int, default=1)
     parser.add_argument("--memory-gb", type=int, default=32)
     parser.add_argument("--warmup-runs", type=int, default=1)
-    parser.add_argument("--measured-runs", type=int, default=3,
-                        help="measured executions per cell; the median time is reported")
+    parser.add_argument("--measured-runs", type=int, default=6,
+                        help="measured executions per cell; the mean time is reported")
     parser.add_argument("--chunk-size", type=int, default=20000)
     parser.add_argument("--oracle-password", default="Oracle_12345")
     parser.add_argument("--oracle-dsn", default="localhost:1521/XEPDB1")
