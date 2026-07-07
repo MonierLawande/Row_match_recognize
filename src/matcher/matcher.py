@@ -2185,6 +2185,47 @@ class EnhancedMatcher:
             compact_transitions.sort(key=lambda item: item[5])
             compact_index[state] = compact_transitions
 
+        # Decision arrays: for every state, the index of the first transition
+        # whose row-local predicate holds at row i (or -1).  The greedy DFA
+        # walk then needs one array fetch per consumed row instead of scanning
+        # the transition list with per-row boolean lookups.
+        row_count = 0
+        condition_matrix_values = (condition_matrix or {}).values()
+        for mask in condition_matrix_values:
+            row_count = max(row_count, len(mask))
+        max_transitions = max((len(t) for t in compact_index.values()), default=0)
+        if row_count == 0 or max_transitions > 120:
+            # No vectorized masks to index by row, or too many transitions for
+            # the int8 decision encoding: the walk falls back to the list scan.
+            self._row_local_dfa_decisions = None
+            self._row_local_dfa_accept_flags = [
+                bool(self.dfa.states[s].is_accept) for s in range(len(self.dfa.states))
+            ]
+            self._row_local_transition_index = compact_index
+            self._row_local_transition_index_cache_key = cache_key
+            return compact_index
+        decision_index: Dict[int, Tuple[Any, List[Tuple[str, int, bool]]]] = {}
+        for state, transitions in compact_index.items():
+            decision = np.full(row_count, -1, dtype=np.int8)
+            remaining = np.ones(row_count, dtype=bool)
+            actions: List[Tuple[str, int, bool]] = []
+            for t_idx, (var, target, is_excluded, var_results, implicit_true, _priority) in enumerate(transitions):
+                actions.append((var, target, is_excluded))
+                if implicit_true:
+                    decision[remaining] = t_idx
+                    remaining[:] = False
+                elif var_results is not None:
+                    mask = remaining & var_results[:row_count].astype(bool, copy=False)
+                    decision[mask] = t_idx
+                    remaining &= ~mask
+                if not remaining.any():
+                    break
+            decision_index[state] = (decision, actions)
+        self._row_local_dfa_decisions = decision_index
+        self._row_local_dfa_accept_flags = [
+            bool(self.dfa.states[s].is_accept) for s in range(len(self.dfa.states))
+        ]
+
         self._row_local_transition_index = compact_index
         self._row_local_transition_index_cache_key = cache_key
         return compact_index
@@ -2223,43 +2264,71 @@ class EnhancedMatcher:
         accepted_end: Optional[int] = None
         accepted_state: Optional[int] = None
 
-        while current_idx < row_count:
-            best_transition: Optional[Tuple[str, int, bool, Any, bool, Tuple[Any, ...]]] = None
-            state_transitions = row_local_transition_index.get(state, [])
-            for transition_tuple in state_transitions:
-                var, target, is_excluded, var_results, implicit_true, priority = transition_tuple
+        decisions = getattr(self, "_row_local_dfa_decisions", None)
+        if decisions is not None:
+            # Precomputed decision arrays: one fetch per consumed row instead
+            # of scanning the transition list with per-row boolean lookups.
+            accept_flags = self._row_local_dfa_accept_flags
+            while current_idx < row_count:
+                state_plan = decisions.get(state)
+                if state_plan is None:
+                    break
+                decision, actions = state_plan
+                transition_idx = decision[current_idx]
+                if transition_idx < 0:
+                    break
+                matched_var, state, is_excluded_match = actions[transition_idx]
 
-                transition_matches = False
-                if implicit_true:
-                    transition_matches = True
-                elif var_results is not None and current_idx < len(var_results) and bool(var_results[current_idx]):
-                    transition_matches = True
+                assignment_list = var_assignments.get(matched_var)
+                if assignment_list is None:
+                    assignment_list = []
+                    var_assignments[matched_var] = assignment_list
+                assignment_list.append(current_idx)
+                if is_excluded_match:
+                    excluded_rows.append(current_idx)
 
-                if not transition_matches:
-                    continue
+                current_idx += 1
+                if accept_flags[state]:
+                    accepted_end = current_idx - 1
+                    accepted_state = state
+        else:
+            while current_idx < row_count:
+                best_transition: Optional[Tuple[str, int, bool, Any, bool, Tuple[Any, ...]]] = None
+                state_transitions = row_local_transition_index.get(state, [])
+                for transition_tuple in state_transitions:
+                    var, target, is_excluded, var_results, implicit_true, priority = transition_tuple
 
-                best_transition = transition_tuple
-                break
+                    transition_matches = False
+                    if implicit_true:
+                        transition_matches = True
+                    elif var_results is not None and current_idx < len(var_results) and bool(var_results[current_idx]):
+                        transition_matches = True
 
-            if best_transition is None:
-                break
+                    if not transition_matches:
+                        continue
 
-            matched_var, next_state, is_excluded_match, _var_results, _implicit_true, _priority = best_transition
+                    best_transition = transition_tuple
+                    break
 
-            assignment_list = var_assignments.get(matched_var)
-            if assignment_list is None:
-                assignment_list = []
-                var_assignments[matched_var] = assignment_list
-            assignment_list.append(current_idx)
-            if is_excluded_match:
-                excluded_rows.append(current_idx)
+                if best_transition is None:
+                    break
 
-            state = next_state
-            current_idx += 1
+                matched_var, next_state, is_excluded_match, _var_results, _implicit_true, _priority = best_transition
 
-            if self.dfa.states[state].is_accept:
-                accepted_end = current_idx - 1
-                accepted_state = state
+                assignment_list = var_assignments.get(matched_var)
+                if assignment_list is None:
+                    assignment_list = []
+                    var_assignments[matched_var] = assignment_list
+                assignment_list.append(current_idx)
+                if is_excluded_match:
+                    excluded_rows.append(current_idx)
+
+                state = next_state
+                current_idx += 1
+
+                if self.dfa.states[state].is_accept:
+                    accepted_end = current_idx - 1
+                    accepted_state = state
 
         if accepted_end is None:
             return None
@@ -6017,46 +6086,59 @@ class EnhancedMatcher:
                 start_positions = None
         whole_pattern_vectorized_available = False
 
+        # Loop-invariant guards.  The compiled fast paths run only under
+        # AFTER MATCH SKIP PAST LAST ROW and advance start_idx on every
+        # outcome, so the stagnation/progress machinery cannot trigger there
+        # and is skipped to keep the per-iteration cost down.
+        needs_progress_guards = not (linear_plan_available or row_local_dfa_available)
+        is_to_next_row = bool(config and config.skip_mode == SkipMode.TO_NEXT_ROW)
+        allow_overlap = bool(
+            config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST)
+        )
+        has_start_anchor = (self._anchor_metadata.get("has_start_anchor", False) or
+                          self.dfa.metadata.get("has_start_anchor", False))
+
         while start_idx < len(rows) and iteration_count < max_iterations:
             iteration_count += 1
             if DEBUG_ENABLED:
                 logger.debug(f"Iteration {iteration_count}, start_idx={start_idx}")
 
-            # UNLIMITED SCALE: Intelligent progress tracking and stagnation detection
-            # Track progress to detect infinite loops without arbitrary iteration limits
-            if start_idx == progress_tracking['last_start_idx']:
-                progress_tracking['iterations_at_same_start'] += 1
-                # If we're stuck at the same start position for too long, advance
-                if progress_tracking['iterations_at_same_start'] > progress_tracking['max_iterations_per_start']:
-                    logger.warning(f"Advancing from stagnant start_idx {start_idx} after {progress_tracking['iterations_at_same_start']} iterations")
-                    start_idx += 1
+            if needs_progress_guards:
+                # UNLIMITED SCALE: Intelligent progress tracking and stagnation detection
+                # Track progress to detect infinite loops without arbitrary iteration limits
+                if start_idx == progress_tracking['last_start_idx']:
+                    progress_tracking['iterations_at_same_start'] += 1
+                    # If we're stuck at the same start position for too long, advance
+                    if progress_tracking['iterations_at_same_start'] > progress_tracking['max_iterations_per_start']:
+                        logger.warning(f"Advancing from stagnant start_idx {start_idx} after {progress_tracking['iterations_at_same_start']} iterations")
+                        start_idx += 1
+                        progress_tracking['last_start_idx'] = start_idx
+                        progress_tracking['iterations_at_same_start'] = 0
+                        continue
+                else:
                     progress_tracking['last_start_idx'] = start_idx
                     progress_tracking['iterations_at_same_start'] = 0
-                    continue
-            else:
-                progress_tracking['last_start_idx'] = start_idx
-                progress_tracking['iterations_at_same_start'] = 0
-            
-            # Periodic progress check for massive datasets
-            if iteration_count - last_progress_check >= progress_window:
-                current_matches = len(results)
-                if current_matches == matches_at_last_check:
-                    stagnant_iterations += progress_window
-                    if stagnant_iterations >= max_stagnant_iterations:
-                        logger.info(f"No progress in {stagnant_iterations} iterations, likely completed processing")
-                        break
-                else:
-                    stagnant_iterations = 0  # Reset stagnation counter
-                
-                last_progress_check = iteration_count
-                matches_at_last_check = current_matches
-                
-                # Progress reporting for large datasets
-                if len(rows) >= 10000 and iteration_count % (progress_window * 10) == 0:
-                    logger.debug(f"Progress: {iteration_count:,} iterations, {current_matches} matches, processing row {start_idx}/{len(rows)}")
+
+                # Periodic progress check for massive datasets
+                if iteration_count - last_progress_check >= progress_window:
+                    current_matches = len(results)
+                    if current_matches == matches_at_last_check:
+                        stagnant_iterations += progress_window
+                        if stagnant_iterations >= max_stagnant_iterations:
+                            logger.info(f"No progress in {stagnant_iterations} iterations, likely completed processing")
+                            break
+                    else:
+                        stagnant_iterations = 0  # Reset stagnation counter
+
+                    last_progress_check = iteration_count
+                    matches_at_last_check = current_matches
+
+                    # Progress reporting for large datasets
+                    if len(rows) >= 10000 and iteration_count % (progress_window * 10) == 0:
+                        logger.debug(f"Progress: {iteration_count:,} iterations, {current_matches} matches, processing row {start_idx}/{len(rows)}")
 
             # Additional safety for TO_NEXT_ROW to prevent infinite loops
-            if config and config.skip_mode == SkipMode.TO_NEXT_ROW:
+            if is_to_next_row:
                 recent_starts.append(start_idx)
                 # If we've seen this start position too many times recently, break
                 if recent_starts.count(start_idx) > 3:
@@ -6066,10 +6148,9 @@ class EnhancedMatcher:
                 if len(recent_starts) > 20:
                     recent_starts = recent_starts[-10:]
 
-            # PRODUCTION FIX: Skip already processed indices 
+            # PRODUCTION FIX: Skip already processed indices
             # TO_NEXT_ROW SHOULD allow overlaps - it creates overlapping matches by advancing only 1 position
             # TO_FIRST and TO_LAST also allow overlap behavior for variable-based skipping
-            allow_overlap = config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST)
             if track_processed_indices and start_idx in processed_indices and not allow_overlap:
                 if DEBUG_ENABLED:
                     logger.debug(f"Skipping already processed index {start_idx}")
@@ -6077,8 +6158,6 @@ class EnhancedMatcher:
                 continue
 
             # Check start anchor constraint - patterns with start anchor can only match at start_idx=0
-            has_start_anchor = (self._anchor_metadata.get("has_start_anchor", False) or
-                              self.dfa.metadata.get("has_start_anchor", False))
             if has_start_anchor and start_idx != 0:
                 if DEBUG_ENABLED:
                     logger.debug(f"Skipping start_idx={start_idx} due to start anchor constraint (^)")
@@ -7185,6 +7264,48 @@ class EnhancedMatcher:
             plans.append((alias, expr, semantics, plan))
         return plans
 
+    def _create_one_row_measure_evaluator(self, match, rows, var_assignments, match_number) -> MeasureEvaluator:
+        """Build the general measure evaluator for one ONE-ROW match output."""
+        context = RowContext(defined_variables=self.defined_variables)
+        context.rows = rows
+        context.variables = var_assignments
+        context.match_number = match_number
+        context.current_idx = match["end"]  # Use the last row for FINAL semantics
+        context.subsets = self.subsets.copy() if self.subsets else {}
+
+        # Set PERMUTE pattern information
+        context.is_permute_pattern = self.is_permute_pattern
+
+        # Set pattern_variables from the original_pattern string
+        if isinstance(self.original_pattern, str) and 'PERMUTE' in self.original_pattern:
+            permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', self.original_pattern, re.IGNORECASE)
+            if permute_match:
+                # Extract variables and their requirements (required vs optional)
+                var_text = permute_match.group(1)
+                variables = [v.strip() for v in var_text.split(',')]
+                context.pattern_variables = variables
+                context.original_permute_variables = variables.copy()
+
+                # Determine variable requirements (required vs optional)
+                variable_requirements = {}
+                for var in variables:
+                    # Check if variable has optional quantifier (?, *, etc.)
+                    if var.endswith('?') or var.endswith('*'):
+                        clean_var = var.rstrip('?*+')
+                        variable_requirements[clean_var] = False  # Optional
+                        # Update the variables list with clean names
+                        idx = context.pattern_variables.index(var)
+                        context.pattern_variables[idx] = clean_var
+                        context.original_permute_variables[idx] = clean_var
+                    else:
+                        variable_requirements[var] = True  # Required
+
+                context.variable_requirements = variable_requirements
+        elif hasattr(self.original_pattern, 'metadata'):
+            context.pattern_variables = self.original_pattern.metadata.get('base_variables', [])
+
+        return MeasureEvaluator(context, final=True)
+
     def _process_one_row_match(self, match, rows, measures, match_number, compiled_measure_plans=None):
         """Process one row per match to exactly match Trino's output format."""
         if match["start"] >= len(rows):
@@ -7203,83 +7324,31 @@ class EnhancedMatcher:
         # materializing the whole start row as a dict for every match.
         result = {}
         start_row = None
+        start_pos = match["start"]
 
-        def get_start_column_value(col: str):
-            nonlocal start_row
-            if hasattr(rows, "get_value"):
-                value = rows.get_value(match["start"], col)
-                return (value, value is not None)
-            if start_row is None:
-                start_row = rows[match["start"]]
-            if isinstance(start_row, dict) and col in start_row:
-                return (start_row[col], True)
-            return (None, False)
+        if hasattr(rows, "get_value"):
+            for col in self.partition_columns:
+                value = rows.get_value(start_pos, col)
+                if value is not None:
+                    result[col] = value
+            for col in self.order_columns:
+                value = rows.get_value(start_pos, col)
+                if value is not None:
+                    result[col] = value
+        else:
+            start_row = rows[start_pos]
+            if isinstance(start_row, dict):
+                for col in self.partition_columns:
+                    if col in start_row:
+                        result[col] = start_row[col]
+                for col in self.order_columns:
+                    if col in start_row:
+                        result[col] = start_row[col]
 
-        # Add partition columns if available
-        for col in self.partition_columns:
-            value, exists = get_start_column_value(col)
-            if exists:
-                result[col] = value
-
-        # Add order columns if available (for proper column ordering in ONE ROW PER MATCH)
-        for col in self.order_columns:
-            value, exists = get_start_column_value(col)
-            if exists:
-                result[col] = value
-        
         # Get variable assignments for easy access
         var_assignments = match.get("variables", {})
-        
-        context = None
         evaluator = None
 
-        def get_measure_evaluator() -> MeasureEvaluator:
-            """Create the general evaluator only when a measure needs it."""
-            nonlocal context, evaluator
-            if evaluator is not None:
-                return evaluator
-
-            context = RowContext(defined_variables=self.defined_variables)
-            context.rows = rows
-            context.variables = var_assignments
-            context.match_number = match_number
-            context.current_idx = match["end"]  # Use the last row for FINAL semantics
-            context.subsets = self.subsets.copy() if self.subsets else {}
-
-            # Set PERMUTE pattern information
-            context.is_permute_pattern = self.is_permute_pattern
-
-            # Set pattern_variables from the original_pattern string
-            if isinstance(self.original_pattern, str) and 'PERMUTE' in self.original_pattern:
-                permute_match = re.search(r'PERMUTE\s*\(\s*([^)]+)\s*\)', self.original_pattern, re.IGNORECASE)
-                if permute_match:
-                    # Extract variables and their requirements (required vs optional)
-                    var_text = permute_match.group(1)
-                    variables = [v.strip() for v in var_text.split(',')]
-                    context.pattern_variables = variables
-                    context.original_permute_variables = variables.copy()
-
-                    # Determine variable requirements (required vs optional)
-                    variable_requirements = {}
-                    for var in variables:
-                        # Check if variable has optional quantifier (?, *, etc.)
-                        if var.endswith('?') or var.endswith('*'):
-                            clean_var = var.rstrip('?*+')
-                            variable_requirements[clean_var] = False  # Optional
-                            # Update the variables list with clean names
-                            idx = context.pattern_variables.index(var)
-                            context.pattern_variables[idx] = clean_var
-                            context.original_permute_variables[idx] = clean_var
-                        else:
-                            variable_requirements[var] = True  # Required
-
-                    context.variable_requirements = variable_requirements
-            elif hasattr(self.original_pattern, 'metadata'):
-                context.pattern_variables = self.original_pattern.metadata.get('base_variables', [])
-
-            evaluator = MeasureEvaluator(context, final=True)
-            return evaluator
-        
         # Process measures.  In the normal find_matches path these plans are
         # prepared once and passed in.  Direct callers still get the same
         # behavior through this fallback.
@@ -7294,10 +7363,14 @@ class EnhancedMatcher:
                 if plan is not None:
                     result[alias] = self._evaluate_compiled_measure_plan(plan, match, rows, match_number)
                 else:
-                    result[alias] = get_measure_evaluator().evaluate(expr, semantics)
+                    if evaluator is None:
+                        evaluator = self._create_one_row_measure_evaluator(
+                            match, rows, var_assignments, match_number
+                        )
+                    result[alias] = evaluator.evaluate(expr, semantics)
                 if DEBUG_ENABLED:
                     logger.debug(f"Setting {alias} to {result[alias]} from evaluator")
-                
+
             except Exception as e:
                 logger.error(f"Error evaluating measure {alias}: {e}")
                 result[alias] = None
