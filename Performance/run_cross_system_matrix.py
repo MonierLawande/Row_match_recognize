@@ -373,7 +373,14 @@ def dataset_path(size: int) -> Path:
 
 
 def create_shared_dataset(size: int) -> Path:
-    """Create one prepared CSV dataset that all systems use for this size."""
+    """Create one prepared CSV dataset that all systems use for this size.
+
+    The source CSV has ~2.2M rows.  For requested sizes at or below that, the
+    dataset is the first ``size`` rows (nested prefixes).  For larger sizes the
+    source rows are tiled (duplicated) to reach the target count; ``seq_id`` is
+    then reassigned 0..size-1 so the ordering and single-partition semantics are
+    preserved and the systems still process an identical row sequence.
+    """
     path = dataset_path(size)
     if path.exists():
         return path
@@ -384,6 +391,10 @@ def create_shared_dataset(size: int) -> Path:
         nrows=size,
         usecols=["stars", "reviews", "price", "categoryName"],
     )
+    if len(df) < size:
+        # Requested size exceeds the source; tile the rows to reach it.
+        reps = -(-size // len(df))  # ceil division
+        df = pd.concat([df] * reps, ignore_index=True).iloc[:size].reset_index(drop=True)
     prepared = pd.DataFrame(
         {
             "seq_id": range(len(df)),
