@@ -62,6 +62,8 @@ class DataFrameRowAccessor:
         self._arrays = {column: df[column].to_numpy(copy=False) for column in self._columns}
         self._case_map = {str(column).upper(): column for column in self._columns}
         self._row_cache: Dict[int, Dict[str, Any]] = {}
+        self._non_null_masks: Dict[str, Any] = {}
+        self._all_non_null: Dict[str, bool] = {}
 
     def __len__(self) -> int:
         return self._length
@@ -88,12 +90,46 @@ class DataFrameRowAccessor:
             yield self[idx]
 
     def get_value(self, row_idx: int, field_name: str) -> Any:
-        if row_idx < 0 or row_idx >= len(self):
+        if row_idx < 0 or row_idx >= self._length:
             return None
         column = self._case_map.get(str(field_name).upper())
         if column is None:
             return None
         return self._arrays[column][row_idx]
+
+    def column_array(self, field_name: str):
+        """Return the backing numpy array for a column (case-insensitive), or None."""
+        column = self._case_map.get(str(field_name).upper())
+        return None if column is None else self._arrays[column]
+
+    def non_null_mask(self, field_name: str):
+        """Return a cached boolean numpy array of non-null cells for a column, or None."""
+        column = self._case_map.get(str(field_name).upper())
+        if column is None:
+            return None
+        cached = self._non_null_masks.get(column)
+        if cached is None:
+            cached = pd.notna(self._arrays[column])
+            self._non_null_masks[column] = cached
+        return cached
+
+    def column_all_non_null(self, field_name: str) -> bool:
+        """Cached: True when the column exists and contains no nulls at all."""
+        column = self._case_map.get(str(field_name).upper())
+        if column is None:
+            return False
+        cached = self._all_non_null.get(column)
+        if cached is None:
+            mask = self.non_null_mask(field_name)
+            cached = bool(mask.all()) if mask is not None else False
+            self._all_non_null[column] = cached
+        return cached
+
+    def is_non_null(self, row_idx: int, field_name: str) -> bool:
+        if row_idx < 0 or row_idx >= self._length:
+            return False
+        mask = self.non_null_mask(field_name)
+        return bool(mask[row_idx]) if mask is not None else False
 
 
 def _normalize_query_cache_key(query: str) -> str:
