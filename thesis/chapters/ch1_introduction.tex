@@ -15,7 +15,7 @@ across many analytical domains: detecting chains of transactions
 associated with money laundering in financial
 systems~\cite{petkovic2022fraud}, revealing multi-step fraudulent
 behavior sequences in security event logs, identifying breakdown behavior patterns in IoT sensor streams, and tracking multi-step
-user trips in e-commerce clickstreams.  compared to standard SQL clauses that analyze each row in isolation, Pattern matching examines at the order of events and the numbers in each row in relation to the others.  Patterns are described using a regular-expression-like
+user trips in e-commerce clickstreams.  Compared to standard SQL clauses that analyze each row in isolation, Pattern matching examines the order of events and the numbers in each row in relation to the others.  Patterns are described using a regular-expression-like
 syntax applied at the row level, enabling analysts to match and
 extract meaningful sequences across ordered partitions.
 
@@ -28,7 +28,7 @@ The \texttt{MATCH\_RECOGNIZE} (MR) clause was introduced in the
 SQL:2016 standard~\cite{iso2016,ISO2021}, enabling users to define
 and search for patterns within ordered sequences of rows directly
 in SQL queries.  Although row pattern recognition was standardized in SQL:2016,Oracle Database had already introduced \texttt{MATCH\_RECOGNIZE}
-support (in Database~12c, 2013) ~\cite{oracle2022,book},However, only a limited number of database management systems have since adopted this functionality.
+support (in Database~12c, 2013) ~\cite{oracle2022,book}.However, only a limited number of database management systems have since adopted this functionality.
 Several modern analytical platforms followed: Trino~\cite{trino2022,trino2021row},
 Snowflake~\cite{snowflake2025match_recognize}, and Apache Flink~\cite{flink}
 each provide their own implementations, though with varying degrees
@@ -93,7 +93,7 @@ for _, grp in df.groupby('customer_id'):
 result_df = pd.DataFrame(all_matches)
 \end{lstlisting}
 
- It takes over 20 lines of code to make a simple three step pattern. The Hand Crafted Approach is also likely to have mistakes where things are not lined up correctly. The Hand-Crafted Approach does not work well when we need to make longer patterns or patterns that have conditions.
+ It takes over 20 lines of code to make a simple three-step pattern. The Hand-Crafted Approach is also likely to have mistakes where things are not lined up correctly. The Hand-Crafted Approach does not work well when we need to make longer patterns or patterns that have conditions.
 
 The same query expressed with \texttt{MATCH\_RECOGNIZE} is shown
 in Listing~\ref{lst:ch1-mr}: a single declarative statement that
@@ -130,7 +130,7 @@ MATCH_RECOGNIZE (
 output_df = match_recognize(query, df)
 \end{lstlisting}
 
-The declarative form is not just shorter in syntax: iIt helps to separate what you need to find which's the pattern,from how you find it, The patterns become composable, auditable and easy to extend. A more complex pattern, such as four or five steps
+The declarative form is not just shorter in syntax: it helps to separate what you need to find, which is the pattern,from how you find it. The patterns become composable, auditable, and easy to extend. A more complex pattern, such as four or five steps
 with conditional alternation, requires no change to the surrounding
 Python code, only an update to the \texttt{PATTERN} and
 \texttt{DEFINE} clauses~\cite{michels2018new,petkovic2022rpr}.
@@ -158,13 +158,13 @@ fulfills it.
   \item \textbf{An in-process engine supporting core SQL:2016
     Feature~R010-style capabilities for Pandas DataFrames.}
     Without a declarative alternative in Python, a data scientist
-    must write the many lines  hand-crafted loop like in
-    Listing~\ref{lst:ch1-udf} to detect a simple patterns like
+    must write the many lines  of hand-crafted loops like in
+    Listing~\ref{lst:ch1-udf} to detect a simple pattern like
     three steps declining-price pattern.  This thesis delivers
     an in-process \texttt{MATCH\_RECOGNIZE}-style implementation
     supporting the core Feature~R010 behavior evaluated in this
-    thesis.  It runs entirely alongside Pandas no external
-    database server or cloud subscription required reducing that
+    thesis.  It runs entirely alongside Pandas, with no external
+    database server or cloud subscription required ,reducing that
     loop to a single declarative call like in Listing~\ref{lst:ch1-mr}
     and avoiding the requirement for external SQL engine dependencies or intricate Python code.
 
@@ -185,14 +185,14 @@ detected matches, match ordering, measures, and output rows.
 
 
 \item \textbf{Empirical validation using a real-world dataset.}
-performance is assessed through targeted automated tests, using the Amazon UK Products~2023
+Performance is assessed through targeted automated tests, using the Amazon UK Products~2023
 catalog~\cite{asaniczka2023amazon}. This real-world e-commerce dataset contains
 approximately 2.2 million product records and provides suitable tabular data for
 evaluating price-based row-pattern recognition scenarios. 
 
 The performance evaluation was conducted using five pattern families across eight input scales, ranging from 25K to 300K rows, sampled from the complete Amazon UK Products catalog.
 In total, 40 performance test cases were executed,
-and all runs completed successfully.The results indicate
+and all runs completed successfully. The results indicate
 near-linear scaling over the evaluated range, with expected runtime differences
 between simple, alternation, quantified, optional, and nested pattern families.
 
@@ -205,8 +205,7 @@ between simple, alternation, quantified, optional, and nested pattern families.
 \label{sec:thesis-organization}
 % ----------------------------------------------------------------
 
-The remainder of this thesis is organized as follows.
-
+The following section outlines the structure of the thesis.
 \textbf{Chapter~\ref{chap:background} --- Background and Concepts}
 presents the theoretical and technical foundations on which this work is built.  It introduces sequential pattern matching and its
 real-world applications, explains the SQL:2016
@@ -232,7 +231,7 @@ connect declarative \texttt{MATCH\_RECOGNIZE} queries to the
 execution layer.
 
 \textbf{Chapter~5 --- Implementation and Optimization}
-describes the concrete implementation of the engine.  It covers
+This chapter describes the engine's implementation.  It covers
 finite-automata compilation, NFA and DFA construction, Pandas-based
 execution, output materialization, measure evaluation, and
 performance optimizations such as pattern caching, memory
@@ -246,9 +245,7 @@ pattern families and five input sizes, scalability, pattern
 complexity, and comparison with existing systems.
 
 \textbf{Chapter~7 --- Conclusions and Future Work}
-summarizes the main contributions, reflects on the limitations
-of the current implementation, and outlines directions for
-future research and further extensions.
+This chapter summarizes the main contributions, discusses the limitations of the current implementation, and suggests directions for future research and further extensions.
 
 \section{Publications in the Course of this Thesis}
 
@@ -260,7 +257,7 @@ during the course of this research.
 \begin{description}
 
 \item[First Publication.]
-First paper has been published in the
+The first paper has been published in the
 \textit{2026 IEEE 23rd Mediterranean Electrotechnical Conference
 (MELECON)}.  The paper, entitled ``Row Pattern Recognition for
 Pandas: Bringing MATCH\_\allowbreak RECOGNIZE to Python DataFrames''
