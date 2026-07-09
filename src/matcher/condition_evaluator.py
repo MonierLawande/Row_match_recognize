@@ -444,6 +444,15 @@ class ConditionEvaluator(ast.NodeVisitor):
             if func_name in ("PREV", "NEXT", "FIRST", "LAST"):
                 return self._handle_navigation_function(node, func_name)
 
+            # MATCH_NUMBER() of the match candidate being evaluated
+            if func_name == "MATCH_NUMBER":
+                return getattr(self.context, 'match_number', None)
+
+            # Aggregate functions in DEFINE (running semantics over the rows
+            # matched so far, current row included under its tentative label)
+            if func_name in ("SUM", "AVG", "MIN", "MAX", "COUNT", "ARBITRARY", "ARRAY_AGG"):
+                return self._handle_define_aggregate(node, func_name)
+
         func = self.visit(node.func)
         if callable(func):
             args = [self.visit(arg) for arg in node.args]
@@ -454,6 +463,104 @@ class ConditionEvaluator(ast.NodeVisitor):
                 raise ValueError(f"Error calling {func_name or 'function'}: {e}")
         raise ValueError(f"Function {func_name or func} not callable")
     
+    def _handle_define_aggregate(self, node: ast.Call, func_name: str) -> Any:
+        """Evaluate an aggregate function inside a DEFINE condition.
+
+        SQL:2016 running semantics: the aggregate runs over the rows matched
+        so far in the current match attempt, with the current row included
+        under its tentative label.  A label-qualified argument (``B.value``)
+        restricts the scope to that variable's rows (or a SUBSET union);
+        an unqualified argument aggregates over the universal row variable.
+        The argument may be an arbitrary expression: it is re-evaluated for
+        every aggregated row with the evaluator positioned at that row, so
+        CLASSIFIER()/MATCH_NUMBER()-dependent arguments work.
+        """
+        if len(node.args) != 1 or node.keywords:
+            raise ValueError(f"{func_name} in DEFINE requires exactly one argument")
+        arg = node.args[0]
+
+        context = self.context
+        variables = getattr(context, "variables", {}) or {}
+        rows = getattr(context, "rows", None) or []
+        current_idx = getattr(context, "current_idx", -1)
+        current_var = getattr(context, "current_var", None)
+
+        scope_var = None
+        if isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
+            scope_var = arg.value.id
+
+        member_set = None
+        if scope_var is not None:
+            members = [scope_var]
+            subsets = getattr(context, "subsets", {}) or {}
+            for subset_name, subset_members in subsets.items():
+                if str(subset_name).upper() == scope_var.upper():
+                    members = list(subset_members)
+                    break
+            member_set = {str(m).upper() for m in members}
+
+        indices = set()
+        for var_name, var_indices in variables.items():
+            if member_set is None or str(var_name).upper() in member_set:
+                indices.update(var_indices)
+        indices = sorted(i for i in indices if 0 <= i < len(rows))
+        if (
+            current_idx is not None and 0 <= current_idx < len(rows)
+            and current_idx not in indices
+            and (member_set is None
+                 or (current_var and str(current_var).upper() in member_set))
+        ):
+            indices.append(current_idx)
+            indices.sort()
+
+        # Per-row labels so CLASSIFIER() inside the argument sees each row's
+        # own label; the current row keeps its tentative label.
+        index_labels = {}
+        for var_name, var_indices in variables.items():
+            for row_index in var_indices:
+                index_labels.setdefault(row_index, var_name)
+        if current_idx is not None and current_idx >= 0:
+            index_labels.setdefault(current_idx, current_var)
+
+        simple_field = (
+            arg.attr if scope_var is not None and isinstance(arg, ast.Attribute) else None
+        )
+        values = []
+        saved_row = self.current_row
+        saved_idx = context.current_idx
+        saved_var = getattr(context, "current_var", None)
+        try:
+            for row_index in indices:
+                if simple_field is not None:
+                    value = rows[row_index].get(simple_field)
+                else:
+                    self.current_row = rows[row_index]
+                    context.current_idx = row_index
+                    context.current_var = index_labels.get(row_index, saved_var)
+                    value = self.visit(arg)
+                if value is not None and value == value:  # skip NULL/NaN
+                    values.append(value)
+        finally:
+            self.current_row = saved_row
+            context.current_idx = saved_idx
+            context.current_var = saved_var
+
+        if func_name == "COUNT":
+            return len(values)
+        if not values:
+            return None
+        if func_name == "SUM":
+            return sum(values)
+        if func_name == "AVG":
+            return sum(values) / len(values)
+        if func_name == "MIN":
+            return min(values)
+        if func_name == "MAX":
+            return max(values)
+        if func_name == "ARRAY_AGG":
+            return values
+        return values[0]  # ARBITRARY
+
     def _handle_navigation_function(self, node: ast.Call, func_name: str) -> Any:
         """Handle navigation function calls with comprehensive support."""
         self.stats["navigation_calls"] += 1
@@ -1316,7 +1423,12 @@ class ConditionEvaluator(ast.NodeVisitor):
         for var_name, indices in self.context.variables.items():
             if current_idx in indices:
                 return var_name
-        
+
+        # The row being tested in DEFINE carries its tentative label
+        tentative = getattr(self.context, 'current_var', None)
+        if tentative:
+            return tentative
+
         # If no variable found, return empty string
         return ""
     
@@ -2170,6 +2282,13 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
         evaluate_condition.original_condition = condition_str
         evaluate_condition.python_condition = python_condition
         evaluate_condition.is_boolean_expression = is_boolean_expression
+        # Aggregates read the accumulated match state, so results for the
+        # same (row, current_idx) can differ between match attempts and must
+        # not be served from position-keyed caches.
+        evaluate_condition.uses_match_state = bool(
+            re.search(r'\b(?:sum|avg|min|max|count|arbitrary|array_agg)\s*\(',
+                      condition_str, re.IGNORECASE)
+        )
         return evaluate_condition
     except SyntaxError as e:
         # Log the error and return a function that always returns False
@@ -2872,6 +2991,9 @@ def _sql_to_python_condition(condition: str) -> str:
     # Clean up whitespace and newlines to make valid Python expression
     # Replace newlines and multiple spaces with single spaces
     condition = re.sub(r'\s+', ' ', condition.strip())
+
+    # SQL ARRAY[...] literals become Python list literals
+    condition = re.sub(r'\bARRAY\s*\[', '[', condition, flags=re.IGNORECASE)
     
     # Convert SQL equality to Python equality
     # Handle cases like 'value = 10' -> 'value == 10'

@@ -704,7 +704,6 @@ class TestAggregationsJavaReferenceValues:
         result = result.sort_values(["part", "match_no", "row_id"]).reset_index(drop=True)
         assert_rows_lists(result, expected, ["part", "match_no", "row_id", "running_sum"])
 
-    @pytest.mark.xfail(reason="engine gap: runtime-evaluated aggregation arguments (value || CLASSIFIER())")
     def test_java_aggregation_argument_with_classifier(self):
         df = pd.DataFrame({
             "part": ["p1"] * 6 + ["p2"] * 3 + ["p3"] * 3,
@@ -733,7 +732,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df).sort_values(["part", "id"]).reset_index(drop=True)
         assert_rows_lists(result, expected, ["part", "id", "measure"])
 
-    @pytest.mark.xfail(reason="engine gap: runtime-evaluated aggregation arguments")
     def test_java_duplicate_symbol_in_aggregation_argument(self):
         df = pd.DataFrame({"id": [1, 2, 3], "value": ["a", "b", "c"]})
         query = """
@@ -751,7 +749,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "measure"])
 
-    @pytest.mark.xfail(reason="engine gap: max_by with runtime-evaluated argument")
     def test_java_max_by_runtime_argument(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4], "value": ["p", "q", "r", "s"]})
         query = """
@@ -769,7 +766,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "measure"])
 
-    @pytest.mark.xfail(reason="engine gap: aggregation over SUBSET variable rows")
     def test_java_selective_aggregation_subset(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4], "value": ["a", "b", "c", "d"]})
         query = """
@@ -796,7 +792,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "measure_1", "measure_2", "measure_3"])
 
-    @pytest.mark.xfail(reason="engine gap: bare count() form")
     def test_java_count_star_and_bare_count(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4], "value": ["a", "b", "c", "d"]})
         query = """
@@ -814,7 +809,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "measure_1", "measure_2"])
 
-    @pytest.mark.xfail(reason="engine gap: RUNNING/FINAL count(*) in ALL ROWS")
     def test_java_count_running_final(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4], "value": ["a", "b", "c", "d"]})
         query = """
@@ -836,7 +830,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "measure_1", "measure_2", "measure_3", "measure_4"])
 
-    @pytest.mark.xfail(reason="engine gap: count(U.*) over SUBSET")
     def test_java_count_var_star_and_subset_star(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4], "value": ["a", "b", "c", "d"]})
         query = """
@@ -880,7 +873,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "classy", "measure_1", "measure_2", "measure_3"])
 
-    @pytest.mark.xfail(reason="engine gap: array_agg with runtime-evaluated argument")
     def test_java_one_row_per_match_array_agg(self):
         df = pd.DataFrame({
             "part": ["p1"] * 6 + ["p2"] * 6,
@@ -973,7 +965,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["part", "measure_1", "measure_2"])
 
-    @pytest.mark.xfail(reason="engine gap: aggregates in DEFINE")
     def test_java_balancing_sums(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6, 7, 8, 9],
                            "value": [4, 6, 10, 1, 1, 1, 10, 5, 1]})
@@ -999,7 +990,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "classy", "running_sum_A", "running_sum_B"])
 
-    @pytest.mark.xfail(reason="engine gap: alternation-quantified pattern ((A B* C | D)*) with per-var sums")
     def test_java_period_length(self):
         df = pd.DataFrame({"user_id": [1, 1, 1, 1, 1, 2, 2, 2],
                            "minute_of_the_day": [3, 4, 5, 8, 9, 2, 3, 4]})
@@ -1020,7 +1010,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df).sort_values(["user_id"]).reset_index(drop=True)
         assert_rows_lists(result, expected, ["user_id", "periods_total"])
 
-    @pytest.mark.xfail(reason="engine gap: aggregates in DEFINE + anchored alternation")
     def test_java_set_partitioning_two_subsets(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6, 7, 8]})
         query = """
@@ -1045,7 +1034,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "running_labels"])
 
-    @pytest.mark.xfail(reason="engine gap: aggregates in DEFINE + anchored alternation")
     def test_java_set_partitioning_three_subsets(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6]})
         query = """
@@ -1069,7 +1057,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "running_labels"])
 
-    @pytest.mark.xfail(reason="engine gap: array_agg(CLASSIFIER()) in DEFINE (thread forking)")
     def test_java_forking_threads(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4]})
         query = """
@@ -1089,7 +1076,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "running_labels"])
 
-    @pytest.mark.xfail(reason="engine gap: MAX/MIN with runtime args in DEFINE")
     def test_java_multiple_aggregations_in_define(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6, 7, 8]})
         query = """

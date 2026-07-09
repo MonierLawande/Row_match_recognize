@@ -1078,6 +1078,11 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         # SUM function defaults to RUNNING in ALL ROWS PER MATCH when no explicit semantics
                         measure_semantics[alias] = "RUNNING"
                         logger.debug(f"SUM function: RUNNING semantics for measure {alias}: {expr}")
+                    elif re.match(r'^(MAX_BY|MIN_BY|STRING_AGG|COUNT_IF|SUM_IF|AVG_IF)\s*\(', expr_upper):
+                        # Multi-argument aggregates also default to RUNNING in
+                        # ALL ROWS PER MATCH (SQL:2016; matches Trino).
+                        measure_semantics[alias] = "RUNNING"
+                        logger.debug(f"Aggregate default RUNNING semantics for measure {alias}: {expr}")
                     else:
                         # Other aggregate functions default to FINAL
                         measure_semantics[alias] = "FINAL"

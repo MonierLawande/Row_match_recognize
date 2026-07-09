@@ -1160,10 +1160,81 @@ class EnhancedMatcher:
                     f"exclusions={self.has_exclusions}, "
                     f"quantifiers={self.has_quantifiers}")
     
+    def _preferred_empty_branch_kind(self) -> Optional[str]:
+        """Classify the first top-level alternative of the pattern.
+
+        Returns "empty" when the preferred alternative reduces to the empty
+        pattern (only empty groups, or anchors/empty groups quantified with a
+        zero minimum), "start_anchored" when it reduces to start-anchor
+        assertions (wins only at the partition start), and None otherwise.
+        Used to implement SQL:2016 alternation preference for empty matches.
+        """
+        cached = getattr(self, "_preferred_empty_branch_cache", "unset")
+        if cached != "unset":
+            return cached
+
+        text = re.sub(r"\s+", "", self.original_pattern or "")
+        # Strip one level of enclosing parentheses when they wrap everything.
+        while text.startswith("(") and text.endswith(")"):
+            depth = 0
+            wraps_all = True
+            for i, ch in enumerate(text):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0 and i < len(text) - 1:
+                        wraps_all = False
+                        break
+            if not wraps_all:
+                break
+            text = text[1:-1]
+
+        # First top-level alternative.
+        depth = 0
+        first_branch = text
+        for i, ch in enumerate(text):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "|" and depth == 0:
+                first_branch = text[:i]
+                break
+
+        quant = r"(?:\{\d*(?:,\d*)?\}\??|[*+?]\??)?"
+        branch = first_branch
+        for _ in range(10):
+            reduced = re.sub(r"\(\)" + quant, "", branch)
+            # Zero-minimum quantified anchors reduce to the empty pattern.
+            reduced = re.sub(r"[\^$](?:\*\??|\{0*(?:,\d*)?\}\??|\?\??)", "", reduced)
+            reduced = re.sub(r"\(\)", "", reduced)
+            if reduced == branch:
+                break
+            branch = reduced
+
+        if branch == "":
+            result = "empty"
+        elif re.fullmatch(r"(?:\^(?:\+\??|\{\d+(?:,\d*)?\}\??)?)+", branch):
+            result = "start_anchored"
+        else:
+            result = None
+        self._preferred_empty_branch_cache = result
+        return result
+
     def _analyze_pattern_text(self) -> None:
         """Analyze original pattern text for specific constructs."""
         pattern = self.original_pattern
-        
+
+        # This method runs from __init__ before _analyze_pattern_characteristics,
+        # so the pattern flags it reads and accumulates must exist already.
+        if not hasattr(self, 'has_empty_alternation'):
+            self.has_empty_alternation = False
+        if not hasattr(self, 'has_reluctant_star'):
+            self.has_reluctant_star = False
+        if not hasattr(self, 'has_reluctant_plus'):
+            self.has_reluctant_plus = False
+
         # Check for empty alternation patterns
         if '()' in pattern and '|' in pattern:
             # More comprehensive patterns to catch empty alternations:
@@ -1217,6 +1288,14 @@ class EnhancedMatcher:
             self.has_reluctant_star = True
             self.has_empty_alternation = True
             logger.debug(f"Pattern contains reluctant optional (??) quantifier: {pattern}")
+
+        # Alternations whose preferred branch reduces to the empty pattern
+        # (e.g. ^* | B, $* | B, ^+ | B) behave like empty alternations even
+        # without a literal () in the pattern text.
+        if '|' in pattern and not self.has_empty_alternation:
+            if self._preferred_empty_branch_kind() in ("empty", "start_anchored"):
+                self.has_empty_alternation = True
+                logger.debug(f"Preferred alternation branch is empty-reducible: {pattern}")
 
         reluctant_quantifiers = {}
         if hasattr(self.dfa, "metadata"):
@@ -1379,9 +1458,56 @@ class EnhancedMatcher:
                             self._anchor_metadata["end_anchor_accepting_states"].add(i)
         
         # Check if pattern spans partition
-        if (self._anchor_metadata["has_start_anchor"] and 
+        if (self._anchor_metadata["has_start_anchor"] and
             self._anchor_metadata["has_end_anchor"]):
             self._anchor_metadata["spans_partition"] = True
+
+        # Pattern-level anchor gating (skipping start positions, rejecting
+        # matches that do not reach the last row) is only sound when EVERY
+        # top-level alternation branch is anchored.  An anchor inside one
+        # branch of (^A | B) must not constrain the other branches; those
+        # are enforced per-state during matching.
+        self._anchor_metadata["start_anchor_all_branches"] = False
+        self._anchor_metadata["end_anchor_all_branches"] = False
+        text = re.sub(r"\s+", "", self.original_pattern or "")
+        while text.startswith("(") and text.endswith(")"):
+            depth = 0
+            wraps_all = True
+            for i, ch in enumerate(text):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0 and i < len(text) - 1:
+                        wraps_all = False
+                        break
+            if not wraps_all:
+                break
+            text = text[1:-1]
+        branches = []
+        depth = 0
+        branch_start = 0
+        for i, ch in enumerate(text):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "|" and depth == 0:
+                branches.append(text[branch_start:i])
+                branch_start = i + 1
+        branches.append(text[branch_start:])
+        # A quantified anchor with min 0 (e.g. $*) reduces to the empty
+        # pattern, so it does not make its branch genuinely anchored.  The
+        # flags are computed from the pattern text unconditionally: the DFA
+        # states scan above can miss anchors (shared cached automata), and
+        # the pattern-level gates AND these flags with the has_* metadata.
+        end_anchor_re = re.compile(r"\$(?:\+\??|\{[1-9]\d*(?:,\d*)?\}\??)?\)*$")
+        self._anchor_metadata["start_anchor_all_branches"] = all(
+            branch.lstrip("(").startswith("^") for branch in branches
+        )
+        self._anchor_metadata["end_anchor_all_branches"] = all(
+            bool(end_anchor_re.search(branch)) for branch in branches
+        )
     def _build_transition_index(self):
         """Build index of transitions with enhanced metadata support and performance optimization."""
         index = defaultdict(list)
@@ -3969,6 +4095,310 @@ class EnhancedMatcher:
                 "backtracking_used": True
             }
         
+
+    def _parse_pattern_ast(self, pattern_text: str):
+        """Parse a row pattern into a small AST for the backtracking searcher.
+
+        Grammar: alternation of sequences of quantified items; an item is a
+        variable, an anchor assertion, an empty group, or a parenthesized
+        group.  Returns ('alt', [ ('seq', [item...]) ...]) with items
+        ('var', name, min, max, greedy) / ('group', alt, min, max, greedy) /
+        ('anchor', char) / ('empty',).  Returns None for constructs outside
+        this grammar (PERMUTE, exclusions) so callers can fall back.
+        """
+        # Whitespace separates adjacent variable names; collapse runs to a
+        # single space and skip them explicitly while parsing.
+        text_norm = re.sub(r"\s+", " ", (pattern_text or "").strip())
+        if not text_norm or "PERMUTE" in text_norm.upper() or "{-" in text_norm:
+            return None
+
+        quant_re = re.compile(r"(\*\??|\+\??|\?\??|\{(\d*)(?:,(\d*))?\}\??)")
+        var_re = re.compile(r'[A-Za-z_][A-Za-z0-9_$]*|"[^"]+"')
+
+        def skip_ws(pos):
+            while pos < len(text_norm) and text_norm[pos] == " ":
+                pos += 1
+            return pos
+
+        def read_quant(pos):
+            pos = skip_ws(pos)
+            match = quant_re.match(text_norm, pos)
+            if not match:
+                return 1, 1, True, pos
+            token = match.group(1)
+            greedy = not token.endswith("?") or token in ("?",)
+            if token in ("*", "*?"):
+                return 0, None, token == "*", match.end()
+            if token in ("+", "+?"):
+                return 1, None, token == "+", match.end()
+            if token in ("?", "??"):
+                return 0, 1, token == "?", match.end()
+            min_text, max_text = match.group(2), match.group(3)
+            min_rep = int(min_text) if min_text else 0
+            if match.group(0).rstrip("?").endswith("}") and "," not in token:
+                max_rep = min_rep
+            else:
+                max_rep = int(max_text) if max_text else None
+            return min_rep, max_rep, not token.endswith("}?") and not token.endswith("??") and "?" != token[-1], match.end()
+
+        def parse_alt(pos):
+            branches = []
+            branch, pos = parse_seq(pos)
+            branches.append(branch)
+            pos = skip_ws(pos)
+            while pos < len(text_norm) and text_norm[pos] == "|":
+                branch, pos = parse_seq(pos + 1)
+                branches.append(branch)
+                pos = skip_ws(pos)
+            return ("alt", branches), pos
+
+        def parse_seq(pos):
+            items = []
+            pos = skip_ws(pos)
+            while pos < len(text_norm) and text_norm[pos] not in "|)":
+                item, pos = parse_item(pos)
+                items.append(item)
+                pos = skip_ws(pos)
+            return ("seq", items), pos
+
+        def parse_item(pos):
+            pos = skip_ws(pos)
+            ch = text_norm[pos]
+            if ch == "(":
+                if pos + 1 < len(text_norm) and text_norm[pos + 1] == ")":
+                    pos += 2
+                    min_rep, max_rep, greedy, pos = read_quant(pos)
+                    return ("empty",), pos
+                inner, pos = parse_alt(pos + 1)
+                if pos >= len(text_norm) or text_norm[pos] != ")":
+                    raise ValueError("unbalanced parentheses")
+                pos += 1
+                min_rep, max_rep, greedy, pos = read_quant(pos)
+                return ("group", inner, min_rep, max_rep, greedy), pos
+            if ch in "^$":
+                pos += 1
+                min_rep, _max_rep, _greedy, pos = read_quant(pos)
+                if min_rep == 0:
+                    return ("empty",), pos
+                return ("anchor", ch), pos
+            var_match = var_re.match(text_norm, pos)
+            if not var_match:
+                raise ValueError(f"unexpected pattern character {ch!r}")
+            name = var_match.group(0).strip('"')
+            pos = var_match.end()
+            min_rep, max_rep, greedy, pos = read_quant(pos)
+            return ("var", name, min_rep, max_rep, greedy), pos
+
+        try:
+            ast_root, end_pos = parse_alt(0)
+            if end_pos != len(text_norm):
+                return None
+        except ValueError:
+            return None
+        return ast_root
+
+    def _should_use_condition_backtracking(self) -> bool:
+        """Route patterns whose DEFINE reads accumulated match state and whose
+        structure has choice points to the exact backtracking searcher."""
+        cached = getattr(self, "_condition_backtracking_gate", None)
+        if cached is not None:
+            return cached
+        result = False
+        define_text = getattr(self, "_define_text_upper", "") or ""
+        uses_state = bool(re.search(
+            r"\b(?:SUM|AVG|MIN|MAX|COUNT|ARBITRARY|ARRAY_AGG|CLASSIFIER)\s*\(", define_text))
+        # Navigation-bearing conditions (FIRST/LAST/PREV/NEXT, including over
+        # CLASSIFIER) are handled by the existing matchers with deferred
+        # validation; keep them there.
+        if re.search(r"\b(?:FIRST|LAST|PREV|NEXT)\s*\(", define_text):
+            uses_state = False
+        pattern_text = self.original_pattern or ""
+        has_choice = "|" in pattern_text or bool(re.search(r"[*+?{]", pattern_text))
+        if has_choice and not self.has_exclusions and not self.is_permute_pattern:
+            ast_root = self._parse_pattern_ast(pattern_text)
+            if ast_root is not None and (
+                uses_state or self._ast_needs_exact_search(ast_root)
+            ):
+                self._condition_backtracking_ast = ast_root
+                result = True
+        self._condition_backtracking_gate = result
+        return result
+
+    def _ast_needs_exact_search(self, node) -> bool:
+        """True for structures the greedy walk cannot decide correctly: a
+        quantified group containing an alternation with a multi-item branch
+        (committing to one branch may require revisiting earlier rows)."""
+        kind = node[0]
+        if kind == "alt":
+            return any(self._ast_needs_exact_search(branch) for branch in node[1])
+        if kind == "seq":
+            return any(self._ast_needs_exact_search(item) for item in node[1])
+        if kind == "group":
+            _tag, inner, min_rep, max_rep, _greedy = node
+            repeats = max_rep is None or max_rep > 1
+            if repeats and inner[0] == "alt" and len(inner[1]) > 1:
+                for branch in inner[1]:
+                    if branch[0] == "seq" and len(branch[1]) > 1:
+                        return True
+            return self._ast_needs_exact_search(inner)
+        return False
+
+    def _find_single_match_condition_backtracking(
+        self, rows, start_idx, context, config=None,
+    ) -> Optional[Dict[str, Any]]:
+        """Exact preference-ordered backtracking search for patterns whose
+        DEFINE conditions depend on the accumulated match (aggregates,
+        CLASSIFIER).  Explores alternation branches in declaration order and
+        quantifiers greedily (or reluctantly), re-evaluating conditions with
+        tentative assignments, exactly like the SQL:2016 matching model.
+        A step budget guards against pathological exponential inputs."""
+        ast_root = getattr(self, "_condition_backtracking_ast", None)
+        if ast_root is None:
+            return None
+        row_count = len(rows)
+
+        compiled = getattr(self, "_condition_backtracking_fns", None)
+        if compiled is None:
+            from src.matcher.condition_evaluator import compile_condition
+            compiled = {
+                str(var): compile_condition(str(cond))
+                for var, cond in (self.define_conditions or {}).items()
+            }
+            self._condition_backtracking_fns = compiled
+
+        variables: Dict[str, List[int]] = {}
+        context.variables = variables
+        context.current_var_assignments = variables
+        budget = [200000]
+
+        def try_var(name, pos):
+            if pos >= row_count:
+                return None
+            condition = compiled.get(name)
+            if condition is None:
+                return pos + 1  # implicit TRUE
+            context.current_idx = pos
+            context.current_var = name
+            try:
+                ok = condition(rows[pos], context)
+            except Exception:
+                ok = False
+            return pos + 1 if ok else None
+
+        def assign(name, pos):
+            variables.setdefault(name, []).append(pos)
+
+        def unassign(name):
+            entries = variables.get(name)
+            if entries:
+                entries.pop()
+                if not entries:
+                    del variables[name]
+
+        def match_node(node, pos, cont):
+            if budget[0] <= 0:
+                return None
+            budget[0] -= 1
+            kind = node[0]
+            if kind == "alt":
+                for branch in node[1]:
+                    result = match_node(branch, pos, cont)
+                    if result is not None:
+                        return result
+                return None
+            if kind == "seq":
+                items = node[1]
+
+                def seq_step(index, position):
+                    if index >= len(items):
+                        return cont(position)
+                    return match_item(items[index], position,
+                                      lambda p2: seq_step(index + 1, p2))
+                return seq_step(0, pos)
+            return None
+
+        def match_item(item, pos, cont):
+            if budget[0] <= 0:
+                return None
+            kind = item[0]
+            if kind == "empty":
+                return cont(pos)
+            if kind == "anchor":
+                if item[1] == "^":
+                    return cont(pos) if pos == 0 else None
+                return cont(pos) if pos == row_count else None
+            if kind == "var":
+                _tag, name, min_rep, max_rep, greedy = item
+                return match_repeat(
+                    lambda p, c: step_var(name, p, c), min_rep, max_rep, greedy, pos, cont)
+            if kind == "group":
+                _tag, inner, min_rep, max_rep, greedy = item
+                return match_repeat(
+                    lambda p, c: match_node(inner, p, c), min_rep, max_rep, greedy, pos, cont)
+            return None
+
+        def step_var(name, pos, cont):
+            next_pos = try_var(name, pos)
+            if next_pos is None:
+                return None
+            assign(name, pos)
+            result = cont(next_pos)
+            if result is None:
+                unassign(name)
+            return result
+
+        def match_repeat(step, min_rep, max_rep, greedy, pos, cont):
+            def rec(count, position):
+                if budget[0] <= 0:
+                    return None
+                budget[0] -= 1
+                can_more = max_rep is None or count < max_rep
+                if greedy:
+                    if can_more:
+                        result = step(position, lambda p2: (
+                            rec(count + 1, p2) if p2 != position or True else None))
+                        if result is not None:
+                            return result
+                    if count >= min_rep:
+                        return cont(position)
+                    return None
+                if count >= min_rep:
+                    result = cont(position)
+                    if result is not None:
+                        return result
+                if can_more:
+                    return step(position, lambda p2: rec(count + 1, p2))
+                return None
+            return rec(0, pos)
+
+        end_pos = match_node(ast_root, start_idx, lambda p: p)
+        if end_pos is None or budget[0] <= 0:
+            variables.clear()
+            return None
+        if end_pos <= start_idx:
+            return {
+                "start": start_idx,
+                "end": start_idx - 1,
+                "variables": {},
+                "state": self.start_state,
+                "is_empty": True,
+                "empty_pattern_rows": [start_idx],
+                "excluded_vars": set(),
+                "excluded_rows": [],
+                "has_empty_alternation": self.has_empty_alternation,
+            }
+        result_variables = {var: sorted(indices) for var, indices in variables.items()}
+        return {
+            "start": start_idx,
+            "end": end_pos - 1,
+            "variables": result_variables,
+            "state": self.start_state,
+            "is_empty": False,
+            "excluded_vars": set(),
+            "excluded_rows": [],
+            "has_empty_alternation": False,
+        }
+
     def _find_single_match(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext, config=None) -> Optional[Dict[str, Any]]:
         """Find a single match using optimized transitions with backtracking support."""
         match_start_time = time.time()
@@ -3991,6 +4421,25 @@ class EnhancedMatcher:
             match = self._handle_permute_with_alternations(rows, start_idx, context, config)
             if match:
                 return self._record_timing_and_return("find_match", match_start_time, match)
+
+        # SQL:2016 alternation precedence with empty alternatives: when the
+        # pattern's first (preferred) alternative reduces to the empty
+        # pattern, the empty match wins at every position, before any of the
+        # non-empty matchers below may claim rows.  A start-anchored empty
+        # first branch (e.g. ^+) wins only at the partition start.
+        if self.has_empty_alternation:
+            preferred_empty = self._preferred_empty_branch_kind()
+            if preferred_empty == "empty" or (preferred_empty == "start_anchored" and start_idx == 0):
+                empty_first = self._handle_empty_matches(rows, start_idx, self.start_state, context)
+                if empty_first:
+                    return self._record_timing_and_return("find_match", match_start_time, empty_first)
+
+        # Patterns whose DEFINE reads accumulated match state need exact
+        # preference-ordered exploration; the greedy walkers below cannot
+        # revisit label choices when a later condition fails.
+        if self._should_use_condition_backtracking():
+            match = self._find_single_match_condition_backtracking(rows, start_idx, context, config)
+            return self._record_timing_and_return("find_match", match_start_time, match)
 
         linear_match = self._find_single_match_linear_quantifier(rows, start_idx, config)
         if linear_match:
@@ -4047,8 +4496,12 @@ class EnhancedMatcher:
                     )
             else:
                 self.backtracking_stats['backtracking_failures'] += 1
-            
-            return self._record_timing_and_return("find_match", match_start_time, result)
+
+            # For empty-capable alternations, a failed non-empty search must
+            # still fall through to the standard loop, whose empty-match
+            # handling can produce the SQL empty match for this position.
+            if result is not None or not self.has_empty_alternation:
+                return self._record_timing_and_return("find_match", match_start_time, result)
 
         # PRODUCTION FIX: Special handling for complex back-reference patterns
         # These patterns require constraint satisfaction and backtracking
@@ -4095,10 +4548,15 @@ class EnhancedMatcher:
         runtime_transition_index = self._build_runtime_transition_index()
         trans_index = runtime_transition_index.get(state, [])
         
-        # Check if we have both start and end anchors in the pattern
-        has_both_anchors = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("spans_partition", False)
-        # Check if we have only end anchor in the pattern
-        has_end_anchor = hasattr(self, '_anchor_metadata') and self._anchor_metadata.get("has_end_anchor", False)
+        # Pattern-level anchor rejection applies only when every top-level
+        # alternation branch is anchored; per-branch anchors are enforced by
+        # the per-state anchor checks during the transition walk.
+        has_both_anchors = (hasattr(self, '_anchor_metadata')
+                            and self._anchor_metadata.get("spans_partition", False)
+                            and self._anchor_metadata.get("start_anchor_all_branches", True)
+                            and self._anchor_metadata.get("end_anchor_all_branches", True))
+        has_end_anchor = (hasattr(self, '_anchor_metadata')
+                          and self._anchor_metadata.get("end_anchor_all_branches", False))
         
         # Debug anchor detection
         if debug_enabled:
@@ -4354,6 +4812,13 @@ class EnhancedMatcher:
                                     
                                     return (state_priority, alphabetical_priority, var_name)
                                 else:
+                                    # Alternation alternatives keep SQL:2016 declaration-order
+                                    # preference at every step, even inside quantified groups
+                                    # like (A | B)*: the first declared alternative whose
+                                    # condition holds wins.
+                                    alternation_priority = self.alternation_order.get(var_name, 999)
+                                    if alternation_priority != 999:
+                                        return (0, alternation_priority, var_name)
                                     # Simple quantifiers without cross-references: prefer state changes
                                     state_advance = target_state == state  # False = state change (preferred)
                                     alphabetical_priority = ord(var_name[0]) if var_name else 999
@@ -5854,6 +6319,11 @@ class EnhancedMatcher:
         Uses intelligent caching and optimized evaluation strategies to minimize
         the performance impact of millions of condition evaluations.
         """
+        # Aggregate-bearing conditions depend on the accumulated match state,
+        # not just (row, current_idx): never serve them from the cache.
+        if getattr(condition_func, 'uses_match_state', False):
+            return bool(condition_func(row, context))
+
         # For simple row-based conditions, use enhanced caching
         try:
             # Create optimized cache key that's faster to compute
@@ -6283,8 +6753,11 @@ class EnhancedMatcher:
         allow_overlap = bool(
             config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST)
         )
-        has_start_anchor = (self._anchor_metadata.get("has_start_anchor", False) or
-                          self.dfa.metadata.get("has_start_anchor", False))
+        has_start_anchor = (
+            (self._anchor_metadata.get("has_start_anchor", False)
+             or self.dfa.metadata.get("has_start_anchor", False))
+            and self._anchor_metadata.get("start_anchor_all_branches", True)
+        )
 
         while start_idx < len(rows) and iteration_count < max_iterations:
             iteration_count += 1
@@ -6452,6 +6925,9 @@ class EnhancedMatcher:
                 else:
                     context = RowContext(rows=rows, defined_variables=self.defined_variables)
                     context.subsets = self.subsets.copy() if self.subsets else {}
+                # MATCH_NUMBER() is usable inside DEFINE conditions; the
+                # candidate being attempted has the next match number.
+                context.match_number = match_number
                 match = self._find_single_match(rows, start_idx, context, config)
             if not match:
                 # Move to next position without marking as processed (unmatched rows will be handled later)
@@ -6792,7 +7268,7 @@ class EnhancedMatcher:
                 result[alias] = match_number
             elif normalized_expr == "CLASSIFIER()":
                 result[alias] = None  # No variables matched in empty match
-            elif re.match(r'^COUNT\s*\(\s*\*\s*\)$', normalized_expr):
+            elif re.match(r'^COUNT\s*\(\s*\*?\s*\)$', normalized_expr):
                 # COUNT(*) for empty match is 0
                 result[alias] = 0
             elif re.match(r'^COUNT\s*\(.*\)$', normalized_expr):
@@ -6881,7 +7357,7 @@ class EnhancedMatcher:
 
         if re.match(r'^MATCH_NUMBER\s*\(\s*\)\s*$', text, re.IGNORECASE):
             plan = {"kind": "MATCH_NUMBER", "semantics": explicit_semantics or semantics}
-        elif re.match(r'^COUNT\s*\(\s*\*\s*\)\s*$', text, re.IGNORECASE):
+        elif re.match(r'^COUNT\s*\(\s*\*?\s*\)\s*$', text, re.IGNORECASE):
             plan = {"kind": "COUNT_STAR", "semantics": explicit_semantics or semantics}
         else:
             count_var_star = re.match(
@@ -6938,6 +7414,37 @@ class EnhancedMatcher:
 
         self._compiled_measure_plan_cache[cache_key] = plan
         return plan
+
+    def _measure_scope_members(self, var_name: str) -> Set[str]:
+        """Uppercase member names for a measure's variable scope.
+
+        A SUBSET union variable expands to its member labels; a plain
+        pattern variable is its own single-member scope.
+        """
+        if not var_name:
+            return set()
+        requested = str(var_name).upper()
+        for subset_name, members in (self.subsets or {}).items():
+            if str(subset_name).upper() == requested:
+                return {str(member).upper() for member in members}
+        return {requested}
+
+    def _resolve_scope_indices(self, variables: Dict[str, List[int]], var_name: str) -> List[int]:
+        """Row indices for a variable or SUBSET scope, in ascending order."""
+        var_key = self._resolve_mapping_key(variables, var_name) if var_name else None
+        if var_key is not None:
+            return variables.get(var_key, [])
+        if not var_name:
+            return []
+        members = self._measure_scope_members(var_name)
+        collected = [
+            index
+            for assigned_var, assigned_indices in variables.items()
+            if str(assigned_var).upper() in members
+            for index in assigned_indices
+        ]
+        collected.sort()
+        return collected
 
     @staticmethod
     def _resolve_mapping_key(mapping: Dict[str, Any], requested_key: str) -> Optional[str]:
@@ -7012,8 +7519,7 @@ class EnhancedMatcher:
             return len(matched_indices)
 
         var_name = plan.get("var")
-        var_key = self._resolve_mapping_key(variables, var_name) if var_name else None
-        indices = variables.get(var_key, []) if var_key is not None else []
+        indices = self._resolve_scope_indices(variables, var_name) if var_name else []
 
         if kind == "COUNT_VAR_STAR":
             return len(indices)
@@ -7109,16 +7615,10 @@ class EnhancedMatcher:
         var_name = plan.get("var")
         if not var_name:
             return None
-        resolved_cell = []
-        var_upper = var_name.upper()
+        scope_members = self._measure_scope_members(var_name)
 
         def seg_is_var(seg_var):
-            if resolved_cell:
-                return seg_var == resolved_cell[0]
-            if seg_var == var_name or seg_var.upper() == var_upper:
-                resolved_cell.append(seg_var)
-                return True
-            return False
+            return str(seg_var).upper() in scope_members
 
         if kind == "COUNT_VAR_STAR":
             def count_var_star(segments, start, end, mn):
@@ -7398,7 +7898,7 @@ class EnhancedMatcher:
         if effective_semantics != "RUNNING":
             return None
 
-        count_star = re.match(r'^COUNT\s*\(\s*\*\s*\)\s*$', text, re.IGNORECASE)
+        count_star = re.match(r'^COUNT\s*\(\s*\*?\s*\)\s*$', text, re.IGNORECASE)
         if count_star:
             return {"kind": "RUNNING_COUNT_STAR"}
 
@@ -7445,8 +7945,7 @@ class EnhancedMatcher:
                 for idxs in variables.values():
                     matched.update(idxs)
                 return sorted(matched)
-            var_key = self._resolve_mapping_key(variables, var_name)
-            return sorted(variables.get(var_key, [])) if var_key is not None else []
+            return sorted(self._resolve_scope_indices(variables, var_name))
 
         kind = plan["kind"]
         if kind == "RUNNING_COUNT_STAR":
@@ -7776,8 +8275,15 @@ class EnhancedMatcher:
         # query, so resolve the case-insensitive key once and cache it.
         resolved_key_cell = []
 
+        scope_members = self._measure_scope_members(var_name)
+        is_subset_scope = len(scope_members) > 1 or (
+            var_name and str(var_name).upper() not in scope_members
+        )
+
         def var_indices(match):
             variables = match.get("variables", {}) or {}
+            if is_subset_scope:
+                return self._resolve_scope_indices(variables, var_name)
             if resolved_key_cell:
                 key = resolved_key_cell[0]
                 if key is not None and key in variables:
@@ -8240,11 +8746,9 @@ class EnhancedMatcher:
             if alias in self.measure_semantics:
                 semantics = self.measure_semantics[alias]
             else:
-                # Apply SQL:2016 default semantics for ALL ROWS PER MATCH:
-                # navigation functions default to RUNNING, aggregates to FINAL.
-                expr_upper_stripped = expr.upper().strip()
-                has_nav_functions = bool(re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr_upper_stripped))
-                semantics = "RUNNING" if has_nav_functions else "FINAL"
+                # SQL:2016: in ALL ROWS PER MATCH, measures without an
+                # explicit FINAL keyword use RUNNING semantics.
+                semantics = "RUNNING"
 
             expr_upper = expr.upper()
             has_complex_navigation = (
@@ -8467,21 +8971,106 @@ class EnhancedMatcher:
         # Check if this is a pattern that only allows empty matches (like A* where A is always false)
         if self.has_reluctant_star and not self._has_required_components(pattern_str):
             return True
-        
+
+        # Structural check: can the pattern match zero rows as written?
+        # Handles nested groups like (B ()*)* that the legacy regex-based
+        # required-variable extraction cannot parse.
+        can_be_empty = self._pattern_can_match_empty(pattern_str)
+        if can_be_empty is not None:
+            if not can_be_empty:
+                logger.debug("Pattern cannot match empty (structural check), rejecting empty match")
+            return can_be_empty
+
         # Parse the pattern to identify required vs optional components
         # For patterns like "B* A* C", C is required so empty matches are invalid
         # For patterns like "B* A*", all components are optional so empty matches are valid
         required_vars = self._extract_required_variables(pattern_str)
-        
+
         if required_vars:
             # If pattern has required variables, empty match is only valid
             # if we're in a state that represents those variables being satisfied
             logger.debug(f"Pattern has required variables: {required_vars}, rejecting empty match")
             return False
-        
+
         # Pattern only has optional components (*, ?, empty alternations)
         logger.debug(f"Pattern only has optional components, allowing empty match")
         return True
+
+    def _pattern_can_match_empty(self, pattern_str: str) -> Optional[bool]:
+        """Structurally decide whether a pattern can match zero rows.
+
+        Grammar-aware recursive check: an alternation can be empty when any
+        branch can; a sequence when every item can; an item when its
+        quantifier has a zero minimum, or its base is an empty group, an
+        anchor (zero-width), or a group that can itself match empty.
+        Returns None when the pattern uses constructs this parser does not
+        model (PERMUTE, exclusions), so callers can fall back.
+        """
+        cached = getattr(self, "_pattern_can_match_empty_cache", "unset")
+        if cached != "unset":
+            return cached
+
+        text = re.sub(r"\s+", "", pattern_str or "")
+        if not text or "PERMUTE" in text.upper() or "{-" in text:
+            self._pattern_can_match_empty_cache = None
+            return None
+
+        quant_re = re.compile(r"(\*\??|\+\??|\?\??|\{(\d*)(?:,\d*)?\}\??)")
+        var_re = re.compile(r'[A-Za-z_][A-Za-z0-9_$]*|"[^"]+"')
+
+        def parse_alternation(pos):
+            empty_ok, pos = parse_sequence(pos)
+            result = empty_ok
+            while pos < len(text) and text[pos] == "|":
+                branch_ok, pos = parse_sequence(pos + 1)
+                result = result or branch_ok
+            return result, pos
+
+        def parse_sequence(pos):
+            result = True
+            while pos < len(text) and text[pos] not in "|)":
+                item_ok, pos = parse_item(pos)
+                result = result and item_ok
+            return result, pos
+
+        def parse_item(pos):
+            ch = text[pos]
+            if ch == "(":
+                inner_ok, pos = parse_alternation(pos + 1)
+                if pos >= len(text) or text[pos] != ")":
+                    raise ValueError("unbalanced parentheses")
+                pos += 1
+                base_empty = inner_ok
+            elif ch in "^$":
+                pos += 1
+                base_empty = True  # anchors are zero-width assertions
+            else:
+                var_match = var_re.match(text, pos)
+                if not var_match:
+                    raise ValueError(f"unexpected character {ch!r}")
+                pos = var_match.end()
+                base_empty = False
+            quant_match = quant_re.match(text, pos)
+            if quant_match:
+                pos = quant_match.end()
+                token = quant_match.group(1)
+                if token.startswith("*") or token.startswith("?"):
+                    return True, pos
+                if token.startswith("+"):
+                    return base_empty, pos
+                min_text = quant_match.group(2)
+                min_rep = int(min_text) if min_text else 0
+                return (min_rep == 0 or base_empty), pos
+            return base_empty, pos
+
+        try:
+            result, end_pos = parse_alternation(0)
+            if end_pos != len(text):
+                raise ValueError("trailing input")
+        except ValueError:
+            result = None
+        self._pattern_can_match_empty_cache = result
+        return result
     
     def _has_required_components(self, pattern: str) -> bool:
         """Check if pattern has any required (non-optional) components."""

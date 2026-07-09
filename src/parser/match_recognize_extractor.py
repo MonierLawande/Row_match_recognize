@@ -729,9 +729,16 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
             
             if mode in ['TO FIRST', 'TO LAST'] and target_var:
                 pattern_vars = self.ast.pattern.metadata.get("base_variables", [])
+                # SUBSET union variables are valid skip targets (SQL:2016)
+                subset_names = []
+                for subset_clause in (getattr(self.ast, 'subset', None) or []):
+                    subset_text = getattr(subset_clause, 'subset_text', '') or ''
+                    name_match = re.match(r'\s*("[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\s*=', subset_text)
+                    if name_match:
+                        subset_names.append(name_match.group(1).strip('"'))
                 
                 # Check if the target variable exists in the pattern
-                if target_var not in pattern_vars:
+                if target_var not in pattern_vars and target_var not in subset_names:
                     raise ParserError(
                         f"AFTER MATCH SKIP target '{target_var}' not found in pattern variables {pattern_vars}.",
                         line=ctx.start.line, column=ctx.start.column, snippet=ctx.getText()

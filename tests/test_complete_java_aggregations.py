@@ -511,7 +511,6 @@ _MAX5_EXPECTED = [
 class TestTentativeLabelMatchJavaReference:
     """All tentative-label-match assertions with Trino's exact outputs."""
 
-    @_AGG_DEFINE_XFAIL
     def test_java_avg_b_in_define(self):
         df = pd.DataFrame({"id": [1, 2, 3], "value": [4, 6, 0]})
         query = """
@@ -529,7 +528,6 @@ class TestTentativeLabelMatchJavaReference:
         result = run_query(query, df)
         assert_rows(result, expected, ["id", "classy", "running_avg_B"])
 
-    @_AGG_DEFINE_XFAIL
     def test_java_avg_a_in_define(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4], "value": [4, 6, 0, 5]})
         query = """
@@ -564,7 +562,6 @@ class TestTentativeLabelMatchJavaReference:
         result = run_query(query, df).sort_values(["part", "row_id"]).reset_index(drop=True)
         assert_rows(result, _P12_EXPECTED, ["part", "row_id", "running_sum"])
 
-    @_AGG_DEFINE_XFAIL
     def test_java_sum_gt4_in_define_partitioned(self):
         df = pd.DataFrame({
             "id": [1, 2, 3, 4, 5, 1, 2, 3, 4, 5],
@@ -607,7 +604,6 @@ class TestTentativeLabelMatchJavaReference:
         result = run_query(query, df).sort_values(["part", "row_id"]).reset_index(drop=True)
         assert_rows(result, _P12_EXPECTED, ["part", "row_id", "running_sum"])
 
-    @_AGG_DEFINE_XFAIL
     def test_java_max_in_define_partitioned(self):
         df = pd.DataFrame(_MAX5_DATA)
         query = """
@@ -625,7 +621,6 @@ class TestTentativeLabelMatchJavaReference:
         result = run_query(query, df).sort_values(["part", "row_id"]).reset_index(drop=True)
         assert_rows(result, _MAX5_EXPECTED, ["part", "row_id", "classy", "running_max"])
 
-    @_AGG_DEFINE_XFAIL
     def test_java_runtime_evaluated_aggregation_argument(self):
         df = pd.DataFrame(_MAX5_DATA)
         query = """

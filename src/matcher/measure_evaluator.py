@@ -702,7 +702,10 @@ class MeasureEvaluator:
             expr = expr.strip()
             if not expr:
                 raise ExpressionValidationError("Empty expression")
-            
+
+            # SQL:2016: count() is equivalent to count(*)
+            expr = re.sub(r'\bcount\s*\(\s*\)', 'count(*)', expr, flags=re.IGNORECASE)
+
             validate_expression_length(expr)
             
             # Get evaluation context
