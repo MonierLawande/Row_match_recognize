@@ -44,6 +44,73 @@ from src.utils.performance_optimizer import (
 logger = get_logger(__name__)
 
 
+def _split_top_level_pattern_alternatives(pattern_text: str) -> List[str]:
+    """Split a row pattern on top-level alternation bars."""
+    alternatives: List[str] = []
+    depth = 0
+    start = 0
+    for idx, char in enumerate(pattern_text or ""):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "|" and depth == 0:
+            alternatives.append(pattern_text[start:idx].strip())
+            start = idx + 1
+    alternatives.append((pattern_text or "")[start:].strip())
+    return alternatives
+
+
+def _is_positive_end_anchor_only_branch(branch: str) -> bool:
+    """Return True for top-level alternatives like ``$`` or ``$+`` only.
+
+    SQL end-anchor assertions are zero-width.  In the Trino Java reference
+    cases, a positive end-anchor-only branch in an alternation does not produce
+    an output row and must not suppress later real pattern-variable branches
+    such as ``$+ | B``.  Zero-minimum forms (``$*``, ``$?``, ``${0,...}``) are
+    intentionally not removed because they behave like ordinary empty
+    alternatives in the existing empty-match tests.
+    """
+    text = re.sub(r"\s+", "", branch or "")
+    while text.startswith("(") and text.endswith(")"):
+        depth = 0
+        wraps_all = True
+        for i, ch in enumerate(text):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i < len(text) - 1:
+                    wraps_all = False
+                    break
+        if not wraps_all:
+            break
+        text = text[1:-1]
+
+    if text == "$":
+        return True
+    if re.fullmatch(r"\$\+\??", text):
+        return True
+    bounded = re.fullmatch(r"\$\{(\d+)(?:,(\d*))?\}\??", text)
+    if bounded:
+        return int(bounded.group(1)) > 0
+    return False
+
+
+def _normalize_end_anchor_only_alternatives(pattern_text: str) -> str:
+    """Drop positive end-anchor-only top-level alternatives when others exist."""
+    if "|" not in (pattern_text or ""):
+        return pattern_text
+    alternatives = _split_top_level_pattern_alternatives(pattern_text)
+    kept = [
+        alt for alt in alternatives
+        if not _is_positive_end_anchor_only_branch(alt)
+    ]
+    if not kept or len(kept) == len(alternatives):
+        return pattern_text
+    return " | ".join(kept)
+
+
 class DataFrameRowAccessor:
     """
     Lightweight row sequence backed by a pandas DataFrame.
@@ -949,6 +1016,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         if not mr_clause.pattern:
             raise ValueError("PATTERN clause is required in MATCH_RECOGNIZE")
         pattern_text = mr_clause.pattern.pattern
+        pattern_text = _normalize_end_anchor_only_alternatives(pattern_text)
         
         # Extract rows per match configuration
         rows_per_match = RowsPerMatch.ONE_ROW  # Default
@@ -1492,7 +1560,12 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                 for col in result_df.columns:
                                     if (col not in ordered_cols and 
                                         not col.startswith('_') and  # Skip internal columns
-                                        col not in ['MATCH_NUMBER']):  # Skip auto-generated measure columns
+                                        col not in [
+                                            'MATCH_NUMBER',
+                                            '_match_sort_pos',
+                                            '_match_sort_kind',
+                                            '_match_output_order',
+                                        ]):  # Skip auto-generated/internal columns
                                         ordered_cols.append(col)
                         else:
                             # For ALL ROWS PER MATCH, include all table columns + pattern navigation columns
@@ -1777,9 +1850,18 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 
                 # Safe sorting that handles None values properly
                 def safe_sort_key(r):
-                    # For WITH UNMATCHED ROWS, use original row index to maintain input order
+                    # For WITH UNMATCHED ROWS, preserve SQL match-output
+                    # order even when matches overlap.  Matched rows sort by
+                    # their match start plus row order within that match;
+                    # unmatched rows sort by their own input position.
+                    if match_config.include_unmatched and '_match_sort_pos' in r:
+                        return (
+                            r.get('_match_sort_pos', 0),
+                            r.get('_match_sort_kind', 0),
+                            r.get('_match_output_order', 0),
+                        )
                     if match_config.include_unmatched and '_original_row_idx' in r:
-                        return (r.get('_original_row_idx', 0), 0)
+                        return (r.get('_original_row_idx', 0), 0, 0)
                     
                     # PRODUCTION FIX: For partitioned queries, sort by partition order first, then by position within partition
                     # This ensures that all rows from partition 1 come before all rows from partition 2, etc.
@@ -1841,7 +1923,14 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         for col in result_df.columns:
                             # Keep measure columns, metadata columns, and needed original columns
                             if (col in measures or 
-                                col in ['MATCH_NUMBER', 'IS_EMPTY_MATCH', '_original_row_idx'] or
+                                col in [
+                                    'MATCH_NUMBER',
+                                    'IS_EMPTY_MATCH',
+                                    '_original_row_idx',
+                                    '_match_sort_pos',
+                                    '_match_sort_kind',
+                                    '_match_output_order',
+                                ] or
                                 col in needed_original_columns):
                                 continue
                             # Drop original data columns that aren't needed or would conflict
@@ -1959,7 +2048,12 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                 for col in result_df.columns:
                                     if (col not in ordered_cols and 
                                         not col.startswith('_') and  # Skip internal columns
-                                        col not in ['MATCH_NUMBER']):  # Skip auto-generated measure columns
+                                        col not in [
+                                            'MATCH_NUMBER',
+                                            '_match_sort_pos',
+                                            '_match_sort_kind',
+                                            '_match_output_order',
+                                        ]):  # Skip auto-generated/internal columns
                                         ordered_cols.append(col)
                         else:
                             # For ALL ROWS PER MATCH, include all table columns + pattern navigation columns
@@ -1987,7 +2081,14 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                             # Add remaining input columns (if not already included)
                             for col in result_df.columns:
                                 if (col not in ordered_cols and 
-                                    col not in ['MATCH_NUMBER', 'IS_EMPTY_MATCH', '_original_row_idx']):
+                                    col not in [
+                                        'MATCH_NUMBER',
+                                        'IS_EMPTY_MATCH',
+                                        '_original_row_idx',
+                                        '_match_sort_pos',
+                                        '_match_sort_kind',
+                                        '_match_output_order',
+                                    ]):
                                     ordered_cols.append(col)
                         
                         logger.debug(f"SELECT * - SQL:2016 column ordering: {ordered_cols}")
@@ -2044,10 +2145,21 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 sort_columns = []
                 
                 # Special handling for WITH UNMATCHED ROWS - sort by original row position
-                if match_config.include_unmatched and '_original_row_idx' in result_df.columns:
-                    sort_columns.append('_original_row_idx')
-                    # For WITH UNMATCHED ROWS, we only sort by original row index to maintain input order
-                    # Don't add additional sort columns that would break this ordering
+                if match_config.include_unmatched and '_match_sort_pos' in result_df.columns:
+                    sort_columns.extend(['_match_sort_pos', '_match_sort_kind', '_match_output_order'])
+                    # WITH UNMATCHED ROWS must preserve overlapping match
+                    # output order.  Sorting only by original row index
+                    # interleaves later overlapping matches before earlier
+                    # match rows.  The matcher supplies a stable SQL-order
+                    # key: unmatched rows use their own input position, while
+                    # matched rows use match start plus row order inside the
+                    # match.
+                elif match_config.include_unmatched and '_original_row_idx' in result_df.columns:
+                    # Do not fall back to sorting only by original row index:
+                    # overlapping matches would be interleaved incorrectly.
+                    # The raw matcher result order is already SQL output
+                    # order for WITH UNMATCHED ROWS.
+                    pass
                 else:
                     # First sort by match number to keep matches grouped together
                     if 'match' in result_df.columns:
@@ -2097,8 +2209,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         result_df.reset_index(drop=True, inplace=True)
                 
                 # Remove temporary sorting columns
-                if '_original_row_idx' in result_df.columns:
-                    result_df = result_df.drop('_original_row_idx', axis=1)
+                for temp_col in ['_original_row_idx', '_match_sort_pos', '_match_sort_kind', '_match_output_order']:
+                    if temp_col in result_df.columns:
+                        result_df = result_df.drop(temp_col, axis=1)
                 
                 # Apply outer ORDER BY clause if present
                 if ast.order_by_clause and ast.order_by_clause.sort_items:

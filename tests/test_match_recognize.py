@@ -1164,13 +1164,13 @@ JAVA_EXCLUSION_CASES = [
     ("A {- B+ -} C+", [(1, 1, 90, "A"), (4, 1, 80, "C"), (5, 1, 90, "C"),
                        (6, 2, 50, "A"), (8, 2, 60, "C")]),
     ("{- A -} {- B+ -} C+", [(4, 1, 80, "C"), (5, 1, 90, "C"), (8, 2, 60, "C")]),
-    pytest.param("A {- {- B+ -} C+ -}", [(1, 1, 90, "A"), (6, 2, 50, "A")], marks=pytest.mark.xfail(reason="engine gap: nested exclusions")),
+    ("A {- {- B+ -} C+ -}", [(1, 1, 90, "A"), (6, 2, 50, "A")]),
     ("{- A B+ C+ -}", []),
     ("A B+ {- ()* -} C+", _FULL8),
-    pytest.param("A {- B -}+ {- C -}+", [(1, 1, 90, "A"), (6, 2, 50, "A")], marks=pytest.mark.xfail(reason="engine gap: quantified exclusions")),
-    pytest.param("A {- B -}* {- C -}*", [(1, 1, 90, "A"), (6, 2, 50, "A")], marks=pytest.mark.xfail(reason="engine gap: quantified exclusions")),
-    pytest.param("A {- B -}{1,2} {- C -}{1,2}", [(1, 1, 90, "A"), (6, 2, 50, "A")], marks=pytest.mark.xfail(reason="engine gap: quantified exclusions")),
-    pytest.param("A {- C -}{2,3} {- B -}{2,3}", [(3, 1, 70, "A")], marks=pytest.mark.xfail(reason="engine gap: quantified exclusions")),
+    ("A {- B -}+ {- C -}+", [(1, 1, 90, "A"), (6, 2, 50, "A")]),
+    ("A {- B -}* {- C -}*", [(1, 1, 90, "A"), (6, 2, 50, "A")]),
+    ("A {- B -}{1,2} {- C -}{1,2}", [(1, 1, 90, "A"), (6, 2, 50, "A")]),
+    ("A {- C -}{2,3} {- B -}{2,3}", [(3, 1, 70, "A")]),
 ]
 
 
@@ -1216,7 +1216,7 @@ JAVA_SKIP_CASES = [
     ("AFTER MATCH SKIP TO FIRST C", _SKIP_TO_B),
     ("AFTER MATCH SKIP TO LAST B", _SKIP_TO_B),
     ("AFTER MATCH SKIP TO B", _SKIP_TO_B),
-    pytest.param("AFTER MATCH SKIP TO U", _SKIP_TO_B, marks=pytest.mark.xfail(reason="engine gap: SUBSET name as SKIP TO target rejected by parser")),
+    ("AFTER MATCH SKIP TO U", _SKIP_TO_B),
 ]
 
 
@@ -1239,7 +1239,6 @@ class TestAfterMatchSkipJavaReference:
         with pytest.raises(Exception):
             match_recognize(JAVA_SKIP_QUERY.format(skip="AFTER MATCH SKIP TO A"), df6)
 
-    @pytest.mark.xfail(reason="engine gap: no runtime error when SKIP TO label is absent from match")
     def test_java_skip_to_unmatched_label_fails(self, df6):
         """Trino: 'AFTER MATCH SKIP failed: pattern variable is not present in match'."""
         with pytest.raises(Exception):

@@ -35,7 +35,7 @@ import threading
 from contextlib import contextmanager
 
 from src.matcher.pattern_tokenizer import (
-    PatternToken, PatternTokenType, parse_quantifier
+    PatternToken, PatternTokenType, parse_quantifier, tokenize_pattern
 )
 from src.matcher.condition_evaluator import compile_condition
 from src.utils.logging_config import get_logger, PerformanceTimer
@@ -2677,6 +2677,17 @@ class NFABuilder:
             elif token.type == PatternTokenType.EXCLUSION:
                 # Handle standalone exclusion tokens
                 exclusion_start, exclusion_end = self._process_exclusion_token(token, define)
+
+                # A quantifier after an exclusion block applies to the whole
+                # excluded sub-pattern, e.g. ``{- B -}+`` means one or more
+                # excluded B rows.  Older code only handled quantifiers inside
+                # the block (``{- B+ -}``), which made quantified exclusions
+                # behave like a single excluded variable.
+                if token.quantifier:
+                    min_rep, max_rep, greedy = parse_quantifier(token.quantifier)
+                    exclusion_start, exclusion_end = self._apply_quantifier(
+                        exclusion_start, exclusion_end, min_rep, max_rep, greedy
+                    )
                 
                 # Connect exclusion fragment to current NFA
                 self.add_epsilon(current, exclusion_start)
@@ -2795,6 +2806,38 @@ class NFABuilder:
         # but will be filtered from output during result processing
         return excl_start, excl_end
 
+    def _extract_exclusion_content(self, token: PatternToken) -> str:
+        """Return the raw pattern content inside a standalone exclusion token."""
+        original = token.metadata.get("original") or token.value
+        original = original.strip()
+
+        if original.startswith("{-") and original.endswith("-}"):
+            return original[2:-2].strip()
+
+        excluded_vars = token.metadata.get("excluded_variables", [])
+        return " ".join(str(var).strip() for var in excluded_vars if str(var).strip())
+
+    def _collect_literal_names(self, tokens: List[PatternToken]) -> Set[str]:
+        """Collect literal variable names recursively from tokenized pattern pieces."""
+        names: Set[str] = set()
+
+        for token in tokens:
+            if token.type == PatternTokenType.LITERAL and token.value:
+                names.add(token.value)
+            elif token.type == PatternTokenType.EXCLUSION:
+                content = self._extract_exclusion_content(token)
+                if content:
+                    try:
+                        names.update(self._collect_literal_names(tokenize_pattern(content)))
+                    except Exception:
+                        names.update(token.metadata.get("excluded_variables", []))
+            elif token.type == PatternTokenType.PERMUTE:
+                for var in token.metadata.get("variables", []) or []:
+                    if isinstance(var, str):
+                        names.add(var)
+
+        return names
+
     def _process_exclusion_token(self, token: PatternToken, define: Dict[str, str]) -> Tuple[int, int]:
         """
         Process a standalone exclusion token with excluded variables in metadata.
@@ -2811,130 +2854,45 @@ class NFABuilder:
         Returns:
             Tuple of (start_state, end_state) for the exclusion pattern
         """
-        # Get excluded variables from token metadata
-        excluded_vars = token.metadata.get('excluded_variables', [])
-        
-        if not excluded_vars:
-            logger.warning("Exclusion token has no excluded variables in metadata")
-            # Create a simple bypass
+        content = self._extract_exclusion_content(token)
+
+        if not content:
+            logger.warning("Exclusion token has no pattern content")
             bypass_state = self.new_state()
             return bypass_state, bypass_state
-        
-        # Create start and end states for the exclusion pattern
+
+        exclusion_start_idx = len(self.states)
         excl_start = self.new_state()
         excl_end = self.new_state()
-        
-        # Track exclusion range start
-        exclusion_start_idx = len(self.states) - 2  # -2 because we just created 2 states
-        
-        # SQL:2016 COMPLIANT EXCLUSION: Build the complete pattern
-        # DO NOT create a bypass - we need to match the excluded variables
-        # and then filter them from output in the matcher
-        
-        current_state = excl_start
-        
-        # Process each excluded variable and connect them in sequence
-        for i, var_spec in enumerate(excluded_vars):
-            var_spec = var_spec.strip()
-            
-            # Check for empty pattern variations
-            if var_spec in ['()', '()*', '()+', '()?', '(){}']:
-                # This is an empty pattern exclusion - create a no-op epsilon transition
-                logger.debug(f"Detected empty pattern exclusion: {var_spec}")
-                # Skip this iteration as empty patterns don't contribute to the automaton
-                continue
-            
-            # HANDLE NESTED EXCLUSIONS: If var_spec contains exclusion patterns,
-            # we need to parse it as a sub-pattern rather than as a variable name
-            if '{-' in var_spec and '-}' in var_spec:
-                logger.debug(f"Processing nested exclusion pattern: {var_spec}")
-                # This is a complex pattern with nested exclusions
-                # For now, skip nested exclusions to avoid circular imports
-                # TODO: Implement proper nested exclusion support
-                logger.warning(f"Nested exclusion patterns not fully implemented yet: {var_spec}")
-                continue
-            
-            # Parse variable and quantifier (e.g., "B+" -> "B", "+")
-            var_name = var_spec
-            quantifier = None
-            
-            # Extract quantifier if present
-            if var_spec.endswith('+'):
-                var_name = var_spec[:-1]
-                quantifier = '+'
-            elif var_spec.endswith('*'):
-                var_name = var_spec[:-1]
-                quantifier = '*'
-            elif var_spec.endswith('?'):
-                var_name = var_spec[:-1]
-                quantifier = '?'
-            elif '{' in var_spec and '}' in var_spec and not ('{-' in var_spec and '-}' in var_spec):
-                # Handle {n,m} quantifiers (but not exclusion patterns)
-                brace_start = var_spec.find('{')
-                var_name = var_spec[:brace_start]
-                quantifier = var_spec[brace_start:]
-            
-            # Skip empty variable names (after removing quantifiers)
-            if not var_name or var_name in ['()', '']:
-                logger.debug(f"Skipping empty variable after quantifier removal: '{var_name}'")
-                continue
-            
-            # Validate that we have a proper variable name (not a pattern)
-            if '{-' in var_name or '-}' in var_name or '|' in var_name:
-                logger.warning(f"Skipping invalid variable name '{var_name}' that appears to be a pattern")
-                continue
-            
-            # Create variable states
-            var_start, var_end = self.create_var_states(var_name, define)
-            
-            # Connect to the sequence
-            self.add_epsilon(current_state, var_start)
-            
-            # Apply quantifier if present
-            if quantifier:
-                min_rep, max_rep, greedy = parse_quantifier(quantifier)
-                var_start, var_end = self._apply_quantifier(
-                    var_start, var_end, min_rep, max_rep, greedy)
-            
-            # Mark all variable transitions as excluded in metadata
-            # Do NOT mark states as excluded - we need them to match!
-            # Instead, mark the transitions/variables for output filtering
-            for state_id, state in enumerate(self.states):
-                if state is not None:
-                    for transition in state.transitions:
-                        if transition.variable == var_name:
-                            # Mark this transition as excluded in metadata
-                            transition.metadata['is_excluded'] = True
-            
-            current_state = var_end
-        
-        # Connect the last variable to the end state
-        self.add_epsilon(current_state, excl_end)
-        
-        # Mark exclusion end in NFA states
+
+        if content in {"()", "()*", "()+", "()?", "(){}"}:
+            logger.debug(f"Detected empty pattern exclusion: {content}")
+            self.add_epsilon(excl_start, excl_end)
+            self.exclusion_ranges.append((exclusion_start_idx, len(self.states) - 1))
+            return excl_start, excl_end
+
+        previous_exclusion_state = self.current_exclusion
+        self.current_exclusion = True
+        try:
+            inner_tokens = tokenize_pattern(content)
+            inner_idx = [0]
+            inner_start, inner_end = self._process_sequence(inner_tokens, inner_idx, define)
+        finally:
+            self.current_exclusion = previous_exclusion_state
+
+        self.add_epsilon(excl_start, inner_start)
+        self.add_epsilon(inner_end, excl_end)
+
+        if "excluded_variables" not in self.metadata:
+            self.metadata["excluded_variables"] = set()
+        self.metadata["excluded_variables"].update(self._collect_literal_names(inner_tokens))
+
         exclusion_end_idx = len(self.states) - 1
-        
-        # Store exclusion range for later processing
         self.exclusion_ranges.append((exclusion_start_idx, exclusion_end_idx))
-        
-        # Store excluded variables in NFA metadata for the matcher
-        if 'excluded_variables' not in self.metadata:
-            self.metadata['excluded_variables'] = set()
-        
-        # Add excluded variable names (without quantifiers) to metadata
-        for var_spec in excluded_vars:
-            var_name = var_spec.strip()
-            # Remove quantifier suffix
-            if var_name.endswith(('+', '*', '?')):
-                var_name = var_name[:-1]
-            elif '{' in var_name and '}' in var_name:
-                var_name = var_name[:var_name.find('{')]
-            
-            self.metadata['excluded_variables'].add(var_name)
-        
-        logger.debug(f"Processed exclusion token with variables: {excluded_vars}")
+
+        logger.debug(f"Processed exclusion token as sub-pattern: {content}")
         logger.debug(f"Excluded variables added to metadata: {self.metadata['excluded_variables']}")
-        
+
         return excl_start, excl_end
 
     def create_var_states(self, var: Union[str, PatternToken], define: Dict[str, str], priority: int = 0) -> Tuple[int, int]:
@@ -3013,8 +2971,12 @@ class NFABuilder:
             # Compile the condition with DEFINE evaluation mode for pattern variables
             condition_fn = compile_condition(condition_str, evaluation_mode='DEFINE')
         
-        # Create transition with condition, variable tracking, and priority
-        self.states[start].add_transition(condition_fn, end, var_base, priority)
+        # Create transition with condition, variable tracking, and priority.
+        # Exclusion is a property of this specific pattern occurrence, not of
+        # the variable name globally.  This keeps patterns like
+        # ``A B {- B -}`` correct: the first B is visible, the second B is not.
+        transition_metadata = {"is_excluded": True} if self.current_exclusion else {}
+        self.states[start].add_transition(condition_fn, end, var_base, priority, transition_metadata)
         
         # Store variable name on both states
         self.states[start].variable = var_base

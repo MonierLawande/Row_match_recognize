@@ -2097,6 +2097,125 @@ class EnhancedMatcher:
             self._linear_search_ctx = ctx
         return ctx
 
+    def _get_linear_dp_match_ctx(self, plan, run_lengths_by_var, row_count):
+        """Compile a linear quantified plan into suffix-feasibility tables.
+
+        ``_linear_search_iterative`` is a safe generic DFS, but for large
+        row-local linear patterns it still pays per-start Python iterator and
+        backtracking overhead.  The semantics of a linear quantified pattern
+        can be represented as a small dynamic program:
+
+        * ``possible[i][p]``: tokens ``i..end`` can match starting at row ``p``.
+        * ``best_end[i][p]``: the end position chosen by SQL quantifier order
+          for token ``i`` at row ``p`` (largest for greedy, smallest for
+          reluctant), constrained by ``possible[i + 1]``.
+
+        The tables are built from the same precomputed row-local condition
+        matrix as the existing linear fast path, so the gate and correctness
+        contract are identical.  Runtime matching becomes O(number of tokens)
+        per accepted start and impossible starts can be skipped exactly.
+        """
+        if not plan or run_lengths_by_var is None:
+            return None
+
+        cached = getattr(self, "_linear_dp_match_ctx", None)
+        if (
+            cached is not None
+            and cached[0] is run_lengths_by_var
+            and cached[1] == row_count
+            and cached[2] is plan
+        ):
+            return cached
+
+        n = row_count
+        positions = np.arange(n + 1, dtype=np.int64)
+        suffix_possible = np.ones(n + 1, dtype=bool)
+        best_ends = [None] * len(plan)
+
+        for token_idx in range(len(plan) - 1, -1, -1):
+            token = plan[token_idx]
+            runs = run_lengths_by_var.get(token["var"])
+            if runs is None:
+                return None
+
+            run_values = np.zeros(n + 1, dtype=np.int64)
+            run_values[:n] = np.asarray(runs[:n], dtype=np.int64)
+            max_count = token["max"]
+            if max_count is not None:
+                upper = np.minimum(run_values, max_count)
+            else:
+                upper = run_values
+
+            min_count = token["min"]
+            low = positions + min_count
+            high = positions + upper
+            valid_range = (low <= high) & (low <= n)
+
+            true_positions = np.where(suffix_possible, positions, n + 1)
+            next_true = np.minimum.accumulate(true_positions[::-1])[::-1]
+            prev_true = np.maximum.accumulate(
+                np.where(suffix_possible, positions, -1)
+            )
+
+            if token["greedy"]:
+                candidate = prev_true[high]
+                possible = valid_range & (candidate >= low)
+            else:
+                low_clipped = np.minimum(low, n)
+                candidate = next_true[low_clipped]
+                possible = valid_range & (candidate <= high)
+
+            best_end = np.where(possible, candidate, -1).astype(np.int64, copy=False)
+            best_ends[token_idx] = best_end
+            suffix_possible = possible
+
+        ctx = (
+            run_lengths_by_var,
+            row_count,
+            plan,
+            tuple(best_ends),
+            suffix_possible,
+        )
+        self._linear_dp_match_ctx = ctx
+        return ctx
+
+    @staticmethod
+    def _linear_plan_benefits_from_dp(plan) -> bool:
+        """Return True when suffix DP should beat the lightweight DFS.
+
+        The DP tables are very effective when a variable-width token can
+        consume rows needed by a later required token, because the scalar DFS
+        may have to backtrack through several counts for many starts.  If the
+        remaining suffix can match empty (for example ``A+ B? C*`` after
+        ``A+``), the DFS usually accepts immediately and the O(n * tokens)
+        DP precomputation is just overhead.  This heuristic is semantic-free:
+        it only chooses between two equivalent compiled matchers.
+        """
+        required_suffix = 0
+        for token in reversed(plan or []):
+            max_count = token["max"]
+            variable_width = max_count is None or max_count != token["min"]
+            if variable_width and required_suffix > 0:
+                return True
+            required_suffix += token["min"]
+        return False
+
+    @staticmethod
+    def _linear_dp_segments(dp_best_ends, plan, start_idx):
+        """Return segment triples from a linear DP context, or None."""
+        pos = start_idx
+        segments = []
+        for token_idx, token in enumerate(plan):
+            best_end = dp_best_ends[token_idx]
+            if pos < 0 or pos >= len(best_end):
+                return None
+            end_pos = int(best_end[pos])
+            if end_pos < 0:
+                return None
+            segments.append((token["var"], pos, end_pos - pos))
+            pos = end_pos
+        return segments
+
     @staticmethod
     def _linear_search_iterative(steps, start_idx, row_count, failed):
         """Iterative greedy depth-first search over a linear quantifier plan.
@@ -4895,7 +5014,27 @@ class EnhancedMatcher:
                 if self.dfa.states[state].is_accept:
                     if debug_enabled:
                         logger.debug(f"Reached accepting state {state} after exclusion at row {current_idx-1}")
-                    # Don't create a match here - continue to see if we can match more
+
+                    # Excluded transitions still consume input and can complete
+                    # a valid match.  The old path waited until the next loop
+                    # iteration to notice the accepting state, which failed
+                    # when the accepting excluded transition consumed the last
+                    # row in the partition.  Record the accepted candidate now,
+                    # while still allowing the greedy walk to continue if more
+                    # transitions are available.
+                    if self._check_anchors(state, current_idx - 1, len(rows), "end"):
+                        if not (has_both_anchors and current_idx < len(rows)):
+                            if not (has_end_anchor and not has_both_anchors and current_idx - 1 != len(rows) - 1):
+                                longest_match = {
+                                    "start": start_idx,
+                                    "end": current_idx - 1,
+                                    "variables": {k: v[:] for k, v in var_assignments.items()},
+                                    "state": state,
+                                    "is_empty": False,
+                                    "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
+                                    "excluded_rows": excluded_rows.copy(),
+                                    "has_empty_alternation": self.has_empty_alternation
+                                }
                 
                 continue
             
@@ -5205,7 +5344,15 @@ class EnhancedMatcher:
         # Special handling for patterns with exclusions
         # If we have a match and it contains excluded rows, make sure they're properly tracked
         if longest_match and excluded_rows:
-            longest_match["excluded_rows"] = sorted(set(excluded_rows))
+            # Excluded rows participate in matching, but only rows consumed by
+            # the accepted match should affect output or skip semantics.  The
+            # greedy traversal may explore rows after the last accepted state
+            # before failing; carrying those speculative rows forward corrupts
+            # AFTER MATCH SKIP PAST LAST ROW and can create duplicate matches.
+            match_end = longest_match.get("end", -1)
+            longest_match["excluded_rows"] = sorted(
+                {idx for idx in excluded_rows if idx <= match_end}
+            )
             if debug_enabled:
                 logger.debug(f"Match contains excluded rows: {longest_match['excluded_rows']}")
         
@@ -7037,6 +7184,9 @@ class EnhancedMatcher:
                     unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
                     # Add original row index for proper sorting in executor
                     unmatched_row['_original_row_idx'] = idx
+                    unmatched_row['_match_sort_pos'] = idx
+                    unmatched_row['_match_sort_kind'] = 0
+                    unmatched_row['_match_output_order'] = 0
                     results.append(unmatched_row)
                     processed_indices.add(idx)
 
@@ -7096,6 +7246,45 @@ class EnhancedMatcher:
             logger.warning(f"Invalid skip configuration: mode={skip_mode}, skip_var={skip_var}. Using default.")
             return start_idx + 1
 
+    @staticmethod
+    def _case_insensitive_mapping_key(mapping: Dict[str, Any], requested_key: str) -> Optional[str]:
+        """Resolve a mapping key using exact match first, then SQL-style case-insensitive lookup."""
+        if not requested_key:
+            return None
+        if requested_key in mapping:
+            return requested_key
+        requested_upper = str(requested_key).upper()
+        for existing_key in mapping.keys():
+            if str(existing_key).upper() == requested_upper:
+                return existing_key
+        return None
+
+    def _resolve_skip_target_indices(self, skip_var: str, match: Dict[str, Any]) -> List[int]:
+        """Return row indices for an AFTER MATCH SKIP target variable or SUBSET.
+
+        SQL row-pattern SUBSET names are valid skip targets.  A subset target
+        resolves to the union of matched rows for its component variables.  If
+        a direct variable or every member of a subset is absent from the
+        current match, the SQL operation fails at runtime; silently falling
+        back to the next row changes match enumeration and can hide invalid
+        queries.
+        """
+        variables = match.get("variables", {}) or {}
+        direct_key = self._case_insensitive_mapping_key(variables, skip_var)
+        if direct_key is not None:
+            return sorted(variables.get(direct_key, []) or [])
+
+        subset_key = self._case_insensitive_mapping_key(self.subsets or {}, skip_var)
+        if subset_key is None:
+            return []
+
+        indices: List[int] = []
+        for component in (self.subsets or {}).get(subset_key, []):
+            component_key = self._case_insensitive_mapping_key(variables, component)
+            if component_key is not None:
+                indices.extend(variables.get(component_key, []) or [])
+        return sorted(set(indices))
+
     def _get_variable_skip_position(self, skip_var: str, match: Dict[str, Any], is_first: bool) -> int:
         """
         Calculate skip position based on pattern variable position.
@@ -7104,16 +7293,14 @@ class EnhancedMatcher:
         """
         start_idx = match["start"]
         
-        # Validate that the skip variable exists in the match
-        if skip_var not in match["variables"]:
-            logger.error(f"Skip variable '{skip_var}' not found in match variables: {list(match['variables'].keys())}")
-            # Standard behavior: if variable is not present, treat as failure and skip to next row
-            return start_idx + 1
-            
-        var_indices = match["variables"][skip_var]
+        var_indices = self._resolve_skip_target_indices(skip_var, match)
         if not var_indices:
-            logger.error(f"Skip variable '{skip_var}' has no matched indices")
-            return start_idx + 1
+            error_msg = (
+                f"AFTER MATCH SKIP target '{skip_var}' is not present in the current match. "
+                f"Available variables: {list((match.get('variables') or {}).keys())}"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
             
         # Calculate target position based on FIRST or LAST
         if is_first:
@@ -7616,9 +7803,15 @@ class EnhancedMatcher:
         if not var_name:
             return None
         scope_members = self._measure_scope_members(var_name)
+        segment_scope_cache = {}
 
         def seg_is_var(seg_var):
-            return str(seg_var).upper() in scope_members
+            cached = segment_scope_cache.get(seg_var)
+            if cached is not None:
+                return cached
+            result = str(seg_var).upper() in scope_members
+            segment_scope_cache[seg_var] = result
+            return result
 
         if kind == "COUNT_VAR_STAR":
             def count_var_star(segments, start, end, mn):
@@ -7736,6 +7929,7 @@ class EnhancedMatcher:
 
         mode = None
         steps = failed = None
+        linear_dp_ctx = None
         if self._can_use_linear_quantifier_plan(config):
             plan = self._get_linear_quantifier_plan()
             if sum(token["min"] for token in plan) < 1:
@@ -7743,12 +7937,20 @@ class EnhancedMatcher:
             run_lengths = self._get_linear_plan_run_lengths(row_count)
             if run_lengths is None:
                 return None
-            ctx = self._get_linear_search_ctx(plan, run_lengths, row_count)
-            steps = ctx[3]
-            if steps is None:
-                return None
-            failed = ctx[4]
-            mode = "linear"
+            linear_dp_ctx = (
+                self._get_linear_dp_match_ctx(plan, run_lengths, row_count)
+                if self._linear_plan_benefits_from_dp(plan)
+                else None
+            )
+            if linear_dp_ctx is not None:
+                mode = "linear_dp"
+            else:
+                ctx = self._get_linear_search_ctx(plan, run_lengths, row_count)
+                steps = ctx[3]
+                if steps is None:
+                    return None
+                failed = ctx[4]
+                mode = "linear"
         elif self._can_use_row_local_dfa_fast_path(config):
             self._build_row_local_transition_index(
                 self.has_quantifiers
@@ -7780,7 +7982,11 @@ class EnhancedMatcher:
             if arr is not None:
                 prefix_columns.append((col, arr))
 
-        start_position_mask = self._build_start_position_mask(row_count)
+        start_position_mask = (
+            linear_dp_ctx[4]
+            if mode == "linear_dp" and linear_dp_ctx is not None
+            else self._build_start_position_mask(row_count)
+        )
         start_positions = (
             np.flatnonzero(start_position_mask) if start_position_mask is not None else None
         )
@@ -7802,8 +8008,9 @@ class EnhancedMatcher:
             row["_original_row_idx"] = start
             results_append(row)
 
-        if mode == "linear":
+        if mode in ("linear", "linear_dp"):
             search = self._linear_search_iterative
+            dp_best_ends = linear_dp_ctx[3] if linear_dp_ctx is not None else None
             while start < row_count:
                 if start_position_mask is not None and not start_position_mask[start]:
                     next_pos = start_positions.searchsorted(start)
@@ -7811,7 +8018,10 @@ class EnhancedMatcher:
                         break
                     start = int(start_positions[next_pos])
                     continue
-                segments = search(steps, start, row_count, failed)
+                if dp_best_ends is not None:
+                    segments = self._linear_dp_segments(dp_best_ends, plan, start)
+                else:
+                    segments = search(steps, start, row_count, failed)
                 if segments is None:
                     start += 1
                     continue
@@ -8869,6 +9079,9 @@ class EnhancedMatcher:
             
             # Add original row index for proper sorting in executor
             result["_original_row_idx"] = idx
+            result["_match_sort_pos"] = match.get("start", idx)
+            result["_match_sort_kind"] = 1
+            result["_match_output_order"] = len(results)
             
             results.append(result)
             logger.debug(f"Added row {idx} to results")
