@@ -1881,15 +1881,14 @@ class EnhancedMatcher:
             elif len(values) > row_count:
                 values = values[:row_count]
 
-            runs = np.zeros(row_count, dtype=np.int64)
-            current_run = 0
-            for idx in range(row_count - 1, -1, -1):
-                if values[idx]:
-                    current_run += 1
-                else:
-                    current_run = 0
-                runs[idx] = current_run
-            run_lengths[var_name] = runs
+            # Vectorized suffix-run lengths: reverse the mask, accumulate a
+            # cumulative count that resets at every False, reverse back.
+            reversed_values = values[::-1]
+            cumulative = np.cumsum(reversed_values.astype(np.int64))
+            reset_baseline = np.maximum.accumulate(
+                np.where(reversed_values, 0, cumulative)
+            )
+            run_lengths[var_name] = (cumulative - reset_baseline)[::-1].copy()
 
         self._linear_plan_run_lengths = run_lengths
         self._linear_plan_run_lengths_row_count = row_count
@@ -1922,6 +1921,147 @@ class EnhancedMatcher:
 
         return True
 
+    def _get_linear_search_ctx(self, plan, run_lengths_by_var, row_count):
+        """Per-pass search context: plan tokens flattened to tuples with their
+        run-length arrays, plus a failure memo.  Whether a suffix can match
+        from (token, pos) does not depend on the start position, so failed
+        states learned during one attempt prune every later attempt in the
+        same pass.  The context is keyed by object identity of the run table
+        (stable within a find_matches pass, rebuilt when inputs change)."""
+        ctx = getattr(self, "_linear_search_ctx", None)
+        if (
+            ctx is None
+            or ctx[0] is not run_lengths_by_var
+            or ctx[1] != row_count
+            or ctx[2] is not plan
+        ):
+            steps = None
+            if run_lengths_by_var is not None:
+                resolved = []
+                for token in plan:
+                    runs = run_lengths_by_var.get(token["var"])
+                    if runs is None:
+                        resolved = None
+                        break
+                    resolved.append(
+                        (token["var"], token["min"], token["max"], token["greedy"], runs)
+                    )
+                steps = tuple(resolved) if resolved is not None else None
+            ctx = (run_lengths_by_var, row_count, plan, steps, set())
+            self._linear_search_ctx = ctx
+        return ctx
+
+    @staticmethod
+    def _linear_search_iterative(steps, start_idx, row_count, failed):
+        """Iterative greedy depth-first search over a linear quantifier plan.
+
+        Explores token counts in the same order as the recursive matcher
+        (greedy tokens high-to-low, reluctant low-to-high) and returns the
+        first complete assignment as ``[(var, pos, count), ...]`` or None.
+        ``failed`` memoizes (token, pos) states whose suffix cannot match;
+        it is shared across start positions within a pass.
+        """
+        plan_len = len(steps)
+        segments = []
+        count_iters = []
+        token_idx = 0
+        pos = start_idx
+
+        while token_idx < plan_len:
+            descended = False
+            if (token_idx, pos) not in failed:
+                var_name, min_count, max_count, greedy, runs = steps[token_idx]
+                run_length = int(runs[pos]) if pos < row_count else 0
+                upper = run_length if max_count is None or run_length < max_count else max_count
+                if upper >= min_count:
+                    if greedy:
+                        counts = iter(range(upper, min_count - 1, -1))
+                    else:
+                        counts = iter(range(min_count, upper + 1))
+                    count = next(counts)
+                    count_iters.append(counts)
+                    segments.append((var_name, pos, count))
+                    token_idx += 1
+                    pos += count
+                    descended = True
+                else:
+                    failed.add((token_idx, pos))
+
+            if descended:
+                continue
+
+            # Backtrack: advance the nearest ancestor with counts left.
+            while True:
+                if not count_iters:
+                    return None
+                counts = count_iters[-1]
+                var_name, seg_pos, _seg_count = segments[-1]
+                next_count = next(counts, None)
+                if next_count is None:
+                    count_iters.pop()
+                    segments.pop()
+                    token_idx -= 1
+                    failed.add((token_idx, seg_pos))
+                    continue
+                segments[-1] = (var_name, seg_pos, next_count)
+                pos = seg_pos + next_count
+                break
+
+        return segments
+
+    def _linear_search_scalar(self, plan, start_idx, row_count):
+        """Recursive fallback search used when run-length tables are missing."""
+        plan_len = len(plan)
+        failed_states = set()
+        segments: List[Tuple[str, int, int]] = []
+
+        def max_run_for_var(var_name, pos):
+            count = 0
+            while pos + count < row_count:
+                matches = self._linear_plan_row_matches_var(var_name, pos + count, row_count)
+                if matches is None:
+                    return None
+                if not matches:
+                    break
+                count += 1
+            return count
+
+        def match_from(token_idx, pos):
+            if token_idx >= plan_len:
+                return True
+            state = (token_idx, pos)
+            if state in failed_states:
+                return False
+
+            token = plan[token_idx]
+            run_length = max_run_for_var(token["var"], pos)
+            if run_length is None:
+                failed_states.add(state)
+                return False
+
+            min_count = token["min"]
+            max_count = token["max"]
+            upper = run_length if max_count is None else min(run_length, max_count)
+            if upper < min_count:
+                failed_states.add(state)
+                return False
+
+            if token["greedy"]:
+                counts = range(upper, min_count - 1, -1)
+            else:
+                counts = range(min_count, upper + 1)
+
+            for count in counts:
+                segments.append((token["var"], pos, count))
+                if match_from(token_idx + 1, pos + count):
+                    return True
+                segments.pop()
+
+            failed_states.add(state)
+            return False
+
+        return segments if match_from(0, start_idx) else None
+
     def _find_single_match_linear_quantifier(
         self,
         rows: List[Dict[str, Any]],
@@ -1939,67 +2079,16 @@ class EnhancedMatcher:
         row_count = len(rows)
         if run_lengths_by_var is None:
             run_lengths_by_var = self._get_linear_plan_run_lengths(row_count)
-        memo = {}
 
-        def max_run_for_var(var_name, pos):
-            if run_lengths_by_var is not None:
-                runs = run_lengths_by_var.get(var_name)
-                if runs is None:
-                    return None
-                if pos < 0 or pos >= row_count:
-                    return 0
-                return int(runs[pos])
+        ctx = self._get_linear_search_ctx(plan, run_lengths_by_var, row_count)
+        steps = ctx[3]
 
-            count = 0
-            while pos + count < row_count:
-                matches = self._linear_plan_row_matches_var(var_name, pos + count, row_count)
-                if matches is None:
-                    return None
-                if not matches:
-                    break
-                count += 1
-            return count
-
-        def match_from(token_idx, pos):
-            cache_key = (token_idx, pos)
-            if cache_key in memo:
-                cached = memo[cache_key]
-                return cached[:] if cached is not None else None
-
-            if token_idx >= len(plan):
-                memo[cache_key] = []
-                return []
-
-            token = plan[token_idx]
-            var_name = token["var"]
-            run_length = max_run_for_var(var_name, pos)
-            if run_length is None:
-                memo[cache_key] = None
-                return None
-
-            min_count = token["min"]
-            max_count = token["max"]
-            upper = run_length if max_count is None else min(run_length, max_count)
-            if upper < min_count:
-                memo[cache_key] = None
-                return None
-
-            if token["greedy"]:
-                counts = range(upper, min_count - 1, -1)
-            else:
-                counts = range(min_count, upper + 1)
-
-            for count in counts:
-                suffix = match_from(token_idx + 1, pos + count)
-                if suffix is not None:
-                    result = [(var_name, pos, count)] + suffix
-                    memo[cache_key] = result
-                    return result[:]
-
-            memo[cache_key] = None
-            return None
-
-        segments = match_from(0, start_idx)
+        if steps is not None:
+            segments = self._linear_search_iterative(
+                steps, start_idx, row_count, ctx[4]
+            )
+        else:
+            segments = self._linear_search_scalar(plan, start_idx, row_count)
         if segments is None:
             return None
 
@@ -2007,11 +2096,17 @@ class EnhancedMatcher:
         end_idx = start_idx - 1
         for var_name, segment_start, count in segments:
             if count <= 0:
-                assignments.setdefault(var_name, [])
+                if var_name not in assignments:
+                    assignments[var_name] = []
                 continue
-            indices = list(range(segment_start, segment_start + count))
-            assignments.setdefault(var_name, []).extend(indices)
-            end_idx = max(end_idx, segment_start + count - 1)
+            segment_end = segment_start + count
+            existing = assignments.get(var_name)
+            if existing is None:
+                assignments[var_name] = list(range(segment_start, segment_end))
+            else:
+                existing.extend(range(segment_start, segment_end))
+            if segment_end - 1 > end_idx:
+                end_idx = segment_end - 1
 
         if end_idx < start_idx:
             return {
@@ -2204,9 +2299,15 @@ class EnhancedMatcher:
             self._row_local_transition_index = compact_index
             self._row_local_transition_index_cache_key = cache_key
             return compact_index
-        decision_index: Dict[int, Tuple[Any, List[Tuple[str, int, bool]]]] = {}
+        # Decision tables are stored per state as raw bytes (255 = no
+        # transition): indexing a bytes object returns a plain int at C
+        # speed, which beats both dict lookups and numpy scalar extraction
+        # in the row-consuming walk.
+        decision_index: List[Optional[Tuple[bytes, Tuple[Tuple[str, int, bool], ...]]]] = (
+            [None] * len(self.dfa.states)
+        )
         for state, transitions in compact_index.items():
-            decision = np.full(row_count, -1, dtype=np.int8)
+            decision = np.full(row_count, 255, dtype=np.uint8)
             remaining = np.ones(row_count, dtype=bool)
             actions: List[Tuple[str, int, bool]] = []
             for t_idx, (var, target, is_excluded, var_results, implicit_true, _priority) in enumerate(transitions):
@@ -2220,7 +2321,8 @@ class EnhancedMatcher:
                     remaining &= ~mask
                 if not remaining.any():
                     break
-            decision_index[state] = (decision, actions)
+            if 0 <= state < len(decision_index):
+                decision_index[state] = (decision.tobytes(), tuple(actions))
         self._row_local_dfa_decisions = decision_index
         self._row_local_dfa_accept_flags = [
             bool(self.dfa.states[s].is_accept) for s in range(len(self.dfa.states))
@@ -2236,6 +2338,7 @@ class EnhancedMatcher:
         start_idx: int,
         config=None,
         assume_safe: bool = False,
+        assume_plan_ready: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Fast DFA traversal for row-local patterns.
@@ -2244,19 +2347,23 @@ class EnhancedMatcher:
         only per-transition operation is a boolean lookup from the precomputed
         condition matrix.  It returns None when no match can start at
         ``start_idx`` and otherwise returns the longest accepted match found by
-        the DFA traversal.
+        the DFA traversal.  ``assume_plan_ready`` skips the transition-index
+        freshness check when the caller has already built it for this pass.
         """
         if not assume_safe and not self._can_use_row_local_dfa_fast_path(config):
             return None
         if start_idx < 0 or start_idx >= row_count:
             return None
 
-        has_cross_ref_for_sort = (
-            self.has_quantifiers
-            and bool(self.define_conditions)
-            and self._has_cross_variable_references()
-        )
-        row_local_transition_index = self._build_row_local_transition_index(has_cross_ref_for_sort)
+        if assume_plan_ready:
+            row_local_transition_index = self._row_local_transition_index
+        else:
+            has_cross_ref_for_sort = (
+                self.has_quantifiers
+                and bool(self.define_conditions)
+                and self._has_cross_variable_references()
+            )
+            row_local_transition_index = self._build_row_local_transition_index(has_cross_ref_for_sort)
         state = self.start_state
         current_idx = start_idx
         var_assignments: Dict[str, List[int]] = {}
@@ -2266,31 +2373,70 @@ class EnhancedMatcher:
 
         decisions = getattr(self, "_row_local_dfa_decisions", None)
         if decisions is not None:
-            # Precomputed decision arrays: one fetch per consumed row instead
-            # of scanning the transition list with per-row boolean lookups.
+            # Precomputed decision tables: one bytes fetch per consumed row.
+            # Variable assignments are recorded as (var, start, stop) run
+            # segments and expanded only for the accepted part of the match,
+            # so failed exploratory rows never materialize index lists.
             accept_flags = self._row_local_dfa_accept_flags
+            segment_records: List[Tuple[str, int, int, bool]] = []
+            current_var = None
+            current_excluded = False
+            segment_start = start_idx
             while current_idx < row_count:
-                state_plan = decisions.get(state)
+                state_plan = decisions[state]
                 if state_plan is None:
                     break
-                decision, actions = state_plan
-                transition_idx = decision[current_idx]
-                if transition_idx < 0:
+                transition_idx = state_plan[0][current_idx]
+                if transition_idx == 255:
                     break
-                matched_var, state, is_excluded_match = actions[transition_idx]
+                matched_var, state, is_excluded_match = state_plan[1][transition_idx]
 
-                assignment_list = var_assignments.get(matched_var)
-                if assignment_list is None:
-                    assignment_list = []
-                    var_assignments[matched_var] = assignment_list
-                assignment_list.append(current_idx)
-                if is_excluded_match:
-                    excluded_rows.append(current_idx)
+                if matched_var is not current_var or is_excluded_match != current_excluded:
+                    if current_var is not None:
+                        segment_records.append(
+                            (current_var, segment_start, current_idx, current_excluded)
+                        )
+                    current_var = matched_var
+                    current_excluded = is_excluded_match
+                    segment_start = current_idx
 
                 current_idx += 1
                 if accept_flags[state]:
                     accepted_end = current_idx - 1
                     accepted_state = state
+
+            if accepted_end is None:
+                return None
+            if current_var is not None:
+                segment_records.append(
+                    (current_var, segment_start, current_idx, current_excluded)
+                )
+
+            limit = accepted_end + 1
+            for seg_var, seg_start, seg_stop, seg_excluded in segment_records:
+                if seg_start >= limit:
+                    break
+                seg_stop = seg_stop if seg_stop <= limit else limit
+                indices = range(seg_start, seg_stop)
+                existing = var_assignments.get(seg_var)
+                if existing is None:
+                    var_assignments[seg_var] = list(indices)
+                else:
+                    existing.extend(indices)
+                if seg_excluded:
+                    excluded_rows.extend(indices)
+
+            return {
+                "start": start_idx,
+                "end": accepted_end,
+                "variables": var_assignments,
+                "state": accepted_state,
+                "is_empty": False,
+                "excluded_vars": set(),
+                "excluded_rows": excluded_rows,
+                "has_empty_alternation": False,
+                "row_local_dfa_fast_path": True,
+            }
         else:
             while current_idx < row_count:
                 best_transition: Optional[Tuple[str, int, bool, Any, bool, Tuple[Any, ...]]] = None
@@ -6015,7 +6161,7 @@ class EnhancedMatcher:
         all_rows = config.rows_per_match != RowsPerMatch.ONE_ROW if config else False
         show_empty = config.show_empty if config else True
         include_unmatched = config.include_unmatched if config else False
-        compiled_one_row_measure_plans = None if all_rows else self._prepare_measure_output_plans(measures)
+        compiled_one_row_measure_plans = None if all_rows else self._prepare_measure_output_plans(measures, rows)
         unmatched_indices = set(range(len(rows))) if include_unmatched else None
         track_processed_indices = (
             include_unmatched
@@ -6023,6 +6169,18 @@ class EnhancedMatcher:
         )
 
         logger.info(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
+
+        # FUSED FAST PASS: for plain ONE ROW PER MATCH / SKIP PAST LAST ROW
+        # queries fully covered by the compiled matchers and measure plans,
+        # enumerate matches and emit output rows directly.  Semantics are
+        # identical to the loop below; every non-default feature bails out.
+        if not all_rows and not include_unmatched and not track_processed_indices:
+            fast_results = self._run_fast_one_row_pass(rows, config, measures)
+            if fast_results is not None:
+                self.timing["total"] = time.time() - start_time
+                self._update_performance_metrics(len(rows), len(fast_results), self.timing["total"])
+                logger.info(f"Fused one-row pass produced {len(fast_results)} result rows")
+                return fast_results
 
         # UNLIMITED SCALE PROCESSING: Intelligent iteration management without hard limits
         # Remove all artificial iteration constraints for true unlimited dataset processing
@@ -6076,6 +6234,16 @@ class EnhancedMatcher:
             False if linear_plan_available
             else self._can_use_row_local_dfa_fast_path(config)
         )
+        row_local_dfa_plan_ready = False
+        if row_local_dfa_available:
+            # Build the transition index and decision tables once for this
+            # pass so per-attempt calls can skip the freshness check.
+            self._build_row_local_transition_index(
+                self.has_quantifiers
+                and bool(self.define_conditions)
+                and self._has_cross_variable_references()
+            )
+            row_local_dfa_plan_ready = True
         start_position_mask = self._build_start_position_mask(len(rows))
         start_positions = None
         if start_position_mask is not None:
@@ -6254,6 +6422,7 @@ class EnhancedMatcher:
                         start_idx,
                         config,
                         assume_safe=True,
+                        assume_plan_ready=row_local_dfa_plan_ready,
                     )
             
             # FALLBACK: Standard DFA traversal for complex patterns
@@ -6900,6 +7069,293 @@ class EnhancedMatcher:
 
         raise ValueError(f"Unsupported compiled measure plan kind: {kind}")
 
+    def _compile_segment_measure_closure(self, plan, rows):
+        """Compile a simple measure plan into ``fn(segments, start, end, mn)``.
+
+        ``segments`` is the ordered run-segment list ``[(var, s, e), ...]`` of
+        a match.  Values are identical to ``_evaluate_compiled_measure_plan``
+        (element order inside aggregations is preserved); this form lets the
+        fused one-row driver skip materializing per-variable index lists.
+        Returns None when the plan (or row store) cannot support it.
+        """
+        kind = plan["kind"]
+
+        if kind == "MATCH_NUMBER":
+            return lambda segments, start, end, mn: mn
+
+        if kind == "COUNT_STAR":
+            return lambda segments, start, end, mn: end - start + 1
+
+        var_name = plan.get("var")
+        if not var_name:
+            return None
+        resolved_cell = []
+        var_upper = var_name.upper()
+
+        def seg_is_var(seg_var):
+            if resolved_cell:
+                return seg_var == resolved_cell[0]
+            if seg_var == var_name or seg_var.upper() == var_upper:
+                resolved_cell.append(seg_var)
+                return True
+            return False
+
+        if kind == "COUNT_VAR_STAR":
+            def count_var_star(segments, start, end, mn):
+                total = 0
+                for seg_var, seg_start, seg_stop in segments:
+                    if seg_is_var(seg_var):
+                        total += seg_stop - seg_start
+                return total
+            return count_var_star
+
+        field_name = plan.get("field")
+        if not (hasattr(rows, "column_array") and hasattr(rows, "non_null_mask")):
+            return None
+        column = rows.column_array(field_name) if field_name else None
+        if field_name and column is None:
+            return None
+        mask = rows.non_null_mask(field_name) if field_name else None
+        all_non_null = rows.column_all_non_null(field_name) if field_name else False
+
+        if kind == "COUNT_FIELD":
+            def count_field(segments, start, end, mn):
+                total = 0
+                for seg_var, seg_start, seg_stop in segments:
+                    if seg_is_var(seg_var):
+                        if all_non_null:
+                            total += seg_stop - seg_start
+                        else:
+                            total += int(mask[seg_start:seg_stop].sum())
+                return total
+            return count_field
+
+        if kind == "FIRST":
+            def first_field(segments, start, end, mn):
+                for seg_var, seg_start, _seg_stop in segments:
+                    if seg_is_var(seg_var):
+                        return column[seg_start]
+                return None
+            return first_field
+
+        if kind == "LAST":
+            def last_field(segments, start, end, mn):
+                for seg_var, _seg_start, seg_stop in reversed(segments):
+                    if seg_is_var(seg_var):
+                        return column[seg_stop - 1]
+                return None
+            return last_field
+
+        if kind in {"SUM_FIELD", "AVG_FIELD", "MIN_FIELD", "MAX_FIELD"}:
+            def agg_field(segments, start, end, mn, _kind=kind):
+                values = []
+                for seg_var, seg_start, seg_stop in segments:
+                    if seg_is_var(seg_var):
+                        segment_values = column[seg_start:seg_stop]
+                        segment_mask = mask[seg_start:seg_stop]
+                        values.extend(segment_values[segment_mask].tolist())
+                if not values:
+                    return None
+                if _kind == "MIN_FIELD":
+                    return min(values)
+                if _kind == "MAX_FIELD":
+                    return max(values)
+                numeric_values = []
+                for value in values:
+                    try:
+                        numeric_values.append(float(value))
+                    except (TypeError, ValueError):
+                        continue
+                if not numeric_values:
+                    return None
+                total = sum(numeric_values)
+                if _kind == "SUM_FIELD":
+                    return total
+                return total / len(numeric_values)
+            return agg_field
+
+        return None
+
+    def _run_fast_one_row_pass(self, rows, config, measures):
+        """Fused enumeration + output for ONE ROW PER MATCH fast paths.
+
+        Combines the compiled matchers with segment-based measure closures so
+        each match emits one output dict directly, without building the match
+        dictionary, per-variable index lists, or RowContext.  Returns the
+        results list, or None when any gate fails (the generic loop then runs
+        with identical semantics).  Gated to: ONE ROW PER MATCH, AFTER MATCH
+        SKIP PAST LAST ROW, no unmatched-row output, no anchors, patterns that
+        cannot produce empty matches, and measures fully covered by compiled
+        plans.
+        """
+        if config is not None:
+            if getattr(config, "rows_per_match", RowsPerMatch.ONE_ROW) != RowsPerMatch.ONE_ROW:
+                return None
+            if config.skip_mode != SkipMode.PAST_LAST_ROW:
+                return None
+            if getattr(config, "include_unmatched", False):
+                return None
+        if not measures:
+            return None
+        if not hasattr(rows, "column_array"):
+            return None
+
+        anchor_metadata = getattr(self, "_anchor_metadata", {}) or {}
+        dfa_metadata = getattr(self.dfa, "metadata", {}) or {}
+        if (
+            anchor_metadata.get("has_start_anchor")
+            or anchor_metadata.get("has_end_anchor")
+            or dfa_metadata.get("has_start_anchor")
+            or dfa_metadata.get("has_end_anchor")
+        ):
+            return None
+
+        row_count = len(rows)
+        if row_count == 0:
+            return None
+
+        mode = None
+        steps = failed = None
+        if self._can_use_linear_quantifier_plan(config):
+            plan = self._get_linear_quantifier_plan()
+            if sum(token["min"] for token in plan) < 1:
+                return None  # pattern can produce empty matches
+            run_lengths = self._get_linear_plan_run_lengths(row_count)
+            if run_lengths is None:
+                return None
+            ctx = self._get_linear_search_ctx(plan, run_lengths, row_count)
+            steps = ctx[3]
+            if steps is None:
+                return None
+            failed = ctx[4]
+            mode = "linear"
+        elif self._can_use_row_local_dfa_fast_path(config):
+            self._build_row_local_transition_index(
+                self.has_quantifiers
+                and bool(self.define_conditions)
+                and self._has_cross_variable_references()
+            )
+            if getattr(self, "_row_local_dfa_decisions", None) is None:
+                return None
+            mode = "dfa"
+        else:
+            return None
+
+        seg_measures = []
+        for alias, expr in measures.items():
+            semantics = self.measure_semantics.get(alias, "FINAL")
+            measure_plan = self._get_compiled_measure_plan(alias, expr, semantics)
+            fn = (
+                self._compile_segment_measure_closure(measure_plan, rows)
+                if measure_plan is not None
+                else None
+            )
+            if fn is None:
+                return None
+            seg_measures.append((alias, fn))
+
+        prefix_columns = []
+        for col in list(self.partition_columns) + list(self.order_columns):
+            arr = rows.column_array(col)
+            if arr is not None:
+                prefix_columns.append((col, arr))
+
+        start_position_mask = self._build_start_position_mask(row_count)
+        start_positions = (
+            np.flatnonzero(start_position_mask) if start_position_mask is not None else None
+        )
+
+        results: List[Dict[str, Any]] = []
+        results_append = results.append
+        match_number = 1
+        start = 0
+
+        def emit(segments, start, end):
+            row = {}
+            for col, arr in prefix_columns:
+                value = arr[start]
+                if value is not None:
+                    row[col] = value
+            for alias, fn in seg_measures:
+                row[alias] = fn(segments, start, end, match_number)
+            row["MATCH_NUMBER"] = match_number
+            row["_original_row_idx"] = start
+            results_append(row)
+
+        if mode == "linear":
+            search = self._linear_search_iterative
+            while start < row_count:
+                if start_position_mask is not None and not start_position_mask[start]:
+                    next_pos = start_positions.searchsorted(start)
+                    if next_pos >= len(start_positions):
+                        break
+                    start = int(start_positions[next_pos])
+                    continue
+                segments = search(steps, start, row_count, failed)
+                if segments is None:
+                    start += 1
+                    continue
+                segs = []
+                end = start - 1
+                for seg_var, seg_pos, seg_count in segments:
+                    if seg_count > 0:
+                        seg_stop = seg_pos + seg_count
+                        segs.append((seg_var, seg_pos, seg_stop))
+                        if seg_stop - 1 > end:
+                            end = seg_stop - 1
+                emit(segs, start, end)
+                match_number += 1
+                start = end + 1
+        else:
+            decisions = self._row_local_dfa_decisions
+            accept_flags = self._row_local_dfa_accept_flags
+            start_state = self.start_state
+            while start < row_count:
+                if start_position_mask is not None and not start_position_mask[start]:
+                    next_pos = start_positions.searchsorted(start)
+                    if next_pos >= len(start_positions):
+                        break
+                    start = int(start_positions[next_pos])
+                    continue
+                state = start_state
+                idx = start
+                accepted_end = -1
+                segment_records = []
+                current_var = None
+                segment_start = start
+                while idx < row_count:
+                    state_plan = decisions[state]
+                    if state_plan is None:
+                        break
+                    transition_idx = state_plan[0][idx]
+                    if transition_idx == 255:
+                        break
+                    matched_var, state, _is_excluded = state_plan[1][transition_idx]
+                    if matched_var is not current_var:
+                        if current_var is not None:
+                            segment_records.append((current_var, segment_start, idx))
+                        current_var = matched_var
+                        segment_start = idx
+                    idx += 1
+                    if accept_flags[state]:
+                        accepted_end = idx - 1
+                if accepted_end < 0:
+                    start += 1
+                    continue
+                if current_var is not None:
+                    segment_records.append((current_var, segment_start, idx))
+                limit = accepted_end + 1
+                segs = []
+                for seg_var, seg_start, seg_stop in segment_records:
+                    if seg_start >= limit:
+                        break
+                    segs.append((seg_var, seg_start, seg_stop if seg_stop <= limit else limit))
+                emit(segs, start, accepted_end)
+                match_number += 1
+                start = accepted_end + 1
+
+        return results
+
     def _compile_simple_running_aggregate_plan(self, expr: str, semantics: str) -> Optional[Dict[str, Any]]:
         """Compile common RUNNING aggregate measures into prefix plans.
 
@@ -7246,14 +7702,16 @@ class EnhancedMatcher:
                 result[idx] = None
         return result
 
-    def _prepare_measure_output_plans(self, measures):
+    def _prepare_measure_output_plans(self, measures, rows=None):
         """Precompile measure expressions once per output pass.
 
         The previous implementation looked up/compiled the same measure plan
         for every match row.  That is correct but expensive for high-cardinality
         ONE ROW PER MATCH queries.  Preparing the measure plan list once keeps
         the semantics identical while removing repeated cache lookups from the
-        hot path.
+        hot path.  When ``rows`` is a column-array accessor, each simple plan
+        is additionally compiled to a closure with the column array, null
+        mask, and variable-name resolution hoisted out of the per-match call.
         """
         if not measures:
             return []
@@ -7261,8 +7719,126 @@ class EnhancedMatcher:
         for alias, expr in measures.items():
             semantics = self.measure_semantics.get(alias, "FINAL")
             plan = self._get_compiled_measure_plan(alias, expr, semantics)
-            plans.append((alias, expr, semantics, plan))
+            plan_fn = self._compile_measure_plan_closure(plan, rows) if plan is not None else None
+            plans.append((alias, expr, semantics, plan, plan_fn))
         return plans
+
+    def _compile_measure_plan_closure(self, plan, rows):
+        """Compile a simple measure plan into a per-match closure.
+
+        Returns ``fn(match, match_number)`` or None when the row store does
+        not expose column arrays.  The closure reproduces
+        ``_evaluate_compiled_measure_plan`` exactly; hot-path savings come
+        from resolving the column array, the non-null mask, and the pattern
+        variable key once per pass instead of once per match.
+        """
+        kind = plan["kind"]
+
+        if kind == "MATCH_NUMBER":
+            return lambda match, match_number: match_number
+
+        if kind == "COUNT_STAR":
+            def count_star(match, match_number):
+                if match.get("is_empty", False):
+                    return 0
+                start_idx = match.get("start")
+                end_idx = match.get("end")
+                if start_idx is not None and end_idx is not None:
+                    return max(0, end_idx - start_idx + 1)
+                matched_indices = set()
+                for indices in (match.get("variables", {}) or {}).values():
+                    matched_indices.update(indices)
+                return len(matched_indices)
+            return count_star
+
+        var_name = plan.get("var")
+        # The variables dict uses the same key casing for every match of a
+        # query, so resolve the case-insensitive key once and cache it.
+        resolved_key_cell = []
+
+        def var_indices(match):
+            variables = match.get("variables", {}) or {}
+            if resolved_key_cell:
+                key = resolved_key_cell[0]
+                if key is not None and key in variables:
+                    return variables.get(key, [])
+            key = self._resolve_mapping_key(variables, var_name) if var_name else None
+            resolved_key_cell.clear()
+            resolved_key_cell.append(key)
+            return variables.get(key, []) if key is not None else []
+
+        if kind == "COUNT_VAR_STAR":
+            return lambda match, match_number: len(var_indices(match))
+
+        field_name = plan.get("field")
+        if not (hasattr(rows, "column_array") and hasattr(rows, "non_null_mask")):
+            return None
+        column = rows.column_array(field_name) if field_name else None
+        if field_name and column is None:
+            return None
+        mask = rows.non_null_mask(field_name) if field_name else None
+        all_non_null = rows.column_all_non_null(field_name) if field_name else False
+
+        if kind == "COUNT_FIELD":
+            def count_field(match, match_number):
+                indices = var_indices(match)
+                if not indices:
+                    return 0
+                if all_non_null:
+                    return len(indices)
+                if len(indices) >= 64:
+                    return int(mask[np.asarray(indices, dtype=np.intp)].sum())
+                return sum(1 for idx in indices if mask[idx])
+            return count_field
+
+        if kind == "FIRST":
+            def first_field(match, match_number):
+                indices = var_indices(match)
+                if not indices:
+                    return None
+                return column[min(indices)]
+            return first_field
+
+        if kind == "LAST":
+            def last_field(match, match_number):
+                indices = var_indices(match)
+                if not indices:
+                    return None
+                return column[max(indices)]
+            return last_field
+
+        if kind in {"SUM_FIELD", "AVG_FIELD", "MIN_FIELD", "MAX_FIELD"}:
+            def agg_field(match, match_number, _kind=kind):
+                indices = var_indices(match)
+                if not indices:
+                    return None
+                if len(indices) >= 64:
+                    index_array = np.asarray(indices, dtype=np.intp)
+                    selected_mask = mask[index_array]
+                    values = column[index_array[selected_mask]].tolist()
+                else:
+                    values = [column[idx] for idx in indices if mask[idx]]
+                if not values:
+                    return None
+                if _kind == "MIN_FIELD":
+                    return min(values)
+                if _kind == "MAX_FIELD":
+                    return max(values)
+                numeric_values = []
+                for value in values:
+                    try:
+                        numeric_values.append(float(value))
+                    except (TypeError, ValueError):
+                        continue
+                if not numeric_values:
+                    return None
+                total = sum(numeric_values)
+                if _kind == "SUM_FIELD":
+                    return total
+                return total / len(numeric_values)
+            return agg_field
+
+        return None
 
     def _create_one_row_measure_evaluator(self, match, rows, var_assignments, match_number) -> MeasureEvaluator:
         """Build the general measure evaluator for one ONE-ROW match output."""
@@ -7355,12 +7931,14 @@ class EnhancedMatcher:
         measure_plans = (
             compiled_measure_plans
             if compiled_measure_plans is not None
-            else self._prepare_measure_output_plans(measures)
+            else self._prepare_measure_output_plans(measures, rows)
         )
-        for alias, expr, semantics, plan in measure_plans:
+        for alias, expr, semantics, plan, plan_fn in measure_plans:
             try:
                 # Evaluate the expression with appropriate semantics
-                if plan is not None:
+                if plan_fn is not None:
+                    result[alias] = plan_fn(match, match_number)
+                elif plan is not None:
                     result[alias] = self._evaluate_compiled_measure_plan(plan, match, rows, match_number)
                 else:
                     if evaluator is None:
