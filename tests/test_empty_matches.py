@@ -344,5 +344,40 @@ class TestEmptyMatches:
         })
         pd.testing.assert_frame_equal(result.reset_index(drop=True), expected, check_dtype=False)
 
+# ----------------------------------------------------------------------------
+# Faithful conversion of testEmptyMatches from src/TestRowPatternMatching.java
+# (WITH UNMATCHED ROWS + SKIP TO NEXT ROW interplay, exact expected values).
+# ----------------------------------------------------------------------------
+
+from tests.test_java_reference_parity import run_query, assert_rows
+
+
+class TestEmptyMatchesJavaReference:
+    @pytest.mark.xfail(reason="engine gap: WITH UNMATCHED ROWS + SKIP TO NEXT ROW formerly-matched suppression")
+    def test_unmatched_vs_formerly_matched(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6],
+                           "value": [100, 100, 90, 80, 70, 100]})
+        query = """
+        SELECT m.id, m.match, m.value, m.label
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES match_number() AS match, classifier() AS label
+            ALL ROWS PER MATCH WITH UNMATCHED ROWS
+            AFTER MATCH SKIP TO NEXT ROW
+            PATTERN (A B{2})
+            DEFINE B AS B.value < PREV (B.value)
+        ) AS m
+        """
+        expected = [
+            (1, None, 100, None),
+            (2, 1, 100, "A"), (3, 1, 90, "B"), (4, 1, 80, "B"),
+            (3, 2, 90, "A"), (4, 2, 80, "B"), (5, 2, 70, "B"),
+            (6, None, 100, None),
+        ]
+        result = run_query(query, df)
+        assert_rows(result, expected, ["id", "match", "value", "label"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

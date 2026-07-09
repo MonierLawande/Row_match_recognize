@@ -1132,3 +1132,147 @@ class TestRowPatternMatching:
                 assert pd.isna(result.iloc[i]['C_final_value']) or result.iloc[i]['C_final_value'] is None
             else:
                 assert result.iloc[i]['C_final_value'] == C_final_value
+
+
+# ----------------------------------------------------------------------------
+# Faithful conversions from src/TestRowPatternMatching.java:
+#   testExclusionSyntax (all 10), testAfterMatchSkip (all 8),
+#   testUnionVariable (1) -- exact Trino expected values.
+# ----------------------------------------------------------------------------
+
+from tests.test_java_reference_parity import run_query, assert_rows
+
+JAVA_EXCLUSION_QUERY = """
+SELECT m.id AS row_id, m.match, m.val, m.label
+FROM data
+MATCH_RECOGNIZE (
+    ORDER BY id
+    MEASURES match_number() AS match, RUNNING LAST(value) AS val, classifier() AS label
+    ALL ROWS PER MATCH
+    AFTER MATCH SKIP PAST LAST ROW
+    PATTERN ({pattern})
+    DEFINE B AS B.value < PREV (B.value),
+           C AS C.value > PREV (C.value)
+) AS m
+"""
+
+_FULL8 = [(1, 1, 90, "A"), (2, 1, 80, "B"), (3, 1, 70, "B"), (4, 1, 80, "C"),
+          (5, 1, 90, "C"), (6, 2, 50, "A"), (7, 2, 40, "B"), (8, 2, 60, "C")]
+
+JAVA_EXCLUSION_CASES = [
+    ("A B+ C+", _FULL8),
+    ("A {- B+ -} C+", [(1, 1, 90, "A"), (4, 1, 80, "C"), (5, 1, 90, "C"),
+                       (6, 2, 50, "A"), (8, 2, 60, "C")]),
+    ("{- A -} {- B+ -} C+", [(4, 1, 80, "C"), (5, 1, 90, "C"), (8, 2, 60, "C")]),
+    pytest.param("A {- {- B+ -} C+ -}", [(1, 1, 90, "A"), (6, 2, 50, "A")], marks=pytest.mark.xfail(reason="engine gap: nested exclusions")),
+    ("{- A B+ C+ -}", []),
+    ("A B+ {- ()* -} C+", _FULL8),
+    pytest.param("A {- B -}+ {- C -}+", [(1, 1, 90, "A"), (6, 2, 50, "A")], marks=pytest.mark.xfail(reason="engine gap: quantified exclusions")),
+    pytest.param("A {- B -}* {- C -}*", [(1, 1, 90, "A"), (6, 2, 50, "A")], marks=pytest.mark.xfail(reason="engine gap: quantified exclusions")),
+    pytest.param("A {- B -}{1,2} {- C -}{1,2}", [(1, 1, 90, "A"), (6, 2, 50, "A")], marks=pytest.mark.xfail(reason="engine gap: quantified exclusions")),
+    pytest.param("A {- C -}{2,3} {- B -}{2,3}", [(3, 1, 70, "A")], marks=pytest.mark.xfail(reason="engine gap: quantified exclusions")),
+]
+
+
+class TestExclusionSyntaxJavaReference:
+    """All 10 testExclusionSyntax assertions with Trino's exact outputs."""
+
+    @pytest.fixture
+    def df8(self):
+        return pd.DataFrame({"id": [1, 2, 3, 4, 5, 6, 7, 8],
+                             "value": [90, 80, 70, 80, 90, 50, 40, 60]})
+
+    @pytest.mark.parametrize("pattern,expected", JAVA_EXCLUSION_CASES,
+                             ids=[(c.values[0] if hasattr(c, 'values') else c[0]) for c in JAVA_EXCLUSION_CASES])
+    def test_java_exclusion(self, df8, pattern, expected):
+        result = run_query(JAVA_EXCLUSION_QUERY.format(pattern=pattern), df8)
+        assert_rows(result, expected, ["row_id", "match", "val", "label"])
+
+
+JAVA_SKIP_QUERY = """
+SELECT m.id, m.match, m.val, m.label
+FROM data
+MATCH_RECOGNIZE (
+    ORDER BY id
+    MEASURES match_number() AS match, RUNNING LAST(value) AS val, classifier() AS label
+    ALL ROWS PER MATCH
+    {skip}
+    PATTERN (A B+ C+ D?)
+    SUBSET U = (C, D)
+    DEFINE B AS B.value < PREV (B.value),
+           C AS C.value > PREV (C.value),
+           D AS false
+) AS m
+"""
+
+_SKIP_M1 = [(1, 1, 90, "A"), (2, 1, 80, "B"), (3, 1, 70, "B"), (4, 1, 80, "C")]
+_SKIP_TO_B = _SKIP_M1 + [(4, 2, 80, "A"), (5, 2, 70, "B"), (6, 2, 80, "C")]
+
+JAVA_SKIP_CASES = [
+    ("AFTER MATCH SKIP PAST LAST ROW", _SKIP_M1),
+    ("AFTER MATCH SKIP TO NEXT ROW",
+     _SKIP_M1 + [(2, 2, 80, "A"), (3, 2, 70, "B"), (4, 2, 80, "C"),
+                 (4, 3, 80, "A"), (5, 3, 70, "B"), (6, 3, 80, "C")]),
+    ("AFTER MATCH SKIP TO FIRST C", _SKIP_TO_B),
+    ("AFTER MATCH SKIP TO LAST B", _SKIP_TO_B),
+    ("AFTER MATCH SKIP TO B", _SKIP_TO_B),
+    pytest.param("AFTER MATCH SKIP TO U", _SKIP_TO_B, marks=pytest.mark.xfail(reason="engine gap: SUBSET name as SKIP TO target rejected by parser")),
+]
+
+
+class TestAfterMatchSkipJavaReference:
+    """All 8 testAfterMatchSkip assertions (6 outputs + 2 runtime failures)."""
+
+    @pytest.fixture
+    def df6(self):
+        return pd.DataFrame({"id": [1, 2, 3, 4, 5, 6],
+                             "value": [90, 80, 70, 80, 70, 80]})
+
+    @pytest.mark.parametrize("skip,expected", JAVA_SKIP_CASES,
+                             ids=[(c.values[0] if hasattr(c, 'values') else c[0]).replace("AFTER MATCH SKIP ", "") for c in JAVA_SKIP_CASES])
+    def test_java_skip_mode(self, df6, skip, expected):
+        result = run_query(JAVA_SKIP_QUERY.format(skip=skip), df6)
+        assert_rows(result, expected, ["id", "match", "val", "label"])
+
+    def test_java_skip_to_first_row_of_match_fails(self, df6):
+        """Trino: 'AFTER MATCH SKIP failed: cannot skip to first row of match'."""
+        with pytest.raises(Exception):
+            match_recognize(JAVA_SKIP_QUERY.format(skip="AFTER MATCH SKIP TO A"), df6)
+
+    @pytest.mark.xfail(reason="engine gap: no runtime error when SKIP TO label is absent from match")
+    def test_java_skip_to_unmatched_label_fails(self, df6):
+        """Trino: 'AFTER MATCH SKIP failed: pattern variable is not present in match'."""
+        with pytest.raises(Exception):
+            match_recognize(JAVA_SKIP_QUERY.format(skip="AFTER MATCH SKIP TO D"), df6)
+
+
+class TestUnionVariableJavaReference:
+    """testUnionVariable: CLASSIFIER(U) over SUBSET variables, exact outputs."""
+
+    def test_java_classifier_of_union_variables(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "value": [90, 80, 70, 80]})
+        query = """
+        SELECT m.id, m.match, m.val, m.lower_or_higher, m.label
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES match_number() AS match,
+                     RUNNING LAST(value) AS val,
+                     classifier(U) AS lower_or_higher,
+                     classifier(W) AS label
+            ALL ROWS PER MATCH
+            PATTERN ((L | H) A)
+            SUBSET U = (L, H), W = (A, L, H)
+            DEFINE A AS A.value = 80,
+                   L AS L.value < 80,
+                   H AS H.value > 80
+        ) AS m
+        """
+        expected = [
+            (1, 1, 90, "H", "H"),
+            (2, 1, 80, "H", "A"),
+            (3, 2, 70, "L", "L"),
+            (4, 2, 80, "L", "A"),
+        ]
+        result = run_query(query, df)
+        assert_rows(result, expected, ["id", "match", "val", "lower_or_higher", "label"])

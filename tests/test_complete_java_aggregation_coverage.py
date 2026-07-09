@@ -597,6 +597,519 @@ class TestCompleteJavaAggregationCoverage:
         print(f"📊 Coverage: {len(python_test_methods)}/{len(java_test_methods)} = 100%")
 
 
+# ----------------------------------------------------------------------------
+# Faithful conversions with exact Trino expected values for every remaining
+# method of src/TestAggregationsInRowPatternMatching.java.  These supersede
+# the existence-only checks above.
+# ----------------------------------------------------------------------------
+
+from tests.test_java_reference_parity import run_query
+
+
+def assert_rows_lists(result, expected_rows, columns):
+    """Row-by-row comparison that also handles list-valued (array) cells."""
+    import pandas as _pd
+    assert len(result) == len(expected_rows), (
+        f"row count {len(result)} != expected {len(expected_rows)}\n{result}"
+    )
+    for i, expected in enumerate(expected_rows):
+        for col, exp_val in zip(columns, expected):
+            actual = result.iloc[i][col]
+            if hasattr(actual, "tolist"):
+                actual = actual.tolist()
+            if exp_val is None:
+                assert actual is None or (not isinstance(actual, list) and _pd.isna(actual)), (
+                    f"row {i} col {col}: expected NULL, got {actual!r}\n{result}"
+                )
+            else:
+                assert actual == exp_val, (
+                    f"row {i} col {col}: expected {exp_val!r}, got {actual!r}\n{result}"
+                )
+
+
+class TestAggregationsJavaReferenceValues:
+    """Exact-value conversions of the remaining Java aggregation methods."""
+
+    def test_java_simple_query_array_agg_classifier(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6, 7, 8]})
+        query = """
+        SELECT m.id, m.running_labels
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES RUNNING array_agg(CLASSIFIER(A)) AS running_labels
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (A*)
+            DEFINE A AS true
+        ) AS m
+        """
+        expected = [(i, ["A"] * i) for i in range(1, 9)]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "running_labels"])
+
+    @pytest.mark.xfail(reason="engine gap: array_agg over SUBSET classifier + quoted labels")
+    def test_java_simple_query_concat_ws_subset(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6, 7, 8]})
+        query = """
+        SELECT m.id, m.running_labels
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES concat_ws('', RUNNING array_agg(lower(CLASSIFIER(U)))) AS running_labels
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (M A X X T C H "!")
+            SUBSET U = (M, A, T, C, H, "!")
+            DEFINE M AS true
+        ) AS m
+        """
+        expected = [(1, "m"), (2, "ma"), (3, "ma"), (4, "ma"),
+                    (5, "mat"), (6, "matc"), (7, "match"), (8, "match!")]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "running_labels"])
+
+    @pytest.mark.xfail(reason="engine gap: per-match aggregation replay under SKIP TO NEXT ROW")
+    def test_java_partitioning_skip_to_next_row(self):
+        df = pd.DataFrame({
+            "id":   [1, 2, 6, 2, 2, 1, 3, 4, 5, 1, 3, 3],
+            "part": ["p1", "p1", "p1", "p2", "p3", "p3", "p1", "p1", "p1", "p2", "p3", "p2"],
+            "value": [1, 1, 1, 10, 100, 100, 1, 1, 1, 10, 100, 10],
+        })
+        query = """
+        SELECT m.part AS part, m.match_no, m.id AS row_id, m.running_sum
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES RUNNING sum(value) AS running_sum, MATCH_NUMBER() AS match_no
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP TO NEXT ROW
+            PATTERN (B+)
+            DEFINE B AS true
+        ) AS m
+        """
+        expected = [
+            ("p1", 1, 1, 1), ("p1", 1, 2, 2), ("p1", 1, 3, 3), ("p1", 1, 4, 4), ("p1", 1, 5, 5), ("p1", 1, 6, 6),
+            ("p1", 2, 2, 1), ("p1", 2, 3, 2), ("p1", 2, 4, 3), ("p1", 2, 5, 4), ("p1", 2, 6, 5),
+            ("p1", 3, 3, 1), ("p1", 3, 4, 2), ("p1", 3, 5, 3), ("p1", 3, 6, 4),
+            ("p1", 4, 4, 1), ("p1", 4, 5, 2), ("p1", 4, 6, 3),
+            ("p1", 5, 5, 1), ("p1", 5, 6, 2),
+            ("p1", 6, 6, 1),
+            ("p2", 1, 1, 10), ("p2", 1, 2, 20), ("p2", 1, 3, 30),
+            ("p2", 2, 2, 10), ("p2", 2, 3, 20),
+            ("p2", 3, 3, 10),
+            ("p3", 1, 1, 100), ("p3", 1, 2, 200), ("p3", 1, 3, 300),
+            ("p3", 2, 2, 100), ("p3", 2, 3, 200),
+            ("p3", 3, 3, 100),
+        ]
+        result = run_query(query, df)
+        result = result.sort_values(["part", "match_no", "row_id"]).reset_index(drop=True)
+        assert_rows_lists(result, expected, ["part", "match_no", "row_id", "running_sum"])
+
+    @pytest.mark.xfail(reason="engine gap: runtime-evaluated aggregation arguments (value || CLASSIFIER())")
+    def test_java_aggregation_argument_with_classifier(self):
+        df = pd.DataFrame({
+            "part": ["p1"] * 6 + ["p2"] * 3 + ["p3"] * 3,
+            "id": [1, 2, 3, 4, 5, 6, 1, 2, 3, 1, 2, 3],
+            "value": list("abcdefghijkl"),
+        })
+        query = """
+        SELECT m.part, m.id, m.measure
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES array_agg(value || CLASSIFIER()) AS measure
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (X Y Z+)
+            DEFINE X AS true
+        ) AS m
+        """
+        expected = [
+            ("p1", 1, ["aX"]), ("p1", 2, ["aX", "bY"]), ("p1", 3, ["aX", "bY", "cZ"]),
+            ("p1", 4, ["aX", "bY", "cZ", "dZ"]), ("p1", 5, ["aX", "bY", "cZ", "dZ", "eZ"]),
+            ("p1", 6, ["aX", "bY", "cZ", "dZ", "eZ", "fZ"]),
+            ("p2", 1, ["gX"]), ("p2", 2, ["gX", "hY"]), ("p2", 3, ["gX", "hY", "iZ"]),
+            ("p3", 1, ["jX"]), ("p3", 2, ["jX", "kY"]), ("p3", 3, ["jX", "kY", "lZ"]),
+        ]
+        result = run_query(query, df).sort_values(["part", "id"]).reset_index(drop=True)
+        assert_rows_lists(result, expected, ["part", "id", "measure"])
+
+    @pytest.mark.xfail(reason="engine gap: runtime-evaluated aggregation arguments")
+    def test_java_duplicate_symbol_in_aggregation_argument(self):
+        df = pd.DataFrame({"id": [1, 2, 3], "value": ["a", "b", "c"]})
+        query = """
+        SELECT m.id, m.measure
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES array_agg(value || value || CLASSIFIER()) AS measure
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (X Y Z)
+            DEFINE X AS true
+        ) AS m
+        """
+        expected = [(1, ["aaX"]), (2, ["aaX", "bbY"]), (3, ["aaX", "bbY", "ccZ"])]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "measure"])
+
+    @pytest.mark.xfail(reason="engine gap: max_by with runtime-evaluated argument")
+    def test_java_max_by_runtime_argument(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "value": ["p", "q", "r", "s"]})
+        query = """
+        SELECT m.id, m.measure
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES max_by(value, CLASSIFIER()) AS measure
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (A B D C)
+            DEFINE A AS true
+        ) AS m
+        """
+        expected = [(1, "p"), (2, "q"), (3, "r"), (4, "r")]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "measure"])
+
+    @pytest.mark.xfail(reason="engine gap: aggregation over SUBSET variable rows")
+    def test_java_selective_aggregation_subset(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "value": ["a", "b", "c", "d"]})
+        query = """
+        SELECT m.id, m.measure_1, m.measure_2, m.measure_3
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                array_agg(U.id) AS measure_1,
+                array_agg(CLASSIFIER(U)) AS measure_2,
+                array_agg(U.value || CLASSIFIER(U)) AS measure_3
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (X Y Z Y)
+            SUBSET U = (X, Z)
+            DEFINE X AS true
+        ) AS m
+        """
+        expected = [
+            (1, [1], ["X"], ["aX"]),
+            (2, [1], ["X"], ["aX"]),
+            (3, [1, 3], ["X", "Z"], ["aX", "cZ"]),
+            (4, [1, 3], ["X", "Z"], ["aX", "cZ"]),
+        ]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "measure_1", "measure_2", "measure_3"])
+
+    @pytest.mark.xfail(reason="engine gap: bare count() form")
+    def test_java_count_star_and_bare_count(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "value": ["a", "b", "c", "d"]})
+        query = """
+        SELECT m.id, m.measure_1, m.measure_2
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES count(*) AS measure_1, count() AS measure_2
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (X Y Z)
+            DEFINE X AS id > 1
+        ) AS m
+        """
+        expected = [(2, 1, 1), (3, 2, 2), (4, 3, 3)]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "measure_1", "measure_2"])
+
+    @pytest.mark.xfail(reason="engine gap: RUNNING/FINAL count(*) in ALL ROWS")
+    def test_java_count_running_final(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "value": ["a", "b", "c", "d"]})
+        query = """
+        SELECT m.id, m.measure_1, m.measure_2, m.measure_3, m.measure_4
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                RUNNING count(*) AS measure_1,
+                FINAL count(*) AS measure_2,
+                RUNNING count() AS measure_3,
+                FINAL count() AS measure_4
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (A B C D)
+            DEFINE A AS true
+        ) AS m
+        """
+        expected = [(1, 1, 4, 1, 4), (2, 2, 4, 2, 4), (3, 3, 4, 3, 4), (4, 4, 4, 4, 4)]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "measure_1", "measure_2", "measure_3", "measure_4"])
+
+    @pytest.mark.xfail(reason="engine gap: count(U.*) over SUBSET")
+    def test_java_count_var_star_and_subset_star(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "value": ["a", "b", "c", "d"]})
+        query = """
+        SELECT m.id, m.measure_1, m.measure_2
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES count(C.*) AS measure_1, count(U.*) AS measure_2
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (A B C D)
+            SUBSET U = (B, D)
+            DEFINE A AS true
+        ) AS m
+        """
+        expected = [(1, 0, 0), (2, 0, 1), (3, 1, 1), (4, 1, 2)]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "measure_1", "measure_2"])
+
+    def test_java_label_and_column_names(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "A": ["p", "q", None, "s"]})
+        query = """
+        SELECT m.id, m.classy, m.measure_1, m.measure_2, m.measure_3
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                CLASSIFIER() AS classy,
+                count(A.A) AS measure_1,
+                count(A) AS measure_2,
+                count(A.*) AS measure_3
+            ALL ROWS PER MATCH
+            PATTERN (A B A A)
+            DEFINE A AS true
+        ) AS m
+        """
+        expected = [
+            (1, "A", 1, 1, 1),
+            (2, "B", 1, 2, 1),
+            (3, "A", 1, 2, 2),
+            (4, "A", 2, 3, 3),
+        ]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "classy", "measure_1", "measure_2", "measure_3"])
+
+    @pytest.mark.xfail(reason="engine gap: array_agg with runtime-evaluated argument")
+    def test_java_one_row_per_match_array_agg(self):
+        df = pd.DataFrame({
+            "part": ["p1"] * 6 + ["p2"] * 6,
+            "id": [1, 2, 3, 4, 5, 6] * 2,
+            "value": list("abcdefghijkl"),
+        })
+        query = """
+        SELECT m.part, m.measure
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES array_agg(value || CLASSIFIER()) AS measure
+            ONE ROW PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (X Y Z)
+            DEFINE X AS true
+        ) AS m
+        """
+        expected = [
+            ("p1", ["aX", "bY", "cZ"]), ("p1", ["dX", "eY", "fZ"]),
+            ("p2", ["gX", "hY", "iZ"]), ("p2", ["jX", "kY", "lZ"]),
+        ]
+        result = run_query(query, df).sort_values(["part"]).reset_index(drop=True)
+        assert_rows_lists(result, expected, ["part", "measure"])
+
+    @pytest.mark.xfail(reason="engine gap: WINDOW ... MEASURES/SEEK row-pattern syntax unsupported")
+    def test_java_seek_window_syntax(self):
+        df = pd.DataFrame({
+            "id": [1, 2, 3, 4, 5] * 2,
+            "part": ["p1"] * 5 + ["p2"] * 5,
+            "value": ["A", "B", "C", "D", "E"] * 2,
+        })
+        query = """
+        SELECT part, id, measure_1 OVER w, measure_2 OVER w
+        FROM data
+          WINDOW w AS (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES
+                array_agg(value) AS measure_1,
+                array_agg(value || CLASSIFIER()) AS measure_2
+            ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+            AFTER MATCH SKIP TO NEXT ROW
+            SEEK
+            PATTERN (X+)
+            DEFINE X AS X.value > 'B')
+        """
+        expected = [
+            ("p1", 1, ["C", "D", "E"], ["CX", "DX", "EX"]),
+            ("p1", 2, ["C", "D", "E"], ["CX", "DX", "EX"]),
+            ("p1", 3, ["C", "D", "E"], ["CX", "DX", "EX"]),
+            ("p1", 4, ["D", "E"], ["DX", "EX"]),
+            ("p1", 5, ["E"], ["EX"]),
+            ("p2", 1, ["C", "D", "E"], ["CX", "DX", "EX"]),
+            ("p2", 2, ["C", "D", "E"], ["CX", "DX", "EX"]),
+            ("p2", 3, ["C", "D", "E"], ["CX", "DX", "EX"]),
+            ("p2", 4, ["D", "E"], ["DX", "EX"]),
+            ("p2", 5, ["E"], ["EX"]),
+        ]
+        result = run_query(query, df).sort_values(["part", "id"]).reset_index(drop=True)
+        assert_rows_lists(result, expected, ["part", "id", "measure_1", "measure_2"])
+
+    @pytest.mark.xfail(reason="engine gap: array_agg + exclusions interplay")
+    def test_java_exclusions_array_agg(self):
+        df = pd.DataFrame({
+            "part": ["p1"] * 5 + ["p2"] * 5,
+            "id": [1, 2, 3, 4, 5] * 2,
+            "value": ["1a", "1b", "1c", "1d", "1e", "2a", "2b", "2c", "2d", "2e"],
+        })
+        query = """
+        SELECT m.part, m.measure_1, m.measure_2
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES
+                array_agg(value) AS measure_1,
+                array_agg(value || CLASSIFIER()) AS measure_2
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (P {- Q R -} S)
+            DEFINE P AS id > 1
+        ) AS m
+        """
+        expected = [
+            ("p1", ["1b"], ["1bP"]),
+            ("p1", ["1b", "1c", "1d", "1e"], ["1bP", "1cQ", "1dR", "1eS"]),
+            ("p2", ["2b"], ["2bP"]),
+            ("p2", ["2b", "2c", "2d", "2e"], ["2bP", "2cQ", "2dR", "2eS"]),
+        ]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["part", "measure_1", "measure_2"])
+
+    @pytest.mark.xfail(reason="engine gap: aggregates in DEFINE")
+    def test_java_balancing_sums(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+                           "value": [4, 6, 10, 1, 1, 1, 10, 5, 1]})
+        query = """
+        SELECT m.id, m.classy, m.running_sum_A, m.running_sum_B
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                RUNNING sum(A.value) AS running_sum_A,
+                RUNNING sum(B.value) AS running_sum_B,
+                CLASSIFIER() AS classy
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN ((A | B)*)
+            DEFINE A AS sum(A.value) - A.value <= sum(B.value)
+        ) AS m
+        """
+        expected = [
+            (1, "B", None, 4), (2, "A", 6, 4), (3, "B", 6, 14), (4, "A", 7, 14),
+            (5, "A", 8, 14), (6, "A", 9, 14), (7, "A", 19, 14), (8, "B", 19, 19),
+            (9, "A", 20, 19),
+        ]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "classy", "running_sum_A", "running_sum_B"])
+
+    @pytest.mark.xfail(reason="engine gap: alternation-quantified pattern ((A B* C | D)*) with per-var sums")
+    def test_java_period_length(self):
+        df = pd.DataFrame({"user_id": [1, 1, 1, 1, 1, 2, 2, 2],
+                           "minute_of_the_day": [3, 4, 5, 8, 9, 2, 3, 4]})
+        query = """
+        SELECT m.user_id, m.periods_total
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY user_id
+            ORDER BY minute_of_the_day
+            MEASURES COALESCE(sum(C.minute_of_the_day) - sum(A.minute_of_the_day), 0) AS periods_total
+            ONE ROW PER MATCH
+            PATTERN ((A B* C | D)*)
+            DEFINE
+                B AS minute_of_the_day = PREV(minute_of_the_day) + 1,
+                C AS minute_of_the_day = PREV(minute_of_the_day) + 1
+        ) AS m
+        """
+        expected = [(1, 3), (2, 2)]
+        result = run_query(query, df).sort_values(["user_id"]).reset_index(drop=True)
+        assert_rows_lists(result, expected, ["user_id", "periods_total"])
+
+    @pytest.mark.xfail(reason="engine gap: aggregates in DEFINE + anchored alternation")
+    def test_java_set_partitioning_two_subsets(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6, 7, 8]})
+        query = """
+        SELECT m.id, m.running_labels
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES RUNNING array_agg(CLASSIFIER()) AS running_labels
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (^(A | B)* (LAST_A | LAST_B)$)
+            DEFINE
+                LAST_A AS sum(A.id) + id = sum(B.id),
+                LAST_B AS sum(B.id) + id = sum(A.id)
+        ) AS m
+        """
+        expected = [
+            (1, ["A"]), (2, ["A", "A"]), (3, ["A", "A", "A"]), (4, ["A", "A", "A", "A"]),
+            (5, ["A", "A", "A", "A", "B"]), (6, ["A", "A", "A", "A", "B", "B"]),
+            (7, ["A", "A", "A", "A", "B", "B", "B"]),
+            (8, ["A", "A", "A", "A", "B", "B", "B", "LAST_A"]),
+        ]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "running_labels"])
+
+    @pytest.mark.xfail(reason="engine gap: aggregates in DEFINE + anchored alternation")
+    def test_java_set_partitioning_three_subsets(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6]})
+        query = """
+        SELECT m.id, m.running_labels
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES RUNNING array_agg(CLASSIFIER()) AS running_labels
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (^(A | B | C)* (LAST_A | LAST_B | LAST_C)$)
+            DEFINE
+                LAST_A AS sum(A.id) + id = sum(B.id) AND sum(B.id) = sum(C.id),
+                LAST_B AS sum(B.id) + id = sum(A.id) AND sum(A.id) = sum(C.id),
+                LAST_C AS sum(C.id) + id = sum(A.id) AND sum(A.id) = sum(B.id)
+        ) AS m
+        """
+        expected = [
+            (1, ["A"]), (2, ["A", "B"]), (3, ["A", "B", "C"]), (4, ["A", "B", "C", "C"]),
+            (5, ["A", "B", "C", "C", "B"]), (6, ["A", "B", "C", "C", "B", "LAST_A"]),
+        ]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "running_labels"])
+
+    @pytest.mark.xfail(reason="engine gap: array_agg(CLASSIFIER()) in DEFINE (thread forking)")
+    def test_java_forking_threads(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4]})
+        query = """
+        SELECT m.id, m.running_labels
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES RUNNING array_agg(CLASSIFIER()) AS running_labels
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN ((A | B | C)* X)
+            DEFINE X AS array_agg(CLASSIFIER()) = ARRAY['C', 'A', 'B', 'X']
+        ) AS m
+        """
+        expected = [
+            (1, ["C"]), (2, ["C", "A"]), (3, ["C", "A", "B"]), (4, ["C", "A", "B", "X"]),
+        ]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["id", "running_labels"])
+
+    @pytest.mark.xfail(reason="engine gap: MAX/MIN with runtime args in DEFINE")
+    def test_java_multiple_aggregations_in_define(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6, 7, 8]})
+        query = """
+        SELECT m.match_no, m.labels
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES MATCH_NUMBER() AS match_no, array_agg(CLASSIFIER()) AS labels
+            ONE ROW PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN ((A | B){4})
+            DEFINE
+                A AS max(id - 2 * MATCH_NUMBER()) > 1 AND max(CLASSIFIER()) = 'B',
+                B AS min(lower(CLASSIFIER())) = 'b' OR min(MATCH_NUMBER() + 100) < 0
+        ) AS m
+        """
+        expected = [(1, ["B", "B", "B", "A"]), (2, ["B", "A", "A", "A"])]
+        result = run_query(query, df)
+        assert_rows_lists(result, expected, ["match_no", "labels"])
+
+
 if __name__ == "__main__":
     # Run all tests to validate coverage
     pytest.main([__file__, "-v", "--tb=short"])

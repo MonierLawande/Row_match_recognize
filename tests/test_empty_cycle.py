@@ -301,5 +301,63 @@ class TestEmptyCycle:
         spike_rows = result[result['label'] == 'SPIKE']
         assert len(spike_rows) > 0
 
+# ----------------------------------------------------------------------------
+# Faithful conversion of testEmptyCycle from src/TestRowPatternMatching.java
+# (all 12 assertions, exact expected values).
+# Data: (1,90),(2,80),(3,70),(4,70); DEFINE B AS B.value < PREV (B.value)
+# ----------------------------------------------------------------------------
+
+from tests.test_java_reference_parity import run_query, assert_rows
+
+JAVA_EMPTY_CYCLE_QUERY = """
+SELECT m.id AS row_id, m.match, m.val, m.label
+FROM data
+MATCH_RECOGNIZE (
+    ORDER BY id
+    MEASURES match_number() AS match, RUNNING LAST(value) AS val, classifier() AS label
+    ALL ROWS PER MATCH
+    AFTER MATCH SKIP PAST LAST ROW
+    PATTERN ({pattern})
+    DEFINE B AS B.value < PREV (B.value)
+) AS m
+"""
+
+_ALL_EMPTY4 = [(1, 1, None, None), (2, 2, None, None), (3, 3, None, None), (4, 4, None, None)]
+
+_EMPTY_GROUP_XFAIL = pytest.mark.xfail(
+    reason="engine gap: empty-group patterns crash (has_empty_alternation init order)")
+_ANCHOR_QUANT_XFAIL = pytest.mark.xfail(
+    reason="engine gap: quantified anchors (^*, $+, ...) unsupported")
+
+JAVA_EMPTY_CYCLE_CASES = [
+    pytest.param("()* | B", _ALL_EMPTY4, marks=_EMPTY_GROUP_XFAIL),
+    pytest.param("()+ | B", _ALL_EMPTY4, marks=_EMPTY_GROUP_XFAIL),
+    pytest.param("(){5,} | B", _ALL_EMPTY4, marks=_EMPTY_GROUP_XFAIL),
+    pytest.param("B | ()*", [(1, 1, None, None), (2, 2, 80, "B"), (3, 3, 70, "B"), (4, 4, None, None)], marks=_EMPTY_GROUP_XFAIL),
+    pytest.param("(B ()*)*", [(1, 1, None, None), (2, 2, 80, "B"), (3, 2, 70, "B"), (4, 3, None, None)], marks=_EMPTY_GROUP_XFAIL),
+    ("(B ()*)*?", _ALL_EMPTY4),
+    pytest.param("^* | B", _ALL_EMPTY4, marks=_ANCHOR_QUANT_XFAIL),
+    pytest.param("^+ | B", [(1, 1, None, None), (2, 2, 80, "B"), (3, 3, 70, "B")], marks=_ANCHOR_QUANT_XFAIL),
+    pytest.param("^* A B", [(1, 1, 90, "A"), (2, 1, 80, "B")], marks=_ANCHOR_QUANT_XFAIL),
+    pytest.param("$* | B", _ALL_EMPTY4, marks=_ANCHOR_QUANT_XFAIL),
+    pytest.param("$+ | B", [(2, 1, 80, "B"), (3, 2, 70, "B")], marks=_ANCHOR_QUANT_XFAIL),
+    pytest.param("B A $+", [(3, 1, 70, "B"), (4, 1, 70, "A")], marks=_ANCHOR_QUANT_XFAIL),
+]
+
+
+class TestEmptyCycleJavaReference:
+    """All 12 testEmptyCycle assertions with Trino's exact expected outputs."""
+
+    @pytest.fixture
+    def df4(self):
+        return pd.DataFrame({"id": [1, 2, 3, 4], "value": [90, 80, 70, 70]})
+
+    @pytest.mark.parametrize("pattern,expected", JAVA_EMPTY_CYCLE_CASES,
+                             ids=[(c.values[0] if hasattr(c, 'values') else c[0]) for c in JAVA_EMPTY_CYCLE_CASES])
+    def test_java_empty_cycle(self, df4, pattern, expected):
+        result = run_query(JAVA_EMPTY_CYCLE_QUERY.format(pattern=pattern), df4)
+        assert_rows(result, expected, ["row_id", "match", "val", "label"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

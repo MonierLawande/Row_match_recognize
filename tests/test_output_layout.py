@@ -289,3 +289,54 @@ class TestOutputLayout:
                 assert col in actual_cols, f"Missing aliased column: {col}"
         else:
             pytest.skip("Column aliasing not implemented")
+
+
+# ----------------------------------------------------------------------------
+# Faithful conversion of testOutputModes from src/TestRowPatternMatching.java
+# (all 9 assertions, exact expected values).
+# Data: (1,90),(2,80),(3,70),(4,70); DEFINE B AS B.value < PREV (B.value)
+# ----------------------------------------------------------------------------
+
+from tests.test_java_reference_parity import run_query, assert_rows
+
+JAVA_OUTPUT_MODES_QUERY = """
+SELECT m.match, m.val, m.label
+FROM data
+MATCH_RECOGNIZE (
+    ORDER BY id
+    MEASURES match_number() AS match, RUNNING LAST(value) AS val, classifier() AS label
+    {mode}
+    AFTER MATCH SKIP PAST LAST ROW
+    PATTERN ({pattern})
+    DEFINE B AS B.value < PREV (B.value)
+) AS m
+"""
+
+JAVA_OUTPUT_MODES_CASES = [
+    ("ONE ROW PER MATCH", "B*", [(1, None, None), (2, 70, "B"), (3, None, None)]),
+    ("", "B*", [(1, None, None), (2, 70, "B"), (3, None, None)]),
+    ("ONE ROW PER MATCH", "B+", [(1, 70, "B")]),
+    ("ALL ROWS PER MATCH", "B*",
+     [(1, None, None), (2, 80, "B"), (2, 70, "B"), (3, None, None)]),
+    ("ALL ROWS PER MATCH", "B+", [(1, 80, "B"), (1, 70, "B")]),
+    ("ALL ROWS PER MATCH SHOW EMPTY MATCHES", "B*",
+     [(1, None, None), (2, 80, "B"), (2, 70, "B"), (3, None, None)]),
+    ("ALL ROWS PER MATCH OMIT EMPTY MATCHES", "B*", [(2, 80, "B"), (2, 70, "B")]),
+    ("ALL ROWS PER MATCH OMIT EMPTY MATCHES", "B+", [(1, 80, "B"), (1, 70, "B")]),
+    ("ALL ROWS PER MATCH WITH UNMATCHED ROWS", "B+",
+     [(None, None, None), (1, 80, "B"), (1, 70, "B"), (None, None, None)]),
+]
+
+
+class TestOutputModesJavaReference:
+    """All 9 testOutputModes assertions with Trino's exact expected outputs."""
+
+    @pytest.fixture
+    def df4(self):
+        return pd.DataFrame({"id": [1, 2, 3, 4], "value": [90, 80, 70, 70]})
+
+    @pytest.mark.parametrize("mode,pattern,expected", JAVA_OUTPUT_MODES_CASES,
+                             ids=[f"{c[0] or 'default'}-{c[1]}" for c in JAVA_OUTPUT_MODES_CASES])
+    def test_java_output_mode(self, df4, mode, pattern, expected):
+        result = run_query(JAVA_OUTPUT_MODES_QUERY.format(mode=mode, pattern=pattern), df4)
+        assert_rows(result, expected, ["match", "val", "label"])

@@ -474,6 +474,176 @@ class TestCompleteJavaAggregations:
             pytest.skip("match_recognize implementation not available")
 
 
+# ----------------------------------------------------------------------------
+# Faithful conversions of testTentativeLabelMatch (6 assertions) and
+# testTentativeLabelMatchWithRuntimeEvaluatedAggregationArgument (1) from
+# src/TestAggregationsInRowPatternMatching.java, with exact expected values.
+# These replace the existence-only checks above for those methods.
+# ----------------------------------------------------------------------------
+
+from tests.test_java_reference_parity import run_query, assert_rows
+
+_AGG_DEFINE_XFAIL = pytest.mark.xfail(
+    reason="engine gap: aggregate functions in DEFINE (tentative label matching)")
+
+_P12_DATA = {
+    "id":   [1, 2, 6, 2, 2, 1, 3, 4, 5, 1, 3, 3],
+    "part": ["p1", "p1", "p1", "p2", "p3", "p3", "p1", "p1", "p1", "p2", "p3", "p2"],
+    "value": [1, 1, 1, 10, 100, 100, 1, 1, 1, 10, 100, 10],
+}
+_P12_EXPECTED = [
+    ("p1", 1, 1), ("p1", 2, 2), ("p1", 3, 3), ("p1", 4, 1), ("p1", 5, 2), ("p1", 6, 3),
+    ("p2", 1, 10), ("p2", 2, 20), ("p2", 3, 30),
+    ("p3", 1, 100), ("p3", 2, 200), ("p3", 3, 300),
+]
+
+_MAX5_DATA = {
+    "id":   [1, 2, 3, 4, 5, 1, 2, 3, 4, 5],
+    "part": ["p1"] * 5 + ["p2"] * 5,
+    "value": [1, 2, 3, 4, 5, 2, 4, 6, 8, 10],
+}
+_MAX5_EXPECTED = [
+    ("p1", 1, "B", 1), ("p1", 2, "B", 2), ("p1", 3, "B", 3), ("p1", 4, "B", 4), ("p1", 5, "A", 5),
+    ("p2", 1, "B", 2), ("p2", 2, "B", 4), ("p2", 3, "A", 6), ("p2", 4, "A", 8), ("p2", 5, "A", 10),
+]
+
+
+class TestTentativeLabelMatchJavaReference:
+    """All tentative-label-match assertions with Trino's exact outputs."""
+
+    @_AGG_DEFINE_XFAIL
+    def test_java_avg_b_in_define(self):
+        df = pd.DataFrame({"id": [1, 2, 3], "value": [4, 6, 0]})
+        query = """
+        SELECT m.id, m.classy, m.running_avg_B
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES RUNNING avg(B.value) AS running_avg_B, CLASSIFIER() AS classy
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN ((A | B)*)
+            DEFINE A AS avg(B.value) = 5
+        ) AS m
+        """
+        expected = [(1, "B", 4.0), (2, "B", 5.0), (3, "A", 5.0)]
+        result = run_query(query, df)
+        assert_rows(result, expected, ["id", "classy", "running_avg_B"])
+
+    @_AGG_DEFINE_XFAIL
+    def test_java_avg_a_in_define(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "value": [4, 6, 0, 5]})
+        query = """
+        SELECT m.id, m.classy, m.running_avg_A
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES RUNNING avg(A.value) AS running_avg_A, CLASSIFIER() AS classy
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN ((A | B)*)
+            DEFINE A AS avg(A.value) = 5
+        ) AS m
+        """
+        expected = [(1, "B", None), (2, "B", None), (3, "B", None), (4, "A", 5.0)]
+        result = run_query(query, df)
+        assert_rows(result, expected, ["id", "classy", "running_avg_A"])
+
+    def test_java_sum_in_define_partitioned(self):
+        df = pd.DataFrame(_P12_DATA)
+        query = """
+        SELECT m.part AS part, m.id AS row_id, m.running_sum
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES RUNNING sum(value) AS running_sum
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (B (A | B) B)
+            DEFINE A AS sum(value) > 1000
+        ) AS m
+        """
+        result = run_query(query, df).sort_values(["part", "row_id"]).reset_index(drop=True)
+        assert_rows(result, _P12_EXPECTED, ["part", "row_id", "running_sum"])
+
+    @_AGG_DEFINE_XFAIL
+    def test_java_sum_gt4_in_define_partitioned(self):
+        df = pd.DataFrame({
+            "id": [1, 2, 3, 4, 5, 1, 2, 3, 4, 5],
+            "part": ["p1"] * 5 + ["p2"] * 5,
+            "value": [1, 1, 1, 1, 1, 2, 2, 2, 2, 2],
+        })
+        query = """
+        SELECT m.part AS part, m.id AS row_id, m.classy, m.running_sum
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES RUNNING sum(value) AS running_sum, CLASSIFIER() AS classy
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN ((A | B)*)
+            DEFINE A AS sum(value) > 4
+        ) AS m
+        """
+        expected = [
+            ("p1", 1, "B", 1), ("p1", 2, "B", 2), ("p1", 3, "B", 3), ("p1", 4, "B", 4), ("p1", 5, "A", 5),
+            ("p2", 1, "B", 2), ("p2", 2, "B", 4), ("p2", 3, "A", 6), ("p2", 4, "A", 8), ("p2", 5, "A", 10),
+        ]
+        result = run_query(query, df).sort_values(["part", "row_id"]).reset_index(drop=True)
+        assert_rows(result, expected, ["part", "row_id", "classy", "running_sum"])
+
+    def test_java_arbitrary_in_define_partitioned(self):
+        df = pd.DataFrame(_P12_DATA)
+        query = """
+        SELECT m.part AS part, m.id AS row_id, m.running_sum
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES RUNNING sum(value) AS running_sum
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (B (A | B) B)
+            DEFINE A AS arbitrary(value) > 1000
+        ) AS m
+        """
+        result = run_query(query, df).sort_values(["part", "row_id"]).reset_index(drop=True)
+        assert_rows(result, _P12_EXPECTED, ["part", "row_id", "running_sum"])
+
+    @_AGG_DEFINE_XFAIL
+    def test_java_max_in_define_partitioned(self):
+        df = pd.DataFrame(_MAX5_DATA)
+        query = """
+        SELECT m.part AS part, m.id AS row_id, m.classy, m.running_max
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES RUNNING max(value) AS running_max, CLASSIFIER() AS classy
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN ((A | B)*)
+            DEFINE A AS max(value) > 4
+        ) AS m
+        """
+        result = run_query(query, df).sort_values(["part", "row_id"]).reset_index(drop=True)
+        assert_rows(result, _MAX5_EXPECTED, ["part", "row_id", "classy", "running_max"])
+
+    @_AGG_DEFINE_XFAIL
+    def test_java_runtime_evaluated_aggregation_argument(self):
+        df = pd.DataFrame(_MAX5_DATA)
+        query = """
+        SELECT m.part AS part, m.id AS row_id, m.classy, m.running_max
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES RUNNING max(value) AS running_max, CLASSIFIER() AS classy
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN ((A | B)*)
+            DEFINE A AS max(value + MATCH_NUMBER()) > 5
+        ) AS m
+        """
+        result = run_query(query, df).sort_values(["part", "row_id"]).reset_index(drop=True)
+        assert_rows(result, _MAX5_EXPECTED, ["part", "row_id", "classy", "running_max"])
+
+
 if __name__ == "__main__":
     # Run the complete Java aggregation tests
     pytest.main([__file__, "-v", "--tb=short"])

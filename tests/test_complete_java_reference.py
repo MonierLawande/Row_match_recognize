@@ -715,5 +715,38 @@ class TestCompleteJavaReferenceCoverage:
         else:
             pytest.skip("Thread optimization not implemented")
 
+# ----------------------------------------------------------------------------
+# testPartitioningAndOrdering, 4th assertion (no measures) -- the other three
+# are covered above; exact Trino expected values.
+# ----------------------------------------------------------------------------
+
+from tests.test_java_reference_parity import run_query, assert_rows
+
+
+class TestPartitioningNoMeasuresJavaReference:
+    def test_java_no_measures(self):
+        df = pd.DataFrame({
+            "id": [5, 2, 1, 4, 3],
+            "part": ["p2", "p1", "p1", "p2", "p1"],
+            "value": [10, 90, 80, 20, 30],
+        })
+        query = """
+        SELECT m.id AS row_id, m.part AS part
+        FROM data
+        MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (B+)
+            DEFINE B AS B.value < PREV (B.value)
+        ) AS m
+        """
+        expected = [(3, "p1"), (5, "p2")]
+        result = run_query(query, df)
+        result = result.sort_values(["part", "row_id"]).reset_index(drop=True)
+        assert_rows(result, expected, ["row_id", "part"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
