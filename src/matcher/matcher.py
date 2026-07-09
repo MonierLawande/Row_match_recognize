@@ -1200,6 +1200,24 @@ class EnhancedMatcher:
             self.has_reluctant_plus = True
             logger.debug(f"Pattern contains reluctant plus (+?) quantifier: {pattern}")
 
+        # Reluctant bounded quantifiers ({n,m}?, {n,}?, {,m}?) and the
+        # reluctant optional (??).  A reluctant quantifier with min >= 1
+        # behaves like +? (prefer the shortest non-empty match); with
+        # min == 0 it behaves like *? (prefer the empty match).
+        for brace_match in re.finditer(r'\{\s*(\d*)\s*(?:,[^}]*)?\}\s*\?', pattern):
+            min_text = brace_match.group(1)
+            if min_text and int(min_text) >= 1:
+                self.has_reluctant_plus = True
+                logger.debug(f"Pattern contains reluctant bounded quantifier: {pattern}")
+            else:
+                self.has_reluctant_star = True
+                self.has_empty_alternation = True
+                logger.debug(f"Pattern contains reluctant zero-min bounded quantifier: {pattern}")
+        if re.search(r'\?\s*\?', pattern):
+            self.has_reluctant_star = True
+            self.has_empty_alternation = True
+            logger.debug(f"Pattern contains reluctant optional (??) quantifier: {pattern}")
+
         reluctant_quantifiers = {}
         if hasattr(self.dfa, "metadata"):
             reluctant_quantifiers = self.dfa.metadata.get("reluctant_quantifiers", {}) or {}
@@ -1736,7 +1754,7 @@ class EnhancedMatcher:
             return None
 
         token_re = re.compile(
-            r'\s*([A-Za-z_][A-Za-z0-9_$]*)(\{\d+(?:,\d*)?\}|\+\?|\*\?|\+|\*|\?)?\s*'
+            r'\s*([A-Za-z_][A-Za-z0-9_$]*)(\{\d*(?:,\d*)?\}\??|\+\??|\*\??|\?\??)?\s*'
         )
         pos = 0
         tokens: List[Dict[str, Any]] = []
@@ -1784,29 +1802,31 @@ class EnhancedMatcher:
     @staticmethod
     def _quantifier_bounds_for_linear_plan(quantifier: str) -> Tuple[int, Optional[int], bool]:
         """Return min, max, greedy for a SQL row-pattern quantifier."""
-        greedy = not quantifier.endswith("?") or quantifier == "?"
         if quantifier in ("", None):
             return 1, 1, True
-        if quantifier == "+":
-            return 1, None, True
-        if quantifier == "+?":
-            return 1, None, False
-        if quantifier == "*":
-            return 0, None, True
-        if quantifier == "*?":
-            return 0, None, False
-        if quantifier == "?":
-            return 0, 1, True
-        if quantifier.startswith("{") and quantifier.endswith("}"):
-            inner = quantifier[1:-1]
+        greedy = True
+        core = quantifier
+        # A trailing ? after another quantifier is the reluctant marker
+        # (*?, +?, ??, {n,m}?); a bare ? is the optional quantifier.
+        if core.endswith("?") and core != "?":
+            greedy = False
+            core = core[:-1]
+        if core == "+":
+            return 1, None, greedy
+        if core == "*":
+            return 0, None, greedy
+        if core == "?":
+            return 0, 1, greedy
+        if core.startswith("{") and core.endswith("}"):
+            inner = core[1:-1]
             if "," in inner:
                 min_part, max_part = inner.split(",", 1)
-                min_count = int(min_part)
+                min_count = int(min_part) if min_part else 0
                 max_count = int(max_part) if max_part else None
             else:
                 min_count = int(inner)
                 max_count = min_count
-            return min_count, max_count, True
+            return min_count, max_count, greedy
         return 1, 1, True
 
     def _linear_plan_row_matches_var(self, var_name: str, row_idx: int, row_count: int) -> Optional[bool]:
