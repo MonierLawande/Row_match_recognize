@@ -1075,8 +1075,9 @@ def parse_quantifier_at(pattern: str, start_pos: int) -> Tuple[Optional[str], bo
         if '-' in content:
             raise QuantifierError(f"Negative values not allowed in quantifier: {quantifier}", start_pos, pattern)
         
-        # Check basic format - only allow positive digits and commas
-        if not re.match(r'^\d+(?:,\d*)?$', content):
+        # Check basic format - only allow positive digits and commas.
+        # SQL:2016 permits an omitted lower bound: {,} == * and {,n} == {0,n}.
+        if not re.match(r'^(?:\d+(?:,\d*)?|,\d*)$', content):
             raise QuantifierError(f"Invalid quantifier format: {quantifier}", start_pos, pattern)
             
         # Parse and validate bounds
