@@ -353,7 +353,6 @@ from tests.test_java_reference_parity import run_query, assert_rows
 
 
 class TestEmptyMatchesJavaReference:
-    @pytest.mark.xfail(reason="engine gap: WITH UNMATCHED ROWS + SKIP TO NEXT ROW formerly-matched suppression")
     def test_unmatched_vs_formerly_matched(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6],
                            "value": [100, 100, 90, 80, 70, 100]})
