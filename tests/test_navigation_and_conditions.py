@@ -278,3 +278,49 @@ class TestConditionEvaluator:
         # B_value should be the value of the most recent B row
         for i in range(1, len(result)):
             assert result.iloc[i]['B_value'] > 10
+
+
+# ----------------------------------------------------------------------------
+# Faithful conversion of testClassifierFunctionPastCurrentRow from
+# src/TestRowPatternMatching.java (both assertions, exact expected values).
+# ----------------------------------------------------------------------------
+
+from tests.test_java_reference_parity import run_query, assert_rows
+
+
+class TestClassifierPastCurrentRowJavaReference:
+    def test_java_next_classifier_in_measures(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "value": [90, 80, 70, 80]})
+        query = """
+        SELECT m.id, m.value, m.label, m.next_label
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES CLASSIFIER() AS label, NEXT(CLASSIFIER()) AS next_label
+            ALL ROWS PER MATCH
+            PATTERN (A B+ C+)
+            DEFINE B AS B.value < PREV(B.value),
+                   C AS C.value > PREV(C.value)
+        ) AS m
+        """
+        expected = [
+            (1, 90, "A", "B"), (2, 80, "B", "B"), (3, 70, "B", "C"), (4, 80, "C", None),
+        ]
+        result = run_query(query, df)
+        assert_rows(result, expected, ["id", "value", "label", "next_label"])
+
+    def test_java_next_classifier_in_define_is_null(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "value": [90, 80, 70, 80]})
+        query = """
+        SELECT m.id, m.val
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES value AS val
+            ALL ROWS PER MATCH
+            PATTERN (A+)
+            DEFINE A AS NEXT(CLASSIFIER()) = 'A'
+        ) AS m
+        """
+        result = run_query(query, df)
+        assert len(result) == 0, f"expected empty result, got\n{result}"

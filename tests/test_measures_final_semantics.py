@@ -732,3 +732,53 @@ class TestProductionReadiness:
 if __name__ == '__main__':
     # Run tests with verbose output
     pytest.main([__file__, '-v', '--tb=short'])
+
+
+# ----------------------------------------------------------------------------
+# Faithful conversion of testRunningAndFinal from src/TestRowPatternMatching.java
+# (the full 11-column RUNNING/FINAL matrix, exact expected values).
+# ----------------------------------------------------------------------------
+
+from tests.test_java_reference_parity import run_query, assert_rows
+
+
+class TestRunningAndFinalJavaReference:
+    def test_java_running_and_final_matrix(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4, 5], "value": [90, 80, 70, 100, 200]})
+        query = """
+        SELECT id, label, final_label, running_value, final_value,
+               A_running_value, A_final_value, B_running_value, B_final_value,
+               C_running_value, C_final_value
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                CLASSIFIER() AS label,
+                FINAL LAST(CLASSIFIER()) AS final_label,
+                RUNNING LAST(value) AS running_value,
+                FINAL LAST(value) AS final_value,
+                RUNNING LAST(A.value) AS A_running_value,
+                FINAL LAST(A.value) AS A_final_value,
+                RUNNING LAST(B.value) AS B_running_value,
+                FINAL LAST(B.value) AS B_final_value,
+                RUNNING LAST(C.value) AS C_running_value,
+                FINAL LAST(C.value) AS C_final_value
+            ALL ROWS PER MATCH
+            PATTERN (A B+ C+)
+            DEFINE B AS B.value < PREV (B.value),
+                   C AS C.value > PREV (C.value)
+        )
+        """
+        expected = [
+            (1, "A", "C", 90, 200, 90, 90, None, 70, None, 200),
+            (2, "B", "C", 80, 200, 90, 90, 80, 70, None, 200),
+            (3, "B", "C", 70, 200, 90, 90, 70, 70, None, 200),
+            (4, "C", "C", 100, 200, 90, 90, 70, 70, 100, 200),
+            (5, "C", "C", 200, 200, 90, 90, 70, 70, 200, 200),
+        ]
+        result = run_query(query, df)
+        assert_rows(result, expected, [
+            "id", "label", "final_label", "running_value", "final_value",
+            "A_running_value", "A_final_value", "B_running_value",
+            "B_final_value", "C_running_value", "C_final_value",
+        ])
