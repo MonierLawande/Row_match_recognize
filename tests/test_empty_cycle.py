@@ -330,18 +330,18 @@ _ANCHOR_QUANT_XFAIL = pytest.mark.xfail(
     reason="engine gap: quantified anchors (^*, $+, ...) unsupported")
 
 JAVA_EMPTY_CYCLE_CASES = [
-    pytest.param("()* | B", _ALL_EMPTY4, marks=_EMPTY_GROUP_XFAIL),
-    pytest.param("()+ | B", _ALL_EMPTY4, marks=_EMPTY_GROUP_XFAIL),
-    pytest.param("(){5,} | B", _ALL_EMPTY4, marks=_EMPTY_GROUP_XFAIL),
-    pytest.param("B | ()*", [(1, 1, None, None), (2, 2, 80, "B"), (3, 3, 70, "B"), (4, 4, None, None)], marks=_EMPTY_GROUP_XFAIL),
-    pytest.param("(B ()*)*", [(1, 1, None, None), (2, 2, 80, "B"), (3, 2, 70, "B"), (4, 3, None, None)], marks=_EMPTY_GROUP_XFAIL),
+    ("()* | B", _ALL_EMPTY4),
+    ("()+ | B", _ALL_EMPTY4),
+    ("(){5,} | B", _ALL_EMPTY4),
+    ("B | ()*", [(1, 1, None, None), (2, 2, 80, "B"), (3, 3, 70, "B"), (4, 4, None, None)]),
+    ("(B ()*)*", [(1, 1, None, None), (2, 2, 80, "B"), (3, 2, 70, "B"), (4, 3, None, None)]),
     ("(B ()*)*?", _ALL_EMPTY4),
-    pytest.param("^* | B", _ALL_EMPTY4, marks=_ANCHOR_QUANT_XFAIL),
-    pytest.param("^+ | B", [(1, 1, None, None), (2, 2, 80, "B"), (3, 3, 70, "B")], marks=_ANCHOR_QUANT_XFAIL),
-    pytest.param("^* A B", [(1, 1, 90, "A"), (2, 1, 80, "B")], marks=_ANCHOR_QUANT_XFAIL),
-    pytest.param("$* | B", _ALL_EMPTY4, marks=_ANCHOR_QUANT_XFAIL),
+    ("^* | B", _ALL_EMPTY4),
+    ("^+ | B", [(1, 1, None, None), (2, 2, 80, "B"), (3, 3, 70, "B")]),
+    ("^* A B", [(1, 1, 90, "A"), (2, 1, 80, "B")]),
+    ("$* | B", _ALL_EMPTY4),
     pytest.param("$+ | B", [(2, 1, 80, "B"), (3, 2, 70, "B")], marks=_ANCHOR_QUANT_XFAIL),
-    pytest.param("B A $+", [(3, 1, 70, "B"), (4, 1, 70, "A")], marks=_ANCHOR_QUANT_XFAIL),
+    ("B A $+", [(3, 1, 70, "B"), (4, 1, 70, "A")]),
 ]
 
 

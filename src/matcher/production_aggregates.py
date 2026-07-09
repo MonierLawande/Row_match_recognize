@@ -1976,6 +1976,10 @@ class ProductionAggregateEvaluator:
         
         # Convert SQL NULL to Python None (for both null and NULL)
         converted = re.sub(r'\bnull\b', 'None', converted, flags=re.IGNORECASE)
+
+        # SQL string concatenation: a || b -> a + b (in measure/aggregate
+        # arguments || is always concat, never logical OR)
+        converted = converted.replace('||', '+')
         
         # Convert pattern variable dot notation: A.value -> value (when evaluating for variable A)
         # For now, we'll assume the context variable is set correctly by the caller
@@ -2769,7 +2773,11 @@ def enhance_measure_evaluator_with_production_aggregates():
     def enhanced_evaluate(self, expr: str, semantics: str = None) -> Any:
         """Enhanced evaluate method with production aggregate support."""
         logger.debug(f"Enhanced evaluate called with expr: '{expr}', semantics: '{semantics}'")
-        
+
+        # SQL:2016: count() is equivalent to count(*)
+        if isinstance(expr, str):
+            expr = re.sub(r'\bcount\s*\(\s*\)', 'count(*)', expr, flags=re.IGNORECASE)
+
         # Determine semantics (default to RUNNING per SQL:2016)
         semantics = semantics or "RUNNING"
         is_running = semantics.upper() == "RUNNING"
@@ -2782,6 +2790,32 @@ def enhance_measure_evaluator_with_production_aggregates():
         clean_expr, semantics_prefix = prod_agg_evaluator._strip_semantics_prefix(expr)
         if semantics_prefix:
             semantics = semantics_prefix
+
+        # COALESCE over aggregate expressions: evaluate arguments in order
+        # and return the first non-null result.
+        coalesce_match = re.match(r'^\s*COALESCE\s*\((.*)\)\s*$', clean_expr, re.IGNORECASE | re.DOTALL)
+        if coalesce_match:
+            inner = coalesce_match.group(1)
+            args, depth, start = [], 0, 0
+            for i, ch in enumerate(inner):
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                elif ch == ',' and depth == 0:
+                    args.append(inner[start:i])
+                    start = i + 1
+            args.append(inner[start:])
+            if depth == 0 and len(args) >= 2:
+                for arg_text in args:
+                    arg_text = arg_text.strip()
+                    try:
+                        value = float(arg_text) if re.fullmatch(r'-?\d+(?:\.\d+)?', arg_text) else enhanced_evaluate(self, arg_text, semantics)
+                    except Exception:
+                        value = None
+                    if value is not None and value == value:
+                        return value
+                return None
 
         start_func_match = re.match(r'^\s*([A-Z_]+)\s*\(', clean_expr, re.IGNORECASE)
         start_func = start_func_match.group(1).upper() if start_func_match else None

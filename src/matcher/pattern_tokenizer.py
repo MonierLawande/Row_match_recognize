@@ -1297,7 +1297,32 @@ def _validate_anchor_patterns(tokens: List[PatternToken], pattern: str,
     """
     if not tokens:
         return
-    
+
+    # SQL:2016 permits quantified anchors.  Anchors are zero-width
+    # assertions, so quantification reduces exactly: with min >= 1 the
+    # repeated assertion equals a single assertion, and with min == 0 the
+    # anchor reduces to the empty pattern (an empty group).
+    normalized = []
+    anchors_rewritten = False
+    for token in tokens:
+        if (token.type in (PatternTokenType.ANCHOR_START, PatternTokenType.ANCHOR_END)
+                and token.quantifier):
+            min_rep, _max_rep, _greedy = parse_quantifier(token.quantifier)
+            token.quantifier = None
+            token.greedy = True
+            anchors_rewritten = True
+            if min_rep >= 1:
+                normalized.append(token)
+            else:
+                normalized.append(PatternToken(
+                    type=PatternTokenType.GROUP_START, value='(', position=token.position))
+                normalized.append(PatternToken(
+                    type=PatternTokenType.GROUP_END, value=')', position=token.position))
+        else:
+            normalized.append(token)
+    if anchors_rewritten:
+        tokens[:] = normalized
+
     # Track anchor positions and validate placement
     start_anchors = []
     end_anchors = []
