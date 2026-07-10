@@ -133,9 +133,9 @@ More than 500 queries were run using different pattern families, SQL constructs,
 
 We assess performance with targeted automated tests, using the Amazon UK Products~2023 catalog~\cite{asaniczka2023amazon}. This real-world e-commerce dataset has about 2.2 million product records and offers good tabular data for testing price-based row-pattern recognition.
 
-We evaluated performance using five pattern families and eight input sizes, from 25,000 to 300,000 rows, all sampled from the full Amazon UK Products catalog.
+We evaluated performance using five pattern families and six input sizes, from 100,000 rows up to the full 2,222,742-row Amazon UK Products catalog, constructed as nested prefixes of the source data.
 
-A total of 40 performance test cases were run, and each one finished without issues. The results show almost linear scaling across the tested range, with the expected differences in runtime for simple, alternation, quantified, optional, and nested pattern types.
+A total of 30 pattern--size benchmark cells were measured for the proposed engine (90 cells across the three compared systems), and every cell completed successfully. The results show almost linear scaling across the tested range, with the expected differences in runtime for simple, alternation, quantified, optional, and nested pattern types; under the shared one-core, 32\,GB resource budget the engine recorded the lowest average execution time of the three systems, while the two database references validated its output row-for-row.
 
 \end{enumerate}
 
@@ -170,14 +170,14 @@ connect declarative \texttt{MATCH\_RECOGNIZE} queries to the
 execution layer.
 
 \textbf{Chapter~5 --- Implementation and Optimization}
-This chapter explains how the engine is built. It looks at finite-automata compilation, how NFAs and DFAs are created, how Pandas is used to run processes, how outputs are produced, how measures are evaluated, and performance improvements like pattern caching, memory management, and better condition evaluation.
+This chapter explains how the engine is built. It looks at finite-automata compilation, how NFAs and DFAs are created, how Pandas is used to run processes, how outputs are produced, how measures are evaluated, and the performance layer: compiled per-query fast paths (vectorized condition evaluation, row-local DFA decision tables, a linear-pattern search, and a fused \texttt{ONE ROW PER MATCH} driver) together with pattern caching and memory management.
 
 
 \textbf{Chapter~6 --- Experimental Evaluation}
 presents the evaluation methodology, the benchmark dataset
 (Amazon UK Products 2023, 2.2~million rows), and experimental
 results covering functional correctness, performance across five
-pattern families and five input sizes, scalability, pattern
+pattern families and six input sizes, scalability, pattern
 complexity, and comparison with existing systems.
 
 \textbf{Chapter~7 --- Conclusions and Future Work}
