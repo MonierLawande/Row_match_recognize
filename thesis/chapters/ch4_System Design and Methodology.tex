@@ -177,145 +177,44 @@ data-analysis workflows.
 Transforming a \texttt{MATCH\_RECOGNIZE} query from plain text into
 an executable representation requires a parsing pipeline that
 handles both standard SQL syntax and the extended row-pattern
-sub-language.  This section explains parsing fundamentals, surveys
-existing SQL parsers and parser generators, motivates the design
-choices made in this implementation, and describes the resulting
-parser in detail.
+sub-language.  This section states the parsing requirements,
+motivates the choice of parser technology, and describes the
+resulting parser.
 
 % ................................
-\subsection{What is Parsing?}
+\subsection{Parsing Approach and Existing Solutions}
 \label{subsec:meth-what-parsing}
-% ................................
-
-\emph{Parsing} refers to the analysis of an input string according to the
-rules of a formal grammar and its transformation into a
-machine-processable representation~\cite{mogensen2024compiler}.  In essence,
-the parser examines a human-written query, determines which grammar rules
-govern its syntactic construction, and produces a tree data structure that
-reflects that derivation.
-
-Parsing in this engine proceeds in two sequential stages:
-\emph{lexical analysis} and \emph{syntactic analysis}~\cite{DragonBook}.
-
-\paragraph{Lexical analysis.}
-The raw character stream is segmented into a sequence of predefined,
-meaningful units called \emph{tokens}.  Keywords
-(\texttt{SELECT}, \texttt{MATCH\_RECOGNIZE}, \texttt{PATTERN}, \ldots),
-identifiers, string and numeric literals, and punctuation are all examples
-of tokens.  Whitespace and comments are discarded at this stage; only the
-ordered token sequence is passed to the next stage.
-
-\paragraph{Syntactic analysis.}
-The token stream is matched against the grammar rules of the language,
-and a valid input is translated into a tree representation.  A valid
-input produces a \emph{parse tree} (also called a \emph{concrete syntax
-tree}) whose internal nodes correspond to grammar rules and whose leaves
-correspond to individual tokens.  An invalid input causes the parser to
-report an error, indicating precisely where the text violated the grammar.
-
-The two-stage design separates concerns cleanly: the lexer handles
-regular-language aspects (token shapes), while the parser handles
-context-free-language aspects (phrase structure).  Together they convert
-a character string into a structured tree that subsequent compiler phases
-can traverse and transform.
-
-% ................................
-\subsection{Parsing SQL: Existing Solutions}
 \label{subsec:meth-existing-parsers}
-% ................................
-
-Several Python libraries offer SQL parsing out of the box.
-\texttt{sqlparse}~\cite{sqlparse_tool} performs tokenization and basic structural
-splitting (statements, clauses) but produces only a shallow token
-stream, not a typed AST, and does not model \texttt{MATCH\_RECOGNIZE}
-at all.  \texttt{sqlglot}~\cite{sqlglot_tool} is a more complete SQL transpiler that
-supports multiple SQL dialects and exposes a typed AST; however,
-it does not provide project-ready coverage for the required
-SQL:2016 row-pattern sub-language (e.g.\ exclusions, anchors,
-\texttt{PERMUTE}, bounded quantifiers).  \texttt{mo\_sql\_parsing}~\cite{mo_sql_parsing_tool}
-converts SQL to JSON but similarly provides no project-ready
-coverage for row-pattern constructs.
-
-A widely used baseline for conventional SQL parsing is the
-\textbf{PostgreSQL parser}, which has been extracted from the
-PostgreSQL source code and released as a standalone C library via
-the \texttt{libpg\_query} project~\cite{libpg_query_tool}.  Built on top of
-\texttt{libpg\_query}, the Python library \texttt{pglast}~\cite{pglast_tool} wraps the
-original C AST nodes as typed Python classes and provides
-functionality to reconstruct SQL text from an AST.
-Listing~\ref{lst:pglast-example} shows a minimal usage example:
-the call to \texttt{parse\_sql} returns a tree of typed node
-objects, and \texttt{RawStream} serializes it back to SQL.
-
-\begin{lstlisting}[language=Python,
-    caption={Parsing a SQL statement with \texttt{pglast} and
-             reconstructing SQL text},
-    label={lst:pglast-example}]
-from pglast import parse_sql
-from pglast.stream import RawStream
-
-tree_root = parse_sql("SELECT 42;")
-print(tree_root)          # typed AST node objects
-print(RawStream()(tree_root))  # SELECT 42
-\end{lstlisting}
-
-Although \texttt{pglast} cannot parse \texttt{MATCH\_RECOGNIZE}, it
-illustrates the difference between a conventional SQL AST and the
-row-pattern-specific structure required here.  The project therefore
-does not depend on \texttt{pglast}, \texttt{sqlparse},
-\texttt{sqlglot}, or \texttt{mo\_sql\_parsing} for execution.
-Instead, these tools were considered as alternatives, and a
-grammar-based parser was selected because the required syntax
-includes pattern constructs that are not handled uniformly by
-general-purpose Python SQL parsers.
-
-% ................................
-\subsection{Grammars}
 \label{subsec:meth-grammars}
 % ................................
 
-A grammar formally describes the syntax of a language~\cite{DragonBook}.
-The elementary constituents of a grammar are:
+\emph{Parsing} analyzes an input string according to the rules of a
+formal grammar and transforms it into a machine-processable
+representation~\cite{mogensen2024compiler}.  The engine follows the
+classical two-stage design~\cite{DragonBook}: a \emph{lexer}
+segments the character stream into tokens (keywords, identifiers,
+literals, punctuation), and a \emph{parser} matches the token stream
+against context-free grammar rules, producing a parse tree for valid
+input and a positioned error for invalid input.  Grammars are
+written in EBNF, whose production rules of the form $N \to \alpha$
+name each syntactic construct; SQL is a large context-free language,
+and the \texttt{MATCH\_RECOGNIZE} sub-language adds productions for
+pattern terms, quantifiers, alternation, grouping, anchors,
+exclusions, \texttt{PERMUTE}, and the eight sub-clauses.
 
-\begin{itemize}
-  \item \textbf{Terminal symbols} (tokens) --- the elementary,
-    indivisible symbols of the language.  In this thesis the terms
-    \emph{terminal} and \emph{token} are used interchangeably.
-  \item \textbf{Non-terminals} --- symbols that represent sets of
-    strings composed of terminals, used to name syntactic constructs
-    (e.g.\ \emph{expression}, \emph{pattern}, \emph{clause}).
-  \item \textbf{Production rules} --- rewriting rules of the form
-    $N \to \alpha$, where $N$ is a non-terminal and $\alpha$ is a
-    sequence of terminals and/or non-terminals.  Each rule describes
-    one way in which a particular construct of the language may be
-    written~\cite{wagenknecht2022formal}.
-\end{itemize}
-
-A grammar is specified as a list of production rules.  Because the
-left-hand side of each rule contains exactly one non-terminal, the
-grammar is \emph{context-free}: the applicable rules do not depend
-on the surrounding context~\cite{DragonBook}.  For example, a grammar
-for one-or-more occurrences of the letter $a$ can be written:
-
-\[
-  S \to a \quad\mid\quad aS
-\]
-
-This form is also known as \emph{Backus--Naur Form} (BNF).
-The \emph{Extended} variant (EBNF) adds syntactic sugar for
-optional elements (\texttt{[~]}), repetition (\texttt{\{~\}}), and
-grouping (\texttt{(~)}), making large grammars more readable.  For
-example, the \texttt{PARTITION~BY} clause can be expressed in EBNF
-as:
-
-\begin{center}
-  \texttt{partitionBy~:~'PARTITION'~'BY'~expr~(','\ expr)*~;}
-\end{center}
-
-SQL is a large context-free language; the \texttt{MATCH\_RECOGNIZE}
-sub-language adds additional syntactic constructs for pattern terms,
-quantifiers, alternation, grouping, anchors, exclusions,
-\texttt{PERMUTE}, and the eight sub-clauses.
+No existing Python SQL parser covers this sub-language adequately.
+\texttt{sqlparse}~\cite{sqlparse_tool} produces only a shallow token
+stream and does not model \texttt{MATCH\_RECOGNIZE};
+\texttt{sqlglot}~\cite{sqlglot_tool} exposes a typed AST but lacks
+project-ready coverage of the row-pattern constructs (exclusions,
+anchors, \texttt{PERMUTE}, bounded quantifiers);
+\texttt{mo\_sql\_parsing}~\cite{mo_sql_parsing_tool} converts SQL to
+JSON with the same gap; and \texttt{pglast}~\cite{pglast_tool}, the
+Python wrapper of the extracted PostgreSQL parser
+(\texttt{libpg\_query}~\cite{libpg_query_tool}), cannot parse
+\texttt{MATCH\_RECOGNIZE} at all.  A grammar-based parser generated
+from a dialect that already includes the row-pattern productions was
+therefore selected instead.
 
 % ................................
 \subsection{Parsing Requirements}
@@ -423,35 +322,25 @@ contract is:
 \end{itemize}
 
 % ................................
-\subsection{Parser Generators}
+\subsection{Parser Technology Selection}
 \label{subsec:meth-parser-generators}
+\label{subsec:meth-alternatives}
+\label{subsec:meth-antlr4}
 % ................................
 
-Since productivity is a goal, the question arises whether the
-creation of a lexer and parser can be automated.  The kind of
-software addressing this issue is called a
-\emph{parser generator}~\cite{mogensen2024compiler}: it takes a
-grammar as input and produces the source code of a parser that
-understands the syntax defined by that grammar.  The target
-language of the generated source code must be Python, since that
-is the language the engine is written in.
-
-Candidates that support Python as a target language include:
-
-\begin{itemize}
-  \item \textbf{PLY} (Python Lex-Yacc) --- a Python implementation
-    of the classic 1970 Lex/Yacc tools~\cite{ply_tool}.
-  \item \textbf{Lark} --- described as ``a modern approach, with a
-    focus on ergonomics, performance and
-    modularity''~\cite{lark_tool}.
-  \item \textbf{ANTLR4} --- a parser generator ``widely used to
-    build languages, tools, and frameworks; from a grammar, ANTLR
-    generates a parser that can build and walk parse
-    trees''~\cite{Parr2013}.
-\end{itemize}
-
-Table~\ref{tab:parser-gen-comparison} compares the three tools
-across criteria extracted from their respective documentation.
+A \emph{parser generator}~\cite{mogensen2024compiler} takes a
+grammar as input and produces the source code of a parser for it;
+this automates lexer and parser construction and keeps the language
+specification in one readable file.  Two non-generator approaches
+were considered and rejected: a hand-written recursive-descent
+parser is error-prone to maintain across SQL's hundreds of
+productions, and regular expressions cannot model recursive
+structures such as nested grouping, so they cannot serve as a
+complete parser.  Three generators that target Python were compared:
+\textbf{PLY} (Python Lex-Yacc)~\cite{ply_tool},
+\textbf{Lark}~\cite{lark_tool}, and
+\textbf{ANTLR4}~\cite{Parr2013}
+(Table~\ref{tab:parser-gen-comparison}).
 
 \begin{table}[htbp]
   \centering
@@ -501,70 +390,16 @@ across criteria extracted from their respective documentation.
   \end{tabular}
 \end{table}
 
-Due to the manageable size and complexity of the
-\texttt{MATCH\_RECOGNIZE} statement, any of the three tools would
-likely produce a satisfactory result.  Nevertheless, two reasons
-motivated the choice of ANTLR4.  First, its parse-tree visualiser
-(via the \texttt{antlr4-tools} Java GUI) greatly aids debugging
-grammar rules.  Second, and more crucially, ANTLR4 automatically
-generates a traversal skeleton---both listener and visitor base
-classes---for the parse tree.  Because the raw parse tree must be
-transformed into the typed AST described in
-Section~\ref{subsubsec:meth-ast-interface}, a generated visitor
-base class eliminates manual tree-traversal boilerplate.  An
-empirical study further demonstrates significantly higher
-performance and maintainability when using ANTLR compared to
+\textbf{ANTLR4} (ANother Tool for Language Recognition,
+version~4)~\cite{Parr2013,parr2014adaptive,antlr_website,parr_antlr_docs}
+was selected: it produces top-down, Adaptive LL(*) recursive-descent
+parsers from a \texttt{.g4} grammar file together with generated
+listener/visitor scaffolding, which eliminates the manual traversal
+boilerplate otherwise needed to build the typed AST of
+Section~\ref{subsubsec:meth-ast-interface}; its parse-tree
+visualiser aids grammar debugging; and an empirical study reports
+higher performance and maintainability than
 Lex/Yacc~\cite{antlr_performance}.
-
-In this thesis the workflow combining ANTLR4 with the typed
-\texttt{MATCH\_RECOGNIZE} AST interface is evaluated for its
-suitability in parsing the supported \texttt{MATCH\_RECOGNIZE}
-statement.
-
-% ................................
-\subsection{Alternative Methods}
-\label{subsec:meth-alternatives}
-% ................................
-
-Two non-generator approaches were considered and rejected.
-
-\paragraph{Hand-written recursive descent.}
-A recursive descent parser is straightforward to implement for
-small grammars: each non-terminal becomes a Python method that
-calls other methods for sub-rules.  However, SQL's grammar contains
-hundreds of productions; maintaining a hand-written parser as the
-grammar evolves is error-prone.  The approach was ruled out on
-maintainability grounds.
-
-\paragraph{Regex-based string extraction.}
-Regular expressions cannot model recursive structures such as nested
-grouping \texttt{((A+B)*|C)} or balanced parentheses, so they
-cannot serve as a complete parser.  They can pre-screen queries or
-extract simple fragments, but any production use requires a proper
-parser as the primary mechanism.
-
-% ................................
-\subsection{ANTLR4}
-\label{subsec:meth-antlr4}
-% ................................
-
-\textbf{ANTLR4} (ANother Tool for Language Recognition, version~4)
-is a parser generator that produces top-down, Adaptive LL(*)
-recursive-descent parsers from context-free grammar specifications
-written in the ANTLR meta-language~\cite{Parr2013,parr2014adaptive,antlr_website,parr_antlr_docs}.  Given a \texttt{.g4} grammar
-file the tool generates a lexer, a parser, and listener/visitor
-scaffolding in the target language (Python in this project).
-
-The implementation uses Trino's SQL grammar
-(\texttt{TrinoLexer.g4} / \texttt{TrinoParser.g4}) from the ANTLR
-community grammars project.  This grammar already contains the
-\texttt{patternRecognition} productions needed for the
-\texttt{MATCH\_RECOGNIZE} sub-clauses, as shown in
-Listing~\ref{lst:grammar}.  The project-specific layer is therefore
-the Python visitor and validation logic that extracts these parse
-tree nodes into typed AST objects.  A custom error listener
-intercepts syntax errors and reports them with line/column positions
-and contextual suggestions.
 
 % ................................
 \subsection{Implementation of the Parser}
@@ -749,85 +584,41 @@ on any syntax violation, and visits the parse tree with
 \label{subsec:meth-parser-testing}
 % ................................
 
-The parser implementation is validated through a structured test
-suite located in the \texttt{tests/} directory.  Tests are organized
-into parser-focused checks, integration tests that exercise the
-\texttt{parse\_full\_query} pipeline, and SQL:2016-oriented tests
-derived from reference scenarios and observed Trino behavior.
-
-\paragraph{Parser-focused tests.}
-The parser tests exercise the extraction and validation behavior of
-the main \texttt{MATCH\_RECOGNIZE} sub-clauses, including
-\texttt{MEASURES} expressions with \texttt{RUNNING}/\texttt{FINAL}
-keywords, after-match skip targets, output-mode combinations, and
-pattern syntax.  The validation chain is also tested
-adversarially: supplying an undefined pattern-variable reference, a
-prohibited function form in \texttt{MEASURES}, an invalid skip
-target, or an incompatible output-mode combination triggers a
-\texttt{ParserError} or an empty-result path as appropriate.  By
-contrast, a pattern variable without a corresponding
-\texttt{DEFINE} predicate is valid and receives an implicit
-always-true condition.
-
-\paragraph{Integration tests.}
-The file \texttt{test\_match\_recognize.py} is adapted from Trino's
-\texttt{TestRowPatternMatching.java} and exercises representative
-end-to-end scenarios: simple queries, pattern quantifiers
-(\texttt{*}, \texttt{+}, \texttt{?}, bounded \texttt{\{n,m\}}),
-pattern exclusion syntax (\texttt{\{-\ldots-\}}), the supported
-after-match-skip modes, one-row and all-rows output modes,
-\texttt{CLASSIFIER()} and \texttt{MATCH\_NUMBER()} special columns,
-navigation functions, partitioned and ordered input, \texttt{SUBSET}
-aliasing, and \texttt{RUNNING}/\texttt{FINAL} semantics.
-
-\paragraph{SQL:2016 compliance tests.}
-\texttt{test\_sql2016\_compliance.py} contains targeted tests for
-standard-oriented behavior: pattern syntax, navigation functions,
-special aggregate functions, partition boundary handling, subset
-variable resolution, output-mode semantics, and the supported skip
-policies.  Empty-match handling is
-covered separately in \texttt{test\_empty\_matches.py} with nine
-test cases including \texttt{SHOW EMPTY MATCHES},
-\texttt{OMIT EMPTY MATCHES}, \texttt{WITH UNMATCHED ROWS}, and
-combinations with alternation and partitioning.
-
-\paragraph{Edge-case tests.}
-Additional test files cover \texttt{IN~()} predicate preprocessing
-(\texttt{test\_in\_predicate.py}),
-\texttt{IS~NULL} handling (\texttt{test\_is\_null\_handling.py}),
-anchored patterns (\texttt{test\_anchor\_patterns.py}),
-\texttt{PERMUTE} patterns (\texttt{test\_permute\_patterns.py}),
-back-references (\texttt{test\_back\_reference.py}),
-pattern cache correctness and thread safety
-(\texttt{test\_pattern\_cache.py}), and aggregate-function behavior
-(\texttt{test\_production\_aggregates.py}).
+The parser is validated through the structured test suite in
+\texttt{tests/}, organized into three layers.  Parser-focused tests
+exercise the extraction and validation of every sub-clause,
+including adversarial inputs: an undefined pattern-variable
+reference, a prohibited function form, an invalid skip target, or an
+incompatible output-mode combination triggers a
+\texttt{ParserError} or an empty-result path as appropriate, while a
+pattern variable without a \texttt{DEFINE} predicate remains valid
+with an implicit always-true condition.  Integration tests adapted
+from Trino's \texttt{TestRowPatternMatching.java} cover end-to-end
+scenarios---quantifiers, exclusions, skip modes, output modes,
+\texttt{CLASSIFIER()}/\texttt{MATCH\_NUMBER()}, navigation,
+partitioning, \texttt{SUBSET} aliasing, and
+\texttt{RUNNING}/\texttt{FINAL} semantics.  Dedicated files cover
+SQL:2016 compliance details, empty-match handling, \texttt{IN~()}
+preprocessing, \texttt{IS~NULL}, anchors, \texttt{PERMUTE},
+back-references, pattern-cache thread safety, and aggregate
+behavior.
 
 % ................................
-\subsection{Discussion of the Parser}
+\subsection{Discussion and Limits}
 \label{subsec:meth-parser-discussion}
-% ................................
-
-The grammar-driven approach provides several practical advantages:
-the language specification remains in a single readable
-\texttt{.g4} file; ANTLR4 provides structured parse-tree generation
-and error-recovery mechanisms, while the custom listener reports
-syntax errors with line and column context; and the generated
-visitor scaffolding eliminates manual tree traversal boilerplate.
-
-% ................................
-\subsubsection{Limits}
 \label{subsubsec:meth-parser-limits}
 % ................................
 
-Two limitations are known.  First, advanced SQL constructs outside
-the supported row-pattern subset, such as recursive common table
-expressions embedded inside predicate subqueries, are not part of the
-main execution path; the expression subsystem recognizes the
-constructs needed for \texttt{MATCH\_RECOGNIZE} evaluation.  Second,
-because the grammar is based on Trino's dialect, vendor-specific
-extensions of other systems (Oracle \texttt{RUNNING} keyword
-placement differences, Snowflake aggregate variants) may require
-minor grammar adjustments if cross-dialect compatibility is needed.
+The grammar-driven approach keeps the language specification in a
+single readable \texttt{.g4} file, provides structured parse-tree
+generation with positioned syntax errors, and eliminates manual
+traversal boilerplate through generated visitor scaffolding.  Two
+limitations are known: advanced SQL constructs outside the supported
+row-pattern subset (such as recursive CTEs inside predicate
+subqueries) are not part of the main execution path, and because the
+grammar follows Trino's dialect, vendor-specific extensions of other
+systems may require minor grammar adjustments for cross-dialect
+compatibility.
 
 % ................................
 \subsection{Safe SQL Expression Evaluation}
@@ -918,8 +709,8 @@ safely to the input DataFrame:
     construction.
 
   \item The \texttt{AFTER MATCH SKIP TO FIRST/LAST $V$} options
-    reference a pattern variable $V$ that actually exists in the
-    pattern, catching typos at compile time rather than at runtime.
+    reference a pattern variable or declared \texttt{SUBSET} alias
+    $V$, catching typos at compile time rather than at runtime.
 \end{itemize}
 
 % ................................
@@ -970,11 +761,16 @@ validator enforces the following rules:
     ROWS}; this combination is rejected with a descriptive error
     message.
 
-  \item \texttt{AFTER MATCH SKIP TO FIRST/LAST $V$} requires that
-    $V$ be a pattern variable, not a subset alias.  Subset aliases
-    are resolved at automaton-construction time, not at skip-mode
-    computation time, so this restriction is necessary to ensure
-    a deterministic next-start position.
+  \item \texttt{AFTER MATCH SKIP TO FIRST/LAST $V$} accepts either
+    a pattern variable or a \texttt{SUBSET} alias for $V$.  The
+    validator resolves subset aliases against the declared
+    \texttt{SUBSET} clause (an alias denotes the union of its member
+    variables, so \texttt{SKIP TO $U$} skips to the last row matched
+    by any member of $U$); a name that is neither a pattern variable
+    nor a declared subset alias is rejected.  Skipping to a target
+    that would re-anchor matching at the first row of the previous
+    match is detected at runtime and reported as an error, since it
+    would otherwise cause an infinite loop.
 \end{itemize}
 
 \noindent
@@ -1030,7 +826,8 @@ attributes and their types.
     \texttt{skip\_mode}      & \texttt{SkipMode}
       & After-match skip strategy enum value \\[4pt]
     \texttt{skip\_var}       & \texttt{Optional[str]}
-      & Target variable for \textsc{To First}/\textsc{To Last};
+      & Target variable or \texttt{SUBSET} alias for
+        \textsc{To First}/\textsc{To Last};
         \texttt{None} for the other two modes \\
     \bottomrule
   \end{tabular}
@@ -1078,8 +875,10 @@ expressions in order:
       \item Under \texttt{ALL ROWS PER MATCH}: \texttt{LAST()}
         defaults to \textsc{Running}; \texttt{FIRST()},
         \texttt{PREV()}, and \texttt{NEXT()} default to
-        \textsc{Final}; aggregate functions \texttt{COUNT()},
-        \texttt{SUM()}, and \texttt{ARRAY\_AGG()} default to
+        \textsc{Final}; aggregate functions (\texttt{COUNT()},
+        \texttt{SUM()}, \texttt{ARRAY\_AGG()}, and the
+        multi-argument forms such as \texttt{MAX\_BY()},
+        \texttt{MIN\_BY()}, and \texttt{STRING\_AGG()}) default to
         \textsc{Running}; all others default to \textsc{Final}.
     \end{itemize}
 \end{enumerate}

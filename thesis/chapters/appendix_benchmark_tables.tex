@@ -12,7 +12,7 @@ referenced in Chapter~\ref{chap:evaluation}.  They are reproduced here
 for completeness and reproducibility; the summary tables and key
 findings remain in the chapter body.  All figures are for the
 Amazon UK Products benchmark under one CPU core and a 32\,GB memory
-budget, with each cell reported as the mean of six measured runs.
+budget, with each cell reported as the mean of twenty measured runs (after five warmups).
 
 \section{Match Counts}
 \label{app:match-counts}
@@ -36,14 +36,12 @@ and \texttt{alternation} the smallest.
 \toprule
 \textbf{Size (rows)} & \textbf{simple\_seq.} & \textbf{alternation} & \textbf{quantified} & \textbf{optional\_pat.} & \textbf{complex\_nested} \\
 \midrule
-50{,}000 & 4{,}322 & 612 & 2{,}219 & 7{,}081 & 3{,}800 \\
 100{,}000 & 9{,}067 & 1{,}828 & 5{,}643 & 15{,}247 & 9{,}420 \\
 200{,}000 & 16{,}093 & 3{,}692 & 10{,}064 & 27{,}172 & 17{,}759 \\
 400{,}000 & 34{,}391 & 5{,}803 & 19{,}012 & 52{,}950 & 32{,}360 \\
 800{,}000 & 66{,}330 & 9{,}782 & 32{,}804 & 99{,}214 & 58{,}616 \\
-1{,}000{,}000 & 80{,}188 & 12{,}433 & 40{,}420 & 120{,}571 & 73{,}835 \\
-1{,}500{,}000 & 121{,}420 & 18{,}431 & 61{,}988 & 183{,}084 & 109{,}974 \\
-2{,}000{,}000 & 160{,}097 & 25{,}719 & 84{,}393 & 244{,}296 & 150{,}477 \\
+1{,}600{,}000 & 130{,}338 & 20{,}276 & 67{,}358 & 197{,}253 & 119{,}299 \\
+2{,}222{,}742 & 181{,}147 & 28{,}776 & 95{,}650 & 276{,}776 & 167{,}641 \\
 \bottomrule
 \end{tabular}}
 \end{table}
@@ -53,14 +51,14 @@ and \texttt{alternation} the smallest.
 \label{app:perf-summaries}
 
 Table~\ref{tab:pattern_summary} averages throughput and execution
-time over the eight dataset sizes for each pattern family, and
+time over the six dataset sizes for each pattern family, and
 Table~\ref{tab:size_summary} averages over the five pattern families
 for each dataset size, for all three systems.
 
 {\scriptsize
 \setlength{\tabcolsep}{4pt}
 \begin{longtable}{lrrrrrr}
-\caption{Pattern performance summary across all three systems (5 patterns $\times$ 8 dataset sizes = 40 tests per system)}
+\caption{Pattern performance summary across all three systems (5 patterns $\times$ 6 dataset sizes = 30 tests per system)}
 \label{tab:pattern_summary} \\
 \toprule
 & \multicolumn{2}{c}{\textbf{Proposed Pandas Engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
@@ -77,11 +75,11 @@ for each dataset size, for all three systems.
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 359{,}762 & 2.06 & 518{,}053 & 1.25 & 1{,}211{,}344 & 0.60 \\
-alternation & 915{,}314 & 0.79 & 643{,}607 & 1.00 & 1{,}685{,}068 & 0.43 \\
-quantified & 361{,}129 & 2.03 & 517{,}258 & 1.25 & 1{,}138{,}248 & 0.67 \\
-optional\_pattern & 335{,}449 & 2.14 & 738{,}919 & 0.85 & 1{,}582{,}848 & 0.45 \\
-complex\_nested & 369{,}498 & 2.48 & 222{,}655 & 4.45 & 614{,}076 & 1.86 \\
+simple\_sequence & 1{,}608{,}537 & 0.54 & 563{,}608 & 1.37 & 1{,}213{,}119 & 0.72 \\
+alternation & 1{,}889{,}087 & 0.45 & 699{,}914 & 1.09 & 1{,}744{,}472 & 0.51 \\
+quantified & 1{,}788{,}673 & 0.47 & 576{,}058 & 1.40 & 1{,}143{,}929 & 0.79 \\
+optional\_pattern & 1{,}291{,}871 & 0.65 & 788{,}092 & 0.99 & 1{,}599{,}189 & 0.53 \\
+complex\_nested & 1{,}155{,}066 & 0.83 & 234{,}483 & 5.38 & 589{,}190 & 2.27 \\
 \end{longtable}
 }
 
@@ -105,13 +103,11 @@ complex\_nested & 369{,}498 & 2.48 & 222{,}655 & 4.45 & 614{,}076 & 1.86 \\
 \endhead
 \bottomrule
 \endfoot
-50{,}000 & 454{,}710 & 0.12 & 203{,}639 & 0.25 & 1{,}022{,}414 & 0.05 \\
-100{,}000 & 437{,}802 & 0.26 & 369{,}113 & 0.32 & 1{,}289{,}743 & 0.08 \\
-200{,}000 & 481{,}512 & 0.48 & 549{,}506 & 0.39 & 1{,}388{,}628 & 0.15 \\
-400{,}000 & 482{,}388 & 0.96 & 579{,}220 & 0.77 & 1{,}302{,}432 & 0.34 \\
-800{,}000 & 465{,}625 & 2.05 & 596{,}718 & 1.92 & 1{,}204{,}273 & 0.90 \\
-1{,}000{,}000 & 479{,}286 & 2.49 & 603{,}993 & 2.29 & 1{,}266{,}626 & 1.06 \\
-1{,}500{,}000 & 469{,}599 & 3.82 & 655{,}404 & 3.64 & 1{,}266{,}984 & 1.67 \\
-2{,}000{,}000 & 474{,}922 & 5.01 & 667{,}194 & 4.52 & 1{,}229{,}434 & 2.17 \\
+100{,}000 & 1{,}318{,}362 & 0.08 & 362{,}847 & 0.29 & 1{,}233{,}748 & 0.09 \\
+200{,}000 & 1{,}517{,}992 & 0.13 & 534{,}595 & 0.39 & 1{,}358{,}505 & 0.16 \\
+400{,}000 & 1{,}648{,}636 & 0.25 & 597{,}835 & 0.74 & 1{,}278{,}970 & 0.35 \\
+800{,}000 & 1{,}589{,}068 & 0.53 & 608{,}874 & 1.95 & 1{,}222{,}889 & 0.91 \\
+1{,}600{,}000 & 1{,}596{,}162 & 1.06 & 633{,}796 & 3.99 & 1{,}227{,}886 & 1.85 \\
+2{,}222{,}742 & 1{,}609{,}660 & 1.46 & 696{,}639 & 4.91 & 1{,}225{,}881 & 2.45 \\
 \end{longtable}
 }
