@@ -13,33 +13,10 @@ import time
 import psutil
 import os
 from typing import Dict, List, Any, Tuple
-import sys
-
-# Add the src directory to the path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
-try:
-    from executor.match_recognize import match_recognize
-    from utils.logging_config import get_logger
-    from utils.performance_optimizer import PerformanceMonitor
-    from utils.pattern_cache import get_cache_stats, clear_pattern_cache
-except ImportError:
-    # Fallback for development/testing
-    def match_recognize(query, df):
-        return pd.DataFrame()
-    
-    def get_logger(name):
-        import logging
-        return logging.getLogger(name)
-    
-    class PerformanceMonitor:
-        pass
-    
-    def get_cache_stats():
-        return {}
-    
-    def clear_pattern_cache():
-        pass
+from src.executor.match_recognize import match_recognize
+from src.utils.logging_config import get_logger
+from src.utils.performance_optimizer import PerformanceMonitor
+from src.utils.pattern_cache import get_cache_stats, clear_pattern_cache
 
 logger = get_logger(__name__)
 
@@ -227,6 +204,7 @@ class TestAggregationPerformance:
         start_time = time.time()
         result1 = match_recognize(query, df)
         first_execution_time = time.time() - start_time
+        cold_cache_stats = get_cache_stats()
 
         # Warm executions (cache hit).  Take the best of three so a single
         # GC pause or scheduler hiccup under full-suite load cannot make the
@@ -244,9 +222,18 @@ class TestAggregationPerformance:
         logger.info(f"Best warm execution: {second_execution_time:.3f}s (all: {[f'{t:.3f}' for t in warm_times]})")
         logger.info(f"Cache stats: {cache_stats}")
 
-        # Second execution should be faster due to caching
+        # End-to-end time includes matching, aggregation, and result creation,
+        # which must still run on every invocation.  Therefore an arbitrary
+        # 10% wall-clock speedup is not a valid test of the compilation cache,
+        # especially for a small pattern.  Verify the cached operation itself:
+        # the cold run compiled one entry, warm runs hit it without adding a
+        # miss, and the cache reports the compilation work that was avoided.
         speedup_ratio = first_execution_time / second_execution_time if second_execution_time > 0 else 1
-        assert speedup_ratio > 1.1, f"Cache speedup ratio {speedup_ratio:.2f} is too low"
+        pd.testing.assert_frame_equal(result1, result2)
+        assert cold_cache_stats.get('entries_count', 0) >= 1
+        assert cache_stats.get('hits', 0) > cold_cache_stats.get('hits', 0)
+        assert cache_stats.get('misses', 0) == cold_cache_stats.get('misses', 0)
+        assert cache_stats.get('total_compilation_time_saved', 0.0) > 0.0
     
     @pytest.mark.performance
     @pytest.mark.slow

@@ -2644,6 +2644,24 @@ class ProductionAggregateEvaluator:
                 self.context.current_idx = old_idx
             expr = expr[:call["start"]] + repr(value) + expr[call["end"]:]
 
+        # Navigation in a FILTER predicate is evaluated at the outer
+        # aggregate frame, not independently at every candidate row.  For
+        # example, in a RUNNING aggregate, FIRST(A.x) and LAST(A.x) refer to
+        # the first/current visible A rows of that running frame.  Replace the
+        # balanced calls before replacing row-local variable references so the
+        # argument inside FIRST/LAST is not accidentally rewritten first.
+        navigation_calls = self._find_balanced_function_calls(
+            expr, {"FIRST", "LAST", "PREV", "NEXT"}
+        )
+        for call in reversed(navigation_calls):
+            old_idx = self.context.current_idx
+            self.context.current_idx = outer_idx
+            try:
+                value = self._evaluate_navigation_call(call)
+            finally:
+                self.context.current_idx = old_idx
+            expr = expr[:call["start"]] + repr(value) + expr[call["end"]:]
+
         # Replace variable.column references with values from the candidate row.
         def replace_var_col(match: re.Match) -> str:
             var_name = match.group(1)
@@ -2663,6 +2681,12 @@ class ProductionAggregateEvaluator:
         )
 
         # Convert common SQL boolean syntax into Python AST-compatible syntax.
+        # Normalize SQL NULL predicates before the generic NOT/NULL rewrites.
+        # Python accepts ``is None`` and ``is not None``; the restricted AST
+        # evaluator below implements those operators with SQL predicate
+        # semantics.
+        expr = re.sub(r'\bIS\s+NOT\s+NULL\b', 'is not None', expr, flags=re.IGNORECASE)
+        expr = re.sub(r'\bIS\s+NULL\b', 'is None', expr, flags=re.IGNORECASE)
         expr = re.sub(r'(?<![<>=!])=(?!=)', '==', expr)
         expr = re.sub(r'\bAND\b', 'and', expr, flags=re.IGNORECASE)
         expr = re.sub(r'\bOR\b', 'or', expr, flags=re.IGNORECASE)
@@ -2698,7 +2722,13 @@ class ProductionAggregateEvaluator:
             left = self._eval_filter_ast(node.left)
             for op, comparator in zip(node.ops, node.comparators):
                 right = self._eval_filter_ast(comparator)
-                if left is None or right is None:
+                # IS NULL / IS NOT NULL are defined precisely when an operand
+                # is NULL.  Other SQL comparisons with NULL are UNKNOWN and
+                # therefore do not pass a FILTER predicate.
+                if (
+                    (left is None or right is None)
+                    and not isinstance(op, (ast.Is, ast.IsNot))
+                ):
                     return False
                 if isinstance(op, ast.Eq):
                     ok = left == right
@@ -2716,6 +2746,10 @@ class ProductionAggregateEvaluator:
                     ok = left in right
                 elif isinstance(op, ast.NotIn):
                     ok = left not in right
+                elif isinstance(op, ast.Is):
+                    ok = left is right
+                elif isinstance(op, ast.IsNot):
+                    ok = left is not right
                 else:
                     ok = False
                 if not ok:

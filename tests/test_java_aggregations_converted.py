@@ -422,7 +422,7 @@ class TestJavaAggregationsConverted:
     @pytest.mark.running_final
     def test_running_and_final_aggregations(self):
         """
-        Test from testRunningAndFinalAggregations() - mix of RUNNING and FINAL.
+        Engine capability test (NOT the Java testRunningAndFinalAggregations() query; the faithful conversion lives in TestJavaExactAggregationsTail) - mix of RUNNING and FINAL.
         Converted from Java test case.
         """
         # Test data from Java VALUES clause
@@ -469,7 +469,7 @@ class TestJavaAggregationsConverted:
     @pytest.mark.multiple
     def test_multiple_aggregation_arguments(self):
         """
-        Test from testMultipleAggregationArguments() - complex aggregation expressions.
+        Engine capability test (NOT the Java testMultipleAggregationArguments() query; the faithful conversion lives in TestJavaExactAggregationsTail) - complex aggregation expressions.
         Converted from Java test case.
         """
         # Test data from Java VALUES clause
