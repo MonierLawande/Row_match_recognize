@@ -748,5 +748,299 @@ class TestPartitioningNoMeasuresJavaReference:
         assert_rows(result, expected, ["row_id", "part"])
 
 
+# ----------------------------------------------------------------------------
+# Java-exact conversions for the tail methods of TestRowPatternMatching.java
+# (testOutputLayout, testMultipleMatchRecognize, testSubqueries,
+#  testInPredicateWithoutSubquery, testPotentiallyExponentialMatch,
+#  testProperties, testKillThread, testScalarFunctions,
+#  testCaseSensitiveLabels).  Exact input data and expected outputs; these
+# supersede the presence-only checks above.
+# ----------------------------------------------------------------------------
+
+from tests.test_java_reference_parity import run_query, assert_rows
+
+
+class TestJavaExactParityTail:
+    def test_java_output_layout_all_rows(self):
+        df = pd.DataFrame({"id": ["ordering"], "part": ["partitioning"], "value": [90]})
+        query = """
+        SELECT * FROM data MATCH_RECOGNIZE (
+            PARTITION BY part ORDER BY id
+            MEASURES CLASSIFIER() AS classy
+            ALL ROWS PER MATCH
+            PATTERN (A) DEFINE A AS true
+        ) AS m
+        """
+        result = run_query(query, df)
+        # PARTITION BY columns, ORDER BY columns, measures, remaining input columns
+        assert list(result.columns) == ["part", "id", "classy", "value"], list(result.columns)
+        assert_rows(result, [("partitioning", "ordering", "A", 90)],
+                    ["part", "id", "classy", "value"])
+
+    def test_java_output_layout_one_row(self):
+        df = pd.DataFrame({"id": ["ordering"], "part": ["partitioning"], "value": [90]})
+        query = """
+        SELECT * FROM data MATCH_RECOGNIZE (
+            PARTITION BY part ORDER BY id
+            MEASURES CLASSIFIER() AS classy
+            ONE ROW PER MATCH
+            PATTERN (A) DEFINE A AS true
+        ) AS m
+        """
+        result = run_query(query, df)
+        # ONE ROW PER MATCH: PARTITION BY columns, then measures only
+        assert list(result.columns) == ["part", "classy"], list(result.columns)
+        assert_rows(result, [("partitioning", "A")], ["part", "classy"])
+
+    @pytest.mark.xfail(reason="engine gap: duplicated ORDER BY column not repeated in output layout")
+    def test_java_output_layout_duplicate_order_by(self):
+        df = pd.DataFrame({"id": ["ordering"], "part": ["partitioning"], "value": [90]})
+        query = """
+        SELECT * FROM data MATCH_RECOGNIZE (
+            PARTITION BY part ORDER BY id ASC, id DESC
+            MEASURES CLASSIFIER() AS classy
+            ALL ROWS PER MATCH
+            PATTERN (A) DEFINE A AS true
+        ) AS m
+        """
+        result = run_query(query, df)
+        # duplicated ORDER BY symbol appears twice in the output layout
+        assert len(result) == 1
+        row = result.iloc[0].tolist()
+        assert row.count("ordering") == 2, row
+        assert "partitioning" in row and "A" in row and 90 in row, row
+
+    @pytest.mark.xfail(reason="engine gap: multiple MATCH_RECOGNIZE joins in one query unsupported")
+    def test_java_multiple_match_recognize_cross_join(self):
+        df1 = pd.DataFrame({"id": [1, 2, 3]})
+        query = """
+        SELECT first.classy, second.classy, third.classy
+        FROM (VALUES (1), (2), (3)) t(id)
+          MATCH_RECOGNIZE (ORDER BY id MEASURES CLASSIFIER() AS classy
+              ALL ROWS PER MATCH PATTERN (A) DEFINE A AS true) AS first,
+          (VALUES (10), (20)) t(id)
+          MATCH_RECOGNIZE (ORDER BY id MEASURES CLASSIFIER() AS classy
+              ALL ROWS PER MATCH PATTERN (B) DEFINE B AS true) AS second,
+          (VALUES 100) t(id)
+          MATCH_RECOGNIZE (ORDER BY id MEASURES CLASSIFIER() AS classy
+              ALL ROWS PER MATCH PATTERN (C) DEFINE C AS true) AS third
+        """
+        result = run_query(query, df1)
+        expected = [("A", "B", "C")] * 6
+        assert len(result) == 6, f"expected 6 cross-join rows, got {len(result)}"
+        for i in range(6):
+            assert tuple(result.iloc[i][:3]) == expected[i]
+
+    # ---- testSubqueries (5 assertions) --------------------------------
+    SUBQ = """
+    SELECT m.val FROM data MATCH_RECOGNIZE (
+        ORDER BY id
+        MEASURES {measure} AS val
+        ONE ROW PER MATCH
+        AFTER MATCH SKIP TO NEXT ROW
+        PATTERN (A+)
+        DEFINE A AS {define}
+    ) AS m
+    """
+
+    @pytest.fixture
+    def df4v(self):
+        return pd.DataFrame({"id": [1, 2, 3, 4], "value": [100, 200, 300, 400]})
+
+    @pytest.mark.xfail(reason="engine gap: scalar subqueries in MEASURES/DEFINE unsupported")
+    def test_java_subquery_scalar(self, df4v):
+        result = run_query(self.SUBQ.format(measure="(SELECT 'x')", define="(SELECT true)"), df4v)
+        assert_rows(result, [("x",)] * 4, ["val"])
+
+    @pytest.mark.xfail(reason="engine gap: subquery nested in navigation unsupported")
+    def test_java_subquery_in_navigation(self, df4v):
+        result = run_query(self.SUBQ.format(
+            measure="FINAL LAST(A.value + (SELECT 1000))",
+            define="FIRST(A.value < 0 OR (SELECT true))"), df4v)
+        assert_rows(result, [(1400,)] * 4, ["val"])
+
+    @pytest.mark.xfail(reason="engine gap: IN-subquery in measures unsupported")
+    def test_java_subquery_in_predicate_no_columns(self, df4v):
+        result = run_query(self.SUBQ.format(
+            measure="LAST(A.id < 0 OR 1 IN (SELECT 1))",
+            define="FIRST(A.id > 0 AND 1 IN (SELECT 1))"), df4v)
+        assert_rows(result, [(True,)] * 4, ["val"])
+
+    @pytest.mark.xfail(reason="engine gap: IN-subquery with column ref unsupported")
+    def test_java_subquery_in_predicate_column_ref(self, df4v):
+        result = run_query(self.SUBQ.format(
+            measure="FIRST(id % 2 IN (SELECT 0))",
+            define="FIRST(value * 0 IN (SELECT 0))"), df4v)
+        assert_rows(result, [(False,), (True,), (False,), (True,)], ["val"])
+
+    @pytest.mark.xfail(reason="engine gap: EXISTS-subquery unsupported")
+    def test_java_subquery_exists(self, df4v):
+        result = run_query(self.SUBQ.format(
+            measure="LAST(A.value < 0 OR EXISTS(SELECT 1))",
+            define="FIRST(A.value < 0 OR EXISTS(SELECT 1))"), df4v)
+        assert_rows(result, [(True,)] * 4, ["val"])
+
+    # ---- testInPredicateWithoutSubquery (3 assertions) ----------------
+    INPRED = """
+    SELECT m.val FROM data MATCH_RECOGNIZE (
+        ORDER BY id
+        MEASURES {measure} AS val
+        ONE ROW PER MATCH
+        AFTER MATCH SKIP TO NEXT ROW
+        PATTERN (A+)
+        DEFINE A AS true
+    ) AS m
+    """
+
+    @pytest.mark.xfail(reason="engine gap: IN-list containing navigation call in measures")
+    def test_java_in_predicate_navigation(self, df4v):
+        result = run_query(self.INPRED.format(
+            measure="FIRST(A.value) IN (300, LAST(A.value))"), df4v)
+        assert_rows(result, [(False,), (False,), (True,), (True,)], ["val"])
+
+    @pytest.mark.xfail(reason="engine gap: CLASSIFIER() IN-list with scalar function")
+    def test_java_in_predicate_classifier(self, df4v):
+        result = run_query(self.INPRED.format(
+            measure="CLASSIFIER() IN ('X', lower(CLASSIFIER()))"), df4v)
+        assert_rows(result, [(False,)] * 4, ["val"])
+
+    def test_java_in_predicate_match_number(self, df4v):
+        result = run_query(self.INPRED.format(
+            measure="MATCH_NUMBER() IN (0, MATCH_NUMBER())"), df4v)
+        assert_rows(result, [(True,)] * 4, ["val"])
+
+    # ---- remaining singles ---------------------------------------------
+    def test_java_potentially_exponential_empty(self):
+        df = pd.DataFrame({"value": [1] * 20})
+        query = """
+        SELECT m.classy FROM data MATCH_RECOGNIZE (
+            MEASURES CLASSIFIER() AS classy
+            PATTERN ((A+)+ B)
+            DEFINE A AS value = 1, B AS value = 2
+        ) AS m
+        """
+        result = run_query(query, df)
+        assert len(result) == 0, f"expected empty result, got\n{result}"
+
+    def test_java_properties_cte(self):
+        df = pd.DataFrame({"a": [1], "b": [1]})
+        query = """
+        SELECT * FROM data MATCH_RECOGNIZE (
+            PARTITION BY a
+            PATTERN (X)
+            DEFINE X AS (b = 1)
+        )
+        """
+        result = run_query(query, df)
+        assert len(result) == 1
+        assert result.iloc[0]["a"] == 1
+
+    def test_java_kill_thread_pattern(self):
+        df = pd.DataFrame({"col0": [1, 2, 3, 4, 5]})
+        query = """
+        SELECT * FROM data MATCH_RECOGNIZE (
+            MEASURES 'foo' AS foo
+            PATTERN ((Y?){2,})
+            DEFINE Y AS true
+        )
+        """
+        result = run_query(query, df)
+        assert len(result) == 1, f"expected one match row, got {len(result)}\n{result}"
+        assert result.iloc[0]["foo"] == "foo"
+
+    @pytest.mark.xfail(reason="engine gap: CAST(lower(LAST(CLASSIFIER())) || literal) measure chain")
+    def test_java_scalar_functions_exact(self):
+        df = pd.DataFrame({"id": [1, 2, 3], "value": [90, 80, 60]})
+        query = """
+        SELECT m.id, m.label FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES CAST(lower(LAST(CLASSIFIER())) || '_label' AS varchar(7)) AS label
+            ALL ROWS PER MATCH
+            PATTERN (A B+)
+            DEFINE B AS B.value + 10 < abs(PREV (B.value))
+        ) AS m
+        """
+        result = run_query(query, df)
+        assert_rows(result, [(2, "a_label"), (3, "b_label")], ["id", "label"])
+
+    def test_java_case_sensitive_labels_exact(self):
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "value": [90, 80, 70, 80]})
+        query = """
+        SELECT m.id, m.label FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES CLASSIFIER() AS label
+            ALL ROWS PER MATCH
+            PATTERN (a "b"+ C+)
+            DEFINE "b" AS "b".value < PREV("b".value),
+                   C AS C.value > PREV(C.value)
+        ) AS m
+        """
+        result = run_query(query, df)
+        assert_rows(result, [(1, "A"), (2, "b"), (3, "b"), (4, "C")], ["id", "label"])
+
+
+class TestPartitioningMultiplePartitionsJavaExact:
+    """testPartitioningAndOrdering assertion 1: multiple partitions,
+    unordered input, PREV(RUNNING LAST(value)) measure — exact Java values."""
+
+    def test_java_multiple_partitions_unordered_exact(self):
+        df = pd.DataFrame({
+            "id":    [1, 2, 6, 2, 2, 1, 3, 4, 5, 1, 3, 3],
+            "part":  ["p1", "p1", "p1", "p2", "p3", "p3", "p1", "p1", "p1", "p2", "p3", "p2"],
+            "value": [90, 80, 80, 20, 60, 50, 70, 80, 90, 20, 70, 10],
+        })
+        query = """
+        SELECT m.part AS part, m.id AS row_id, m.match, m.val, m.label
+        FROM data MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES match_number() AS match,
+                     PREV(RUNNING LAST(value)) AS val,
+                     classifier() AS label
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (B+)
+            DEFINE B AS B.value < PREV (B.value)
+        ) AS m
+        """
+        expected = [
+            ("p1", 2, 1, 90, "B"),
+            ("p1", 3, 1, 80, "B"),
+            ("p1", 6, 2, 90, "B"),
+            ("p2", 3, 1, 20, "B"),
+        ]
+        result = run_query(query, df)
+        result = result.sort_values(["part", "row_id"]).reset_index(drop=True)
+        assert_rows(result, expected, ["part", "row_id", "match", "val", "label"])
+
+    def test_java_no_partitioning_unordered_exact(self):
+        """testPartitioningAndOrdering assertion 3: no partitioning,
+        unordered input, RUNNING LAST(value) measure — exact Java values."""
+        df = pd.DataFrame({
+            "id":    [5, 2, 1, 4, 3],
+            "value": [10, 90, 80, 20, 30],
+        })
+        query = """
+        SELECT m.id AS row_id, m.match, m.val, m.label
+        FROM data MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES match_number() AS match,
+                     RUNNING LAST(value) AS val,
+                     classifier() AS label
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (B+)
+            DEFINE B AS B.value < PREV (B.value)
+        ) AS m
+        """
+        expected = [
+            (3, 1, 30, "B"),
+            (4, 1, 20, "B"),
+            (5, 1, 10, "B"),
+        ]
+        result = run_query(query, df)
+        assert_rows(result, expected, ["row_id", "match", "val", "label"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -450,7 +450,8 @@ class ConditionEvaluator(ast.NodeVisitor):
 
             # Aggregate functions in DEFINE (running semantics over the rows
             # matched so far, current row included under its tentative label)
-            if func_name in ("SUM", "AVG", "MIN", "MAX", "COUNT", "ARBITRARY", "ARRAY_AGG"):
+            if func_name in ("SUM", "AVG", "MIN", "MAX", "COUNT", "ARBITRARY", "ARRAY_AGG",
+                             "MAX_BY", "MIN_BY"):
                 return self._handle_define_aggregate(node, func_name)
 
         func = self.visit(node.func)
@@ -475,9 +476,11 @@ class ConditionEvaluator(ast.NodeVisitor):
         every aggregated row with the evaluator positioned at that row, so
         CLASSIFIER()/MATCH_NUMBER()-dependent arguments work.
         """
-        if len(node.args) != 1 or node.keywords:
-            raise ValueError(f"{func_name} in DEFINE requires exactly one argument")
+        expected_args = 2 if func_name in ("MAX_BY", "MIN_BY") else 1
+        if len(node.args) != expected_args or node.keywords:
+            raise ValueError(f"{func_name} in DEFINE requires {expected_args} argument(s)")
         arg = node.args[0]
+        key_arg = node.args[1] if expected_args == 2 else None
 
         context = self.context
         variables = getattr(context, "variables", {}) or {}
@@ -525,7 +528,10 @@ class ConditionEvaluator(ast.NodeVisitor):
         simple_field = (
             arg.attr if scope_var is not None and isinstance(arg, ast.Attribute) else None
         )
+        if key_arg is not None:
+            simple_field = None  # two-argument aggregates always re-evaluate
         values = []
+        keys = []
         saved_row = self.current_row
         saved_idx = context.current_idx
         saved_var = getattr(context, "current_var", None)
@@ -538,7 +544,13 @@ class ConditionEvaluator(ast.NodeVisitor):
                     context.current_idx = row_index
                     context.current_var = index_labels.get(row_index, saved_var)
                     value = self.visit(arg)
-                if value is not None and value == value:  # skip NULL/NaN
+                if key_arg is not None:
+                    key = self.visit(key_arg)
+                    if (value is not None and value == value
+                            and key is not None and key == key):
+                        values.append(value)
+                        keys.append(key)
+                elif value is not None and value == value:  # skip NULL/NaN
                     values.append(value)
         finally:
             self.current_row = saved_row
@@ -549,6 +561,10 @@ class ConditionEvaluator(ast.NodeVisitor):
             return len(values)
         if not values:
             return None
+        if func_name in ("MAX_BY", "MIN_BY"):
+            pick = max if func_name == "MAX_BY" else min
+            best_index = pick(range(len(keys)), key=lambda i: keys[i])
+            return values[best_index]
         if func_name == "SUM":
             return sum(values)
         if func_name == "AVG":

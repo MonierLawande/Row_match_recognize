@@ -1043,9 +1043,12 @@ class TestRowPatternMatching:
         assert not result.empty
         
         expected_rows = [
-            (1, 1, 'A'),
-            (2, 2, 'A'),
-            (3, 3, 'A'),
+            # A+ is greedy. SKIP TO NEXT ROW changes only the next
+            # candidate start, so each suffix is a separate overlapping
+            # match rather than a one-row minimal match.
+            (1, 1, 'A'), (2, 1, 'A'), (3, 1, 'A'), (4, 1, 'A'),
+            (2, 2, 'A'), (3, 2, 'A'), (4, 2, 'A'),
+            (3, 3, 'A'), (4, 3, 'A'),
             (4, 4, 'A')
         ]
         

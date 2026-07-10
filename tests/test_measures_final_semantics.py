@@ -464,9 +464,8 @@ class TestPartitionHandling:
 class TestRunningVsFinalSemantics:
     """Test the difference between RUNNING and FINAL semantics."""
     
-    @pytest.mark.skip(reason="Explicit FINAL keyword not yet supported in parser (FINAL is default)")
     def test_final_semantics_explicit(self):
-        """Test explicit FINAL keyword (should be default behavior)."""
+        """Test explicit FINAL processing mode on a navigation function."""
         data = [
             ('cust_1', '2020-05-11', 100),  # A
             ('cust_1', '2020-05-12', 200),  # A (last)
@@ -483,7 +482,7 @@ class TestRunningVsFinalSemantics:
             ORDER BY order_date
             MEASURES
                 CLASSIFIER() AS pattern_var,
-                FINAL A.price AS a_price
+                FINAL LAST(A.price) AS a_price
             ALL ROWS PER MATCH
             PATTERN (A+ B+)
             DEFINE
@@ -496,7 +495,7 @@ class TestRunningVsFinalSemantics:
         
         # B row should use LAST A with explicit FINAL
         b_row = result[result['pattern_var'] == 'B'].iloc[0]
-        assert b_row['a_price'] == 200, "FINAL A.price should use last A row"
+        assert b_row['a_price'] == 200, "FINAL LAST(A.price) should use last A row"
     
     def test_final_semantics_implicit_default(self):
         """Test that FINAL semantics is the default (no keyword needed)."""

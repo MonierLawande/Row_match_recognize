@@ -5278,26 +5278,6 @@ class EnhancedMatcher:
                             logger.debug(f"  Reluctant star match (early termination): {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
                         break  # Early termination for reluctant star
                 
-                # PRODUCTION FIX: For SKIP TO NEXT ROW, use minimal matching to align with Trino behavior
-                # SKIP TO NEXT ROW with A+ should produce multiple minimal matches, not one greedy match
-                # This enables patterns like A+ with SKIP TO NEXT ROW to produce separate matches per row
-                if config and config.skip_mode == SkipMode.TO_NEXT_ROW:
-                    # Use minimal matching for SKIP TO NEXT ROW to match Trino behavior
-                    longest_match = {
-                        "start": start_idx,
-                        "end": current_idx - 1,
-                        "variables": {k: v[:] for k, v in var_assignments.items()},
-                        "state": state,
-                        "is_empty": False,
-                        "excluded_vars": self.excluded_vars.copy() if hasattr(self, 'excluded_vars') else set(),
-                        "excluded_rows": excluded_rows.copy(),
-                        "has_empty_alternation": self.has_empty_alternation
-                    }
-                    if debug_enabled:
-                        logger.debug(f"  Minimal match for SKIP TO NEXT ROW: {start_idx}-{current_idx-1}, vars: {list(var_assignments.keys())}")
-                    # Break early for minimal matching with SKIP TO NEXT ROW
-                    break
-                
                 # For greedy quantifiers, we should continue trying to match as long as possible
                 # Only update longest_match but don't break - continue to find longer matches
                 longest_match = {
@@ -8374,8 +8354,12 @@ class EnhancedMatcher:
         # Per-leaf per-row argument values, computed once.
         leaf_rows: List[Dict[int, Any]] = []
         for leaf in plan["leaves"]:
-            var_key = self._resolve_mapping_key(variables, leaf["var"])
-            indices = sorted(variables.get(var_key, [])) if var_key is not None else []
+            # Resolve both ordinary pattern variables and SQL SUBSET union
+            # variables.  The arithmetic plan accepts the same variable scope
+            # syntax as the general aggregate evaluator, so looking up only a
+            # direct key here silently produced empty inputs for expressions
+            # such as SUM(T.value * T.weight), where T is a SUBSET.
+            indices = sorted(self._resolve_scope_indices(variables, leaf["var"]))
             arg_fn = leaf["arg_fn"]
             fields = leaf["fields"]
             values: Dict[int, Any] = {}

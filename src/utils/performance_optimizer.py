@@ -505,8 +505,7 @@ class SmartCache:
                 if not entry.is_expired():
                     entry.update_access()
                     self._move_to_end(self.l1_cache, key)
-                    self.stats['l1_hits'] += 1
-                    self._record_access(key, 'L1')
+                    self._record_cache_hit(key, 'L1', entry)
                     return entry.value
                 else:
                     self._remove_expired_entry(self.l1_cache, key)
@@ -517,13 +516,12 @@ class SmartCache:
                 if not entry.is_expired():
                     entry.update_access()
                     self._move_to_end(self.l2_cache, key)
-                    self.stats['l2_hits'] += 1
-                    self._record_access(key, 'L2')
+                    self._record_cache_hit(key, 'L2', entry)
                     
                     # Consider promotion to L1
                     if entry.should_promote('L1'):
                         self._promote_to_l1(key, entry)
-                    
+
                     return entry.value
                 else:
                     self._remove_expired_entry(self.l2_cache, key)
@@ -534,13 +532,12 @@ class SmartCache:
                 if not entry.is_expired():
                     entry.update_access()
                     self._move_to_end(self.l3_cache, key)
-                    self.stats['l3_hits'] += 1
-                    self._record_access(key, 'L3')
+                    self._record_cache_hit(key, 'L3', entry)
                     
                     # Consider promotion to L2
                     if entry.should_promote('L2'):
                         self._promote_to_l2(key, entry)
-                    
+
                     return entry.value
                 else:
                     self._remove_expired_entry(self.l3_cache, key)
@@ -555,6 +552,21 @@ class SmartCache:
                 self._trigger_predictive_loading(key)
             
             return None
+
+    def _record_cache_hit(self, key: str, level: str, entry: CacheEntry) -> None:
+        """Record one successful lookup and the work avoided by the hit.
+
+        ``total_compilation_time_saved`` used to remain zero because cache
+        entries retained their compilation time but successful lookups never
+        consumed that metadata.  Keeping the accounting beside the hit makes
+        the metric reliable for every cache level and avoids using noisy
+        end-to-end query timings to infer whether compilation was reused.
+        """
+        self.stats[f'{level.lower()}_hits'] += 1
+        self.stats['total_compilation_time_saved'] += max(
+            0.0, float(getattr(entry, 'compilation_time', 0.0) or 0.0)
+        )
+        self._record_access(key, level)
     
     def put(self, key: str, value: Any, size_hint: float = 1.0, metadata: Dict[str, Any] = None) -> bool:
         """
@@ -1408,6 +1420,14 @@ class SmartCache:
             # Add metadata if provided
             if metadata:
                 entry.metadata = metadata
+                entry.compilation_time = max(
+                    0.0, float(metadata.get('compilation_time', 0.0) or 0.0)
+                )
+                entry.navigation_pattern = bool(metadata.get('has_navigation', False))
+                entry.partition_signature = self._create_partition_signature(
+                    metadata.get('partitions', [])
+                )
+                entry._update_value_score()
             
             # Override size if hint provided
             if size_hint:
@@ -1689,7 +1709,7 @@ class SmartCache:
             }
     
     def clear(self):
-        """Clear all cache entries."""
+        """Clear entries, analysis state, and statistics atomically."""
         with self.lock:
             self.l1_cache.clear()
             self.l2_cache.clear()
@@ -1698,13 +1718,20 @@ class SmartCache:
             self.pattern_relationships.clear()
             self.access_history.clear()
             self.similarity_cache.clear()
+            self.access_patterns.clear()
+            self.frequency_counter.clear()
+            self.hot_patterns.clear()
+            self.error_patterns.clear()
+            self.navigation_patterns.clear()
+            self.navigation_cache_keys.clear()
+            self.partition_signatures.clear()
+            self.partition_sharing_map.clear()
             
-            # Reset statistics
+            # A clear operation establishes a new measurement interval.  The
+            # previous implementation reset only size/count fields, leaving
+            # hit and miss totals from earlier tests or workloads behind.
             for key in self.stats:
-                if 'size_mb' in key or 'count' in key or key == 'entries_count':
-                    self.stats[key] = 0
-                elif key == 'size_bytes':
-                    self.stats[key] = 0
+                self.stats[key] = 0.0 if isinstance(self.stats[key], float) else 0
     
     def optimize_policy(self):
         """Dynamically optimize eviction policy based on performance."""
@@ -2685,8 +2712,16 @@ class PatternCompilationCache:
         
         # Estimate size for large compiled objects
         size_hint = len(pattern) * 0.001  # Rough estimate in MB
-        
-        return cache.put(key, compiled_result, size_hint)
+
+        # The executor stores compilation metadata as the third tuple item.
+        # Pass it through to the cache entry so monitoring can report the
+        # actual compilation work avoided by subsequent hits.
+        metadata = None
+        if (isinstance(compiled_result, tuple) and len(compiled_result) >= 3
+                and isinstance(compiled_result[2], dict)):
+            metadata = compiled_result[2]
+
+        return cache.put(key, compiled_result, size_hint, metadata=metadata)
     
     @staticmethod
     def get_compiled_pattern(pattern: str, define_conditions: Dict[str, str], 
