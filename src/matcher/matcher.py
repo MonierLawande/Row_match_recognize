@@ -6867,12 +6867,20 @@ class EnhancedMatcher:
         # queries fully covered by the compiled matchers and measure plans,
         # enumerate matches and emit output rows directly.  Semantics are
         # identical to the loop below; every non-default feature bails out.
+        # Clear any columnar payload from a previous pass so the executor
+        # never consumes stale columns when this pass takes another path.
+        self._fast_one_row_columns = None
         if not all_rows and not include_unmatched and not track_processed_indices:
             fast_results = self._run_fast_one_row_pass(rows, config, measures)
             if fast_results is not None:
+                fast_count = len(fast_results)
+                if not fast_count:
+                    fast_cols = getattr(self, "_fast_one_row_columns", None)
+                    if fast_cols is not None:
+                        fast_count = fast_cols[1]
                 self.timing["total"] = time.time() - start_time
-                self._update_performance_metrics(len(rows), len(fast_results), self.timing["total"])
-                logger.info(f"Fused one-row pass produced {len(fast_results)} result rows")
+                self._update_performance_metrics(len(rows), fast_count, self.timing["total"])
+                logger.info(f"Fused one-row pass produced {fast_count} result rows")
                 return fast_results
 
         # UNLIMITED SCALE PROCESSING: Intelligent iteration management without hard limits
@@ -8047,22 +8055,34 @@ class EnhancedMatcher:
             np.flatnonzero(start_position_mask) if start_position_mask is not None else None
         )
 
-        results: List[Dict[str, Any]] = []
-        results_append = results.append
+        # Columnar output: one list per output column instead of one dict per
+        # match.  The executor receives the columns via
+        # ``_fast_one_row_columns`` and builds the DataFrame in one step,
+        # skipping the list-of-dicts conversion path entirely.
+        prefix_data = [(col, arr, [], [False]) for col, arr in prefix_columns]
+        measure_data = [(alias, fn, []) for alias, fn in seg_measures]
+        match_number_column: List[int] = []
+        row_idx_column: List[int] = []
+        match_count = 0
         match_number = 1
         start = 0
 
+        _nan = float("nan")
+
         def emit(segments, start, end):
-            row = {}
-            for col, arr in prefix_columns:
+            nonlocal match_count
+            for _col, arr, values, seen in prefix_data:
                 value = arr[start]
-                if value is not None:
-                    row[col] = value
-            for alias, fn in seg_measures:
-                row[alias] = fn(segments, start, end, match_number)
-            row["MATCH_NUMBER"] = match_number
-            row["_original_row_idx"] = start
-            results_append(row)
+                if value is None:
+                    values.append(_nan)
+                else:
+                    values.append(value)
+                    seen[0] = True
+            for _alias, fn, values in measure_data:
+                values.append(fn(segments, start, end, match_number))
+            match_number_column.append(match_number)
+            row_idx_column.append(start)
+            match_count += 1
 
         if mode in ("linear", "linear_dp"):
             search = self._linear_search_iterative
@@ -8140,7 +8160,33 @@ class EnhancedMatcher:
                 match_number += 1
                 start = accepted_end + 1
 
-        return results
+        # Assemble columns in the same first-seen key order the dict-based
+        # emit produced: prefix columns (omitting columns that never carried
+        # a value, exactly like the old per-row None skip), then measures,
+        # MATCH_NUMBER, and the original row index.
+        columns: Dict[str, List[Any]] = {}
+        for col, _arr, values, seen in prefix_data:
+            if seen[0]:
+                columns[col] = values
+        for alias, _fn, values in measure_data:
+            columns[alias] = values
+        columns["MATCH_NUMBER"] = match_number_column
+        columns["_original_row_idx"] = row_idx_column
+
+        if getattr(self, "_fast_columnar_result", False):
+            # The executor consumes the columns directly and builds the
+            # result DataFrame in one step.
+            self._fast_one_row_columns = (columns, match_count)
+            return []
+
+        # Direct callers (tests, embedding code) keep the historical
+        # list-of-dicts shape.
+        names = list(columns.keys())
+        value_lists = list(columns.values())
+        return [
+            dict(zip(names, row_values))
+            for row_values in zip(*value_lists)
+        ] if match_count else []
 
     def _compile_simple_running_aggregate_plan(self, expr: str, semantics: str) -> Optional[Dict[str, Any]]:
         """Compile common RUNNING aggregate measures into prefix plans.

@@ -456,6 +456,95 @@ def _normalize_end_anchor_only_alternatives(pattern_text: str) -> str:
     return " | ".join(kept)
 
 
+class _FastRowChunk:
+    """Columnar block of ONE ROW PER MATCH results from the fused fast pass.
+
+    Carries one list per output column for a whole partition, so the final
+    DataFrame is built column-wise instead of from one dict per match.
+    """
+
+    __slots__ = ("columns", "row_count")
+
+    def __init__(self, columns: Dict[str, List[Any]], row_count: int):
+        self.columns = columns
+        self.row_count = row_count
+
+
+def _chunk_columns_to_frame(columns) -> pd.DataFrame:
+    """Build a DataFrame from column lists, converting numeric columns
+    directly with numpy.
+
+    ``np.asarray`` on a homogeneous numeric list produces the same dtype
+    pandas would infer, without pandas' object-array intermediate.  Columns
+    that do not convert cleanly (strings, None-mixed, datetimes) are left as
+    lists so pandas applies its normal inference, keeping dtypes identical
+    to the dict-based path.
+    """
+    import numpy as np
+
+    data = {}
+    for col, values in columns.items():
+        try:
+            arr = np.asarray(values)
+        except Exception:
+            data[col] = values
+            continue
+        data[col] = arr if arr.dtype != object and arr.dtype.kind in "iufb" else values
+    return pd.DataFrame(data)
+
+
+def _build_one_row_result_frame(results) -> pd.DataFrame:
+    """Build the ONE ROW PER MATCH result DataFrame.
+
+    ``results`` holds plain per-match dicts, columnar ``_FastRowChunk``
+    blocks from the fused fast pass, or a mix when only some partitions
+    qualified for the fast pass.  Chunks are assembled column-wise; a mixed
+    list is restored to partition order with a stable sort on the partition
+    tracking keys, matching the order the pure-dict path produces.
+    """
+    if not any(isinstance(item, _FastRowChunk) for item in results):
+        return pd.DataFrame(results)
+
+    frames = []
+    dict_rows = []
+    for item in results:
+        if isinstance(item, _FastRowChunk):
+            frames.append(_chunk_columns_to_frame(item.columns))
+        elif item is not None:
+            dict_rows.append(item)
+    mixed = bool(dict_rows)
+    if dict_rows:
+        frames.append(pd.DataFrame(dict_rows))
+    if len(frames) == 1:
+        result_df = frames[0]
+    else:
+        result_df = pd.concat(frames, ignore_index=True, sort=False)
+        if mixed and '_partition_index' in result_df.columns:
+            result_df = result_df.sort_values(
+                ['_partition_index', '_partition_row_index'],
+                kind='stable',
+            ).reset_index(drop=True)
+    return result_df
+
+
+def _make_fast_row_chunk(fast_columns, partition_by, rows, partition_idx) -> _FastRowChunk:
+    """Apply the per-partition result mutations columnarly.
+
+    Mirrors the legacy per-dict loop: add missing PARTITION BY columns from
+    the partition's first row, then the partition tracking keys used for
+    result ordering.
+    """
+    columns, row_count = fast_columns
+    if partition_by and rows:
+        first_row = rows[0]
+        for col in partition_by:
+            if col not in columns:
+                columns[col] = [first_row[col]] * row_count
+    columns['_partition_index'] = [partition_idx] * row_count
+    columns['_partition_row_index'] = list(range(row_count))
+    return _FastRowChunk(columns, row_count)
+
+
 class DataFrameRowAccessor:
     """
     Lightweight row sequence backed by a pandas DataFrame.
@@ -1189,6 +1278,7 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
         
         # Find matches
         matcher._source_dataframe = partition
+        matcher._fast_columnar_result = True
         try:
             partition_results = matcher.find_matches(
                 rows=rows,
@@ -1197,7 +1287,15 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
             )
         finally:
             matcher._source_dataframe = None
-        
+            matcher._fast_columnar_result = False
+
+        fast_columns = getattr(matcher, "_fast_one_row_columns", None)
+        matcher._fast_one_row_columns = None
+        if fast_columns is not None and fast_columns[1]:
+            results.append(
+                _make_fast_row_chunk(fast_columns, partition_by, rows, partition_idx)
+            )
+
         # Process matches and adjust indices
         if hasattr(matcher, "_matches"):
             for match in matcher._matches:
@@ -1258,6 +1356,7 @@ def _process_partitions_sequentially(partitions, partition_by, order_by, matcher
         
         # Find matches
         matcher._source_dataframe = partition
+        matcher._fast_columnar_result = True
         try:
             partition_results = matcher.find_matches(
                 rows=rows,
@@ -1266,7 +1365,15 @@ def _process_partitions_sequentially(partitions, partition_by, order_by, matcher
             )
         finally:
             matcher._source_dataframe = None
-        
+            matcher._fast_columnar_result = False
+
+        fast_columns = getattr(matcher, "_fast_one_row_columns", None)
+        matcher._fast_one_row_columns = None
+        if fast_columns is not None and fast_columns[1]:
+            results.append(
+                _make_fast_row_chunk(fast_columns, partition_by, rows, partition_idx)
+            )
+
         # Store matches for post-processing with adjusted indices
         if hasattr(matcher, "_matches"):
             for match in matcher._matches:
@@ -1853,7 +1960,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 # For ONE ROW PER MATCH, use the results from the matcher
                 # The matcher already produces one result per match with correct measures
                 if results:
-                    result_df = pd.DataFrame(results)
+                    result_df = _build_one_row_result_frame(results)
                 else:
                     # Handle empty results case
                     columns = _get_empty_result_columns(ast, partition_by, measures)
