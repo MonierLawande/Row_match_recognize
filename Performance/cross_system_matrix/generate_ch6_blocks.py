@@ -123,18 +123,9 @@ for label, s in [("Proposed Pandas engine", SP), ("Trino~473", ST), ("Oracle XE~
     )
 block("overall_stats", lines)
 
-# ---- tab:cross_system_summary ----
-lines = []
-for label, s, corr in [
-    ("Proposed Pandas engine", SP, "proposed output"),
-    ("Trino~473", ST, "30/30 identical"),
-    ("Oracle XE~21c", SO, "30/30 identical"),
-]:
-    lines.append(
-        f"{label} & 30 & {s['avg']:.2f} & {texnum(round(s['avgthr']))} & {s['maxq']:.2f} & "
-        f"{texnum(round(s['maxf'], 2))} & {corr} \\\\"
-    )
-block("cross_system_summary", lines)
+# tab:cross_system_summary was removed from ch6 (its time/throughput/memory
+# duplicated tab:overall_stats and its correctness column duplicated
+# tab:cross_system_correctness); no block is emitted for it.
 
 # ---- tab:avg_time_by_pattern ----
 lines = []
