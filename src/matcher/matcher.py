@@ -2175,6 +2175,7 @@ class EnhancedMatcher:
             plan,
             tuple(best_ends),
             suffix_possible,
+            tuple((token["var"], best_ends[i]) for i, token in enumerate(plan)),
         )
         self._linear_dp_match_ctx = ctx
         return ctx
@@ -2185,34 +2186,45 @@ class EnhancedMatcher:
 
         The DP tables are very effective when a variable-width token can
         consume rows needed by a later required token, because the scalar DFS
-        may have to backtrack through several counts for many starts.  If the
-        remaining suffix can match empty (for example ``A+ B? C*`` after
-        ``A+``), the DFS usually accepts immediately and the O(n * tokens)
-        DP precomputation is just overhead.  This heuristic is semantic-free:
-        it only chooses between two equivalent compiled matchers.
+        may have to backtrack through several counts for many starts.  They
+        also win for greedy-chain plans such as ``A+ B? C*`` where every
+        token after the first has ``min == 0``: the DFS accepts on its first
+        descent but still pays iterator and memo overhead per match, while
+        the DP lookup is a plain per-token array read.  Only single-token
+        plans keep the DFS, whose one descent is cheaper than building the
+        tables.  This heuristic is semantic-free: it only chooses between
+        two equivalent compiled matchers.
         """
+        if not plan or len(plan) < 2:
+            return False
         required_suffix = 0
-        for token in reversed(plan or []):
+        for token in reversed(plan):
             max_count = token["max"]
             variable_width = max_count is None or max_count != token["min"]
             if variable_width and required_suffix > 0:
                 return True
             required_suffix += token["min"]
-        return False
+        # Greedy chain: no token after the first requires rows, so the first
+        # descent always succeeds and the DP read replaces the DFS overhead.
+        return all(token["min"] == 0 for token in plan[1:])
 
     @staticmethod
-    def _linear_dp_segments(dp_best_ends, plan, start_idx):
-        """Return segment triples from a linear DP context, or None."""
+    def _linear_dp_segments(dp_token_ends, start_idx):
+        """Return segment triples from a linear DP context, or None.
+
+        ``dp_token_ends`` is the precomputed ``(var, best_end)`` pair tuple
+        from the DP context; the tables are ``row_count + 1`` long and every
+        stored end position is ``<= row_count``, so a non-negative ``pos``
+        can never index out of range.
+        """
         pos = start_idx
         segments = []
-        for token_idx, token in enumerate(plan):
-            best_end = dp_best_ends[token_idx]
-            if pos < 0 or pos >= len(best_end):
-                return None
-            end_pos = int(best_end[pos])
+        append = segments.append
+        for var_name, best_end in dp_token_ends:
+            end_pos = best_end[pos]
             if end_pos < 0:
                 return None
-            segments.append((token["var"], pos, end_pos - pos))
+            append((var_name, pos, end_pos - pos))
             pos = end_pos
         return segments
 
@@ -5997,6 +6009,11 @@ class EnhancedMatcher:
             except Exception:
                 return {}
 
+        # One factorization per string column per pass: every `col = 'lit'`
+        # in DEFINE then compares integer codes instead of re-scanning the
+        # object array for each variable.
+        self._column_factorize_cache = {}
+
         condition_matrix = {}
         for var_name, condition_expr in (self.define_conditions or {}).items():
             vectorized = self._vectorize_simple_condition_expression(
@@ -6329,6 +6346,9 @@ class EnhancedMatcher:
                 raise ValueError("Function call is not row-local")
 
             if isinstance(current, ast.Compare):
+                fast = factorized_string_compare(current)
+                if fast is not None:
+                    return fast
                 left = eval_node(current.left)
                 combined = np.ones(len(df), dtype=bool)
                 for op, comparator in zip(current.ops, current.comparators):
@@ -6339,6 +6359,62 @@ class EnhancedMatcher:
                 return combined
 
             raise ValueError(f"Unsupported row-local AST node: {type(current).__name__}")
+
+        def factorized_string_compare(compare_node):
+            """Fast path for `column ==/!= 'literal'` over object columns.
+
+            Factorizes the column once per matching pass and compares integer
+            codes.  NaN factorizes to code -1, which never equals a valid
+            uniques index, so `NULL = 'lit'` stays false; `!=` masks NULLs
+            explicitly to keep SQL three-valued semantics.
+            """
+            if len(compare_node.ops) != 1:
+                return None
+            op = compare_node.ops[0]
+            if not isinstance(op, (ast.Eq, ast.NotEq)):
+                return None
+
+            def column_of(node):
+                if isinstance(node, ast.Name):
+                    return column_map.get(node.id.lower())
+                if (isinstance(node, ast.Attribute)
+                        and isinstance(node.value, ast.Name)):
+                    return column_map.get(node.attr.lower())
+                return None
+
+            def str_const_of(node):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    return node.value
+                return None
+
+            col = column_of(compare_node.left)
+            lit = str_const_of(compare_node.comparators[0])
+            if col is None or lit is None:
+                col = column_of(compare_node.comparators[0])
+                lit = str_const_of(compare_node.left)
+            if col is None or lit is None:
+                return None
+
+            series = df[col]
+            if series.dtype != object and str(series.dtype) not in ("string", "category"):
+                return None
+
+            cache = getattr(self, "_column_factorize_cache", None)
+            if cache is None:
+                cache = self._column_factorize_cache = {}
+            entry = cache.get(col)
+            if entry is None or entry[0] is not series:
+                codes, uniques = pd.factorize(series.to_numpy(), use_na_sentinel=True)
+                positions = {value: idx for idx, value in enumerate(uniques)}
+                entry = (series, codes, positions)
+                cache[col] = entry
+            _, codes, positions = entry
+
+            code = positions.get(lit, -2)  # -2: literal absent; never matches
+            if isinstance(op, ast.Eq):
+                return codes == code
+            # NotEq: NULL != 'lit' is NULL (false); valid rows have code >= 0.
+            return (codes >= 0) & (codes != code)
 
         def compare_values(left, op, right):
             if isinstance(op, (ast.In, ast.NotIn)):
@@ -7990,7 +8066,7 @@ class EnhancedMatcher:
 
         if mode in ("linear", "linear_dp"):
             search = self._linear_search_iterative
-            dp_best_ends = linear_dp_ctx[3] if linear_dp_ctx is not None else None
+            dp_token_ends = linear_dp_ctx[5] if linear_dp_ctx is not None else None
             while start < row_count:
                 if start_position_mask is not None and not start_position_mask[start]:
                     next_pos = start_positions.searchsorted(start)
@@ -7998,8 +8074,8 @@ class EnhancedMatcher:
                         break
                     start = int(start_positions[next_pos])
                     continue
-                if dp_best_ends is not None:
-                    segments = self._linear_dp_segments(dp_best_ends, plan, start)
+                if dp_token_ends is not None:
+                    segments = self._linear_dp_segments(dp_token_ends, start)
                 else:
                     segments = search(steps, start, row_count, failed)
                 if segments is None:
