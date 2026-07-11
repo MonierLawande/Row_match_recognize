@@ -170,30 +170,46 @@ def cast_function(value: Any, target_type: str) -> Any:
         return None
     
     try:
-        target_type = target_type.upper()
+        target_type = target_type.upper().strip()
+        type_match = re.fullmatch(r'([A-Z]+)\s*\(([^)]*)\)', target_type)
+        base_type = type_match.group(1) if type_match else target_type
+        type_parameters = (
+            [part.strip() for part in type_match.group(2).split(',')]
+            if type_match else []
+        )
         
-        if target_type in ('BIGINT', 'INTEGER', 'INT'):
+        if base_type in ('BIGINT', 'INTEGER', 'INT'):
             if isinstance(value, bool):
                 return int(value)
             return int(float(value))  # Handle string numbers
-        elif target_type in ('DOUBLE', 'REAL', 'FLOAT'):
+        elif base_type in ('DOUBLE', 'REAL', 'FLOAT'):
             return float(value)
-        elif target_type in ('VARCHAR', 'CHAR', 'TEXT', 'STRING'):
-            return str(value)
-        elif target_type == 'BOOLEAN':
+        elif base_type in ('VARCHAR', 'CHAR', 'TEXT', 'STRING'):
+            result = str(value)
+            if type_parameters and type_parameters[0].isdigit():
+                length = int(type_parameters[0])
+                result = result[:length]
+                if base_type == 'CHAR':
+                    result = result.ljust(length)
+            return result
+        elif base_type == 'BOOLEAN':
             if isinstance(value, str):
                 return value.lower() in ('true', 't', '1', 'yes', 'y')
             return bool(value)
-        elif target_type == 'DATE':
+        elif base_type == 'DATE':
             if isinstance(value, str):
                 return datetime.datetime.strptime(value, '%Y-%m-%d').date()
             return value
-        elif target_type in ('TIMESTAMP', 'DATETIME'):
+        elif base_type in ('TIMESTAMP', 'DATETIME'):
             if isinstance(value, str):
                 return datetime.datetime.fromisoformat(value)
             return value
-        elif target_type == 'DECIMAL':
-            return decimal.Decimal(str(value))
+        elif base_type in ('DECIMAL', 'NUMERIC'):
+            result = decimal.Decimal(str(value))
+            if len(type_parameters) > 1 and type_parameters[1].isdigit():
+                scale = int(type_parameters[1])
+                result = result.quantize(decimal.Decimal(1).scaleb(-scale))
+            return result
         else:
             logger.warning(f"Unsupported cast target type: {target_type}")
             return value
@@ -495,6 +511,15 @@ MATH_FUNCTIONS = {
     'SUBSTR': lambda s, start, length=None: s[start-1:start-1+length] if length else s[start-1:],
     'SUBSTRING': lambda s, start, length=None: s[start-1:start-1+length] if length else s[start-1:],
     'CONCAT': lambda *args: ''.join(str(arg) for arg in args if arg is not None),
+    # Trino accepts either variadic values or a single array argument and
+    # ignores NULL elements.  Keeping this in the shared scalar registry makes
+    # CONCAT_WS compose with navigation and aggregate expressions as well as
+    # ordinary row-local expressions.
+    'CONCAT_WS': lambda separator, *args: str(separator).join(
+        str(value)
+        for value in (args[0] if len(args) == 1 and isinstance(args[0], (list, tuple)) else args)
+        if value is not None
+    ),
     'TRIM': lambda s: str(s).strip() if s is not None else None,
     'LTRIM': lambda s: str(s).lstrip() if s is not None else None,
     'RTRIM': lambda s: str(s).rstrip() if s is not None else None,
@@ -525,6 +550,81 @@ MATH_FUNCTIONS = {
     'CURRENT_TIME': lambda: datetime.datetime.now().time(),
     'CURRENT_TIMESTAMP': lambda: datetime.datetime.now(),
 }
+
+
+def inline_scalar_subqueries(expression: str) -> str:
+    """Inline safe, no-FROM scalar subqueries used inside row expressions.
+
+    A DataFrame-backed matcher has no external catalog from which to execute a
+    general SQL subquery.  SQL scalar subqueries that contain only a SELECT
+    expression, however, are self-contained and deterministic.  This routine
+    removes that SELECT wrapper while preserving the inner expression, and
+    reduces EXISTS over such a query to TRUE.  Queries containing FROM are
+    deliberately left untouched for the query executor rather than being
+    guessed at by the expression layer.
+    """
+    if not isinstance(expression, str) or "SELECT" not in expression.upper():
+        return expression
+
+    def matching_paren(text: str, start: int) -> Optional[int]:
+        depth = 0
+        quote = None
+        index = start
+        while index < len(text):
+            char = text[index]
+            if quote:
+                if char == quote:
+                    # SQL escapes a quote by doubling it.
+                    if index + 1 < len(text) and text[index + 1] == quote:
+                        index += 1
+                    else:
+                        quote = None
+            elif char in ("'", '"'):
+                quote = char
+            elif char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    return index
+            index += 1
+        return None
+
+    result = expression
+    index = 0
+    while index < len(result):
+        if result[index] != '(':
+            index += 1
+            continue
+        end = matching_paren(result, index)
+        if end is None:
+            break
+        inner = result[index + 1:end].strip()
+        select_match = re.match(r'(?is)^SELECT\s+(.+)$', inner)
+        if not select_match:
+            index += 1
+            continue
+
+        body = select_match.group(1).strip()
+        # General table/correlated subqueries require a relational executor.
+        if re.search(r'(?i)\bFROM\b', body):
+            index = end + 1
+            continue
+
+        body = re.sub(r'(?i)\bTRUE\b', 'True', body)
+        body = re.sub(r'(?i)\bFALSE\b', 'False', body)
+        body = re.sub(r'(?i)\bNULL\b', 'None', body)
+
+        prefix_match = re.search(r'(?i)\bEXISTS\s*$', result[:index])
+        if prefix_match:
+            result = result[:prefix_match.start()] + 'True' + result[end + 1:]
+            index = prefix_match.start() + 4
+        else:
+            replacement = f'({body})'
+            result = result[:index] + replacement + result[end + 1:]
+            index += len(replacement)
+
+    return result
 
 def evaluate_math_function(func_name: str, *args: Any) -> Any:
     """

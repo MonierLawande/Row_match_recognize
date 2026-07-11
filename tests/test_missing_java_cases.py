@@ -391,7 +391,7 @@ class TestMissingJavaCases:
         df = pd.DataFrame({
             'id': [1, 2, 3, 4, 5, 6],
             'value': [10, 20, 30, 40, 50, 60],
-            'timestamp': pd.date_range('2024-01-01', periods=6, freq='H')
+            'timestamp': pd.date_range('2024-01-01', periods=6, freq='h')
         })
         
         # Test navigation combined with aggregations

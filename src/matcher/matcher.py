@@ -8237,13 +8237,26 @@ class EnhancedMatcher:
         if effective_semantics != "RUNNING":
             return None
 
+        # Normalize SQL DISTINCT aggregate syntax to internal function names
+        # that Python's AST can represent.
+        text = re.sub(
+            r'\b(COUNT|SUM|AVG)\s*\(\s*DISTINCT\s+([^()]+)\)',
+            lambda match: f"{match.group(1).upper()}_DISTINCT({match.group(2)})",
+            text,
+            flags=re.IGNORECASE,
+        )
+
         try:
             tree = ast.parse(text, mode="eval")
         except SyntaxError:
             return None
 
         leaves: List[Dict[str, Any]] = []
-        aggregate_names = {"SUM", "AVG", "MIN", "MAX", "COUNT"}
+        aggregate_names = {
+            "SUM", "AVG", "MIN", "MAX", "COUNT",
+            "STDDEV", "STDDEV_SAMP", "STDDEV_POP", "VARIANCE", "VAR_SAMP", "VAR_POP",
+            "COUNT_DISTINCT", "SUM_DISTINCT", "AVG_DISTINCT",
+        }
 
         def compile_leaf_arg(node, var_holder):
             """Row-local arithmetic over one variable's fields -> fn(field values)."""
@@ -8300,6 +8313,14 @@ class EnhancedMatcher:
                     "arg_fn": arg_fn,
                 })
                 return lambda leaf_values, i=leaf_index: leaf_values[i]
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id.upper() == "NULLIF":
+                if len(node.args) != 2 or node.keywords:
+                    raise ValueError("NULLIF requires exactly two arguments")
+                left = compile_node(node.args[0])
+                right = compile_node(node.args[1])
+                return lambda values, l=left, r=right: (
+                    None if (value := l(values)) is None or value == r(values) else value
+                )
             if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
                 left = compile_node(node.left)
                 right = compile_node(node.right)
@@ -8317,7 +8338,9 @@ class EnhancedMatcher:
                         None if (a := l(lv)) is None or (b := r(lv)) is None else a * b
                     )
                 return lambda lv, l=left, r=right: (
-                    None if (a := l(lv)) is None or (b := r(lv)) is None else a / b
+                    None
+                    if (a := l(lv)) is None or (b := r(lv)) is None or b == 0
+                    else a / b
                 )
             if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
                 operand = compile_node(node.operand)
@@ -8373,23 +8396,49 @@ class EnhancedMatcher:
 
         # Running state per leaf.
         states = [
-            {"count": 0, "total": 0.0, "min": None, "max": None}
+            {
+                "count": 0,
+                "total": 0.0,
+                "sum_sq": 0.0,
+                "min": None,
+                "max": None,
+                "seen": set(),
+            }
             for _ in plan["leaves"]
         ]
 
         def leaf_value(leaf, state):
             func = leaf["func"]
-            if func == "COUNT":
+            base_func = func.replace("_DISTINCT", "")
+            if base_func == "COUNT":
                 return state["count"]
             if state["count"] == 0:
                 return None
-            if func == "SUM":
+            if base_func == "SUM":
                 return state["total"]
-            if func == "AVG":
+            if base_func == "AVG":
                 return state["total"] / state["count"]
-            if func == "MIN":
+            if base_func == "MIN":
                 return state["min"]
-            return state["max"]
+            if base_func == "MAX":
+                return state["max"]
+            if base_func in {"STDDEV", "STDDEV_SAMP", "VARIANCE", "VAR_SAMP"}:
+                if state["count"] < 2:
+                    return None
+                variance = (
+                    state["sum_sq"]
+                    - state["total"] * state["total"] / state["count"]
+                ) / (state["count"] - 1)
+                variance = max(variance, 0.0)
+                return variance if base_func in {"VARIANCE", "VAR_SAMP"} else math.sqrt(variance)
+            if base_func in {"STDDEV_POP", "VAR_POP"}:
+                variance = (
+                    state["sum_sq"]
+                    - state["total"] * state["total"] / state["count"]
+                ) / state["count"]
+                variance = max(variance, 0.0)
+                return variance if base_func == "VAR_POP" else math.sqrt(variance)
+            return None
 
         combine = plan["combine"]
         result: Dict[int, Any] = {}
@@ -8400,12 +8449,31 @@ class EnhancedMatcher:
                 value = values[idx]
                 if value is None:
                     continue
+                if leaf["func"].endswith("_DISTINCT"):
+                    try:
+                        distinct_key = value
+                        already_seen = distinct_key in state["seen"]
+                    except TypeError:
+                        distinct_key = repr(value)
+                        already_seen = distinct_key in state["seen"]
+                    if already_seen:
+                        continue
+                    state["seen"].add(distinct_key)
                 state["count"] += 1
-                if leaf["func"] in ("SUM", "AVG"):
+                base_func = leaf["func"].replace("_DISTINCT", "")
+                if base_func in (
+                    "SUM", "AVG", "STDDEV", "STDDEV_SAMP", "STDDEV_POP",
+                    "VARIANCE", "VAR_SAMP", "VAR_POP",
+                ):
                     state["total"] += value
-                elif leaf["func"] == "MIN":
+                    if base_func in (
+                        "STDDEV", "STDDEV_SAMP", "STDDEV_POP",
+                        "VARIANCE", "VAR_SAMP", "VAR_POP",
+                    ):
+                        state["sum_sq"] += value * value
+                elif base_func == "MIN":
                     state["min"] = value if state["min"] is None or value < state["min"] else state["min"]
-                elif leaf["func"] == "MAX":
+                elif base_func == "MAX":
                     state["max"] = value if state["max"] is None or value > state["max"] else state["max"]
 
             leaf_values = [leaf_value(leaf, state) for leaf, state in zip(plan["leaves"], states)]

@@ -647,7 +647,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "running_labels"])
 
-    @pytest.mark.xfail(reason="engine gap: array_agg over SUBSET classifier + quoted labels")
     def test_java_simple_query_concat_ws_subset(self):
         df = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6, 7, 8]})
         query = """
@@ -897,7 +896,6 @@ class TestAggregationsJavaReferenceValues:
         result = run_query(query, df).sort_values(["part"]).reset_index(drop=True)
         assert_rows_lists(result, expected, ["part", "measure"])
 
-    @pytest.mark.xfail(reason="engine gap: WINDOW ... MEASURES/SEEK row-pattern syntax unsupported")
     def test_java_seek_window_syntax(self):
         df = pd.DataFrame({
             "id": [1, 2, 3, 4, 5] * 2,
@@ -1170,7 +1168,6 @@ class TestJavaExactAggregationsTail:
             "id", "classy", "match", "running_measure", "final_measure",
         ])
 
-    @pytest.mark.xfail(reason="engine gap: scalar/IN/EXISTS subqueries in aggregation arguments")
     def test_java_subquery_in_aggregation_argument(self):
         df = pd.DataFrame({"id": [1, 2, 3], "value": ["a", "b", "c"]})
         query = """
@@ -1195,7 +1192,6 @@ class TestJavaExactAggregationsTail:
         result = run_query(query, df)
         assert_rows_lists(result, expected, ["id", "measure_1", "measure_2", "measure_3"])
 
-    @pytest.mark.xfail(reason="engine gap: subqueries in runtime-evaluated aggregation arguments")
     def test_java_subquery_in_runtime_aggregation_argument(self):
         df = pd.DataFrame({"id": [1, 2, 3], "value": ["a", "b", "c"]})
         query = """

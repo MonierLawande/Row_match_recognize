@@ -100,7 +100,7 @@ class TestDataGenerator:
         return pd.DataFrame({
             'id': range(1, size + 1),
             'sensor_id': [1] * size,
-            'timestamp': pd.date_range('2024-01-01', periods=size, freq='H'),
+            'timestamp': pd.date_range('2024-01-01', periods=size, freq='h'),
             'value': np.random.uniform(10, 100, size),
             'confidence': np.random.uniform(0.7, 0.95, size)
         })

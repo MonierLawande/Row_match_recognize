@@ -41,7 +41,8 @@ from src.matcher.evaluation_utils import (
     validate_expression_length, validate_recursion_depth,
     is_null, is_table_prefix, get_column_value_with_type_preservation,
     preserve_data_type, MATH_FUNCTIONS, evaluate_math_function,
-    get_evaluation_metrics, cast_function, try_cast_function
+    get_evaluation_metrics, cast_function, try_cast_function,
+    inline_scalar_subqueries
 )
 from src.utils.logging_config import get_logger, PerformanceTimer
 
@@ -471,7 +472,7 @@ class MeasureEvaluator:
         # If it does, don't preprocess CLASSIFIER calls as they should be handled by the AST evaluator
         has_navigation_functions = re.search(r'\b(FIRST|LAST|PREV|NEXT)\s*\(', expr, re.IGNORECASE)
         
-        preprocessed = expr
+        preprocessed = inline_scalar_subqueries(expr)
         
         # Replace MATCH_NUMBER() with the actual match number
         # Use word boundaries to avoid replacing partial matches
@@ -564,6 +565,10 @@ class MeasureEvaluator:
         preprocessed = re.sub(r'\bAND\b', 'and', preprocessed, flags=re.IGNORECASE)
         preprocessed = re.sub(r'\bOR\b', 'or', preprocessed, flags=re.IGNORECASE)
         preprocessed = re.sub(r'\bNOT\b', 'not', preprocessed, flags=re.IGNORECASE)
+        # SQL uses || for string concatenation.  Python's restricted AST
+        # evaluator uses Add for the same operation after operands have been
+        # resolved to their scalar values.
+        preprocessed = preprocessed.replace('||', '+')
         
         # Handle CAST and TRY_CAST functions by evaluating them and replacing with their values
         # Use a more robust approach to handle nested parentheses in type specifications
@@ -629,13 +634,12 @@ class MeasureEvaluator:
                 
                 evaluator = ConditionEvaluator(temp_context, evaluation_mode='MEASURES')
                 
-                # Try to evaluate the inner expression as an AST
-                try:
-                    inner_tree = ast.parse(value_expr, mode='eval')
-                    inner_value = evaluator.visit(inner_tree.body)
-                except:
-                    # Fallback: try as simple column reference
-                    inner_value = temp_context.current_row.get(value_expr) if temp_context.current_row else None
+                # Evaluate the complete inner expression through the normal
+                # MEASURES pipeline.  Parsing it directly as Python used to
+                # lose SQL concatenation and nested navigation/classifier
+                # semantics (for example CAST(lower(LAST(CLASSIFIER())) ||
+                # '_label' AS varchar)).
+                inner_value = self._evaluate_expression_safe(value_expr, is_running)
                 
                 # Apply the CAST function
                 if func_name == 'CAST':
@@ -824,7 +828,7 @@ class MeasureEvaluator:
         """
         # Handle CLASSIFIER function
         classifier_pattern = r'CLASSIFIER\(\s*([A-Za-z][A-Za-z0-9_]*)?\s*\)'
-        classifier_match = re.match(classifier_pattern, expr, re.IGNORECASE)
+        classifier_match = re.fullmatch(classifier_pattern, expr.strip(), re.IGNORECASE)
         if classifier_match:
             var_name = classifier_match.group(1)
             return self.evaluate_classifier(var_name, running=is_running)
@@ -987,17 +991,32 @@ class MeasureEvaluator:
         # Enhanced navigation function detection
         # Only match complete navigation function expressions, not complex expressions that contain them
         # Strategy: Look for expressions that are ONLY navigation functions (no operators after)
-        complete_nav_pattern = r'^(FIRST|LAST|PREV|NEXT)\s*\(.*\)\s*$'
-        nested_nav_pattern = r'^(FIRST|LAST|PREV|NEXT)\s*\(\s*(FIRST|LAST|PREV|NEXT)\s*\([^)]*\)\s*,\s*[^)]*\)\s*$'
-        has_operators_pattern = r'.*\)\s*[=<>!]+.*|.*\)\s+(AND|OR|NOT)\s+.*'
-        
-        # Check if expression is a simple navigation function (not a complex boolean expression)
-        matches_nav = re.match(complete_nav_pattern, expr, re.IGNORECASE) is not None
-        has_operators = re.match(has_operators_pattern, expr, re.IGNORECASE) is not None
-        is_simple_nav = matches_nav and not has_operators
-        is_nested_nav = re.match(nested_nav_pattern, expr, re.IGNORECASE) is not None
-        
-        if is_simple_nav or is_nested_nav:
+        nav_calls = self._find_balanced_function_calls(
+            expr, {"FIRST", "LAST", "PREV", "NEXT"}
+        )
+        # A navigation call is standalone only when its balanced span covers
+        # the whole expression.  Greedy regex matching previously classified
+        # `FIRST(A.x) IN (..., LAST(A.x))` as a single FIRST call and silently
+        # discarded the predicate surrounding it.
+        nav_arguments = nav_calls[0]["arguments"] if len(nav_calls) == 1 else ""
+        simple_nav_arguments = re.fullmatch(
+            r'\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*\.)?[A-Za-z_][A-Za-z0-9_]*|CLASSIFIER\([^)]*\))\s*(?:,\s*\d+\s*)?',
+            nav_arguments,
+            re.IGNORECASE,
+        ) is not None
+        nested_nav_arguments = re.fullmatch(
+            r'\s*(?:(?:RUNNING|FINAL)\s+)?(?:FIRST|LAST|PREV|NEXT)\s*\(.+\)\s*(?:,\s*\d+\s*)?',
+            nav_arguments,
+            re.IGNORECASE,
+        ) is not None
+        is_standalone_nav = (
+            len(nav_calls) == 1
+            and nav_calls[0]["start"] == 0
+            and nav_calls[0]["end"] == len(expr.strip())
+            and (simple_nav_arguments or nested_nav_arguments)
+        )
+
+        if is_standalone_nav:
             return self._evaluate_navigation(expr, is_running)
         
         # Try AST-based evaluation for complex expressions (arithmetic, etc.)

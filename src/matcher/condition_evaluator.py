@@ -621,7 +621,7 @@ class ConditionEvaluator(ast.NodeVisitor):
             first_arg = node.args[0]
             
             # Get optional steps argument
-            steps = 1
+            steps = 0 if func_name in ("FIRST", "LAST") else 1
             if len(node.args) > 1:
                 steps_arg = node.args[1]
                 if isinstance(steps_arg, ast.Constant):
@@ -689,7 +689,12 @@ class ConditionEvaluator(ast.NodeVisitor):
                         subset_var = first_arg.args[0].id
                     
                     # Special case: Navigation with CLASSIFIER
-                    return self._handle_classifier_navigation(func_name, subset_var, steps)
+                    classifier_steps = steps if len(node.args) > 1 else (
+                        0 if func_name in ("FIRST", "LAST") else 1
+                    )
+                    return self._handle_classifier_navigation(
+                        func_name, subset_var, classifier_steps
+                    )
                 else:
                     # For other nested calls, evaluate the argument first
                     evaluated_arg = self.visit(first_arg)
@@ -706,6 +711,39 @@ class ConditionEvaluator(ast.NodeVisitor):
                             return self._handle_first_last_navigation(func_name, column, steps, None)
                     else:
                         return None
+            elif func_name in ("FIRST", "LAST"):
+                # SQL logical navigation accepts a value expression, not only
+                # a bare column.  Evaluate that expression at the selected
+                # matched row (e.g. FIRST(A.x > 0 OR EXISTS(...))).
+                variables = getattr(self.context, "_full_match_variables", None) or getattr(
+                    self.context, "variables", {}
+                )
+                indices = sorted({idx for values in variables.values() for idx in values})
+                current_idx = self.context.current_idx
+                if self.evaluation_mode == "DEFINE":
+                    indices = [idx for idx in indices if idx <= current_idx]
+                    if current_idx not in indices:
+                        indices.append(current_idx)
+                        indices.sort()
+                if not indices:
+                    return None
+                occurrence = int(steps or 0)
+                target_pos = occurrence if func_name == "FIRST" else len(indices) - 1 - occurrence
+                if not 0 <= target_pos < len(indices):
+                    return None
+                target_idx = indices[target_pos]
+                old_idx = self.context.current_idx
+                old_row = self.current_row
+                old_context_row = getattr(self.context, "current_row", None)
+                try:
+                    self.context.current_idx = target_idx
+                    self.current_row = self.context.rows[target_idx]
+                    self.context.current_row = self.current_row
+                    return self.visit(first_arg)
+                finally:
+                    self.context.current_idx = old_idx
+                    self.current_row = old_row
+                    self.context.current_row = old_context_row
             else:
                 raise ValueError(f"Unsupported argument type for {func_name}: {type(first_arg)}")
     
@@ -1417,8 +1455,11 @@ class ConditionEvaluator(ast.NodeVisitor):
                 current_idx = self.context.current_idx
                 for comp in self.context.subsets[variable]:
                     if comp in self.context.variables and current_idx in self.context.variables[comp]:
-                        return comp
-                return variable  # Fallback if no component matches
+                        return comp.strip('"')
+                # CLASSIFIER(subset) is NULL when the current row was not
+                # classified by one of that subset's primary variables.  The
+                # subset name itself is never a row classifier.
+                return None
             else:
                 # Return the specific variable name for non-subset variables
                 return variable
@@ -3001,6 +3042,9 @@ def _sql_to_python_condition(condition: str) -> str:
     """
     if not condition:
         return condition
+
+    from src.matcher.evaluation_utils import inline_scalar_subqueries
+    condition = inline_scalar_subqueries(condition)
     
     import re
     
@@ -3220,6 +3264,11 @@ def _sql_to_python_condition(condition: str) -> str:
     # First try to match parenthesized expressions like (value + 10) IN (...)
     parenthesized_in_pattern = r'(\([^)]+\))\s+IN\s*\(([^)]*)\)'
     condition = re.sub(parenthesized_in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
+
+    # Literal left operands are common after inlining a scalar subquery, e.g.
+    # `1 IN (SELECT 1)` -> `1 IN (1)`.
+    literal_in_pattern = r"((?:'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|-?\d+(?:\.\d+)?))\s+IN\s*\(([^)]*)\)"
+    condition = re.sub(literal_in_pattern, convert_in_predicate, condition, flags=re.IGNORECASE)
     
     # Then match function calls like SUBSTR(column, 1, 1) IN (...)
     complex_in_pattern = r'([A-Za-z_][A-Za-z0-9_]*\([^)]*(?:\([^)]*\)[^)]*)*\))\s+IN\s*\(([^)]*)\)'
