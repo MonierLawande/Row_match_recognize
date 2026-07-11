@@ -445,7 +445,7 @@ class TestAdvancedAggregationScenarios:
         df = pd.DataFrame({
             'id': range(1, 16),
             'sensor_id': [1] * 15,
-            'timestamp': pd.date_range('2024-01-01', periods=15, freq='H'),
+            'timestamp': pd.date_range('2024-01-01', periods=15, freq='h'),
             'value': [25, 30, 35, 40, 85, 20, 25, 30, 45, 90, 15, 20, 25, 30, 35],
             'confidence': [0.9, 0.85, 0.92, 0.88, 0.95, 0.87, 0.9, 0.89, 0.91, 0.93, 0.86, 0.88, 0.9, 0.87, 0.92]
         })

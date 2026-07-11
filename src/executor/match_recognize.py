@@ -6,6 +6,7 @@ import time
 import itertools
 import hashlib
 import copy
+import ast as python_ast
 from functools import lru_cache
 from typing import List, Dict, Any, Optional, Set, Tuple, Union
 
@@ -42,6 +43,350 @@ from src.utils.performance_optimizer import (
 
 # Module logger
 logger = get_logger(__name__)
+
+
+def _find_matching_parenthesis(text: str, opening: int) -> Optional[int]:
+    """Return the closing parenthesis while respecting SQL string quotes."""
+    depth = 0
+    quote = None
+    index = opening
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == quote:
+                if index + 1 < len(text) and text[index + 1] == quote:
+                    index += 1
+                else:
+                    quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _split_top_level_sql(text: str, delimiter: str = ',') -> List[str]:
+    """Split SQL text on a delimiter outside parentheses and quotes."""
+    parts: List[str] = []
+    depth = 0
+    quote = None
+    start = 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == quote:
+                if index + 1 < len(text) and text[index + 1] == quote:
+                    index += 1
+                else:
+                    quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == '(':
+            depth += 1
+        elif char == ')':
+            depth = max(0, depth - 1)
+        elif char == delimiter and depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+        index += 1
+    parts.append(text[start:].strip())
+    return [part for part in parts if part]
+
+
+def _find_top_level_keyword(text: str, keyword: str) -> Optional[int]:
+    """Find a SQL keyword outside parentheses and quoted literals."""
+    depth = 0
+    quote = None
+    upper = text.upper()
+    key = keyword.upper()
+    index = 0
+    while index <= len(text) - len(key):
+        char = text[index]
+        if quote:
+            if char == quote:
+                if index + 1 < len(text) and text[index + 1] == quote:
+                    index += 1
+                else:
+                    quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == '(':
+            depth += 1
+        elif char == ')':
+            depth = max(0, depth - 1)
+        elif depth == 0 and upper.startswith(key, index):
+            before_ok = index == 0 or not (text[index - 1].isalnum() or text[index - 1] == '_')
+            after = index + len(key)
+            after_ok = after == len(text) or not (text[after].isalnum() or text[after] == '_')
+            if before_ok and after_ok:
+                return index
+        index += 1
+    return None
+
+
+def _parse_inline_values_relation(source: str) -> pd.DataFrame:
+    """Build a DataFrame from an inline `(VALUES ...) alias(columns)` relation."""
+    source = source.strip()
+    if not source.startswith('('):
+        raise ValueError("Multiple MATCH_RECOGNIZE currently requires inline VALUES relations")
+    closing = _find_matching_parenthesis(source, 0)
+    if closing is None:
+        raise ValueError("Unbalanced inline VALUES relation")
+    inner = source[1:closing].strip()
+    values_match = re.match(r'(?is)^VALUES\s+(.+)$', inner)
+    if not values_match:
+        raise ValueError("Expected VALUES before each MATCH_RECOGNIZE relation")
+
+    alias_text = source[closing + 1:].strip()
+    columns_match = re.search(r'(?is)\b[A-Za-z_][A-Za-z0-9_]*\s*\(([^)]*)\)\s*$', alias_text)
+    if not columns_match:
+        raise ValueError("Inline VALUES relation requires a column alias list")
+    columns = [name.strip().strip('"') for name in _split_top_level_sql(columns_match.group(1))]
+
+    rows: List[Tuple[Any, ...]] = []
+    for value_text in _split_top_level_sql(values_match.group(1)):
+        normalized = re.sub(r'(?i)\bNULL\b', 'None', value_text.strip())
+        normalized = re.sub(r'(?i)\bTRUE\b', 'True', normalized)
+        normalized = re.sub(r'(?i)\bFALSE\b', 'False', normalized)
+        value = python_ast.literal_eval(normalized)
+        row = value if isinstance(value, tuple) else (value,)
+        if len(row) != len(columns):
+            raise ValueError(
+                f"VALUES row has {len(row)} fields but alias declares {len(columns)} columns"
+            )
+        rows.append(tuple(row))
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _execute_multiple_match_recognize_query(query: str, fallback_df: pd.DataFrame) -> pd.DataFrame:
+    """Execute independent MATCH_RECOGNIZE relations and cross join them.
+
+    The public API supplies one DataFrame, so multiple independent relations
+    are unambiguous only when their inputs are self-contained inline VALUES
+    relations.  Each relation is evaluated by the normal engine and the
+    resulting relations are combined with SQL CROSS JOIN semantics.
+    """
+    select_pos = _find_top_level_keyword(query, "SELECT")
+    from_pos = _find_top_level_keyword(query, "FROM")
+    if select_pos is None or from_pos is None:
+        raise ValueError("Malformed multiple MATCH_RECOGNIZE query")
+    select_text = query[select_pos + len("SELECT"):from_pos].strip()
+    relation_text = query[from_pos + len("FROM"):].strip().rstrip(';')
+    relation_specs = _split_top_level_sql(relation_text)
+
+    relation_results: List[Tuple[str, pd.DataFrame]] = []
+    for spec in relation_specs:
+        mr_match = re.search(r'(?i)\bMATCH_RECOGNIZE\s*\(', spec)
+        if not mr_match:
+            raise ValueError("Every relation in a multiple MATCH_RECOGNIZE query must contain the clause")
+        opening = spec.find('(', mr_match.start())
+        closing = _find_matching_parenthesis(spec, opening)
+        if closing is None:
+            raise ValueError("Unbalanced MATCH_RECOGNIZE clause")
+        source = spec[:mr_match.start()].strip()
+        clause = spec[mr_match.start():closing + 1]
+        alias_match = re.match(
+            r'(?is)^\s*(?:AS\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*$',
+            spec[closing + 1:],
+        )
+        if not alias_match:
+            raise ValueError("Each MATCH_RECOGNIZE relation requires an alias")
+        alias = alias_match.group(1)
+        relation_df = _parse_inline_values_relation(source)
+        single_query = f"SELECT * FROM data {clause} AS {alias}"
+        relation_results.append((alias, match_recognize(single_query, relation_df)))
+
+    combined = pd.DataFrame({"__cross_seed": [0]})
+    for alias, relation_result in relation_results:
+        prefixed = relation_result.copy()
+        prefixed.columns = [f"{alias}.{column}" for column in prefixed.columns]
+        combined = combined.merge(prefixed, how="cross")
+    combined = combined.drop(columns=["__cross_seed"])
+
+    projected: List[pd.Series] = []
+    for item in _split_top_level_sql(select_text):
+        alias_match = re.match(r'(?is)^(.+?)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)$', item)
+        expression = alias_match.group(1).strip() if alias_match else item.strip()
+        output_name = alias_match.group(2) if alias_match else expression.split('.')[-1]
+        if expression not in combined.columns:
+            raise ValueError(f"Unsupported cross-relation SELECT expression: {expression}")
+        projected.append(combined[expression].rename(output_name))
+    return pd.concat(projected, axis=1) if projected else combined
+
+
+def _window_clause_segments(spec: str) -> Dict[str, str]:
+    """Split a row-pattern window specification into top-level clauses."""
+    keywords = ["PARTITION", "ORDER", "MEASURES", "ROWS", "RANGE", "GROUPS",
+                "AFTER", "INITIAL", "SEEK", "PATTERN", "SUBSET", "DEFINE"]
+    positions: List[Tuple[int, str]] = []
+    for keyword in keywords:
+        pos = _find_top_level_keyword(spec, keyword)
+        if pos is not None:
+            positions.append((pos, keyword))
+    positions.sort()
+    segments: Dict[str, str] = {}
+    for index, (position, keyword) in enumerate(positions):
+        end = positions[index + 1][0] if index + 1 < len(positions) else len(spec)
+        segments[keyword] = spec[position + len(keyword):end].strip()
+    return segments
+
+
+def _parse_measure_definitions(text: str) -> List[Tuple[str, str]]:
+    definitions: List[Tuple[str, str]] = []
+    for item in _split_top_level_sql(text):
+        matches = list(re.finditer(r'(?i)\s+AS\s+', item))
+        if not matches:
+            raise ValueError(f"Window measure requires AS alias: {item}")
+        split = matches[-1]
+        definitions.append((item[:split.start()].strip(), item[split.end():].strip().strip('"')))
+    return definitions
+
+
+def _execute_row_pattern_window_query(query: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Execute SQL row-pattern recognition used as a named window measure.
+
+    For the common `ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING SEEK`
+    frame, all candidate matches are enumerated once per partition using the
+    normal matcher.  Each input row then selects the first candidate beginning
+    at or after its frame start.  This preserves SEEK semantics without
+    re-running the matcher for every suffix.
+    """
+    select_pos = _find_top_level_keyword(query, "SELECT")
+    from_pos = _find_top_level_keyword(query, "FROM")
+    window_pos = _find_top_level_keyword(query, "WINDOW")
+    if select_pos is None or from_pos is None or window_pos is None:
+        raise ValueError("Malformed row-pattern WINDOW query")
+
+    select_text = query[select_pos + len("SELECT"):from_pos].strip()
+    window_header = query[window_pos + len("WINDOW"):].strip().rstrip(';')
+    header_match = re.match(
+        r'(?is)^([A-Za-z_][A-Za-z0-9_]*)\s+AS\s*\(', window_header
+    )
+    if not header_match:
+        raise ValueError("Named row-pattern window must use `WINDOW name AS (...)`")
+    window_name = header_match.group(1)
+    opening = window_header.find('(', header_match.start())
+    closing = _find_matching_parenthesis(window_header, opening)
+    if closing is None:
+        raise ValueError("Unbalanced row-pattern window specification")
+    spec = window_header[opening + 1:closing].strip()
+    segments = _window_clause_segments(spec)
+
+    frame_text = ""
+    frame_kind = next((kind for kind in ("ROWS", "RANGE", "GROUPS") if kind in segments), None)
+    if frame_kind:
+        frame_text = f"{frame_kind} {segments[frame_kind]}".strip().upper()
+    if frame_text != "ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING":
+        raise ValueError(
+            "Row-pattern WINDOW execution currently requires "
+            "ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING"
+        )
+    if "SEEK" not in segments:
+        raise ValueError("This row-pattern WINDOW execution path requires SEEK")
+    if "PATTERN" not in segments or "MEASURES" not in segments:
+        raise ValueError("Row-pattern WINDOW requires MEASURES and PATTERN")
+
+    partition_text = segments.get("PARTITION", "")
+    partition_text = re.sub(r'(?i)^BY\s+', '', partition_text).strip()
+    partition_columns = [part.strip().strip('"') for part in _split_top_level_sql(partition_text)] if partition_text else []
+
+    order_text = re.sub(r'(?i)^BY\s+', '', segments.get("ORDER", "")).strip()
+    if not order_text:
+        raise ValueError("Row-pattern WINDOW requires ORDER BY")
+    order_items = _split_top_level_sql(order_text)
+    order_columns: List[str] = []
+    ascending: List[bool] = []
+    for item in order_items:
+        order_match = re.match(r'(?is)^([A-Za-z_][A-Za-z0-9_]*)(?:\s+(ASC|DESC))?(?:\s+NULLS\s+(?:FIRST|LAST))?$', item)
+        if not order_match:
+            raise ValueError(f"Unsupported row-pattern window ORDER BY expression: {item}")
+        order_columns.append(order_match.group(1))
+        ascending.append((order_match.group(2) or "ASC").upper() != "DESC")
+
+    measures = _parse_measure_definitions(segments["MEASURES"])
+    pattern_text = segments["PATTERN"].strip()
+    if not pattern_text.startswith('('):
+        raise ValueError("Malformed PATTERN in row-pattern WINDOW")
+    pattern_close = _find_matching_parenthesis(pattern_text, 0)
+    if pattern_close is None:
+        raise ValueError("Unbalanced PATTERN in row-pattern WINDOW")
+    pattern_body = pattern_text[1:pattern_close]
+
+    define_text = segments.get("DEFINE", "")
+    subset_text = segments.get("SUBSET", "")
+    hidden_position = "__rpr_window_position"
+    hidden_start = "__rpr_window_match_start"
+    if hidden_position in df.columns or hidden_start in df.columns:
+        raise ValueError("Input uses a reserved row-pattern window column name")
+
+    if partition_columns:
+        grouper: Any = partition_columns[0] if len(partition_columns) == 1 else partition_columns
+        grouped = df.groupby(grouper, sort=False, dropna=False)
+        partitions = [group.copy() for _, group in grouped]
+    else:
+        partitions = [df.copy()]
+
+    output_rows: List[Dict[str, Any]] = []
+    for partition in partitions:
+        ordered = partition.sort_values(order_columns, ascending=ascending, kind="mergesort").reset_index(drop=True)
+        ordered[hidden_position] = range(len(ordered))
+
+        measure_sql = ",\n                ".join(
+            [f"{expression} AS {alias}" for expression, alias in measures]
+            + [f"FIRST({hidden_position}) AS {hidden_start}"]
+        )
+        subset_sql = f"\n            SUBSET {subset_text}" if subset_text else ""
+        define_sql = f"\n            DEFINE {define_text}" if define_text else ""
+        generated_query = f"""
+        SELECT * FROM data MATCH_RECOGNIZE (
+            ORDER BY {order_text}
+            MEASURES {measure_sql}
+            ONE ROW PER MATCH
+            AFTER MATCH SKIP TO NEXT ROW
+            PATTERN ({pattern_body}){subset_sql}{define_sql}
+        ) AS __window_matches
+        """
+        candidates = match_recognize(generated_query, ordered)
+        if not candidates.empty:
+            candidates = candidates.sort_values(hidden_start, kind="mergesort").reset_index(drop=True)
+            starts = candidates[hidden_start].astype(int).tolist()
+        else:
+            starts = []
+
+        for position, (_, input_row) in enumerate(ordered.iterrows()):
+            candidate_row = None
+            for candidate_index, start in enumerate(starts):
+                if start >= position:
+                    candidate_row = candidates.iloc[candidate_index]
+                    break
+            record = input_row.to_dict()
+            for _, alias in measures:
+                record[alias] = candidate_row[alias] if candidate_row is not None else None
+            output_rows.append(record)
+
+    materialized = pd.DataFrame(output_rows)
+    projected: List[pd.Series] = []
+    for item in _split_top_level_sql(select_text):
+        alias_match = re.match(r'(?is)^(.+?)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)$', item)
+        expression = alias_match.group(1).strip() if alias_match else item.strip()
+        over_match = re.match(
+            r'(?is)^([A-Za-z_][A-Za-z0-9_]*)\s+OVER\s+([A-Za-z_][A-Za-z0-9_]*)$',
+            expression,
+        )
+        source_column = over_match.group(1) if over_match else expression.split('.')[-1]
+        output_name = alias_match.group(2) if alias_match else source_column
+        if over_match and over_match.group(2).lower() != window_name.lower():
+            raise ValueError(f"Unknown row-pattern window: {over_match.group(2)}")
+        if source_column not in materialized.columns:
+            raise ValueError(f"Unsupported row-pattern window SELECT expression: {expression}")
+        projected.append(materialized[source_column].rename(output_name))
+    return pd.concat(projected, axis=1).reset_index(drop=True)
 
 
 def _split_top_level_pattern_alternatives(pattern_text: str) -> List[str]:
@@ -975,6 +1320,19 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         ValueError: If the query is invalid or cannot be executed
         RuntimeError: If an unexpected error occurs during execution
     """
+    if (
+        not re.search(r'(?i)\bMATCH_RECOGNIZE\s*\(', query)
+        and re.search(r'(?i)\bWINDOW\b', query)
+        and re.search(r'(?i)\bPATTERN\s*\(', query)
+    ):
+        return _execute_row_pattern_window_query(query, df)
+
+    # Multiple independent pattern-recognition relations form a relational
+    # cross product.  Dispatch them before parsing a single-clause AST; the
+    # recursive calls each contain exactly one MATCH_RECOGNIZE clause.
+    if len(re.findall(r'(?i)\bMATCH_RECOGNIZE\s*\(', query)) > 1:
+        return _execute_multiple_match_recognize_query(query, df)
+
     # Initialize performance metrics
     metrics = {
         "parsing_time": 0,
@@ -1580,9 +1938,14 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                     if col in result_df.columns:
                                         ordered_cols.append(col)
                             
-                            # Add ORDER BY columns (if not already included)
+                            # Preserve the ORDER BY symbol list exactly.  SQL
+                            # pattern-recognition output descriptors may contain
+                            # the same ordering symbol more than once (for
+                            # example `ORDER BY id ASC, id DESC`).  A pandas
+                            # projection with a repeated column label preserves
+                            # that positional layout.
                             for col in order_by:
-                                if col in result_df.columns and col not in ordered_cols:
+                                if col in result_df.columns:
                                     ordered_cols.append(col)
                             
                             # Add MEASURES columns last
@@ -2068,9 +2431,10 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                     if col in result_df.columns:
                                         ordered_cols.append(col)
                             
-                            # Add ORDER BY columns (if not already included)
+                            # Preserve duplicate sort symbols in descriptor
+                            # order; skip de-duplication here intentionally.
                             for col in order_by:
-                                if col in result_df.columns and col not in ordered_cols:
+                                if col in result_df.columns:
                                     ordered_cols.append(col)
                             
                             # Add MEASURES (if not already included)

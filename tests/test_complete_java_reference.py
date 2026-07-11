@@ -792,7 +792,6 @@ class TestJavaExactParityTail:
         assert list(result.columns) == ["part", "classy"], list(result.columns)
         assert_rows(result, [("partitioning", "A")], ["part", "classy"])
 
-    @pytest.mark.xfail(reason="engine gap: duplicated ORDER BY column not repeated in output layout")
     def test_java_output_layout_duplicate_order_by(self):
         df = pd.DataFrame({"id": ["ordering"], "part": ["partitioning"], "value": [90]})
         query = """
@@ -810,7 +809,6 @@ class TestJavaExactParityTail:
         assert row.count("ordering") == 2, row
         assert "partitioning" in row and "A" in row and 90 in row, row
 
-    @pytest.mark.xfail(reason="engine gap: multiple MATCH_RECOGNIZE joins in one query unsupported")
     def test_java_multiple_match_recognize_cross_join(self):
         df1 = pd.DataFrame({"id": [1, 2, 3]})
         query = """
@@ -847,33 +845,28 @@ class TestJavaExactParityTail:
     def df4v(self):
         return pd.DataFrame({"id": [1, 2, 3, 4], "value": [100, 200, 300, 400]})
 
-    @pytest.mark.xfail(reason="engine gap: scalar subqueries in MEASURES/DEFINE unsupported")
     def test_java_subquery_scalar(self, df4v):
         result = run_query(self.SUBQ.format(measure="(SELECT 'x')", define="(SELECT true)"), df4v)
         assert_rows(result, [("x",)] * 4, ["val"])
 
-    @pytest.mark.xfail(reason="engine gap: subquery nested in navigation unsupported")
     def test_java_subquery_in_navigation(self, df4v):
         result = run_query(self.SUBQ.format(
             measure="FINAL LAST(A.value + (SELECT 1000))",
             define="FIRST(A.value < 0 OR (SELECT true))"), df4v)
         assert_rows(result, [(1400,)] * 4, ["val"])
 
-    @pytest.mark.xfail(reason="engine gap: IN-subquery in measures unsupported")
     def test_java_subquery_in_predicate_no_columns(self, df4v):
         result = run_query(self.SUBQ.format(
             measure="LAST(A.id < 0 OR 1 IN (SELECT 1))",
             define="FIRST(A.id > 0 AND 1 IN (SELECT 1))"), df4v)
         assert_rows(result, [(True,)] * 4, ["val"])
 
-    @pytest.mark.xfail(reason="engine gap: IN-subquery with column ref unsupported")
     def test_java_subquery_in_predicate_column_ref(self, df4v):
         result = run_query(self.SUBQ.format(
             measure="FIRST(id % 2 IN (SELECT 0))",
             define="FIRST(value * 0 IN (SELECT 0))"), df4v)
         assert_rows(result, [(False,), (True,), (False,), (True,)], ["val"])
 
-    @pytest.mark.xfail(reason="engine gap: EXISTS-subquery unsupported")
     def test_java_subquery_exists(self, df4v):
         result = run_query(self.SUBQ.format(
             measure="LAST(A.value < 0 OR EXISTS(SELECT 1))",
@@ -892,13 +885,11 @@ class TestJavaExactParityTail:
     ) AS m
     """
 
-    @pytest.mark.xfail(reason="engine gap: IN-list containing navigation call in measures")
     def test_java_in_predicate_navigation(self, df4v):
         result = run_query(self.INPRED.format(
             measure="FIRST(A.value) IN (300, LAST(A.value))"), df4v)
         assert_rows(result, [(False,), (False,), (True,), (True,)], ["val"])
 
-    @pytest.mark.xfail(reason="engine gap: CLASSIFIER() IN-list with scalar function")
     def test_java_in_predicate_classifier(self, df4v):
         result = run_query(self.INPRED.format(
             measure="CLASSIFIER() IN ('X', lower(CLASSIFIER()))"), df4v)
@@ -948,7 +939,6 @@ class TestJavaExactParityTail:
         assert len(result) == 1, f"expected one match row, got {len(result)}\n{result}"
         assert result.iloc[0]["foo"] == "foo"
 
-    @pytest.mark.xfail(reason="engine gap: CAST(lower(LAST(CLASSIFIER())) || literal) measure chain")
     def test_java_scalar_functions_exact(self):
         df = pd.DataFrame({"id": [1, 2, 3], "value": [90, 80, 60]})
         query = """

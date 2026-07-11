@@ -11,7 +11,6 @@ import pandas as pd
 import numpy as np
 import time
 import psutil
-import os
 from typing import Dict, List, Any, Tuple
 from src.executor.match_recognize import match_recognize
 from src.utils.logging_config import get_logger
@@ -239,10 +238,6 @@ class TestAggregationPerformance:
     @pytest.mark.slow
     def test_stress_test_aggregations(self):
         """Stress test with very large datasets and complex aggregations."""
-        # Only run in stress test mode
-        if not os.environ.get('RUN_STRESS_TESTS', False):
-            pytest.skip("Stress tests disabled. Set RUN_STRESS_TESTS=1 to enable.")
-        
         df = self.generate_large_dataset(50000)
         
         query = """

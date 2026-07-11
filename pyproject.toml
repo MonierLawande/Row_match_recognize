@@ -64,3 +64,33 @@ pandas_match_recognize = ["**/*"]
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "aggregation_args: aggregation arguments and expression handling",
+    "advanced_stats: advanced statistical aggregation scenarios",
+    "array_fixes: array aggregation regression coverage",
+    "array_string_agg: array and string aggregation scenarios",
+    "basic: basic translated Java reference coverage",
+    "complex_patterns: complex row-pattern scenarios",
+    "conditional_agg: conditional aggregation scenarios",
+    "count: count aggregation scenarios",
+    "edge_cases: boundary and edge-case coverage",
+    "integration: integration-level tests",
+    "minmax_by_fixes: min_by and max_by regression coverage",
+    "multiple: multiple-aggregation scenarios",
+    "navigation_agg: navigation functions combined with aggregates",
+    "null_handling: SQL NULL-semantics coverage",
+    "nullable: nullable-input aggregation coverage",
+    "parser_fixes: parser regression coverage",
+    "partitioning: partitioned row-pattern scenarios",
+    "percentile_fixes: percentile aggregation regression coverage",
+    "performance: performance and scalability checks",
+    "performance_fixes: performance regression coverage",
+    "running_final: RUNNING and FINAL semantic coverage",
+    "selective: selective/filter aggregation scenarios",
+    "slow: tests that intentionally exercise larger workloads",
+    "specialized_agg: specialized aggregation functions",
+    "statistical_fixes: statistical aggregation regression coverage",
+    "string_fixes: string aggregation regression coverage",
+    "unit: isolated unit tests",
+    "window: window-based row-pattern scenarios",
+]

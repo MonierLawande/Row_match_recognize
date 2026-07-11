@@ -27,6 +27,7 @@ Version: 3.0.0
 """
 
 import threading
+import ast
 from collections import defaultdict
 from functools import lru_cache
 from typing import Dict, Any, List, Optional, Set, Union, Tuple, Callable
@@ -39,6 +40,7 @@ from enum import Enum
 from dataclasses import dataclass
 
 from src.matcher.row_context import RowContext
+from src.matcher.evaluation_utils import inline_scalar_subqueries
 from src.utils.logging_config import get_logger, PerformanceTimer
 
 # Module logger with enhanced configuration
@@ -305,6 +307,19 @@ class ProductionAggregateEvaluator:
                             logger.debug(f"PROD_AGG_FINAL: mathematical function '{clean_expr}' evaluated to: {result}")
                             return result
 
+                # A scalar function may wrap one or more aggregates, e.g.
+                # CONCAT_WS('', RUNNING ARRAY_AGG(LOWER(CLASSIFIER(U)))).
+                # Such an expression is not itself an aggregate; evaluate the
+                # balanced aggregate leaves first and then pass the remaining
+                # scalar expression through the restricted AST evaluator.
+                handled, scalar_result = self._evaluate_scalar_over_aggregates(
+                    clean_expr, semantics
+                )
+                if handled:
+                    if len(self._result_cache) < MAX_CACHE_SIZE:
+                        self._result_cache[cache_key] = scalar_result
+                    return scalar_result
+
                 # Prefer standalone aggregate parsing before arithmetic
                 # parsing.  FILTER predicates often contain arithmetic
                 # operators (for example ``id % 2 = 0``), but the expression
@@ -432,6 +447,63 @@ class ProductionAggregateEvaluator:
         if not match:
             return expr.strip(), None
         return match.group(2).strip(), match.group(1).upper()
+
+    def _evaluate_scalar_over_aggregates(
+        self, expr: str, semantics: str
+    ) -> Tuple[bool, Any]:
+        """Evaluate scalar composition whose leaves are aggregate calls.
+
+        The balanced scanner deliberately finds aggregate calls even when an
+        unsupported outer scalar function surrounds them.  Each aggregate is
+        evaluated with its own optional RUNNING/FINAL prefix, replaced by a
+        Python literal, and the resulting scalar expression is evaluated by
+        the same restricted evaluator used for DEFINE/MEASURES expressions.
+        """
+        aggregate_calls = self._find_balanced_function_calls(
+            expr, self.STANDARD_AGGREGATES
+        )
+        if not aggregate_calls:
+            return False, None
+
+        # A standalone aggregate belongs to the normal aggregate path, which
+        # supplies validation, FILTER handling, statistics, and caching.
+        stripped = expr.strip()
+        if len(aggregate_calls) == 1:
+            call = aggregate_calls[0]
+            prefix = stripped[:call["start"]].strip().upper()
+            suffix = stripped[call["end"]:].strip()
+            if prefix in ("", "RUNNING", "FINAL") and not suffix:
+                return False, None
+
+        working = expr
+        for call in reversed(aggregate_calls):
+            start = call["start"]
+            leaf_semantics = semantics
+
+            prefix_match = re.search(
+                r'\b(RUNNING|FINAL)\s*$', working[:start], re.IGNORECASE
+            )
+            if prefix_match:
+                leaf_semantics = prefix_match.group(1).upper()
+                start = prefix_match.start()
+
+            value = self.evaluate_aggregate(call["text"], leaf_semantics)
+            working = working[:start] + repr(value) + working[call["end"]:]
+
+        try:
+            from src.matcher.condition_evaluator import ConditionEvaluator
+
+            converted = self._convert_sql_to_python(working)
+            tree = ast.parse(converted, mode="eval")
+            evaluator = ConditionEvaluator(self.context, evaluation_mode="MEASURES")
+            return True, evaluator.visit(tree.body)
+        except Exception as exc:
+            logger.debug(
+                "Scalar-over-aggregate evaluation did not handle %r: %s",
+                expr,
+                exc,
+            )
+            return False, None
 
     def _evaluate_parsed_aggregate(
         self,
@@ -1067,9 +1139,6 @@ class ProductionAggregateEvaluator:
             # Literal number
             return node.value
             
-        elif isinstance(node, ast.Num):  # For older Python versions
-            return node.n
-            
         return None
 
     def _evaluate_count(self, arguments: List[str], is_running: bool, filter_condition: str = None) -> int:
@@ -1584,7 +1653,7 @@ class ProductionAggregateEvaluator:
             # This ensures MATCH_NUMBER() returns consistent values within aggregates
             return getattr(self.context, 'match_number', 1)
         
-        classifier_match = re.match(r'CLASSIFIER\(\s*([A-Z_][A-Z0-9_]*)?\s*\)', expr, re.IGNORECASE)
+        classifier_match = re.fullmatch(r'CLASSIFIER\(\s*([A-Z_][A-Z0-9_]*)?\s*\)', expr, re.IGNORECASE)
         if classifier_match:
             var_name = classifier_match.group(1)
             return self._evaluate_classifier(var_name)
@@ -1936,7 +2005,7 @@ class ProductionAggregateEvaluator:
             if hasattr(self.context, 'subsets') and var_name in self.context.subsets:
                 for comp in self.context.subsets[var_name]:
                     if comp in self.context.variables and current_idx in self.context.variables[comp]:
-                        return comp
+                        return comp.strip('"')
             return None
         else:
             # CLASSIFIER() - return the variable that matches the current row
@@ -1962,8 +2031,10 @@ class ProductionAggregateEvaluator:
         """Convert SQL function syntax to Python-compatible syntax."""
         import re
         
+        # Resolve safe scalar SELECT expressions before translating operators.
+        converted = inline_scalar_subqueries(expr)
         # Convert CASE WHEN expressions to Python conditional expressions
-        converted = self._convert_case_when_to_python(expr)
+        converted = self._convert_case_when_to_python(converted)
         
         # Convert SQL CAST syntax: cast(value as type) -> CAST(value, 'TYPE')
         cast_pattern = r'cast\s*\(\s*([^,)]+)\s+as\s+([^)]+)\s*\)'
@@ -2104,14 +2175,13 @@ class ProductionAggregateEvaluator:
         
         # First handle SQL IN operator 
         # Convert: expression IN (value1, value2, ...) -> expression in [value1, value2, ...]
-        in_pattern = r'\b(\w+(?:\(\))?)\s+IN\s*\(\s*([^)]+)\s*\)'
+        in_pattern = r"((?:'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|-?\d+(?:\.\d+)?|\b\w+(?:\(\))?))\s+IN\s*\(\s*([^)]+)\s*\)"
         def in_replacer(match):
             expr = match.group(1)
             values = match.group(2)
-            # Parse the values and wrap in square brackets
-            values_list = [v.strip().strip("'\"") for v in values.split(',')]
-            values_python = "[" + ", ".join(f"'{v}'" for v in values_list) + "]"
-            return f"{expr} in {values_python}"
+            # Preserve literal types and expression calls; Python lists also
+            # handle the single-element case that `(1)` would not.
+            return f"{expr} in [{values}]"
         
         converted = re.sub(in_pattern, in_replacer, condition, flags=re.IGNORECASE)
         
@@ -2785,8 +2855,6 @@ class ProductionAggregateEvaluator:
             return [self._eval_filter_ast(elt) for elt in node.elts]
         if isinstance(node, ast.Constant):
             return node.value
-        if isinstance(node, ast.Num):
-            return node.n
         if isinstance(node, ast.Name):
             return None if node.id == "None" else False
 
