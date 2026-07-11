@@ -202,7 +202,10 @@ correctness for the tested cases, throughput captures execution speed,
 and line-count comparison captures only one aspect of developer
 effort.  Third, \emph{external validity} is limited by the use of one
 workstation, one main real-world dataset, and a bounded range of input
-sizes.  These threats do not invalidate the reported results, but they
+sizes, and by the fact that the Trino and Oracle baselines were run at
+their default container configuration rather than expert-tuned, so a
+differently tuned deployment could narrow the measured performance
+gap.  These threats do not invalidate the reported results, but they
 define the conditions under which the results should be generalized.
 
 % ----------------------------------------------------------------
