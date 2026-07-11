@@ -817,9 +817,9 @@ The three worked examples of Section~\ref{sec:eval-correctness} each
 express the same detection three ways---as a Trino SQL query, as a
 call to the proposed engine, and as a hand-written Python/pandas UDF
 (Listings~\ref{lst:orders-udf}, \ref{lst:stock-pandas},
-and~\ref{lst:vshape-udf}).  This lets
-us weigh the declarative \texttt{MATCH\_\allowbreak{}RECOGNIZE} form
-against the two realistic alternatives an analyst actually faces:
+and~\ref{lst:vshape-udf}).  This places the declarative
+\texttt{MATCH\_\allowbreak{}RECOGNIZE} form side by side with
+the two realistic alternatives an analyst actually faces:
 writing the detection \emph{by hand in Python}, or \emph{sending the
 data to an external SQL engine} such as Trino or Oracle.
 
@@ -1086,7 +1086,10 @@ step reduces to the $O(n)$ monotonicity check.  The benchmark queries
 order by a sequential \texttt{seq\_id} whose values are already
 monotonic, so this run takes the $O(n)$ path---which is precisely why
 the measured scaling is approximately linear rather than
-$n \log n$.
+$n \log n$.  Both branches are exercised and confirmed empirically in
+Section~\ref{subsec:eval-ordering}, which reruns the benchmark on
+shuffled input to force the $O(n\log n)$ branch and recovers exactly
+the predicted super-linear ordering cost.
 
 Step~4 evaluates the row-local \texttt{DEFINE} predicates as
 vectorized column operations, producing per-variable Boolean arrays
@@ -1181,14 +1184,14 @@ Section~\ref{subsec:eval-pattern-defs}.  Each cell is reported as the
 mean of twenty measured runs after five warmups, together with its
 standard deviation.  All 90 cross-system cells completed successfully.
 Over its 30 cells the proposed engine achieved an average throughput
-of approximately 1\,546\,647~rows/s, and the sum of its 30 mean cell
-times was about 17.59\,s (this figure aggregates the reported means,
+of approximately 5\,043\,941~rows/s, and the sum of its 30 mean cell
+times was about 5.96\,s (this figure aggregates the reported means,
 not the total duration of all repetitions).  The results show
 predictable, approximately linear scaling over the evaluated range
-($R^2 \geq 0.99$ for the proposed engine's time-versus-size fit on
-each of its five pattern families): alternation remains the fastest
-family, while complex nested patterns incur higher transition and
-condition-evaluation overhead.
+($R^2 \geq 0.98$ for the proposed engine's time-versus-size fit on
+each of its five pattern families): simple sequences and bounded
+quantifiers are the fastest families, while complex nested patterns
+incur higher transition and condition-evaluation overhead.
 
 The remainder of this section reports the empirical results across all
 evaluation metrics: Section~\ref{subsec:eval-pattern-defs} defines the
@@ -1388,12 +1391,10 @@ results show the current implementation's observed behavior.  The
 Pandas engine shows stable throughput across the evaluated range,
 which is consistent with a scan-dominated execution path for these
 fixed-size patterns.  In this run it records the lowest average
-execution time of the three systems: it is faster than Trino on all
-five pattern families and faster than Oracle on four of the five,
-with \texttt{optional\_pattern} as the exception, where Oracle's
-family average is lower (0.53\,s versus 0.65\,s); on individual
-small cells the systems are within tens of milliseconds of one
-another.  Memory is reported using the two metrics defined in
+execution time of the three systems on every one of the 30
+pattern--size cells: averaged per family it is roughly
+6--13$\times$ faster than Trino and 2.7--5.5$\times$ faster than
+Oracle, with the largest gap on \texttt{complex\_nested}.  Memory is reported using the two metrics defined in
 Section~\ref{subsec:eval-metrics}: the engine-reported
 system-native \emph{query-memory indicators}, and the
 \emph{operational footprint}, which documents the cost of the
@@ -1424,33 +1425,30 @@ systems (this is exactly what the correctness comparison verifies).
 per-pattern variation in the time and memory tables that follow.
 
 % Final run (each cell = 5 warmup + 20 measured; 1 core, 32GB; sizes 100K-2.22M; mean +/- sample std)
-% pandas: total=17.59, avg=0.59, avgthr=1{,}546{,}647, minthr=1{,}010{,}071, maxthr=2{,}052{,}420, maxqmem=129.40, maxfmem=689.04, medCV=4.5%
-% Trino~473: total=61.36, avg=2.05, avgthr=572{,}431, minthr=141{,}914, maxthr=1{,}001{,}251, maxqmem=41.53, maxfmem=23{,}654.4, medCV=8.9%
-% Oracle XE~21c: total=28.97, avg=0.97, avgthr=1{,}257{,}980, minthr=344{,}953, maxthr=1{,}789{,}102, maxqmem=58.19, maxfmem=2{,}262.17, medCV=2.6%
+% pandas: total=5.96, avg=0.20, avgthr=5{,}043{,}941, minthr=1{,}791{,}628, maxthr=8{,}055{,}323, maxqmem=173.81, maxfmem=665.63, medCV=8.8%
+% Trino~473: total=57.88, avg=1.93, avgthr=609{,}122, minthr=153{,}963, maxthr=1{,}009{,}725, maxqmem=41.50, maxfmem=23{,}225.34, medCV=5.9%
+% Oracle XE~21c: total=28.21, avg=0.94, avgthr=1{,}258{,}336, minthr=359{,}113, maxthr=1{,}802{,}506, maxqmem=58.19, maxfmem=2{,}523.6, medCV=2.1%
 
 Table~\ref{tab:pattern_summary} (Appendix~\ref{app:benchmark-tables})
 summarizes each pattern family across
 all six dataset sizes.  The proposed engine records the lowest
-average time on four of the five pattern families in this run; the
-exception is \texttt{optional\_pattern}, where Oracle's family
-average is lower (0.53\,s versus 0.65\,s).  Relative to Trino the
-engine is faster on all five families, with the largest gap on
-\texttt{complex\_nested}, the family where Trino shows by far its
-largest relative cost (5.38\,s versus 0.83\,s on average).  This
+average time on all five pattern families in this run, against both
+database systems.  The largest gap is on \texttt{complex\_nested},
+the family where Trino shows by far its largest relative cost
+(5.04\,s versus 0.40\,s on average, about 12.6$\times$).  This
 indicates that both implementation strategy and pattern structure
 affect the measured runtime.
 
 Table~\ref{tab:size_summary} (Appendix~\ref{app:benchmark-tables})
 groups the same measurements by dataset
 size.  The proposed engine records the lowest average time at every
-size, and its throughput remains stable (roughly
-1.32\,M--1.65\,M rows/s) as the input increases.  Relative to a
+size, and its throughput remains high (per-size averages of roughly
+3.6\,M--5.6\,M rows/s) as the input increases.  Relative to a
 fully-warmed Trino, the engine's per-size averages are lower at all
-six sizes, by a factor of approximately 2.9--3.8$\times$.
+six sizes, by a factor of approximately 7.3--10.6$\times$.
 Relative to Oracle, the engine's per-size averages are also lower
 across the evaluated range, by a factor of approximately
-1.1--1.7$\times$ (equivalently, Oracle sustains about
-0.8--0.9$\times$ of the engine's per-size throughput), using the
+3.1--5.2$\times$, using the
 per-size averages of Table~\ref{tab:size_summary}.
 
 {\scriptsize
@@ -1470,40 +1468,40 @@ per-size averages of Table~\ref{tab:size_summary}.
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 100{,}000 & 0.08 $\pm$ 0.01 & 0.35 $\pm$ 0.07 & 0.10 $\pm$ 0.05 \\
-simple\_sequence & 200{,}000 & 0.12 $\pm$ 0.01 & 0.37 $\pm$ 0.14 & 0.14 $\pm$ 0.00 \\
-simple\_sequence & 400{,}000 & 0.24 $\pm$ 0.02 & 0.71 $\pm$ 0.16 & 0.37 $\pm$ 0.02 \\
-simple\_sequence & 800{,}000 & 0.47 $\pm$ 0.02 & 1.32 $\pm$ 0.15 & 0.67 $\pm$ 0.01 \\
-simple\_sequence & 1{,}600{,}000 & 1.00 $\pm$ 0.05 & 2.42 $\pm$ 0.20 & 1.28 $\pm$ 0.02 \\
-simple\_sequence & 2{,}222{,}742 & 1.32 $\pm$ 0.05 & 3.04 $\pm$ 0.27 & 1.80 $\pm$ 0.04 \\
+simple\_sequence & 100{,}000 & 0.02 $\pm$ 0.01 & 0.28 $\pm$ 0.06 & 0.22 $\pm$ 0.18 \\
+simple\_sequence & 200{,}000 & 0.03 $\pm$ 0.00 & 0.32 $\pm$ 0.12 & 0.14 $\pm$ 0.01 \\
+simple\_sequence & 400{,}000 & 0.05 $\pm$ 0.00 & 0.67 $\pm$ 0.16 & 0.34 $\pm$ 0.01 \\
+simple\_sequence & 800{,}000 & 0.11 $\pm$ 0.02 & 1.20 $\pm$ 0.15 & 0.65 $\pm$ 0.01 \\
+simple\_sequence & 1{,}600{,}000 & 0.22 $\pm$ 0.03 & 2.16 $\pm$ 0.12 & 1.26 $\pm$ 0.01 \\
+simple\_sequence & 2{,}222{,}742 & 0.30 $\pm$ 0.01 & 2.95 $\pm$ 0.13 & 1.77 $\pm$ 0.01 \\
 \midrule
-alternation & 100{,}000 & 0.06 $\pm$ 0.00 & 0.26 $\pm$ 0.07 & 0.06 $\pm$ 0.00 \\
-alternation & 200{,}000 & 0.11 $\pm$ 0.01 & 0.34 $\pm$ 0.18 & 0.11 $\pm$ 0.00 \\
-alternation & 400{,}000 & 0.20 $\pm$ 0.01 & 0.57 $\pm$ 0.12 & 0.22 $\pm$ 0.00 \\
-alternation & 800{,}000 & 0.41 $\pm$ 0.02 & 1.02 $\pm$ 0.07 & 0.45 $\pm$ 0.01 \\
-alternation & 1{,}600{,}000 & 0.81 $\pm$ 0.03 & 1.89 $\pm$ 0.05 & 0.92 $\pm$ 0.03 \\
-alternation & 2{,}222{,}742 & 1.08 $\pm$ 0.01 & 2.48 $\pm$ 0.12 & 1.29 $\pm$ 0.04 \\
+alternation & 100{,}000 & 0.03 $\pm$ 0.00 & 0.30 $\pm$ 0.29 & 0.06 $\pm$ 0.00 \\
+alternation & 200{,}000 & 0.05 $\pm$ 0.00 & 0.32 $\pm$ 0.10 & 0.11 $\pm$ 0.00 \\
+alternation & 400{,}000 & 0.09 $\pm$ 0.01 & 0.55 $\pm$ 0.13 & 0.22 $\pm$ 0.00 \\
+alternation & 800{,}000 & 0.16 $\pm$ 0.01 & 0.92 $\pm$ 0.03 & 0.44 $\pm$ 0.01 \\
+alternation & 1{,}600{,}000 & 0.31 $\pm$ 0.01 & 1.82 $\pm$ 0.07 & 0.89 $\pm$ 0.01 \\
+alternation & 2{,}222{,}742 & 0.44 $\pm$ 0.02 & 2.49 $\pm$ 0.07 & 1.24 $\pm$ 0.01 \\
 \midrule
-quantified & 100{,}000 & 0.07 $\pm$ 0.00 & 0.26 $\pm$ 0.02 & 0.09 $\pm$ 0.00 \\
-quantified & 200{,}000 & 0.12 $\pm$ 0.01 & 0.38 $\pm$ 0.11 & 0.17 $\pm$ 0.02 \\
-quantified & 400{,}000 & 0.22 $\pm$ 0.01 & 0.64 $\pm$ 0.06 & 0.33 $\pm$ 0.00 \\
-quantified & 800{,}000 & 0.42 $\pm$ 0.02 & 1.31 $\pm$ 0.08 & 0.73 $\pm$ 0.01 \\
-quantified & 1{,}600{,}000 & 0.82 $\pm$ 0.04 & 2.57 $\pm$ 0.10 & 1.44 $\pm$ 0.04 \\
-quantified & 2{,}222{,}742 & 1.17 $\pm$ 0.03 & 3.22 $\pm$ 0.09 & 1.99 $\pm$ 0.03 \\
+quantified & 100{,}000 & 0.02 $\pm$ 0.00 & 0.24 $\pm$ 0.02 & 0.09 $\pm$ 0.00 \\
+quantified & 200{,}000 & 0.04 $\pm$ 0.01 & 0.36 $\pm$ 0.09 & 0.16 $\pm$ 0.00 \\
+quantified & 400{,}000 & 0.06 $\pm$ 0.01 & 0.61 $\pm$ 0.04 & 0.33 $\pm$ 0.01 \\
+quantified & 800{,}000 & 0.10 $\pm$ 0.01 & 1.23 $\pm$ 0.04 & 0.72 $\pm$ 0.01 \\
+quantified & 1{,}600{,}000 & 0.21 $\pm$ 0.03 & 2.47 $\pm$ 0.15 & 1.40 $\pm$ 0.02 \\
+quantified & 2{,}222{,}742 & 0.31 $\pm$ 0.04 & 3.21 $\pm$ 0.08 & 1.95 $\pm$ 0.03 \\
 \midrule
-optional\_pattern & 100{,}000 & 0.09 $\pm$ 0.00 & 0.21 $\pm$ 0.03 & 0.07 $\pm$ 0.00 \\
-optional\_pattern & 200{,}000 & 0.17 $\pm$ 0.01 & 0.30 $\pm$ 0.08 & 0.13 $\pm$ 0.01 \\
-optional\_pattern & 400{,}000 & 0.30 $\pm$ 0.01 & 0.50 $\pm$ 0.04 & 0.25 $\pm$ 0.01 \\
-optional\_pattern & 800{,}000 & 0.60 $\pm$ 0.02 & 0.90 $\pm$ 0.07 & 0.48 $\pm$ 0.01 \\
-optional\_pattern & 1{,}600{,}000 & 1.11 $\pm$ 0.02 & 1.78 $\pm$ 0.22 & 0.94 $\pm$ 0.03 \\
-optional\_pattern & 2{,}222{,}742 & 1.66 $\pm$ 0.08 & 2.22 $\pm$ 0.05 & 1.33 $\pm$ 0.04 \\
+optional\_pattern & 100{,}000 & 0.02 $\pm$ 0.00 & 0.20 $\pm$ 0.03 & 0.07 $\pm$ 0.00 \\
+optional\_pattern & 200{,}000 & 0.04 $\pm$ 0.00 & 0.29 $\pm$ 0.07 & 0.13 $\pm$ 0.01 \\
+optional\_pattern & 400{,}000 & 0.07 $\pm$ 0.01 & 0.46 $\pm$ 0.02 & 0.25 $\pm$ 0.01 \\
+optional\_pattern & 800{,}000 & 0.13 $\pm$ 0.01 & 0.81 $\pm$ 0.03 & 0.47 $\pm$ 0.02 \\
+optional\_pattern & 1{,}600{,}000 & 0.29 $\pm$ 0.04 & 1.59 $\pm$ 0.04 & 0.92 $\pm$ 0.03 \\
+optional\_pattern & 2{,}222{,}742 & 0.46 $\pm$ 0.05 & 2.20 $\pm$ 0.04 & 1.29 $\pm$ 0.04 \\
 \midrule
-complex\_nested & 100{,}000 & 0.09 $\pm$ 0.01 & 0.35 $\pm$ 0.07 & 0.11 $\pm$ 0.00 \\
-complex\_nested & 200{,}000 & 0.16 $\pm$ 0.01 & 0.58 $\pm$ 0.05 & 0.24 $\pm$ 0.00 \\
-complex\_nested & 400{,}000 & 0.30 $\pm$ 0.01 & 1.29 $\pm$ 0.11 & 0.57 $\pm$ 0.01 \\
-complex\_nested & 800{,}000 & 0.76 $\pm$ 0.01 & 5.19 $\pm$ 0.15 & 2.22 $\pm$ 0.05 \\
-complex\_nested & 1{,}600{,}000 & 1.58 $\pm$ 0.05 & 11.27 $\pm$ 0.50 & 4.64 $\pm$ 0.13 \\
-complex\_nested & 2{,}222{,}742 & 2.08 $\pm$ 0.03 & 13.61 $\pm$ 0.40 & 5.85 $\pm$ 0.16 \\
+complex\_nested & 100{,}000 & 0.06 $\pm$ 0.00 & 0.29 $\pm$ 0.02 & 0.11 $\pm$ 0.01 \\
+complex\_nested & 200{,}000 & 0.10 $\pm$ 0.01 & 0.54 $\pm$ 0.04 & 0.24 $\pm$ 0.01 \\
+complex\_nested & 400{,}000 & 0.18 $\pm$ 0.02 & 1.25 $\pm$ 0.10 & 0.57 $\pm$ 0.04 \\
+complex\_nested & 800{,}000 & 0.37 $\pm$ 0.01 & 4.80 $\pm$ 0.11 & 2.14 $\pm$ 0.02 \\
+complex\_nested & 1{,}600{,}000 & 0.70 $\pm$ 0.01 & 10.39 $\pm$ 0.16 & 4.46 $\pm$ 0.09 \\
+complex\_nested & 2{,}222{,}742 & 0.99 $\pm$ 0.01 & 12.96 $\pm$ 0.25 & 5.59 $\pm$ 0.08 \\
 \end{longtable}
 }
 
@@ -1534,40 +1532,40 @@ remains the most expensive pattern family.
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 100{,}000 & 1{,}320{,}354 & 284{,}913 & 1{,}045{,}382 \\
-simple\_sequence & 200{,}000 & 1{,}635{,}155 & 537{,}422 & 1{,}454{,}636 \\
-simple\_sequence & 400{,}000 & 1{,}688{,}496 & 559{,}942 & 1{,}091{,}343 \\
-simple\_sequence & 800{,}000 & 1{,}716{,}946 & 607{,}478 & 1{,}202{,}251 \\
-simple\_sequence & 1{,}600{,}000 & 1{,}603{,}370 & 659{,}914 & 1{,}248{,}531 \\
-simple\_sequence & 2{,}222{,}742 & 1{,}686{,}900 & 731{,}980 & 1{,}236{,}575 \\
+simple\_sequence & 100{,}000 & 4{,}557{,}285 & 357{,}076 & 455{,}079 \\
+simple\_sequence & 200{,}000 & 7{,}066{,}948 & 624{,}322 & 1{,}442{,}657 \\
+simple\_sequence & 400{,}000 & 7{,}864{,}039 & 599{,}042 & 1{,}186{,}792 \\
+simple\_sequence & 800{,}000 & 7{,}051{,}074 & 667{,}059 & 1{,}234{,}424 \\
+simple\_sequence & 1{,}600{,}000 & 7{,}345{,}525 & 740{,}875 & 1{,}271{,}565 \\
+simple\_sequence & 2{,}222{,}742 & 7{,}517{,}413 & 752{,}286 & 1{,}258{,}944 \\
 \midrule
-alternation & 100{,}000 & 1{,}576{,}433 & 391{,}635 & 1{,}661{,}444 \\
-alternation & 200{,}000 & 1{,}774{,}999 & 587{,}871 & 1{,}774{,}771 \\
-alternation & 400{,}000 & 2{,}009{,}999 & 696{,}577 & 1{,}789{,}102 \\
-alternation & 800{,}000 & 1{,}934{,}464 & 782{,}519 & 1{,}776{,}561 \\
-alternation & 1{,}600{,}000 & 1{,}986{,}207 & 845{,}254 & 1{,}736{,}288 \\
-alternation & 2{,}222{,}742 & 2{,}052{,}420 & 895{,}626 & 1{,}728{,}666 \\
+alternation & 100{,}000 & 3{,}311{,}689 & 338{,}621 & 1{,}641{,}751 \\
+alternation & 200{,}000 & 4{,}198{,}875 & 634{,}194 & 1{,}783{,}969 \\
+alternation & 400{,}000 & 4{,}441{,}633 & 722{,}472 & 1{,}791{,}942 \\
+alternation & 800{,}000 & 4{,}901{,}958 & 866{,}742 & 1{,}802{,}506 \\
+alternation & 1{,}600{,}000 & 5{,}106{,}703 & 881{,}308 & 1{,}792{,}047 \\
+alternation & 2{,}222{,}742 & 5{,}023{,}855 & 893{,}397 & 1{,}794{,}710 \\
 \midrule
-quantified & 100{,}000 & 1{,}455{,}513 & 381{,}418 & 1{,}138{,}967 \\
-quantified & 200{,}000 & 1{,}686{,}770 & 525{,}889 & 1{,}194{,}471 \\
-quantified & 400{,}000 & 1{,}856{,}381 & 625{,}250 & 1{,}205{,}390 \\
-quantified & 800{,}000 & 1{,}894{,}341 & 609{,}077 & 1{,}100{,}424 \\
-quantified & 1{,}600{,}000 & 1{,}940{,}788 & 623{,}724 & 1{,}107{,}271 \\
-quantified & 2{,}222{,}742 & 1{,}898{,}242 & 690{,}994 & 1{,}117{,}048 \\
+quantified & 100{,}000 & 4{,}442{,}142 & 417{,}568 & 1{,}137{,}354 \\
+quantified & 200{,}000 & 5{,}002{,}090 & 551{,}188 & 1{,}252{,}330 \\
+quantified & 400{,}000 & 6{,}350{,}487 & 651{,}060 & 1{,}209{,}887 \\
+quantified & 800{,}000 & 8{,}055{,}323 & 649{,}590 & 1{,}116{,}448 \\
+quantified & 1{,}600{,}000 & 7{,}582{,}348 & 647{,}215 & 1{,}140{,}903 \\
+quantified & 2{,}222{,}742 & 7{,}243{,}840 & 691{,}696 & 1{,}138{,}626 \\
 \midrule
-optional\_pattern & 100{,}000 & 1{,}073{,}439 & 467{,}396 & 1{,}428{,}464 \\
-optional\_pattern & 200{,}000 & 1{,}207{,}581 & 674{,}263 & 1{,}519{,}770 \\
-optional\_pattern & 400{,}000 & 1{,}344{,}315 & 796{,}190 & 1{,}602{,}673 \\
-optional\_pattern & 800{,}000 & 1{,}342{,}911 & 891{,}278 & 1{,}674{,}690 \\
-optional\_pattern & 1{,}600{,}000 & 1{,}440{,}374 & 898{,}173 & 1{,}702{,}387 \\
-optional\_pattern & 2{,}222{,}742 & 1{,}342{,}607 & 1{,}001{,}251 & 1{,}667{,}148 \\
+optional\_pattern & 100{,}000 & 4{,}141{,}043 & 494{,}680 & 1{,}390{,}356 \\
+optional\_pattern & 200{,}000 & 5{,}527{,}191 & 696{,}430 & 1{,}571{,}544 \\
+optional\_pattern & 400{,}000 & 5{,}417{,}165 & 868{,}398 & 1{,}615{,}209 \\
+optional\_pattern & 800{,}000 & 6{,}035{,}844 & 984{,}378 & 1{,}702{,}193 \\
+optional\_pattern & 1{,}600{,}000 & 5{,}555{,}254 & 1{,}009{,}358 & 1{,}738{,}158 \\
+optional\_pattern & 2{,}222{,}742 & 4{,}881{,}440 & 1{,}009{,}725 & 1{,}728{,}719 \\
 \midrule
-complex\_nested & 100{,}000 & 1{,}166{,}073 & 288{,}874 & 894{,}481 \\
-complex\_nested & 200{,}000 & 1{,}285{,}452 & 347{,}529 & 848{,}877 \\
-complex\_nested & 400{,}000 & 1{,}343{,}991 & 311{,}217 & 706{,}343 \\
-complex\_nested & 800{,}000 & 1{,}056{,}676 & 154{,}020 & 360{,}521 \\
-complex\_nested & 1{,}600{,}000 & 1{,}010{,}071 & 141{,}914 & 344{,}953 \\
-complex\_nested & 2{,}222{,}742 & 1{,}068{,}130 & 163{,}345 & 379{,}968 \\
+complex\_nested & 100{,}000 & 1{,}791{,}628 & 343{,}097 & 876{,}493 \\
+complex\_nested & 200{,}000 & 2{,}025{,}051 & 368{,}396 & 838{,}858 \\
+complex\_nested & 400{,}000 & 2{,}188{,}285 & 321{,}233 & 705{,}413 \\
+complex\_nested & 800{,}000 & 2{,}161{,}881 & 166{,}814 & 374{,}437 \\
+complex\_nested & 1{,}600{,}000 & 2{,}274{,}674 & 153{,}963 & 359{,}113 \\
+complex\_nested & 2{,}222{,}742 & 2{,}255{,}543 & 171{,}492 & 397{,}651 \\
 \end{longtable}
 }
 
@@ -1618,40 +1616,40 @@ per-query or algorithm-level metric.
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 100{,}000 & 12.24 & 1.43 & 1.24 \\
-simple\_sequence & 200{,}000 & 7.15 & 2.35 & 3.75 \\
-simple\_sequence & 400{,}000 & 11.90 & 6.86 & 9.06 \\
-simple\_sequence & 800{,}000 & 27.11 & 13.50 & 19.69 \\
-simple\_sequence & 1{,}600{,}000 & 52.99 & 28.64 & 40.69 \\
-simple\_sequence & 2{,}222{,}742 & 129.40 & 41.42 & 58.19 \\
+simple\_sequence & 100{,}000 & 1.34 & 1.24 & 1.24 \\
+simple\_sequence & 200{,}000 & 2.14 & 2.80 & 3.75 \\
+simple\_sequence & 400{,}000 & 3.18 & 6.53 & 9.06 \\
+simple\_sequence & 800{,}000 & 6.52 & 13.61 & 19.69 \\
+simple\_sequence & 1{,}600{,}000 & 8.87 & 28.70 & 40.69 \\
+simple\_sequence & 2{,}222{,}742 & 160.03 & 41.48 & 58.19 \\
 \midrule
-alternation & 100{,}000 & 0.03 & 1.24 & 1.19 \\
-alternation & 200{,}000 & 0.00 & 3.28 & 3.75 \\
-alternation & 400{,}000 & 0.01 & 5.78 & 9.06 \\
-alternation & 800{,}000 & 0.00 & 13.26 & 19.69 \\
-alternation & 1{,}600{,}000 & 0.00 & 28.72 & 40.69 \\
-alternation & 2{,}222{,}742 & 0.00 & 41.41 & 58.19 \\
+alternation & 100{,}000 & 0.05 & 1.24 & 1.19 \\
+alternation & 200{,}000 & 0.00 & 2.62 & 3.75 \\
+alternation & 400{,}000 & 0.00 & 5.77 & 9.06 \\
+alternation & 800{,}000 & 0.00 & 12.86 & 19.69 \\
+alternation & 1{,}600{,}000 & 0.90 & 28.63 & 40.69 \\
+alternation & 2{,}222{,}742 & 0.99 & 41.42 & 58.19 \\
 \midrule
-quantified & 100{,}000 & 3.45 & 1.39 & 1.19 \\
-quantified & 200{,}000 & 4.03 & 2.88 & 3.75 \\
-quantified & 400{,}000 & 8.25 & 6.86 & 9.06 \\
-quantified & 800{,}000 & 17.54 & 13.68 & 19.69 \\
-quantified & 1{,}600{,}000 & 27.78 & 28.70 & 40.69 \\
-quantified & 2{,}222{,}742 & 103.07 & 41.42 & 58.19 \\
+quantified & 100{,}000 & 0.53 & 1.46 & 1.19 \\
+quantified & 200{,}000 & 2.64 & 3.08 & 3.75 \\
+quantified & 400{,}000 & 4.10 & 7.01 & 9.06 \\
+quantified & 800{,}000 & 5.19 & 13.83 & 19.69 \\
+quantified & 1{,}600{,}000 & 4.75 & 28.76 & 40.69 \\
+quantified & 2{,}222{,}742 & 164.31 & 41.42 & 58.19 \\
 \midrule
-optional\_pattern & 100{,}000 & 4.98 & 1.34 & 1.19 \\
-optional\_pattern & 200{,}000 & 8.51 & 2.75 & 3.75 \\
-optional\_pattern & 400{,}000 & 17.47 & 5.89 & 9.06 \\
-optional\_pattern & 800{,}000 & 32.99 & 12.06 & 19.69 \\
-optional\_pattern & 1{,}600{,}000 & 54.39 & 28.62 & 40.69 \\
-optional\_pattern & 2{,}222{,}742 & 73.25 & 41.40 & 58.19 \\
+optional\_pattern & 100{,}000 & 0.96 & 1.34 & 1.19 \\
+optional\_pattern & 200{,}000 & 4.45 & 2.85 & 3.75 \\
+optional\_pattern & 400{,}000 & 2.87 & 5.90 & 9.06 \\
+optional\_pattern & 800{,}000 & 3.32 & 10.95 & 19.69 \\
+optional\_pattern & 1{,}600{,}000 & 35.68 & 28.62 & 40.69 \\
+optional\_pattern & 2{,}222{,}742 & 173.81 & 41.40 & 58.19 \\
 \midrule
-complex\_nested & 100{,}000 & 0.88 & 1.44 & 1.19 \\
-complex\_nested & 200{,}000 & 3.00 & 3.38 & 3.75 \\
-complex\_nested & 400{,}000 & 8.86 & 8.38 & 9.06 \\
-complex\_nested & 800{,}000 & 15.74 & 13.83 & 19.69 \\
-complex\_nested & 1{,}600{,}000 & 18.13 & 28.75 & 40.69 \\
-complex\_nested & 2{,}222{,}742 & 18.79 & 41.53 & 58.19 \\
+complex\_nested & 100{,}000 & 2.09 & 1.18 & 1.19 \\
+complex\_nested & 200{,}000 & 1.17 & 2.79 & 3.75 \\
+complex\_nested & 400{,}000 & 4.64 & 7.89 & 9.06 \\
+complex\_nested & 800{,}000 & 8.00 & 13.63 & 19.69 \\
+complex\_nested & 1{,}600{,}000 & 16.75 & 28.75 & 40.69 \\
+complex\_nested & 2{,}222{,}742 & 42.01 & 41.50 & 58.19 \\
 \end{longtable}
 }
 
@@ -1659,16 +1657,16 @@ Table~\ref{tab:memory_cache} shows that the average query-memory
 indicators generally increase with input size, as expected for a
 per-query working set.  For the most memory-intensive pattern
 families at the largest input (the full 2.22\,M rows), the three
-indicators fall between roughly 41 and 129\,MB; this range describes
+indicators fall between roughly 41 and 174\,MB; this range describes
 only those worst-case cells, not the benchmark as a whole, where most
 readings are far smaller.  At 2.22\,M rows the Pandas engine's
 vectorized execution path trades additional working memory for its
 lower execution times on three families---its largest indicator is
-on \texttt{simple\_sequence} (129.40\,MB), followed by
-\texttt{quantified} (103.07\,MB) and \texttt{optional\_pattern}
-(73.25\,MB), each above Oracle's 58.19\,MB and Trino's roughly
-41.4\,MB---whereas on the other two families its readings stay well
-below both databases (\texttt{complex\_nested} at 18.79\,MB and
+on \texttt{optional\_pattern} (173.81\,MB), followed by
+\texttt{quantified} (164.31\,MB) and \texttt{simple\_sequence}
+(160.03\,MB), each above Oracle's 58.19\,MB and Trino's roughly
+41.5\,MB---whereas on the other two families its readings stay at or
+below the databases' (\texttt{complex\_nested} at 42.01\,MB and
 \texttt{alternation} at the measurement floor, against Trino's
 41.4--41.5\,MB and Oracle's 58.19\,MB).
 
@@ -1711,40 +1709,40 @@ intended to show.
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 100{,}000 & 158.37 & 8{,}314.83 & 2{,}183.07 \\
-simple\_sequence & 200{,}000 & 186.61 & 9{,}234.89 & 2{,}203.39 \\
-simple\_sequence & 400{,}000 & 235.76 & 10{,}453.5 & 2{,}188.8 \\
-simple\_sequence & 800{,}000 & 338.69 & 12{,}784.64 & 2{,}217.57 \\
-simple\_sequence & 1{,}600{,}000 & 527.75 & 17{,}288.7 & 2{,}202.78 \\
-simple\_sequence & 2{,}222{,}742 & 689.04 & 23{,}561.22 & 2{,}216.76 \\
+simple\_sequence & 100{,}000 & 155.95 & 8{,}320.72 & 2{,}523.6 \\
+simple\_sequence & 200{,}000 & 182.35 & 9{,}180.11 & 2{,}224.13 \\
+simple\_sequence & 400{,}000 & 227.79 & 10{,}453.5 & 2{,}228.84 \\
+simple\_sequence & 800{,}000 & 323.32 & 12{,}917.25 & 2{,}219.88 \\
+simple\_sequence & 1{,}600{,}000 & 507.72 & 16{,}923.65 & 2{,}225.82 \\
+simple\_sequence & 2{,}222{,}742 & 645.45 & 23{,}130.11 & 2{,}245.99 \\
 \midrule
-alternation & 100{,}000 & 145.36 & 8{,}422.35 & 2{,}150.3 \\
-alternation & 200{,}000 & 183.22 & 9{,}287.37 & 2{,}205.7 \\
-alternation & 400{,}000 & 220.03 & 10{,}594.82 & 2{,}188.85 \\
-alternation & 800{,}000 & 305.20 & 13{,}079.04 & 2{,}215.63 \\
-alternation & 1{,}600{,}000 & 476.48 & 17{,}418.24 & 2{,}200.99 \\
-alternation & 2{,}222{,}742 & 494.51 & 23{,}633.92 & 2{,}208.2 \\
+alternation & 100{,}000 & 149.14 & 8{,}368.18 & 2{,}307.12 \\
+alternation & 200{,}000 & 182.07 & 9{,}231.36 & 2{,}224.54 \\
+alternation & 400{,}000 & 226.23 & 10{,}626.56 & 2{,}229.2 \\
+alternation & 800{,}000 & 318.72 & 13{,}210.62 & 2{,}219.93 \\
+alternation & 1{,}600{,}000 & 448.96 & 17{,}058.82 & 2{,}225.51 \\
+alternation & 2{,}222{,}742 & 445.44 & 23{,}203.84 & 2{,}240.36 \\
 \midrule
-quantified & 100{,}000 & 158.24 & 8{,}642.61 & 2{,}151.12 \\
-quantified & 200{,}000 & 185.44 & 9{,}366.43 & 2{,}243.53 \\
-quantified & 400{,}000 & 231.59 & 10{,}805.25 & 2{,}189.06 \\
-quantified & 800{,}000 & 329.69 & 13{,}098.5 & 2{,}207.74 \\
-quantified & 1{,}600{,}000 & 520.72 & 17{,}428.48 & 2{,}203.08 \\
-quantified & 2{,}222{,}742 & 679.85 & 23{,}639.04 & 2{,}262.17 \\
+quantified & 100{,}000 & 156.47 & 8{,}651.16 & 2{,}187.78 \\
+quantified & 200{,}000 & 184.05 & 9{,}309.9 & 2{,}266.47 \\
+quantified & 400{,}000 & 229.84 & 10{,}836.99 & 2{,}229.25 \\
+quantified & 800{,}000 & 323.14 & 13{,}230.08 & 2{,}219.88 \\
+quantified & 1{,}600{,}000 & 503.56 & 17{,}062.4 & 2{,}225.36 \\
+quantified & 2{,}222{,}742 & 658.42 & 23{,}212.54 & 2{,}304.41 \\
 \midrule
-optional\_pattern & 100{,}000 & 157.58 & 8{,}648.29 & 2{,}159.62 \\
-optional\_pattern & 200{,}000 & 187.31 & 9{,}464.93 & 2{,}225.61 \\
-optional\_pattern & 400{,}000 & 246.38 & 10{,}833.92 & 2{,}189.0 \\
-optional\_pattern & 800{,}000 & 347.72 & 13{,}107.2 & 2{,}208.26 \\
-optional\_pattern & 1{,}600{,}000 & 558.28 & 17{,}432.06 & 2{,}200.63 \\
-optional\_pattern & 2{,}222{,}742 & 586.12 & 23{,}644.16 & 2{,}208.26 \\
+optional\_pattern & 100{,}000 & 156.01 & 8{,}656.79 & 2{,}187.72 \\
+optional\_pattern & 200{,}000 & 184.98 & 9{,}410.05 & 2{,}243.23 \\
+optional\_pattern & 400{,}000 & 232.13 & 10{,}865.15 & 2{,}220.34 \\
+optional\_pattern & 800{,}000 & 324.95 & 13{,}240.32 & 2{,}219.67 \\
+optional\_pattern & 1{,}600{,}000 & 500.74 & 17{,}070.08 & 2{,}225.25 \\
+optional\_pattern & 2{,}222{,}742 & 665.63 & 23{,}214.08 & 2{,}254.34 \\
 \midrule
-complex\_nested & 100{,}000 & 155.37 & 8{,}652.85 & 2{,}172.11 \\
-complex\_nested & 200{,}000 & 183.21 & 9{,}628.16 & 2{,}191.82 \\
-complex\_nested & 400{,}000 & 237.46 & 10{,}847.23 & 2{,}192.69 \\
-complex\_nested & 800{,}000 & 330.12 & 13{,}117.44 & 2{,}228.02 \\
-complex\_nested & 1{,}600{,}000 & 524.43 & 17{,}440.77 & 2{,}253.52 \\
-complex\_nested & 2{,}222{,}742 & 566.19 & 23{,}654.4 & 2{,}253.93 \\
+complex\_nested & 100{,}000 & 152.95 & 8{,}660.99 & 2{,}201.4 \\
+complex\_nested & 200{,}000 & 184.92 & 9{,}582.13 & 2{,}230.89 \\
+complex\_nested & 400{,}000 & 230.45 & 10{,}875.9 & 2{,}218.85 \\
+complex\_nested & 800{,}000 & 318.66 & 13{,}250.56 & 2{,}239.49 \\
+complex\_nested & 1{,}600{,}000 & 481.85 & 17{,}080.32 & 2{,}281.88 \\
+complex\_nested & 2{,}222{,}742 & 501.71 & 23{,}225.34 & 2{,}298.27 \\
 \end{longtable}
 }
 
@@ -1752,7 +1750,7 @@ Table~\ref{tab:memory_footprint} shows the practical deployment
 footprints.  The boundaries differ by construction: the Pandas value
 covers one Python process including the loaded input DataFrame,
 whereas the database values cover entire Docker containers.  The
-Pandas engine peaks at about 0.69\,GB at the full 2.22\,M rows.  Trino's
+Pandas engine peaks at about 0.67\,GB at the full 2.22\,M rows.  Trino's
 container grows to about 23\,GB: the benchmark table is held by its
 memory connector inside the JVM heap, the table is dropped and
 recreated before each dataset size is loaded, and the container
@@ -1764,7 +1762,7 @@ heap to the operating system, the readings carry allocations
 retained from earlier sizes, yet they can also fluctuate downward
 between neighboring cells because the container-level usage metric
 excludes reclaimable page cache that the kernel may free at any
-time.  Oracle's container stays near 2.2--2.3\,GB.  The two kinds
+time.  Oracle's container stays near 2.4--2.5\,GB.  The two kinds
 of values therefore have different reset boundaries: the Pandas
 readings are per-run process peaks, while the database readings are
 per-run samples of a container whose memory state resets only when
@@ -1795,9 +1793,9 @@ per-query comparisons should use Table~\ref{tab:memory_cache}.
 \textbf{System} & \textbf{Tests} & \textbf{Sum of Mean} & \textbf{Avg Time} & \textbf{Avg Thr.} & \textbf{Thr. Range} & \textbf{Max Query} & \textbf{Max Footpr.} \\
 & & \textbf{Times (s)} & \textbf{(s)} & \textbf{(rows/s)} & \textbf{(rows/s)} & \textbf{Mem.\ (MB)} & \textbf{Mem.\ (MB)} \\
 \midrule
-Proposed Pandas engine & 30 & 17.59 & 0.59 & 1{,}546{,}647 & 1{,}010{,}071--2{,}052{,}420 & 129.40 & 689.04 \\
-Trino~473 & 30 & 61.36 & 2.05 & 572{,}431 & 141{,}914--1{,}001{,}251 & 41.53 & 23{,}654.4 \\
-Oracle XE~21c & 30 & 28.97 & 0.97 & 1{,}257{,}980 & 344{,}953--1{,}789{,}102 & 58.19 & 2{,}262.17 \\
+Proposed Pandas engine & 30 & 5.96 & 0.20 & 5{,}043{,}941 & 1{,}791{,}628--8{,}055{,}323 & 173.81 & 665.63 \\
+Trino~473 & 30 & 57.88 & 1.93 & 609{,}122 & 153{,}963--1{,}009{,}725 & 41.50 & 23{,}225.34 \\
+Oracle XE~21c & 30 & 28.21 & 0.94 & 1{,}258{,}336 & 359{,}113--1{,}802{,}506 & 58.19 & 2{,}523.6 \\
 \bottomrule
 \end{tabular}}
 \end{table}
@@ -1816,9 +1814,9 @@ Oracle XE~21c & 30 & 28.97 & 0.97 & 1{,}257{,}980 & 344{,}953--1{,}789{,}102 & 5
 \textbf{System} & \textbf{Tests} & \textbf{Avg Time} & \textbf{Avg Throughput} & \textbf{Max Query} & \textbf{Max Footpr.} & \textbf{Correctness} \\
 & & \textbf{(s)} & \textbf{(rows/s)} & \textbf{Mem.\ (MB)} & \textbf{Mem.\ (MB)} & \\
 \midrule
-Proposed Pandas engine & 30 & 0.59 & 1{,}546{,}647 & 129.40 & 689.04 & proposed output \\
-Trino~473 & 30 & 2.05 & 572{,}431 & 41.53 & 23{,}654.4 & 30/30 identical \\
-Oracle XE~21c & 30 & 0.97 & 1{,}257{,}980 & 58.19 & 2{,}262.17 & 30/30 identical \\
+Proposed Pandas engine & 30 & 0.20 & 5{,}043{,}941 & 173.81 & 665.63 & proposed output \\
+Trino~473 & 30 & 1.93 & 609{,}122 & 41.50 & 23{,}225.34 & 30/30 identical \\
+Oracle XE~21c & 30 & 0.94 & 1{,}258{,}336 & 58.19 & 2{,}523.6 & 30/30 identical \\
 \bottomrule
 \end{tabular}}
 \end{table}
@@ -1831,11 +1829,11 @@ Oracle XE~21c & 30 & 0.97 & 1{,}257{,}980 & 58.19 & 2{,}262.17 & 30/30 identical
 \toprule
 \textbf{Pattern} & \textbf{Pandas (s)} & \textbf{Trino~473 (s)} & \textbf{Oracle XE~21c (s)} \\
 \midrule
-simple\_sequence & 0.54 & 1.37 & 0.72 \\
-alternation & 0.45 & 1.09 & 0.51 \\
-quantified & 0.47 & 1.40 & 0.79 \\
-optional\_pattern & 0.65 & 0.99 & 0.53 \\
-complex\_nested & 0.83 & 5.38 & 2.27 \\
+simple\_sequence & 0.12 & 1.26 & 0.73 \\
+alternation & 0.18 & 1.07 & 0.50 \\
+quantified & 0.12 & 1.36 & 0.77 \\
+optional\_pattern & 0.17 & 0.92 & 0.52 \\
+complex\_nested & 0.40 & 5.04 & 2.18 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1848,12 +1846,12 @@ complex\_nested & 0.83 & 5.38 & 2.27 \\
 \toprule
 \textbf{Size (rows)} & \textbf{Pandas (s)} & \textbf{Trino~473 (s)} & \textbf{Oracle XE~21c (s)} \\
 \midrule
-100{,}000 & 0.08 & 0.29 & 0.09 \\
-200{,}000 & 0.13 & 0.39 & 0.16 \\
-400{,}000 & 0.25 & 0.74 & 0.35 \\
-800{,}000 & 0.53 & 1.95 & 0.91 \\
-1{,}600{,}000 & 1.06 & 3.99 & 1.85 \\
-2{,}222{,}742 & 1.46 & 4.91 & 2.45 \\
+100{,}000 & 0.03 & 0.26 & 0.11 \\
+200{,}000 & 0.05 & 0.37 & 0.16 \\
+400{,}000 & 0.09 & 0.71 & 0.34 \\
+800{,}000 & 0.18 & 1.79 & 0.88 \\
+1{,}600{,}000 & 0.35 & 3.68 & 1.79 \\
+2{,}222{,}742 & 0.50 & 4.76 & 2.37 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1866,12 +1864,12 @@ complex\_nested & 0.83 & 5.38 & 2.27 \\
 \toprule
 \textbf{Size (rows)} & \textbf{Pandas (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle XE~21c (MB)} \\
 \midrule
-100{,}000 & 4.32 & 1.37 & 1.20 \\
-200{,}000 & 4.54 & 2.93 & 3.75 \\
-400{,}000 & 9.29 & 6.76 & 9.06 \\
-800{,}000 & 18.68 & 13.27 & 19.69 \\
-1{,}600{,}000 & 30.66 & 28.69 & 40.69 \\
-2{,}222{,}742 & 64.90 & 41.44 & 58.19 \\
+100{,}000 & 0.99 & 1.29 & 1.20 \\
+200{,}000 & 2.08 & 2.83 & 3.75 \\
+400{,}000 & 2.96 & 6.62 & 9.06 \\
+800{,}000 & 4.60 & 12.98 & 19.69 \\
+1{,}600{,}000 & 13.39 & 28.69 & 40.69 \\
+2{,}222{,}742 & 108.23 & 41.44 & 58.19 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1884,12 +1882,12 @@ complex\_nested & 0.83 & 5.38 & 2.27 \\
 \toprule
 \textbf{Size (rows)} & \textbf{Pandas (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle XE~21c (MB)} \\
 \midrule
-100{,}000 & 154.98 & 8{,}536.19 & 2{,}163.24 \\
-200{,}000 & 185.16 & 9{,}396.36 & 2{,}214.01 \\
-400{,}000 & 234.24 & 10{,}706.94 & 2{,}189.68 \\
-800{,}000 & 330.28 & 13{,}037.36 & 2{,}215.44 \\
-1{,}600{,}000 & 521.53 & 17{,}401.65 & 2{,}212.2 \\
-2{,}222{,}742 & 603.14 & 23{,}626.55 & 2{,}229.86 \\
+100{,}000 & 154.11 & 8{,}531.57 & 2{,}281.52 \\
+200{,}000 & 183.68 & 9{,}342.71 & 2{,}237.85 \\
+400{,}000 & 229.29 & 10{,}731.62 & 2{,}225.3 \\
+800{,}000 & 321.76 & 13{,}169.77 & 2{,}223.77 \\
+1{,}600{,}000 & 488.57 & 17{,}039.05 & 2{,}236.76 \\
+2{,}222{,}742 & 583.33 & 23{,}197.18 & 2{,}268.67 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1918,48 +1916,84 @@ successfully, and Trino and Oracle produced output identical to the
 proposed engine's normalized output for all 30 pattern--size
 combinations each---all three systems produced identical result
 sets.  The proposed Pandas engine had the lowest average
-execution time in this benchmark (0.59\,s), ahead of Oracle
-(0.97\,s) and a fully-warmed Trino (2.05\,s): it is faster than
-Trino on all five pattern families (on \texttt{complex\_nested} by
-more than a factor of six) and faster than Oracle on four of the
-five, with \texttt{optional\_pattern} as the exception; both the
-engine and Oracle sustain above one million rows per second on most
-combinations.  The system-native
+execution time in this benchmark (0.20\,s), ahead of Oracle
+(0.94\,s) and a fully-warmed Trino (1.93\,s): it recorded the
+lowest time on all 30 pattern--size cells, faster than Trino by
+roughly 6--13$\times$ per family and faster than Oracle by roughly
+2.7--5.5$\times$, with the widest margins on \texttt{complex\_nested}
+(where Trino averages 5.04\,s against the engine's 0.40\,s).  The
+system-native
 query-memory indicators of all three systems fall in the same order
-of magnitude, reaching at most 41--129\,MB for the most
+of magnitude, reaching at most 41--174\,MB for the most
 memory-intensive patterns at the full 2.22\,M rows---where the
-engine's largest indicators (\texttt{simple\_sequence} at
-129.40\,MB and \texttt{quantified} at 103.07\,MB)
-exceed Oracle's 58.19\,MB and Trino's roughly 41.4\,MB, while on
+engine's largest indicators (\texttt{optional\_pattern} at
+173.81\,MB and \texttt{quantified} at 164.31\,MB)
+exceed Oracle's 58.19\,MB and Trino's roughly 41.5\,MB, while on
 \texttt{alternation} and \texttt{complex\_nested} its readings stay
-well below the databases'---and the
+at or below the databases'---and the
 operational
 footprints differ substantially: the Pandas engine peaks at about
-0.69\,GB as a single Python process, the Oracle container stays near
-2.3\,GB (about 3.3$\times$ the Pandas peak), and the Trino
+0.67\,GB as a single Python process, the Oracle container stays near
+2.5\,GB (about 3.8$\times$ the Pandas peak), and the Trino
 container reaches about 23\,GB under its memory-connector setup.
 Across the twenty measured runs per cell, run-to-run variability is
 low: the median \emph{coefficient of variation} (the standard
-deviation as a fraction of the mean) is about 5\% for the Pandas
-engine, 9\% for Trino, and 3\% for Oracle; the five warmup runs
+deviation as a fraction of the mean) is about 9\% for the Pandas
+engine, 6\% for Trino, and 2\% for Oracle; the five warmup runs
 remove the cold-start outliers that a single warmup had left behind
 for the JVM-based Trino.  These
 results are not presented as a claim that one system is universally
 better; they show the trade-off observed under the selected
 workload, data sizes, and resource configuration.
 
+\paragraph{Why the proposed engine is faster on this workload.}
+The measured advantage is a direct consequence of specialization,
+not of a generally superior execution model, and it should be read
+together with the scope limits stated at the start of this section.
+Four factors explain it.  \emph{First}, the engine is a
+single-purpose row-pattern matcher: it carries none of the
+general-purpose query-planning, catalog, transaction, logging, or
+distributed-coordination machinery that Trino and Oracle must run on
+every query, so it has almost no fixed per-query overhead to amortize
+at these input sizes.  \emph{Second}, execution is entirely
+in-process over \texttt{pandas}/NumPy arrays: there is no client
+protocol, no result serialization, and no cross-process data movement
+between a client and a server, all of which the database paths pay
+even when the table is already loaded.  \emph{Third}, the
+implementation compiles each query to a narrow fast path tailored to
+the evaluated workload---\texttt{ONE ROW PER MATCH}, a single logical
+partition, and row-local \texttt{DEFINE} predicates.  These predicates
+are evaluated as vectorized column operations (Chapter~\ref{chap:implementation}),
+category comparisons are reduced to integer-code checks, the
+deterministic automaton is walked from precompiled per-state decision
+tables that skip whole constant-mask runs in one step, and the output
+columns and running measures are assembled with grouped NumPy
+reductions rather than one Python object per matched row.  Each of
+these turns a per-row Python operation into an amortized array
+operation, which is where the bulk of the speedup arises.
+\emph{Fourth}, the benchmark queries order by an already-sorted key
+and use no \texttt{PARTITION~BY}, so the engine takes its
+linear-scan path and never sorts, whereas the database engines still
+route the query through their full operator pipelines.  The
+trade-off is equally clear: this speed holds only for the supported
+feature subset and single-node in-memory setting, and it costs more
+per-query working memory on the sequence-style families
+(Table~\ref{tab:memory_cache}); Trino and Oracle remain the
+appropriate choice for large-scale, distributed, transactional, or
+broader-SQL workloads that fall outside this engine's scope.
+
 Table~\ref{tab:relative_comparison} condenses that trade-off into a
 single relative view, expressing the proposed engine's average
 across the 30 benchmark cells as a percentage difference from each
 database engine.  Under this workload the engine's average execution
-time is about 71\% below a fully-warmed Trino's and about 39\% below
+time is about 90\% below a fully-warmed Trino's and about 79\% below
 Oracle's, with correspondingly higher average throughput
-(about 2.7$\times$ Trino's and 1.2$\times$ Oracle's).
-Its mean per-query working set is about 40\% above Trino's
+(about 8.3$\times$ Trino's and 4.0$\times$ Oracle's).
+Its mean per-query working set is about 41\% above Trino's
 counter and essentially equal to Oracle's---the price of the
 vectorized fast paths on the sequence-style families---while its
-operational footprint is far smaller---about $41\times$ smaller than
-the Trino container and about $6.5\times$ smaller than the Oracle
+operational footprint is far smaller---about $42\times$ smaller than
+the Trino container and about $6.9\times$ smaller than the Oracle
 container---because it runs inside a single Python process with no
 resident database server.  In short, under this workload the engine
 records the lowest average execution time of the three systems while
@@ -1979,13 +2013,101 @@ below them.
 \toprule
 \textbf{Metric} & \textbf{vs.\ Trino~473} & \textbf{vs.\ Oracle XE~21c} \\
 \midrule
-Execution time & $-71\%$ & $-39\%$ \\
-Throughput & $+170\%$ & $+23\%$ \\
-Query memory & $+40\%$ & $-0\%$ \\
+Execution time & $-90\%$ & $-79\%$ \\
+Throughput & $+728\%$ & $+301\%$ \\
+Query memory & $+41\%$ & $-0\%$ \\
 Operational footprint & $-98\%$ & $-85\%$ \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+% ................................................................
+\subsection{Input Ordering: Best-Case and Worst-Case Sorting}
+\label{subsec:eval-ordering}
+% ................................................................
+
+The benchmark reported so far orders by a sequential \texttt{seq\_id}
+whose values are already monotonic in the input, so the proposed
+engine takes the \emph{ordered-input} branch of
+Section~\ref{subsec:eval-complexity}: a single $O(n)$ monotonicity
+check lets it skip \texttt{sort\_values} entirely.  That is realistic
+for append-ordered DataFrames, but it exercises only the $O(n)$ side
+of the ordering step and gives the engine a shortcut the two database
+systems never take, since a SQL table has no guaranteed row order and
+\texttt{ORDER~BY} therefore sorts on every query.  To measure the
+other side---the $O(n\log n)$ branch the complexity analysis
+predicted but the ordered benchmark never triggered---the identical
+matrix was rerun with the physical row order of every input
+\emph{shuffled} (deterministically, per size), which forces a genuine
+sort in all three systems.  Because the logical order after sorting is
+unchanged, the match results and counts are byte-identical across the
+two scenarios (verified for all 90 cells), so any time difference is
+attributable to sorting alone.  Scenario~A (ordered) is thus the
+best case and Scenario~B (shuffled) the fair worst case for the
+ordering step, and the two bracket the engine's realistic
+performance.  Table~\ref{tab:ordering_scenarios} reports the average
+per system.
+
+\begin{table}[H]
+\centering
+\caption{Average execution time under ordered (Scenario~A) and
+  shuffled (Scenario~B) input, over all 30 pattern--size cells per
+  system.  Scenario~B forces a genuine sort in every system; match
+  counts are identical between the two scenarios.}
+\label{tab:ordering_scenarios}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{System} & \textbf{A ordered (s)} & \textbf{B shuffled (s)}
+  & \textbf{Slowdown} \\
+\midrule
+Proposed Pandas engine & 0.20 & 0.27 & $1.34\times$ \\
+Trino~473              & 1.93 & 2.18 & $1.13\times$ \\
+Oracle XE~21c          & 0.94 & 1.09 & $1.16\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three observations follow.  \emph{First}, the proposed engine incurs
+the largest relative slowdown ($1.34\times$) because it is the only
+system that skips sorting in the ordered case; the penalty is
+therefore the full cost of the sort it now performs.  It is widest on
+the sequence-style families, where matching is so cheap that the sort
+dominates (\texttt{simple\_sequence} $1.56\times$,
+\texttt{quantified} $1.48\times$), and narrowest on
+\texttt{complex\_nested} ($1.20\times$), where the automaton walk
+dominates and the sort is a smaller share of the total.
+\emph{Second}, the databases slow down far less ($1.13$--$1.16\times$)
+because they sort in \emph{both} scenarios; they benefit only from the
+fact that sorting already-ordered rows is cheaper than sorting
+shuffled ones (fewer comparisons and moves, better cache locality),
+not from skipping the sort.  \emph{Third}, and most important, the
+ranking is unchanged: at the full 2.22\,M rows the engine remains
+about $4.2\times$ faster than Oracle and $8.1\times$ faster than Trino
+under shuffled input (against $4.8\times$ and $9.6\times$ under
+ordered input).  The engine's advantage is therefore not an artifact
+of the ordered-input shortcut---it survives when every system must
+sort.
+
+These measurements also validate the complexity model of
+Section~\ref{subsec:eval-complexity} directly.  The incremental cost
+of Scenario~B over Scenario~A isolates the ordering step, and it
+behaves exactly as an $O(n\log n)$ sort should: at the larger sizes it
+becomes essentially \emph{pattern-independent} (its spread across the
+five families narrows to a coefficient of variation of about
+13\%\ at 800\,K rows and above), confirming that it is the
+per-query sort rather than any matching work; and its per-row cost
+\emph{rises} with input size, from about 53 to 83\,ns per row between
+100\,K and 2.22\,M rows, which is the signature of super-linear
+growth---a purely linear step would hold that figure constant.
+Normalizing instead by $n\log_2 n$ removes the trend (the figure stays
+within a narrow $3.2$--$3.9$ band), and an $n\log n$ fit of the
+incremental cost ($R^2 = 0.995$) is closer than a linear one
+($R^2 = 0.993$).  Meanwhile the ordered scenario itself remains
+approximately linear over the range ($R^2 \geq 0.99$ for a linear
+time-versus-size fit).  In short, the empirical results match the
+assumed complexity on both sides: linear scaling when the input is
+already ordered and the sort is skipped, and an added $O(n\log n)$
+term when a genuine sort is required.
 
 % ----------------------------------------------------------------
 \section{Chapter Summary}
@@ -2011,10 +2133,10 @@ produced output identical to the engine's normalized output in all
 identical result sets)---while reducing
 developer effort compared with hand-written Pandas logic.  Under the
 selected workload and resource configuration, the proposed engine
-sustained stable throughput of roughly 1.55\,M~rows/s with
+sustained stable throughput of roughly 5.0\,M~rows/s with
 approximately linear scaling, the lowest average execution time of
-the three systems in this benchmark (0.59\,s, versus 0.97\,s for
-Oracle and 2.05\,s for a fully-warmed Trino),
+the three systems in this benchmark (0.20\,s, versus 0.94\,s for
+Oracle and 1.93\,s for a fully-warmed Trino),
 query-memory indicator values in the same order of magnitude as the
 database engines, and a substantially smaller operational footprint,
 since it runs inside a single Python process without a resident

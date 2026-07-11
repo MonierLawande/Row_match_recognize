@@ -32,6 +32,24 @@
 \pagestyle{fancy}
 \fancyhead{} \fancyfoot{}
 \fancyfoot[C]{\thepage}
+% The dissertation class switches to the "headings" page style at every
+% \chapter; redefine it so body pages carry the chapter title at the top
+% (deposit-policy requirement) and the page number centered at the bottom.
+\fancypagestyle{headings}{%
+  \fancyhead{}\fancyfoot{}%
+  \fancyhead[C]{\small\leftmark}%
+  \fancyfoot[C]{\thepage}%
+  \renewcommand{\headrulewidth}{0.3pt}%
+}
+\fancypagestyle{plain}{%
+  \fancyhead{}\fancyfoot{}%
+  \fancyfoot[C]{\thepage}%
+  \renewcommand{\headrulewidth}{0pt}%
+}
+% fancyhdr page styles do not install \chaptermark; define it so
+% \leftmark carries the current chapter title for the running header.
+\renewcommand{\chaptermark}[1]{%
+  \markboth{\MakeUppercase{\chaptername\ \thechapter.\ #1}}{}}
 \usepackage[table,xcdraw]{xcolor}
 
 \usepackage{listingsutf8}
@@ -62,7 +80,7 @@
 \newcommand{\vect}[1]{\boldsymbol{\mathbf{#1}}}
 \usepackage{epsf,color}
 \usepackage{caption}
-\usepackage[a4paper,left=1.5in,right=1in,top=1in,bottom=1in]{geometry}
+\usepackage[a4paper,left=1.5in,right=1in,top=1in,bottom=1in,includehead,headheight=15pt,headsep=14pt]{geometry}
 \usepackage{tabularx}
 \usepackage[export]{adjustbox}
 \usepackage[section]{placeins}
@@ -271,6 +289,24 @@ May, 2026
 \input{copyright}
 \pagebreak
 
+%%%%%%%%%%%%%%%% DECLARATION %%%%%%%%%%%%%%%%%%%%
+\begin{center}
+\textbf{DECLARATION}
+\end{center}
+\vskip 30pt
+I declare that the submitted work in this Thesis contains no section
+copied in whole or in part from any other source unless explicitly
+identified in quotation marks and with detailed, complete, and
+accurate referencing.
+
+\vskip 60pt
+\noindent
+\begin{tabular}{@{}p{0.4\textwidth}p{0.3\textwidth}p{0.25\textwidth}@{}}
+\textbf{Name} & \textbf{Signature} & \textbf{Date} \\[6pt]
+Monier Ashraf Monier Lawande & & \\
+\end{tabular}
+\pagebreak
+
 \startdoublespace
 \begin{abstract}
 \input{Abstract}
@@ -284,27 +320,53 @@ May, 2026
 \listoffigures
 
 \cleardoublepage
-\pagestyle{plain}
+% Policy: chapter titles must appear at the top of each page.
+\pagestyle{fancy}
+\fancyhead{} \fancyfoot{}
+\fancyhead[C]{\small\leftmark}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
 
-%%%%%%%%%%%%%%%% LIST OF ABBREVIATIONS %%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%% LIST OF ABBREVIATIONS AND ACRONYMS %%%%%%%%%%%%%%%%%%%%
+\addcontentsline{toc}{front}{List of Abbreviations and Acronyms}
+\markboth{LIST OF ABBREVIATIONS AND ACRONYMS}{}
 \begin{center}
-  \textbf{{LIST OF ABBREVIATIONS}}
+  \textbf{LIST OF ABBREVIATIONS AND ACRONYMS}
 \end{center}
-\begin{longtable}{@{\extracolsep{\fill}}ll@{}}
-\centering
-\begin{tabular}{l l}
-\hline
-\textbf{Full Name} & \textbf{Abbreviation} \\
-\hline \hline
-Full Definition & Shortcut \\
-\hline
-Full Definition & Shortcut \\
-\hline
-Full Definition & Shortcut \\
-\hline\hline
-\end{tabular}
-\label{table:loa}
+\begin{center}
+\begin{longtable}{@{}ll@{}}
+\toprule
+\textbf{Abbreviation} & \textbf{Full Name} \\
+\midrule
+ANTLR & ANother Tool for Language Recognition \\
+API   & Application Programming Interface \\
+AST   & Abstract Syntax Tree \\
+BNF   & Backus--Naur Form \\
+CPU   & Central Processing Unit \\
+CSV   & Comma-Separated Values \\
+CTE   & Common Table Expression \\
+CV    & Coefficient of Variation \\
+DFA   & Deterministic Finite Automaton \\
+EBNF  & Extended Backus--Naur Form \\
+GC    & Garbage Collection \\
+ISO   & International Organization for Standardization \\
+JIT   & Just-In-Time (compilation) \\
+JVM   & Java Virtual Machine \\
+LALR  & Look-Ahead Left-to-right Rightmost-derivation (parser) \\
+LRU   & Least Recently Used \\
+MR    & \texttt{MATCH\_RECOGNIZE} \\
+NFA   & Non-deterministic Finite Automaton \\
+OOM   & Out Of Memory \\
+PGA   & Program Global Area (Oracle) \\
+RAM   & Random Access Memory \\
+RSS   & Resident Set Size \\
+SIEM  & Security Information and Event Management \\
+SQL   & Structured Query Language \\
+UDF   & User-Defined Function \\
+XE    & Express Edition (Oracle) \\
+\bottomrule
 \end{longtable}
+\end{center}
 
 \IfFileExists{chapters/ch1_introduction.tex}
   {\input{chapters/ch1_introduction}}

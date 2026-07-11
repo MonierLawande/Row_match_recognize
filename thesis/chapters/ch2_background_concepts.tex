@@ -70,14 +70,14 @@ Manufacturing systems monitor sensor readings to detect patterns of equipment de
 E-commerce platforms study how users move through their sites to find out which paths lead to purchases or when people leave without buying. For example, a typical funnel query looks for the sequence ``view~$\rightarrow$ add-to-cart~$\rightarrow$ remove~$\rightarrow$ exit,'' which can show when a customer is unsure about buying. Using \texttt{MATCH\_RECOGNIZE}, analysts can count how many times an item was added to the cart before it was removed, pull the exact timestamps for each action, and measure the total time spent, all in one query. Without this feature, these tasks would need several complex subqueries or extra session logic. These types of funnel analyses are common uses of row-pattern recognition in analytical SQL~\cite{hoffa2021snowflake}.
 
 \paragraph{Network Security and Intrusion Detection.}
-Cyber-attacks usually do not appear as just one unusual event. Instead, they happen through a series of steps. For example, a multi-stage intrusion might start with port scanning, then move to repeated failed logins, followed by a successful login, and finally privilege escalation. With \texttt{MATCH\_RECOGNIZE}, you can describe this whole sequence in a single pattern query on your event log. It will flag the suspicious session and pull out the first and last timestamps, the targeted port, and the compromised account, all without needing to export the log to another SIEM tool~\cite{petkovic2022fraud}.
+Cyber-attacks usually do not appear as just one unusual event. Instead, they happen through a series of steps. For example, a multi-stage intrusion might start with port scanning, then move to repeated failed logins, followed by a successful login, and finally privilege escalation. With \texttt{MATCH\_RECOGNIZE}, this whole sequence can be described in a single pattern query over the event log. The query flags the suspicious session and pulls out the first and last timestamps, the targeted port, and the compromised account, all without exporting the log to another SIEM tool~\cite{petkovic2022fraud}.
 
 \paragraph{Healthcare and Patient Monitoring.}
 Early warning systems in clinical data streams help spot signs of physiological decline before a crisis happens. For example, sepsis often shows up as a rising heart rate, then a drop in blood pressure, and finally a spike in white blood cell count. This pattern shows how ordered clinical measurements can be modeled as a row-pattern query over a time series of vital signs. The specific alerting process, however, depends on the domain and system in use.
 
 
 \paragraph{Supply Chain and Logistics.}
-Supply chain disruptions can quickly set off a chain reaction. For instance, a single late shipment might lead to several partial deliveries and eventually a stockout. With \texttt{MATCH\_RECOGNIZE} applied to your order fulfillment log, you can find these escalation patterns for each supplier or warehouse and see how much time passes from the first delay to the final stockout. This lets teams look into issues earlier, instead of waiting until after problems have already happened.
+Supply chain disruptions can quickly set off a chain reaction. For instance, a single late shipment might lead to several partial deliveries and eventually a stockout. Applying \texttt{MATCH\_RECOGNIZE} to an order fulfillment log uncovers these escalation patterns for each supplier or warehouse and shows how much time passes from the first delay to the final stockout. Teams can then look into issues earlier, instead of waiting until after problems have already happened.
 
 
 \paragraph{Financial Compliance and Trade Surveillance.}
@@ -90,8 +90,7 @@ Trade-surveillance systems watch for signs of market manipulation, like ``layeri
 \label{sec:bg-match-recognize}
 % ----------------------------------------------------------------
 
-The SQL:2016 standard introduced
- The SQL:2016 standard introduced \texttt{MATCH\_RECOGNIZE}~\cite{ISO2016SQL,iso2016}, which lets you match patterns across rows in SQL. This feature helps you find ordered sequences of rows where each part of the pattern is defined by a row condition, not just a character. With \texttt{MATCH\_RECOGNIZE}, you can describe complex event sequences in a clear, declarative way~\cite{winand2017sqlnew}. While it does not add new capabilities to the relational model since similar queries can be written with joins, window functions, recursion, or procedural code, it offers a simpler and more maintainable way to express sequence-based logic.
+The SQL:2016 standard introduced \texttt{MATCH\_RECOGNIZE}~\cite{ISO2016SQL,iso2016}, which brings pattern matching across rows into SQL. The feature finds ordered sequences of rows where each part of the pattern is defined by a row condition, not just a character, and allows complex event sequences to be described in a clear, declarative way~\cite{winand2017sqlnew}. While it does not add new capabilities to the relational model since similar queries can be written with joins, window functions, recursion, or procedural code, it offers a simpler and more maintainable way to express sequence-based logic.
   
 
 At the time of writing, \texttt{MATCH\_RECOGNIZE} is still absent from
@@ -153,10 +152,10 @@ MATCH_RECOGNIZE (
 \begin{enumerate}
 
 \item \textbf{PARTITION BY.}
-If provided, this option splits the input rowset into separate partitions, similar to how window functions work. Pattern matching then runs on each partition by itself, which allows for parallel processing and grouping by things like customer or sensor. If you leave it out, the input is handled as one partition.
+If provided, this option splits the input rowset into separate partitions, similar to how window functions work. Pattern matching then runs on each partition by itself, which allows for parallel processing and grouping by attributes such as customer or sensor. If the clause is omitted, the input is handled as one partition.
 
 \item \textbf{ORDER BY.}
-This determines how rows are ordered within each partition. When you set an order, the pattern-matching algorithm processes the rows in that sequence. To get consistent results, you should usually specify the order. You can use several sort keys and choose \texttt{ASC} or \texttt{DESC} for each.
+This determines how rows are ordered within each partition. When an order is set, the pattern-matching algorithm processes the rows in that sequence. Consistent results usually require an explicit order. Several sort keys may be combined, each with its own \texttt{ASC} or \texttt{DESC} direction.
 
 
 \item \textbf{MEASURES.}
@@ -209,7 +208,7 @@ This determines how rows are ordered within each partition. When you set an orde
   \end{itemize}
 
 \item \textbf{SUBSET.}
-This optional clause lets you define union variables, which are made up of variables already listed in the \texttt{PATTERN} clause. A union variable does not change how matching works. Instead, it gives a shared name to rows matched by any of its component variables. You can use a union variable in \texttt{MEASURES}, \texttt{DEFINE}, and skip expressions where allowed.
+This optional clause defines union variables, which are made up of variables already listed in the \texttt{PATTERN} clause. A union variable does not change how matching works. Instead, it gives a shared name to rows matched by any of its component variables. A union variable may appear in \texttt{MEASURES}, \texttt{DEFINE}, and skip expressions where allowed.
 
 
 \item \textbf{DEFINE.}
@@ -271,5 +270,5 @@ The query groups rows by \texttt{customer\_id} and sorts them by \texttt{order\_
 % ----------------------------------------------------------------
 This chapter explained sequential pattern matching as an analytical problem and showed why regular row-by-row predicates do not work well for many tasks involving ordered data. It also covered the main parts of SQL:2016 \texttt{MATCH\_RECOGNIZE}, such as partitioning, ordering, measures, output modes, skip policies, pattern definitions, and variable predicates.
 
-The stock-price V-pattern example demonstrated how these components fit together in a full query and explained why this abstraction works well with automata-based execution. In the next Chapter~\ref{chap:related}, we will look more closely at existing implementations, comparing their features, deployment options, and real-world limitations.
+The stock-price V-pattern example demonstrated how these components fit together in a full query and explained why this abstraction works well with automata-based execution. Chapter~\ref{chap:related} looks more closely at existing implementations, comparing their features, deployment options, and real-world limitations.
 
