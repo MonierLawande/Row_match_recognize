@@ -51,20 +51,27 @@ of twenty measured runs after five warmups, with its standard
 deviation) using five pattern families and six dataset
 sizes from 100\,K to the full 2{,}222{,}742-row dataset.  Across these
 runs, the implementation achieved an average throughput of
-1\,546\,647~rows/s, with throughput remaining stable as input size
+5\,043\,941~rows/s, with throughput remaining stable as input size
 increased.  The main variation came
-from pattern structure: alternation was the fastest family, while
-\texttt{complex\_nested}, which carries the highest transition and
-condition-evaluation overhead, was the slowest.  In the cross-system
+from pattern structure: simple sequences and bounded quantifiers
+were the fastest families, while \texttt{complex\_nested}, which
+carries the highest transition and condition-evaluation overhead,
+was the slowest.  In the cross-system
 comparison under
 the same nominal resource budget, the engine recorded the lowest
-average execution time of the three systems (0.59\,s, versus
-0.97\,s for Oracle and 2.05\,s for a fully-warmed Trino): it was
-faster than Trino on all five pattern families and faster than
-Oracle on four of the five, with \texttt{optional\_pattern} as the
-exception.  The memory measurements
+average execution time of the three systems (0.20\,s, versus
+0.94\,s for Oracle and 1.93\,s for a fully-warmed Trino): it was
+faster than both databases on every one of the 30 pattern--size
+cells, by roughly 6--13$\times$ over Trino and 2.7--5.5$\times$
+over Oracle per family.  This advantage follows from the engine's
+narrow specialization---no general-purpose query-planning or
+distributed-execution overhead, fully in-process execution over
+\texttt{pandas}/NumPy arrays, and compiled fast paths that turn
+per-row work into vectorized array operations---and holds only for
+the supported feature subset and single-node in-memory setting.
+The memory measurements
 were also bounded for the evaluated range, with engine-reported
-query memory remaining below 130\,MB across the 30 reported
+query memory remaining below 175\,MB across the 30 reported
 scenarios.
 
 Architecturally, the system benefits from a separation between parsing,
@@ -150,10 +157,10 @@ and six dataset sizes from 100\,K to the full 2.22\,M rows, reported
 as means of twenty measured runs after five warmups (with standard
 deviation). &
 Execution time scales predictably over the measured range
-($R^2 \geq 0.99$ for the proposed engine on each of its five pattern
+($R^2 \geq 0.98$ for the proposed engine on each of its five pattern
 families), with average throughput of
-1\,546\,647~rows/s and the lowest average execution time of the
-three systems (0.59\,s, versus 0.97\,s for Oracle and 2.05\,s for a
+5\,043\,941~rows/s and the lowest average execution time of the
+three systems (0.20\,s, versus 0.94\,s for Oracle and 1.93\,s for a
 fully-warmed Trino) under the same nominal budget. &
 The benchmark does not establish performance for very large,
 distributed, or highly adversarial workloads. \\
@@ -161,7 +168,7 @@ distributed, or highly adversarial workloads. \\
 Memory use &
 Query-memory and footprint measurements for all 30 benchmark
 scenarios, including the maximum observed query memory of
-129.40\,MB. &
+173.81\,MB. &
 Memory use remains bounded for the evaluated workloads. &
 The measurements are empirical and do not define a formal upper bound
 for all possible patterns or datasets. \\
@@ -289,9 +296,9 @@ procedural Python code needed to express sequential row-pattern
 analysis.  Third, the benchmark over the Amazon UK Products Dataset
 shows stable performance across 30 pattern--size cells from 100\,K to
 the full 2.22\,M rows, with an average throughput of
-1\,546\,647~rows/s, the lowest average execution time of the three
-systems under the same nominal resource budget (0.59\,s, versus
-0.97\,s for Oracle and 2.05\,s for a fully-warmed Trino), and
+5\,043\,941~rows/s, the lowest average execution time of the three
+systems under the same nominal resource budget (0.20\,s, versus
+0.94\,s for Oracle and 1.93\,s for a fully-warmed Trino), and
 bounded memory use in the measured range.
 
 The proposed approach is therefore best understood as a bridge between

@@ -20,7 +20,7 @@ Several modern analytical platforms have since emerged. Trino~\cite{trino2022,tr
 
 This gap affects analytical workflows. Many analytical workflows begin in Python, where users prepare data, test hypotheses, and build models before transitioning to larger database or cloud platforms. For data that fits in memory, using a separate SQL engine to express row-pattern logic can add overhead for deployment and data movement. The focus of this thesis is therefore not to replace enterprise or Database systems, but to bring a practical subset of declarative row-pattern recognition into the Pandas environment, where many analytical workflows already begin.
 
-If you do not have this declarative clause, finding multi-row patterns means using complicated mixes of SQL window functions, self-joins, or even looping through rows outside the database. When the pattern has more than two or three steps, the code quickly grows into many lines with row number calculations, timestamp checks, and lots of \texttt{JOIN} conditions. This kind of code is hard to write, even harder to maintain, and often leads to multiple table scans that hurt performance~\cite{cao2012optimizationanalyticwindowfunctions}.
+Without this declarative clause, finding multi-row patterns means using complicated mixes of SQL window functions, self-joins, or even looping through rows outside the database. When the pattern has more than two or three steps, the code quickly grows into many lines with row number calculations, timestamp checks, and lots of \texttt{JOIN} conditions. This kind of code is hard to write, even harder to maintain, and often leads to multiple table scans that hurt performance~\cite{cao2012optimizationanalyticwindowfunctions}.
 
 This limitation stands out in Python’s data science tools. Pandas~\cite{McKinney2010}, a popular library for working with tables, does not have built-in support for sequential pattern matching. If analysts want to find multi-step patterns, they have to do it themselves by creating shifted copies of columns, such as \texttt{df['value'].shift(-1)}, \texttt{shift(-2)}, and so on, making Boolean masks, using \texttt{groupby().apply()} to piece together sequences, and then pivoting or renaming columns.
 Listing~\ref{lst:ch1-udf} illustrates this
@@ -55,7 +55,7 @@ for _, grp in df.groupby('customer_id'):
 result_df = pd.DataFrame(all_matches)
 \end{lstlisting}
 
- It takes over 20 lines of code to make a simple three-step pattern. The Hand-Crafted Approach is also likely to have mistakes where things are not lined up correctly. The Hand-Crafted Approach does not work well when we need to make longer patterns or patterns that have conditions.
+ It takes over 20 lines of code to make a simple three-step pattern. The Hand-Crafted Approach is also likely to have mistakes where things are not lined up correctly. The hand-crafted approach also does not scale well to longer patterns or to patterns that carry conditions.
 
 The same query expressed with \texttt{MATCH\_RECOGNIZE} is shown
 in Listing~\ref{lst:ch1-mr}: a single declarative statement that
@@ -92,7 +92,7 @@ MATCH_RECOGNIZE (
 output_df = match_recognize(query, df)
 \end{lstlisting}
 
-The declarative form is not just shorter in syntax: it helps to separate what you need to find, which is the pattern,from how you find it. The patterns become composable, auditable, and easy to extend. A more complex pattern, such as four or five steps
+The declarative form is not just shorter in syntax: it separates what to find---the pattern---from how to find it. The patterns become composable, auditable, and easy to extend. A more complex pattern, such as four or five steps
 with conditional alternation, requires no change to the surrounding
 Python code, only an update to the \texttt{PATTERN} and
 \texttt{DEFINE} clauses~\cite{michels2018new,petkovic2022rpr}.
@@ -125,15 +125,15 @@ The engine works with many SQL:2016-style row-pattern features. It handles quant
 PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)
 \end{lstlisting}
 
-The engine reads, compiles, and runs the pattern directly on pandas DataFrames. We check that it works correctly using focused automated tests and by comparing results with Oracle and Trino.
+The engine reads, compiles, and runs the pattern directly on pandas DataFrames. Correct behavior is verified through focused automated tests and by comparing results with Oracle and Trino.
 
 More than 500 queries were run using different pattern families, SQL constructs, and output scenarios. For the cases tested, the proposed engine gave results that matched those from Oracle and Trino, including detected matches, match order, measures, and output rows.
 
 \item \textbf{Empirical Validation Using a Real-World Dataset.}
 
-We assess performance with targeted automated tests, using the Amazon UK Products~2023 catalog~\cite{asaniczka2023amazon}. This real-world e-commerce dataset has about 2.2 million product records and offers good tabular data for testing price-based row-pattern recognition.
+Performance is assessed with targeted automated tests on the Amazon UK Products~2023 catalog~\cite{asaniczka2023amazon}. This real-world e-commerce dataset has about 2.2 million product records and offers good tabular data for testing price-based row-pattern recognition.
 
-We evaluated performance using five pattern families and six input sizes, from 100,000 rows up to the full 2,222,742-row Amazon UK Products catalog, constructed as nested prefixes of the source data.
+Performance was evaluated using five pattern families and six input sizes, from 100,000 rows up to the full 2,222,742-row Amazon UK Products catalog, constructed as nested prefixes of the source data.
 
 A total of 30 pattern--size benchmark cells were measured for the proposed engine (90 cells across the three compared systems), and every cell completed successfully. The results show almost linear scaling across the tested range, with the expected differences in runtime for simple, alternation, quantified, optional, and nested pattern types; under the shared one-core, 32\,GB resource budget the engine recorded the lowest average execution time of the three systems, while the two database references validated its output row-for-row.
 

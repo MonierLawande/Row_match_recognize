@@ -21,36 +21,18 @@ The pipeline consists of five phases: \emph{parsing},
 
 In the parsing stage, the SQL query is transformed into an abstract
 syntax tree (AST) that captures both the \texttt{SELECT}/\texttt{FROM}
-clauses and \texttt{MATCH\_RECOGNIZE} sub-clauses~\cite{tarazona2021antlr,parr2013definitive}.
-Semantic validation then checks variable usage, predicates, skip
-policies, output modes, and the consistency of referenced
-row-pattern constructs.  The validation rules are scoped to the
-features supported by the implementation: they enforce correct use of
-navigation functions, consistent measure semantics, and predictable
-handling of edge cases such as empty matches, partition boundaries,
-and skip behavior.
-
-The validated plan is translated into a logical plan composed of
-modular operators for partitioning, sorting, matching, measuring,
-and skipping.  From this plan, the system compiles a
-nondeterministic finite automaton (NFA) with guarded transitions
-that support quantifiers, alternation, and \texttt{PERMUTE}
-constructs~\cite{salomaa1996nfa}.  The NFA is constructed using
-Thompson's construction, extended for SQL:2016 semantics by
-embedding predicates from the \texttt{DEFINE} clause when present,
-organizing $\varepsilon$-transitions, and applying subset
-construction with state deduplication to mitigate unnecessary state
-growth in practical patterns.
-
-Finally, execution is performed over ordered partitions using the
-compiled automaton.  Matches are materialized with the correct
-\texttt{RUNNING}/\texttt{FINAL} semantics.  The evaluation engine
-manages context separation, applies navigation functions
-(\texttt{FIRST}, \texttt{LAST}, \texttt{PREV}, \texttt{NEXT}) with
-partition awareness, and computes aggregates such as \texttt{COUNT},
-\texttt{SUM}, and \texttt{AVG} across pattern variables.  This
-preserves the supported SQL:2016 behavior while producing results
-directly as \texttt{pandas} DataFrames.
+clauses and the \texttt{MATCH\_RECOGNIZE}
+sub-clauses~\cite{tarazona2021antlr,parr2013definitive}.  Semantic
+validation then checks variable usage, predicates, skip policies,
+output modes, and the consistency of the referenced row-pattern
+constructs.  The validated AST becomes a logical plan, from which the
+system compiles an NFA with Thompson's construction---extended with
+\texttt{DEFINE} predicates, prioritized $\varepsilon$-transitions,
+and subset construction with state
+deduplication~\cite{salomaa1996nfa}---and finally executes the
+compiled automaton over ordered partitions, materializing matches
+with the correct \texttt{RUNNING}/\texttt{FINAL} semantics directly
+as \texttt{pandas} DataFrames.
 
 \begin{figure}[htbp]
   \centering
@@ -111,63 +93,23 @@ implementation details, and optimization techniques.
 % ----------------------------------------------------------------
 
 The engine's five-phase pipeline is designed so that each stage
-produces a well-defined artifact consumed by the next.
-The following three subsections give a brief description of the
-primary runtime components.  This chapter then details the parsing,
-validation, and logical-planning stages; Chapter~\ref{chap:implementation}
-continues with automata compilation, Pandas execution, and
-optimization.
-
-% ................................
-\subsection{SQL Parsing and AST Construction}
-\label{subsec:overview-parsing}
-% ................................
-
-The process starts by analyzing the user's SQL query and identifying
-its logical components.  A parsing process explores the query,
-recognizes its main components---grouping (\texttt{PARTITION BY}),
-ordering (\texttt{ORDER BY}), the pattern to be searched, and any
-specific conditions or output metrics---and organizes these into an
-Abstract Syntax Tree (AST).  The AST provides a clear, structured
-representation of the query.  This approach eases query validation
-and prepares it for pattern matching in the following stages.
-
-% ................................
-\subsection{Pattern Translation to Finite Automata}
-\label{subsec:overview-automata}
-% ................................
-
-Once the AST is complete, the system focuses on the pattern
-component of the SQL query.  The pattern is converted into a finite
-automaton that defines a set of states and transitions for detecting
-complex sequences or behaviors in the data.  The process begins by
-constructing a non-deterministic finite automaton (NFA) from the
-pattern and then, for improved efficiency, transforms it into a
-deterministic finite automaton
-(DFA)~\cite{georgiou2025streaming}.  The DFA eliminates transition
-ambiguity, enabling the system to scan data sequences quickly and
-accurately.  This translation handles a wide variety of pattern
-features---repetitions, alternatives, and specific sequences---in a
-unified and efficient way.  The resulting automaton acts as the core
-mechanism for scanning and detecting patterns within the data.
-
-% ................................
-\subsection{Execution Engine on Pandas}
-\label{subsec:overview-execution}
-% ................................
-
-The execution phase uses the compiled DFA to perform pattern
-matching directly on input data represented as Pandas DataFrames.
-The engine begins by partitioning and ordering the data according to
-the query's specifications.  It then applies the DFA to scan the
-dataset, identifying matching sequences according to the configured
-pattern and skip policy.
-For every detected match the engine computes any requested measures
-or calculations and compiles the results into a DataFrame formatted
-to mirror standard SQL query outputs.  By utilizing Pandas, the
-system retains both flexibility and accessibility, smoothly
-incorporating advanced pattern matching into conventional Python
-data-analysis workflows.
+produces a well-defined artifact consumed by the next, and it rests
+on three primary runtime components.  The \emph{parser} analyzes the
+SQL query, recognizes its components---partitioning, ordering, the
+pattern, conditions, and output measures---and organizes them into
+an AST that eases validation and prepares the query for matching.
+The \emph{automata compiler} converts the pattern into an NFA and
+then, for efficiency, into a DFA that removes transition ambiguity
+and handles repetitions, alternatives, and sequences in a uniform
+way~\cite{georgiou2025streaming}.  The \emph{execution engine}
+partitions and orders the input DataFrame, scans it with the
+compiled automaton under the configured skip policy, computes the
+requested measures for every match, and assembles the results into a
+DataFrame that mirrors standard SQL output---bringing declarative
+pattern matching into conventional Python data-analysis workflows.
+This chapter details the parsing, validation, and logical-planning
+stages; Chapter~\ref{chap:implementation} continues with automata
+compilation, Pandas execution, and optimization.
 
 % ----------------------------------------------------------------
 \section{SQL Parsing}
@@ -255,34 +197,22 @@ MATCH_RECOGNIZE (
 <rest>;
 \end{lstlisting}
 
-The \texttt{DEFINE} clause is optional in both the grammar and the
-execution pipeline.  If a pattern variable appears in
-\texttt{PATTERN} without a corresponding predicate in
-\texttt{DEFINE}, the logical plan assigns that variable an implicit
-always-true predicate.
-Measure aliases require the \texttt{AS} keyword in the adopted
-Trino grammar, while the alias after the
-\texttt{MATCH\_RECOGNIZE} clause itself is optional.
-
-\texttt{MATCH\_RECOGNIZE} is an optional sub-clause of the
-\texttt{FROM} clause.  The implementation focuses on one
-\texttt{MATCH\_RECOGNIZE} clause extracted from a top-level
-\texttt{SELECT} query and supports an optional outer
-\texttt{ORDER~BY}.  More complex SQL compositions such as full CTE
-rewriting, set-operation planning, and general nested-subquery
-execution are outside the main execution path, although selected
-subquery-like and multi-query scenarios are covered by the test
-suite as foundations for future extension.  This scope is sufficient
-for the core \texttt{FROM}-clause row-pattern use cases evaluated in
-this thesis.
-
-The parser must extract the mandatory pattern clause and the
-available optional sub-clauses of
-\texttt{MATCH\_RECOGNIZE}---\texttt{PARTITION~BY},
-\texttt{ORDER~BY}, \texttt{MEASURES}, rows-per-match,
-after-match-skip, \texttt{PATTERN}, \texttt{SUBSET}, and
-\texttt{DEFINE}---and deliver them to subsequent pipeline stages
-through a well-defined AST interface, described next.
+The \texttt{DEFINE} clause is optional: a pattern variable that
+appears in \texttt{PATTERN} without a predicate receives an implicit
+always-true predicate in the logical plan.  Measure aliases require
+the \texttt{AS} keyword in the adopted Trino grammar, while the
+alias after the \texttt{MATCH\_RECOGNIZE} clause itself is optional.
+The implementation focuses on one \texttt{MATCH\_RECOGNIZE} clause
+extracted from a top-level \texttt{SELECT} query with an optional
+outer \texttt{ORDER~BY}; full CTE rewriting, set-operation planning,
+and general nested-subquery execution are outside the main execution
+path, which is sufficient for the \texttt{FROM}-clause row-pattern
+use cases evaluated in this thesis.  The parser must extract the
+mandatory pattern clause and the optional
+sub-clauses---\texttt{PARTITION~BY}, \texttt{ORDER~BY},
+\texttt{MEASURES}, rows-per-match, after-match-skip,
+\texttt{SUBSET}, and \texttt{DEFINE}---and deliver them through a
+well-defined AST interface, described next.
 
 % ................................
 \subsubsection{The \texttt{MATCH\_RECOGNIZE} AST Interface}
@@ -532,52 +462,27 @@ implicit always-true predicate downstream.
 \label{subsec:meth-visitor}
 % ................................
 
-ANTLR4 generates an abstract visitor base class from the grammar~\cite{robson2022designpatterns}.
-The parsing module is structured as two cooperating visitor classes
-built on the generated \texttt{TrinoParserVisitor} base.
-
-\paragraph{\texttt{MatchRecognizeExtractor}.}
-The inner visitor overrides \texttt{visitPatternRecognition}
-and extracts the available sub-clauses in grammar order:
-\texttt{PARTITION~BY} column expressions,
-\texttt{ORDER~BY} sort items with direction and nulls handling,
-\texttt{MEASURES} definitions (handling \texttt{RUNNING}/\texttt{FINAL}
-prefix and alias via a dedicated \texttt{smart\_split()} helper that
-correctly traverses nested parentheses and quoted identifiers),
-rows-per-match mode, after-match-skip policy, the raw pattern string,
-\texttt{SUBSET} definitions, and \texttt{DEFINE} variable--condition
-pairs.  After extraction, the parser applies validation routines such
-as \texttt{validate\_clauses}, \texttt{validate\_identifiers},
-\texttt{validate\_pattern\_clause},
-\texttt{validate\_pattern\_variables\_defined}, and
-\texttt{validate\_function\_usage}.  These checks verify required
+ANTLR4 generates an abstract visitor base class from the
+grammar~\cite{robson2022designpatterns}; the parsing module builds
+two cooperating visitors on it.  The outer
+\texttt{FullQueryExtractor} handles the top-level statement rule,
+extracts the outer \texttt{SELECT} list, \texttt{FROM} reference,
+and trailing \texttt{ORDER~BY}, and locates the pattern-recognition
+node.  It delegates to the inner \texttt{MatchRecognizeExtractor},
+which extracts the sub-clauses in grammar order---partitioning,
+ordering, measures with their \texttt{RUNNING}/\texttt{FINAL}
+prefixes and aliases, rows-per-match mode, skip policy, the raw
+pattern string, \texttt{SUBSET} definitions, and \texttt{DEFINE}
+pairs---and then applies the validation routines that check required
 clauses, balanced pattern syntax, incompatible output-mode
-combinations such as exclusions with \texttt{WITH UNMATCHED ROWS},
-table-prefix misuse, skip targets, and malformed uses of supported
-navigation or aggregate functions.  Pattern variables that appear in
-\texttt{PATTERN} but not in \texttt{DEFINE} are intentionally allowed
-and later receive the implicit always-true predicate required by the
-standard.
-
-\paragraph{\texttt{FullQueryExtractor}.}
-The outer visitor handles the top-level \texttt{singleStatement}
-rule.  It extracts the outer \texttt{SELECT} column list, \texttt{FROM}
-table reference, and any trailing \texttt{ORDER~BY} clause via regex,
-then locates the \texttt{PatternRecognitionContext} node through a
-recursive tree walk and delegates to \texttt{MatchRecognizeExtractor}.
-
-\paragraph{Public API.}
-The entry point for all callers is
-\texttt{parse\_full\_query(query:~str)} $\to$ \texttt{FullQueryAST}.
-This function preprocesses the query string
-(e.g.\ rewriting empty \texttt{IN~()} predicates to a sentinel value
-to satisfy the grammar), constructs
-\texttt{InputStream} $\to$ \texttt{TrinoLexer} $\to$ \texttt{CommonTokenStream} $\to$ \texttt{TrinoParser},
-replaces the default ANTLR4 error listeners with a
+combinations, skip targets, and malformed navigation or aggregate
+function usage.  The public entry point,
+\texttt{parse\_full\_query(query)} $\to$ \texttt{FullQueryAST},
+preprocesses the query string, drives the generated lexer and
+parser, and replaces the default error listeners with a
 \texttt{CustomErrorListener} that raises a structured
-\texttt{ParserError} carrying exact line, column, and source snippet
-on any syntax violation, and visits the parse tree with
-\texttt{FullQueryExtractor} to produce the typed \texttt{FullQueryAST}.
+\texttt{ParserError} carrying the exact line, column, and source
+snippet of any syntax violation.
 
 % ................................
 \subsection{Testing and Evaluation of the Parser}
@@ -728,22 +633,19 @@ pattern variables first appear in the pattern string.  For each
 
 \begin{itemize}
   \item Cross-variable \texttt{NEXT($v$.$c$)} references must point
-    to a variable that appears later in the pattern timeline.
-    Self-references and unqualified column navigation are handled by
-    the evaluator according to the available row context.  If a
-    navigation condition is determined to be invalid for the pattern,
-    the engine returns an empty result set rather than raising an
-    exception, matching the Trino-oriented behavior used in the
-    tests.
+    to a variable that appears later in the pattern timeline;
+    self-references and unqualified navigation are resolved from the
+    row context.  A navigation condition that is invalid for the
+    pattern yields an empty result set rather than an exception,
+    matching the Trino-oriented behavior used in the tests.
 
-  \item \texttt{PREV($v$.$c$, $k$)} references are accepted when
-    the referenced variable is available in the pattern context; the
-    evaluator also checks boundary conditions during execution.
+  \item \texttt{PREV($v$.$c$, $k$)} references are accepted when the
+    referenced variable is available in the pattern context, with
+    boundary conditions checked during execution.
 
-  \item Nested navigation expressions (e.g.\
-    \texttt{NEXT(PREV(A.price, 1), 1)}) are handled by the enhanced
-    navigation-evaluation path; executor-side helper routines also
-    validate nested forms where they are used.
+  \item Nested navigation expressions such as
+    \texttt{NEXT(PREV(A.price, 1), 1)} are handled by the enhanced
+    navigation-evaluation path.
 \end{itemize}
 
 % ................................
