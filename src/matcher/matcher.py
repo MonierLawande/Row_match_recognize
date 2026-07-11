@@ -2570,6 +2570,7 @@ class EnhancedMatcher:
             # No vectorized masks to index by row, or too many transitions for
             # the int8 decision encoding: the walk falls back to the list scan.
             self._row_local_dfa_decisions = None
+            self._row_local_mask_run_lengths = None
             self._row_local_dfa_accept_flags = [
                 bool(self.dfa.states[s].is_accept) for s in range(len(self.dfa.states))
             ]
@@ -2604,6 +2605,29 @@ class EnhancedMatcher:
         self._row_local_dfa_accept_flags = [
             bool(self.dfa.states[s].is_accept) for s in range(len(self.dfa.states))
         ]
+
+        # Shared run-length table for the self-loop jump.  Every state's
+        # decision byte at row i is a pure function of the per-variable mask
+        # vector at row i, so rows whose mask vectors are identical to their
+        # predecessor's form runs with constant decisions in every state.  A
+        # self-looping transition can therefore consume a whole run in one
+        # step instead of one row at a time.
+        if row_count > 1:
+            same_as_prev = np.ones(row_count - 1, dtype=bool)
+            for mask in condition_matrix_values:
+                arr = np.asarray(mask[:row_count], dtype=bool)
+                same_as_prev &= arr[1:] == arr[:-1]
+            change = np.empty(row_count, dtype=bool)
+            change[0] = True
+            np.logical_not(same_as_prev, out=change[1:])
+            run_starts = np.flatnonzero(change)
+            run_bounds = np.append(run_starts[1:], row_count)
+            run_ids = np.cumsum(change) - 1
+            self._row_local_mask_run_lengths = (
+                run_bounds[run_ids] - np.arange(row_count)
+            ).astype(np.int32, copy=False)
+        else:
+            self._row_local_mask_run_lengths = None
 
         self._row_local_transition_index = compact_index
         self._row_local_transition_index_cache_key = cache_key
@@ -7953,6 +7977,237 @@ class EnhancedMatcher:
 
         return None
 
+    def _compile_linear_dp_vector_measures(self, measures, plan, rows):
+        """Compile measures into vector specs over linear-DP token boundaries.
+
+        For a linear quantified plan the DP tables give every token boundary
+        of every match as an array lookup, so FIRST/LAST/COUNT-style measures
+        can be evaluated for all matches at once with numpy gathers instead
+        of one closure call per match.  Returns a list of
+        ``(alias, eval_fn)`` where ``eval_fn(boundaries, starts, count)``
+        yields the full output column, or None when any measure (or column
+        dtype edge case) is not supported; the caller then keeps the
+        per-match closure path, which is semantically identical.
+        """
+        if not hasattr(rows, "column_array") or not hasattr(rows, "non_null_mask"):
+            return None
+
+        token_vars = [str(token["var"]).upper() for token in plan]
+        token_mins = [token["min"] for token in plan]
+        specs = []
+
+        for alias, expr in measures.items():
+            semantics = self.measure_semantics.get(alias, "FINAL")
+            mplan = self._get_compiled_measure_plan(alias, expr, semantics)
+            if mplan is None:
+                return None
+            kind = mplan["kind"]
+
+            if kind == "MATCH_NUMBER":
+                specs.append((alias, lambda b, starts, count: np.arange(1, count + 1, dtype=np.int64)))
+                continue
+            if kind == "COUNT_STAR":
+                specs.append((alias, lambda b, starts, count: b[-1] - starts))
+                continue
+
+            var_name = mplan.get("var")
+            if not var_name:
+                return None
+            scope = self._measure_scope_members(var_name)
+            tokens = [i for i, v in enumerate(token_vars) if v in scope]
+
+            def token_length_sum(b, tokens=tokens):
+                total = None
+                for i in tokens:
+                    length = b[i + 1] - b[i]
+                    total = length if total is None else total + length
+                return total
+
+            if kind == "COUNT_VAR_STAR":
+                specs.append((alias, lambda b, starts, count, _sum=token_length_sum,
+                              _tokens=tuple(tokens):
+                              _sum(b) if _tokens else np.zeros(count, dtype=np.int64)))
+                continue
+
+            field = mplan.get("field")
+            if kind in ("COUNT_FIELD", "FIRST", "LAST"):
+                column = rows.column_array(field) if field else None
+                if field and column is None:
+                    return None
+            else:
+                return None
+
+            if kind == "COUNT_FIELD":
+                if rows.column_all_non_null(field):
+                    specs.append((alias, lambda b, starts, count, _sum=token_length_sum,
+                                  _tokens=tuple(tokens):
+                                  _sum(b) if _tokens else np.zeros(count, dtype=np.int64)))
+                else:
+                    mask = rows.non_null_mask(field)
+                    if mask is None:
+                        return None
+                    prefix = np.concatenate(
+                        ([0], np.cumsum(np.asarray(mask, dtype=np.int64)))
+                    )
+                    def count_field_vec(b, starts, count, tokens=tokens, prefix=prefix):
+                        total = np.zeros(count, dtype=np.int64)
+                        for i in tokens:
+                            total = total + (prefix[b[i + 1]] - prefix[b[i]])
+                        return total
+                    specs.append((alias, count_field_vec))
+                continue
+
+            # FIRST / LAST: the value row is the first (last) non-empty scope
+            # segment.  A scope token with min >= 1 makes the result
+            # structurally guaranteed; otherwise the column dtype must
+            # support a NULL fallback identical to the closure path.
+            guaranteed = any(token_mins[i] >= 1 for i in tokens)
+            dtype_kind = getattr(column, "dtype", None)
+            dtype_kind = dtype_kind.kind if dtype_kind is not None else None
+            if not guaranteed and dtype_kind not in ("O", "f", "i", "u", "b"):
+                return None
+
+            def first_last_vec(b, starts, count, tokens=tokens, column=column,
+                               last=(kind == "LAST"), guaranteed=guaranteed):
+                pos = np.full(count, -1, dtype=np.int64)
+                order = tokens if last else reversed(tokens)
+                for i in order:
+                    length = b[i + 1] - b[i]
+                    candidate = (b[i + 1] - 1) if last else b[i]
+                    pos = np.where(length > 0, candidate, pos)
+                if guaranteed:
+                    return column[pos]
+                found = pos >= 0
+                if found.all():
+                    return column[pos]
+                if column.dtype == object:
+                    values = np.empty(count, dtype=object)
+                    values[found] = column[pos[found]]
+                    values[~found] = None
+                else:
+                    values = np.full(count, np.nan)
+                    values[found] = column[pos[found]]
+                return values
+
+            specs.append((alias, first_last_vec))
+
+        return specs
+
+    def _compile_dfa_vector_measures(self, measures, rows):
+        """Compile measures into specs over flat match-segment arrays.
+
+        The DFA walk records each match's kept segments into flat arrays, so
+        FIRST/LAST/COUNT-style measures can be evaluated for all matches at
+        once with grouped numpy reductions.  Returns a list of
+        ``(alias, kind, scope_names, column, prefix, plain_length)`` specs or
+        None when any measure is unsupported (the per-match closure path then
+        runs unchanged).
+        """
+        if not hasattr(rows, "column_array") or not hasattr(rows, "non_null_mask"):
+            return None
+        specs = []
+        for alias, expr in measures.items():
+            semantics = self.measure_semantics.get(alias, "FINAL")
+            mplan = self._get_compiled_measure_plan(alias, expr, semantics)
+            if mplan is None:
+                return None
+            kind = mplan["kind"]
+            if kind in ("MATCH_NUMBER", "COUNT_STAR"):
+                specs.append((alias, kind, (), None, None, False))
+                continue
+            var_name = mplan.get("var")
+            if not var_name:
+                return None
+            scope_names = frozenset(self._measure_scope_members(var_name))
+            field = mplan.get("field")
+            if kind == "COUNT_VAR_STAR":
+                specs.append((alias, "COUNT_SEG", scope_names, None, None, True))
+                continue
+            if kind == "COUNT_FIELD":
+                column = rows.column_array(field) if field else None
+                if field and column is None:
+                    return None
+                if rows.column_all_non_null(field):
+                    specs.append((alias, "COUNT_SEG", scope_names, None, None, True))
+                else:
+                    mask = rows.non_null_mask(field)
+                    if mask is None:
+                        return None
+                    prefix = np.concatenate(
+                        ([0], np.cumsum(np.asarray(mask, dtype=np.int64)))
+                    )
+                    specs.append((alias, "COUNT_SEG", scope_names, None, prefix, False))
+                continue
+            if kind in ("FIRST", "LAST"):
+                column = rows.column_array(field) if field else None
+                if column is None:
+                    return None
+                if getattr(column, "dtype", None) is None or column.dtype.kind not in "Ofiub":
+                    return None
+                specs.append((alias, kind, scope_names, column, None, False))
+                continue
+            return None
+        return specs
+
+    @staticmethod
+    def _eval_dfa_vector_measure(spec, env):
+        """Evaluate one DFA vector measure spec over the segment arrays."""
+        _alias, kind, scope_names, column, prefix, plain_length = spec
+        count = env["count"]
+        if kind == "MATCH_NUMBER":
+            return np.arange(1, count + 1, dtype=np.int64)
+        if kind == "COUNT_STAR":
+            return env["ends"] - env["starts"] + 1
+
+        scope_codes = [
+            code for code, name in enumerate(env["uniques"])
+            if str(name).upper() in scope_names
+        ]
+        codes = env["codes"]
+        if scope_codes:
+            if len(scope_codes) == 1:
+                seg_mask = codes == scope_codes[0]
+            else:
+                seg_mask = np.isin(codes, scope_codes)
+        else:
+            seg_mask = np.zeros(len(codes), dtype=bool)
+
+        m_ids = env["m_ids"]
+        seg_starts = env["seg_starts"]
+        seg_stops = env["seg_stops"]
+
+        if kind == "COUNT_SEG":
+            if plain_length:
+                weights = (seg_stops - seg_starts)[seg_mask]
+            else:
+                weights = (prefix[seg_stops] - prefix[seg_starts])[seg_mask]
+            return np.bincount(
+                m_ids[seg_mask], weights=weights, minlength=count
+            ).astype(np.int64, copy=False)
+
+        # FIRST / LAST over the match's masked segments.
+        idx = np.flatnonzero(seg_mask)
+        m = m_ids[idx]
+        pos = np.full(count, -1, dtype=np.int64)
+        if kind == "FIRST":
+            uniq, sel = np.unique(m, return_index=True)
+            pos[uniq] = seg_starts[idx[sel]]
+        else:
+            idx_r = idx[::-1]
+            uniq, sel = np.unique(m[::-1], return_index=True)
+            pos[uniq] = seg_stops[idx_r[sel]] - 1
+        found = pos >= 0
+        if found.all():
+            return column[pos]
+        if column.dtype == object:
+            values = np.empty(count, dtype=object)
+            values[found] = column[pos[found]]
+            values[~found] = None
+            return values
+        values = np.full(count, np.nan)
+        values[found] = column[pos[found]]
+        return values
+
     def _run_fast_one_row_pass(self, rows, config, measures):
         """Fused enumeration + output for ONE ROW PER MATCH fast paths.
 
@@ -8084,16 +8339,82 @@ class EnhancedMatcher:
             row_idx_column.append(start)
             match_count += 1
 
+        if mode == "linear_dp":
+            vector_specs = self._compile_linear_dp_vector_measures(measures, plan, rows)
+            if vector_specs is not None:
+                # Vectorized output: the scan only collects match starts;
+                # boundaries and every output column are computed with numpy
+                # gathers afterwards.  Values and dtypes are identical to the
+                # per-match closure path.
+                best_ends = linear_dp_ctx[3]
+                advance = np.arange(row_count + 1, dtype=np.int64)
+                for be in best_ends:
+                    advance = be[np.clip(advance, 0, row_count)]
+                starts_list: List[int] = []
+                starts_append = starts_list.append
+                sp = start_positions
+                sp_len = len(sp) if sp is not None else 0
+                cursor = 0
+                pos = 0
+                while pos < row_count:
+                    if sp is not None:
+                        while cursor < sp_len and sp[cursor] < pos:
+                            cursor += 1
+                        if cursor >= sp_len:
+                            break
+                        pos = int(sp[cursor])
+                        cursor += 1
+                    starts_append(pos)
+                    pos = int(advance[pos])
+                starts = np.asarray(starts_list, dtype=np.int64)
+                count = len(starts)
+                boundaries = [starts]
+                bpos = starts
+                for be in best_ends:
+                    bpos = be[bpos]
+                    boundaries.append(bpos)
+
+                columns: Dict[str, List[Any]] = {}
+                for col, arr in prefix_columns:
+                    gathered = arr[starts]
+                    if gathered.dtype == object:
+                        none_mask = np.array(
+                            [value is None for value in gathered.tolist()], dtype=bool
+                        )
+                        if none_mask.all():
+                            continue
+                        if none_mask.any():
+                            gathered = np.where(none_mask, np.nan, gathered)
+                    columns[col] = gathered
+                for alias, eval_fn in vector_specs:
+                    columns[alias] = eval_fn(boundaries, starts, count)
+                columns["MATCH_NUMBER"] = np.arange(1, count + 1, dtype=np.int64)
+                columns["_original_row_idx"] = starts
+
+                if getattr(self, "_fast_columnar_result", False):
+                    self._fast_one_row_columns = (columns, count)
+                    return []
+                names = list(columns.keys())
+                value_lists = list(columns.values())
+                return [
+                    dict(zip(names, row_values))
+                    for row_values in zip(*value_lists)
+                ] if count else []
+
         if mode in ("linear", "linear_dp"):
             search = self._linear_search_iterative
             dp_token_ends = linear_dp_ctx[5] if linear_dp_ctx is not None else None
+            sp = start_positions
+            sp_len = len(sp) if sp is not None else 0
+            cursor = 0
             while start < row_count:
-                if start_position_mask is not None and not start_position_mask[start]:
-                    next_pos = start_positions.searchsorted(start)
-                    if next_pos >= len(start_positions):
+                if sp is not None:
+                    while cursor < sp_len and sp[cursor] < start:
+                        cursor += 1
+                    if cursor >= sp_len:
                         break
-                    start = int(start_positions[next_pos])
-                    continue
+                    start = int(sp[cursor])
+                    cursor += 1
                 if dp_token_ends is not None:
                     segments = self._linear_dp_segments(dp_token_ends, start)
                 else:
@@ -8115,34 +8436,65 @@ class EnhancedMatcher:
         else:
             decisions = self._row_local_dfa_decisions
             accept_flags = self._row_local_dfa_accept_flags
+            run_lengths = getattr(self, "_row_local_mask_run_lengths", None)
             start_state = self.start_state
+            dfa_vector_specs = self._compile_dfa_vector_measures(measures, rows)
+            if dfa_vector_specs is not None:
+                # Vectorized output: the walk records each match's kept
+                # segments into flat lists; measures become grouped numpy
+                # reductions after the scan.
+                seg_var_names: List[Any] = []
+                seg_name_append = seg_var_names.append
+                seg_starts_list: List[int] = []
+                seg_start_append = seg_starts_list.append
+                seg_stops_list: List[int] = []
+                seg_stop_append = seg_stops_list.append
+                seg_counts_list: List[int] = []
+                seg_count_append = seg_counts_list.append
+                match_starts_list: List[int] = []
+                match_start_append = match_starts_list.append
+                match_ends_list: List[int] = []
+                match_end_append = match_ends_list.append
+            # Candidate starts are visited through a monotone cursor: the
+            # scan position only moves forward, so advancing an index into
+            # the sorted candidate array replaces one binary search per gap.
+            sp = start_positions
+            sp_len = len(sp) if sp is not None else 0
+            cursor = 0
             while start < row_count:
-                if start_position_mask is not None and not start_position_mask[start]:
-                    next_pos = start_positions.searchsorted(start)
-                    if next_pos >= len(start_positions):
+                if sp is not None:
+                    while cursor < sp_len and sp[cursor] < start:
+                        cursor += 1
+                    if cursor >= sp_len:
                         break
-                    start = int(start_positions[next_pos])
-                    continue
+                    start = int(sp[cursor])
+                    cursor += 1
                 state = start_state
+                state_plan = decisions[state]
                 idx = start
                 accepted_end = -1
                 segment_records = []
                 current_var = None
                 segment_start = start
-                while idx < row_count:
-                    state_plan = decisions[state]
-                    if state_plan is None:
-                        break
+                while idx < row_count and state_plan is not None:
                     transition_idx = state_plan[0][idx]
                     if transition_idx == 255:
                         break
-                    matched_var, state, _is_excluded = state_plan[1][transition_idx]
+                    matched_var, next_state, _is_excluded = state_plan[1][transition_idx]
                     if matched_var is not current_var:
                         if current_var is not None:
                             segment_records.append((current_var, segment_start, idx))
                         current_var = matched_var
                         segment_start = idx
-                    idx += 1
+                    if next_state == state and run_lengths is not None:
+                        # Self-loop: the decision byte is constant across the
+                        # mask run, so the whole run stays in this state under
+                        # this variable.  Consume it in one step.
+                        idx += int(run_lengths[idx])
+                    else:
+                        state = next_state
+                        state_plan = decisions[state]
+                        idx += 1
                     if accept_flags[state]:
                         accepted_end = idx - 1
                 if accepted_end < 0:
@@ -8151,14 +8503,79 @@ class EnhancedMatcher:
                 if current_var is not None:
                     segment_records.append((current_var, segment_start, idx))
                 limit = accepted_end + 1
-                segs = []
-                for seg_var, seg_start, seg_stop in segment_records:
-                    if seg_start >= limit:
-                        break
-                    segs.append((seg_var, seg_start, seg_stop if seg_stop <= limit else limit))
-                emit(segs, start, accepted_end)
-                match_number += 1
+                if dfa_vector_specs is not None:
+                    kept = 0
+                    for seg_var, seg_start, seg_stop in segment_records:
+                        if seg_start >= limit:
+                            break
+                        seg_name_append(seg_var)
+                        seg_start_append(seg_start)
+                        seg_stop_append(seg_stop if seg_stop <= limit else limit)
+                        kept += 1
+                    seg_count_append(kept)
+                    match_start_append(start)
+                    match_end_append(accepted_end)
+                else:
+                    segs = []
+                    for seg_var, seg_start, seg_stop in segment_records:
+                        if seg_start >= limit:
+                            break
+                        segs.append((seg_var, seg_start, seg_stop if seg_stop <= limit else limit))
+                    emit(segs, start, accepted_end)
+                    match_number += 1
                 start = accepted_end + 1
+
+            if dfa_vector_specs is not None:
+                import pandas as pd
+
+                count = len(match_starts_list)
+                starts_arr = np.asarray(match_starts_list, dtype=np.int64)
+                if seg_var_names:
+                    seg_codes, seg_uniques = pd.factorize(
+                        np.asarray(seg_var_names, dtype=object)
+                    )
+                else:
+                    seg_codes = np.empty(0, dtype=np.int64)
+                    seg_uniques = []
+                env = {
+                    "count": count,
+                    "starts": starts_arr,
+                    "ends": np.asarray(match_ends_list, dtype=np.int64),
+                    "codes": seg_codes,
+                    "uniques": list(seg_uniques),
+                    "seg_starts": np.asarray(seg_starts_list, dtype=np.int64),
+                    "seg_stops": np.asarray(seg_stops_list, dtype=np.int64),
+                    "m_ids": np.repeat(
+                        np.arange(count, dtype=np.int64),
+                        np.asarray(seg_counts_list, dtype=np.int64),
+                    ),
+                }
+                vec_columns: Dict[str, Any] = {}
+                for col, arr in prefix_columns:
+                    gathered = arr[starts_arr]
+                    if gathered.dtype == object:
+                        none_mask = np.array(
+                            [value is None for value in gathered.tolist()], dtype=bool
+                        )
+                        if none_mask.all():
+                            continue
+                        if none_mask.any():
+                            gathered = np.where(none_mask, np.nan, gathered)
+                    vec_columns[col] = gathered
+                for spec in dfa_vector_specs:
+                    vec_columns[spec[0]] = self._eval_dfa_vector_measure(spec, env)
+                vec_columns["MATCH_NUMBER"] = np.arange(1, count + 1, dtype=np.int64)
+                vec_columns["_original_row_idx"] = starts_arr
+
+                if getattr(self, "_fast_columnar_result", False):
+                    self._fast_one_row_columns = (vec_columns, count)
+                    return []
+                names = list(vec_columns.keys())
+                value_lists = list(vec_columns.values())
+                return [
+                    dict(zip(names, row_values))
+                    for row_values in zip(*value_lists)
+                ] if count else []
 
         # Assemble columns in the same first-seen key order the dict-based
         # emit produced: prefix columns (omitting columns that never carried
