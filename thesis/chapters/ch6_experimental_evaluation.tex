@@ -1530,22 +1530,14 @@ should use Table~\ref{tab:memory_cache}.
   \label{fig:avg_footprint_by_size}
 \end{figure}
 
-\begin{figure}[htbp]
-  \centering
-  \includegraphics[width=0.85\textwidth]{images/viz_correctness.png}
-  \caption[Cross-system correctness by pattern]{Cross-system correctness by pattern: for every pattern, Trino and Oracle reproduced the proposed engine's normalized output on all six dataset sizes.  The tabular form is in Table~\ref{tab:cross_system_correctness} (Appendix~\ref{app:benchmark-tables}).}
-  \label{fig:correctness}
-\end{figure}
-
-
-Figures~\ref{fig:overall_stats}--\ref{fig:correctness} summarize the
-main findings, with the underlying
-Tables~\ref{tab:overall_stats}--\ref{tab:cross_system_correctness} in
+Figures~\ref{fig:overall_stats}--\ref{fig:avg_footprint_by_size}
+summarize the main findings, with the underlying tables in
 Appendix~\ref{app:benchmark-tables}.  All 90 benchmark cells completed
-successfully, and Trino and Oracle produced output identical to the
-proposed engine's normalized output for all 30 pattern--size
-combinations each---all three systems produced identical result
-sets.  The proposed Pandas engine had the lowest average
+successfully, and Trino and Oracle reproduced the proposed engine's
+normalized output for all 30 pattern--size combinations each---verified
+cell by cell in Table~\ref{tab:cross_system_correctness}
+(Appendix~\ref{app:benchmark-tables}), so all three systems produced
+identical result sets.  The proposed Pandas engine had the lowest average
 execution time in this benchmark (0.20\,s), ahead of Oracle
 (0.94\,s) and a fully-warmed Trino (1.93\,s): it recorded the
 lowest time on all 30 pattern--size cells, faster than Trino by
@@ -1610,16 +1602,27 @@ it costs more per-query working memory on the sequence-style families
 (Figure~\ref{fig:query_memory}).
 
 Figure~\ref{fig:relative_comparison} condenses the trade-off into a
-single relative view.  It shows the shape of the result compactly: a
-large execution-time and throughput advantage and a far smaller
-operational footprint, obtained at the cost of a per-query memory
-indicator that is comparable to the databases' rather than below it
-(about 41\% above Trino's counter and level with Oracle's).
+single relative view, expressing each metric as an \emph{advantage
+factor}---how many times better the proposed engine is than each SQL
+engine, read against parity at $1\times$.  It shows the shape of the
+result compactly: large execution-time ($4.8$--$10\times$) and
+throughput ($4.0$--$8.3\times$) advantages and a far smaller
+operational footprint ($6.7$--$50\times$), obtained at the cost of a
+per-query memory indicator that is comparable to the databases' rather
+than below it---the only point below parity, at $0.71\times$ (about
+$41\%$ above Trino's counter) and level with Oracle's ($1.00\times$).
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=0.9\textwidth]{images/viz_relative_comparison.png}
-  \caption[Proposed engine relative to each SQL engine]{Proposed engine relative to each SQL engine, averaged over the 30 benchmark cells (symmetric-log axis).  Lower is better for execution time and both memory metrics; higher is better for throughput.  The underlying values are in Table~\ref{tab:relative_comparison} (Appendix~\ref{app:benchmark-tables}).}
+  \includegraphics[width=0.95\textwidth]{images/viz_relative_comparison.png}
+  \caption[Proposed engine relative to each SQL engine]{Advantage
+    factor of the proposed engine over each SQL engine, averaged over
+    the 30 benchmark cells and read against parity at $1\times$ (log
+    scale): a value of $n\times$ means the engine is $n$ times better
+    on that metric, and the single point left of parity (query memory
+    versus Trino) is the engine's one trade-off.  The underlying signed
+    percentages are in Table~\ref{tab:relative_comparison}
+    (Appendix~\ref{app:benchmark-tables}).}
   \label{fig:relative_comparison}
 \end{figure}
 
@@ -1647,27 +1650,24 @@ two scenarios (verified for all 90 cells), so any time difference is
 attributable to sorting alone.  Scenario~A (ordered) is thus the
 best case and Scenario~B (shuffled) the fair worst case for the
 ordering step, and the two bracket the engine's realistic
-performance.  Table~\ref{tab:ordering_scenarios} reports the average
-per system.
+performance.  Figure~\ref{fig:ordering_scenarios} shows the average
+per system; the full per-size breakdown for both scenarios is in
+Table~\ref{tab:ordering_scenarios} and
+Table~\ref{tab:ordering_by_size} (Appendix~\ref{app:benchmark-tables}).
 
-\begin{table}[H]
-\centering
-\caption{Average execution time under ordered (Scenario~A) and
-  shuffled (Scenario~B) input, over all 30 pattern--size cells per
-  system.  Scenario~B forces a genuine sort in every system; match
-  counts are identical between the two scenarios.}
-\label{tab:ordering_scenarios}
-\begin{tabular}{lrrr}
-\toprule
-\textbf{System} & \textbf{A ordered (s)} & \textbf{B shuffled (s)}
-  & \textbf{Slowdown} \\
-\midrule
-Proposed Pandas engine & 0.20 & 0.27 & $1.34\times$ \\
-Trino~473              & 1.93 & 2.18 & $1.13\times$ \\
-Oracle XE~21c          & 0.94 & 1.09 & $1.16\times$ \\
-\bottomrule
-\end{tabular}
-\end{table}
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.78\textwidth]{images/viz_ordering_scenarios.png}
+  \caption[Ordered vs shuffled input by system]{Average execution time
+    under ordered (Scenario~A) and shuffled (Scenario~B) input, over
+    all 30 pattern--size cells per system (log scale); the B/A slowdown
+    is shown above each pair.  Scenario~B forces a genuine sort in
+    every system, and match counts are identical between the two
+    scenarios.  Underlying values in Table~\ref{tab:ordering_scenarios}
+    and Table~\ref{tab:ordering_by_size}
+    (Appendix~\ref{app:benchmark-tables}).}
+  \label{fig:ordering_scenarios}
+\end{figure}
 
 Three observations follow.  \emph{First}, the proposed engine incurs
 the largest relative slowdown ($1.34\times$) because it is the only
@@ -1691,7 +1691,8 @@ of the ordered-input shortcut---it survives when every system must
 sort.
 
 These measurements also validate the complexity model of
-Section~\ref{subsec:eval-complexity} directly.  The incremental cost
+Section~\ref{subsec:eval-complexity} directly, as
+Figure~\ref{fig:sort_cost_scaling} makes visible.  The incremental cost
 of Scenario~B over Scenario~A isolates the ordering step, and it
 behaves exactly as an $O(n\log n)$ sort should: at the larger sizes it
 becomes essentially \emph{pattern-independent} (its spread across the
@@ -1709,7 +1710,24 @@ approximately linear over the range ($R^2 \geq 0.99$ for a linear
 time-versus-size fit).  In short, the empirical results match the
 assumed complexity on both sides: linear scaling when the input is
 already ordered and the sort is skipped, and an added $O(n\log n)$
-term when a genuine sort is required.
+term when a genuine sort is required.  The per-size figures behind this
+paragraph are tabulated in Table~\ref{tab:sort_cost_by_size}
+(Appendix~\ref{app:benchmark-tables}).
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{images/viz_sort_cost_scaling.png}
+  \caption[Sorting cost validates the $O(n\log n)$ term]{Empirical
+    validation of the ordering-step complexity for the proposed engine.
+    \emph{Left}: the incremental sort cost per row (Scenario~B minus
+    Scenario~A, averaged over the five patterns) rises with input size,
+    the signature of super-linear growth.  \emph{Right}: dividing that
+    cost by $n\log_2 n$ removes the trend, leaving a flat band---the
+    signature of an $O(n\log n)$ sort.  Underlying values in
+    Table~\ref{tab:sort_cost_by_size}
+    (Appendix~\ref{app:benchmark-tables}).}
+  \label{fig:sort_cost_scaling}
+\end{figure}
 
 % ................................................................
 \subsection{Evaluation Validity}
