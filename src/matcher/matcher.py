@@ -7709,6 +7709,44 @@ class EnhancedMatcher:
             return None
         return row.get(field_key)
 
+    def _get_measure_column_array(
+        self,
+        rows: List[Dict[str, Any]],
+        field_name: str,
+    ) -> Optional[np.ndarray]:
+        """Return a backing column array without changing field resolution.
+
+        ALL ROWS execution currently materializes row dictionaries because it
+        must reconstruct every output row.  Aggregate evaluation, however,
+        only needs a single field at a time.  Reading that field from the
+        ordered source DataFrame avoids one dictionary lookup per aggregate
+        and row.  Lazy row accessors expose the same capability directly.
+
+        Exact-name lookup is attempted before the SQL-style case-insensitive
+        fallback, matching :meth:`_get_measure_row_value`.  ``None`` tells the
+        caller to retain the row-oriented path, so custom row stores and
+        missing fields preserve their existing behavior.
+        """
+        if hasattr(rows, "column_array"):
+            column = rows.column_array(field_name)
+            if column is not None:
+                return column
+
+        source_df = getattr(self, "_source_dataframe", None)
+        if source_df is None or not hasattr(source_df, "columns"):
+            return None
+
+        resolved = field_name if field_name in source_df.columns else None
+        if resolved is None:
+            requested_upper = str(field_name).upper()
+            for column_name in source_df.columns:
+                if str(column_name).upper() == requested_upper:
+                    resolved = column_name
+                    break
+        if resolved is None:
+            return None
+        return source_df[resolved].to_numpy(copy=False)
+
     def _is_measure_row_field_non_null(self, rows: List[Dict[str, Any]], row_idx: int, field_name: str) -> bool:
         """Check field non-nullness using a column mask when the row store supports it."""
         if row_idx < 0 or row_idx >= len(rows):
@@ -8615,18 +8653,168 @@ class EnhancedMatcher:
             "field": func_match.group(3),
         }
 
+    @staticmethod
+    def _try_vectorized_running_aggregate(
+        func: str,
+        relevant_indices: List[int],
+        output_indices: List[int],
+        column: Optional[np.ndarray],
+    ) -> Optional[List[Any]]:
+        """Evaluate a numeric RUNNING aggregate with ordered array prefixes.
+
+        This path is independent of pattern shape: ``relevant_indices`` is
+        the already-resolved variable or SUBSET scope, while
+        ``output_indices`` is the row order of the match.  Consequently the
+        same implementation applies to sequences, alternations, quantified
+        groups, exclusions, and sparse scopes.
+
+        Only native numeric columns use the array path.  Object, decimal,
+        temporal, extension, and custom values retain the scalar evaluator so
+        SQL coercion, ordering, and error behavior are not broadened merely
+        for speed.  The size threshold avoids allocating prefix arrays for
+        short matches where the scalar merge is cheaper.
+        """
+        output_count = len(output_indices)
+        if output_count < 256:
+            return None
+
+        output_array = np.asarray(output_indices, dtype=np.intp)
+        relevant_array = np.asarray(relevant_indices, dtype=np.intp)
+
+        if relevant_array.size:
+            # The legacy implementation used a set, so duplicate scope rows
+            # contributed once.  Preserve that behavior before mapping scope
+            # rows to output positions.
+            if relevant_array.size > 1:
+                deduplicate = np.empty(relevant_array.size, dtype=bool)
+                deduplicate[0] = True
+                deduplicate[1:] = relevant_array[1:] != relevant_array[:-1]
+                relevant_array = relevant_array[deduplicate]
+
+            positions = np.searchsorted(output_array, relevant_array)
+            mapped = positions < output_count
+            if mapped.any():
+                mapped_indices = np.nonzero(mapped)[0]
+                mapped[mapped_indices] &= (
+                    output_array[positions[mapped_indices]]
+                    == relevant_array[mapped_indices]
+                )
+            positions = positions[mapped]
+            relevant_array = relevant_array[mapped]
+        else:
+            positions = np.empty(0, dtype=np.intp)
+
+        if func == "COUNT_STAR":
+            events = np.zeros(output_count, dtype=np.int64)
+            events[positions] = 1
+            return np.cumsum(events, dtype=np.int64).tolist()
+
+        if column is None:
+            return None
+        column = np.asarray(column)
+        if column.dtype.kind not in "biuf":
+            return None
+
+        valid_rows = (relevant_array >= 0) & (relevant_array < len(column))
+        positions = positions[valid_rows]
+        relevant_array = relevant_array[valid_rows]
+        raw_values = column[relevant_array]
+
+        if raw_values.dtype.kind == "f":
+            non_null = ~np.isnan(raw_values)
+            positions = positions[non_null]
+            raw_values = raw_values[non_null]
+
+        events = np.zeros(output_count, dtype=np.int64)
+        events[positions] = 1
+        counts = np.cumsum(events, dtype=np.int64)
+
+        if func == "COUNT":
+            return counts.tolist()
+
+        if func in {"MIN", "MAX"}:
+            # MIN/MAX return the original scalar type; unlike SUM/AVG they do
+            # not coerce every input through float().  Preserve integer,
+            # unsigned, boolean, and floating dtypes while using a neutral
+            # sentinel only for output positions without a scope value.
+            kind = raw_values.dtype.kind
+            if kind == "f":
+                initial = np.inf if func == "MIN" else -np.inf
+            elif kind in "iu":
+                limits = np.iinfo(raw_values.dtype)
+                initial = limits.max if func == "MIN" else limits.min
+            elif kind == "b":
+                initial = True if func == "MIN" else False
+            else:
+                return None
+            values = np.full(output_count, initial, dtype=raw_values.dtype)
+            values[positions] = raw_values
+            if func == "MIN":
+                values = np.minimum.accumulate(values)
+            else:
+                values = np.maximum.accumulate(values)
+            result = values.astype(object)
+            result[counts == 0] = None
+            return result.tolist()
+
+        numeric_values = raw_values.astype(np.float64, copy=False)
+        if func in {"SUM", "AVG", "STDDEV", "STDDEV_SAMP", "STDDEV_POP", "VARIANCE", "VAR_SAMP", "VAR_POP"}:
+            contributions = np.zeros(output_count, dtype=np.float64)
+            contributions[positions] = numeric_values
+            totals = np.cumsum(contributions, dtype=np.float64)
+
+            if func == "SUM":
+                result = totals.astype(object)
+                result[counts == 0] = None
+                return result.tolist()
+
+            if func == "AVG":
+                valid = counts > 0
+                result = np.empty(output_count, dtype=object)
+                result[:] = None
+                result[valid] = totals[valid] / counts[valid]
+                return result.tolist()
+
+            squared = np.zeros(output_count, dtype=np.float64)
+            squared[positions] = numeric_values * numeric_values
+            sum_squares = np.cumsum(squared, dtype=np.float64)
+            sample = func in {"STDDEV", "STDDEV_SAMP", "VARIANCE", "VAR_SAMP"}
+            valid = counts >= (2 if sample else 1)
+            result = np.empty(output_count, dtype=object)
+            result[:] = None
+            denominator = counts[valid] - 1 if sample else counts[valid]
+            variance = (
+                sum_squares[valid]
+                - totals[valid] * totals[valid] / counts[valid]
+            ) / denominator
+            variance = np.maximum(variance, 0.0)
+            if func in {"STDDEV", "STDDEV_SAMP", "STDDEV_POP"}:
+                variance = np.sqrt(variance)
+            result[valid] = variance
+            return result.tolist()
+
+        return None
+
     def _precompute_simple_running_aggregate(
         self,
         plan: Dict[str, Any],
         match: Dict[str, Any],
         rows: List[Dict[str, Any]],
         output_indices: List[int],
-    ) -> Dict[int, Any]:
-        """Precompute a simple RUNNING aggregate for all output rows in a match."""
+    ) -> List[Any]:
+        """Precompute a RUNNING aggregate aligned with ``output_indices``.
+
+        Earlier versions built both an index-to-value dictionary and an
+        index-to-result dictionary.  Output rows are already processed in
+        ascending position order, so those hash tables added CPU and memory
+        without providing random access.  A merge-style walk over the ordered
+        aggregate scope produces the same values in one pass and returns a
+        dense list aligned with the output rows.
+        """
         variables = match.get("variables", {}) or {}
         output_indices = sorted(output_indices)
         if not output_indices:
-            return {}
+            return []
 
         def resolve_var_indices(var_name: Optional[str]) -> List[int]:
             if not var_name:
@@ -8639,33 +8827,55 @@ class EnhancedMatcher:
         kind = plan["kind"]
         if kind == "RUNNING_COUNT_STAR":
             relevant_indices = resolve_var_indices(None)
-            values_by_idx = {idx: 1 for idx in relevant_indices}
             func = "COUNT_STAR"
+            column = None
         elif kind == "RUNNING_COUNT_VAR_STAR":
             relevant_indices = resolve_var_indices(plan.get("var"))
-            values_by_idx = {idx: 1 for idx in relevant_indices}
             func = "COUNT_STAR"
+            column = None
         else:
             relevant_indices = resolve_var_indices(plan.get("var"))
             field = plan["field"]
-            values_by_idx = {
-                idx: self._get_measure_row_value(rows, idx, field)
-                for idx in relevant_indices
-            }
             func = plan["func"]
+            column = self._get_measure_column_array(rows, field)
 
-        relevant_set = set(relevant_indices)
-        result: Dict[int, Any] = {}
+        vectorized = self._try_vectorized_running_aggregate(
+            func,
+            relevant_indices,
+            output_indices,
+            column,
+        )
+        if vectorized is not None:
+            return vectorized
+
+        result: List[Any] = []
         count = 0
         non_null_count = 0
         total = 0.0
         sum_sq = 0.0
         current_min = None
         current_max = None
+        relevant_pos = 0
+        relevant_count = len(relevant_indices)
 
         for idx in output_indices:
-            if idx in relevant_set:
-                raw_value = values_by_idx.get(idx)
+            # Scope indices and output indices are both sorted.  Advance the
+            # scope cursor instead of probing a set/dict for every row.  The
+            # duplicate-skipping loop preserves the old set-based behavior if
+            # a malformed/custom match contains the same row more than once.
+            while relevant_pos < relevant_count and relevant_indices[relevant_pos] < idx:
+                relevant_pos += 1
+            in_scope = (
+                relevant_pos < relevant_count
+                and relevant_indices[relevant_pos] == idx
+            )
+            if in_scope:
+                raw_value = None
+                if func != "COUNT_STAR":
+                    if column is not None and 0 <= idx < len(column):
+                        raw_value = column[idx]
+                    else:
+                        raw_value = self._get_measure_row_value(rows, idx, field)
                 if func == "COUNT_STAR":
                     count += 1
                 elif func == "COUNT":
@@ -8686,30 +8896,37 @@ class EnhancedMatcher:
                     elif func == "MAX":
                         current_max = raw_value if current_max is None or raw_value > current_max else current_max
 
+                relevant_pos += 1
+                while (
+                    relevant_pos < relevant_count
+                    and relevant_indices[relevant_pos] == idx
+                ):
+                    relevant_pos += 1
+
             if func in {"COUNT_STAR", "COUNT"}:
-                result[idx] = count
+                result.append(count)
             elif func == "SUM":
-                result[idx] = total if non_null_count else None
+                result.append(total if non_null_count else None)
             elif func == "AVG":
-                result[idx] = (total / non_null_count) if non_null_count else None
+                result.append((total / non_null_count) if non_null_count else None)
             elif func == "MIN":
-                result[idx] = current_min
+                result.append(current_min)
             elif func == "MAX":
-                result[idx] = current_max
+                result.append(current_max)
             elif func in {"STDDEV", "STDDEV_SAMP", "VARIANCE", "VAR_SAMP"}:
                 if non_null_count < 2:
-                    result[idx] = None
+                    result.append(None)
                 else:
                     variance = (sum_sq - (total * total / non_null_count)) / (non_null_count - 1)
                     variance = max(variance, 0.0)
-                    result[idx] = variance if func in {"VARIANCE", "VAR_SAMP"} else math.sqrt(variance)
+                    result.append(variance if func in {"VARIANCE", "VAR_SAMP"} else math.sqrt(variance))
             elif func in {"STDDEV_POP", "VAR_POP"}:
                 if non_null_count < 1:
-                    result[idx] = None
+                    result.append(None)
                 else:
                     variance = (sum_sq - (total * total / non_null_count)) / non_null_count
                     variance = max(variance, 0.0)
-                    result[idx] = variance if func == "VAR_POP" else math.sqrt(variance)
+                    result.append(variance if func == "VAR_POP" else math.sqrt(variance))
 
         return result
 
@@ -8783,6 +9000,7 @@ class EnhancedMatcher:
                 elif op is ast.Mult:
                     fn = lambda fields, l=left, r=right: l(fields) * r(fields)
                 else:
+                    var_holder["has_division"] = True
                     fn = lambda fields, l=left, r=right: l(fields) / r(fields)
                 return [], fn
             if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
@@ -8800,7 +9018,7 @@ class EnhancedMatcher:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id.upper() in aggregate_names:
                 if len(node.args) != 1 or node.keywords:
                     raise ValueError("unsupported aggregate call shape")
-                var_holder = {"var": None, "fields": []}
+                var_holder = {"var": None, "fields": [], "has_division": False}
                 _, arg_fn = compile_leaf_arg(node.args[0], var_holder)
                 if var_holder["var"] is None:
                     raise ValueError("aggregate argument references no pattern variable")
@@ -8810,6 +9028,7 @@ class EnhancedMatcher:
                     "var": var_holder["var"],
                     "fields": var_holder["fields"],
                     "arg_fn": arg_fn,
+                    "has_division": var_holder["has_division"],
                 })
                 return lambda leaf_values, i=leaf_index: leaf_values[i]
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id.upper() == "NULLIF":
@@ -8866,32 +9085,83 @@ class EnhancedMatcher:
         match: Dict[str, Any],
         rows: List[Dict[str, Any]],
         output_indices: List[int],
-    ) -> Dict[int, Any]:
+    ) -> List[Any]:
         """Evaluate an arithmetic RUNNING aggregate plan in one O(n) pass."""
         variables = match.get("variables", {}) or {}
         output_indices = sorted(output_indices)
         if not output_indices:
-            return {}
+            return []
 
-        # Per-leaf per-row argument values, computed once.
-        leaf_rows: List[Dict[int, Any]] = []
+        # Per-leaf argument values aligned with that leaf's ordered scope.
+        # The previous representation used one dict per leaf and repeatedly
+        # fetched every field from row dictionaries.  Ordered arrays are both
+        # smaller and cheaper to merge with ordered output positions.
+        leaf_rows: List[Tuple[List[int], List[Any]]] = []
         for leaf in plan["leaves"]:
             # Resolve both ordinary pattern variables and SQL SUBSET union
             # variables.  The arithmetic plan accepts the same variable scope
             # syntax as the general aggregate evaluator, so looking up only a
             # direct key here silently produced empty inputs for expressions
             # such as SUM(T.value * T.weight), where T is a SUBSET.
-            indices = sorted(self._resolve_scope_indices(variables, leaf["var"]))
+            indices = sorted(set(self._resolve_scope_indices(variables, leaf["var"])))
             arg_fn = leaf["arg_fn"]
             fields = leaf["fields"]
-            values: Dict[int, Any] = {}
-            for idx in indices:
-                field_values = [self._get_measure_row_value(rows, idx, field) for field in fields]
-                if any(not self._is_non_null_measure_value(v) for v in field_values):
-                    values[idx] = None  # SQL aggregates skip NULL inputs
-                else:
-                    values[idx] = arg_fn(field_values)
-            leaf_rows.append(values)
+            columns = [self._get_measure_column_array(rows, field) for field in fields]
+            if leaf.get("has_division", False):
+                # NumPy scalar division by zero yields inf, whereas the legacy
+                # Python-scalar expression raises and activates the general
+                # evaluator fallback.  Keep the row store for this case.
+                columns = [None] * len(fields)
+            values: List[Any]
+
+            # The compiled row-local lambda naturally works on NumPy arrays.
+            # Restrict this to native numeric columns and expressions without
+            # division: scalar division by zero raises, whereas NumPy would
+            # silently produce infinity and change SQL fallback behavior.
+            can_vectorize_argument = (
+                len(indices) >= 256
+                and bool(fields)
+                and not leaf.get("has_division", False)
+                and all(
+                    column is not None
+                    and np.asarray(column).dtype.kind == "f"
+                    for column in columns
+                )
+            )
+            if can_vectorize_argument:
+                index_array = np.asarray(indices, dtype=np.intp)
+                max_column_length = min(len(column) for column in columns)
+                valid_rows = (index_array >= 0) & (index_array < max_column_length)
+                gathered = [
+                    np.asarray(column)[index_array[valid_rows]]
+                    for column in columns
+                ]
+                non_null = np.ones(int(valid_rows.sum()), dtype=bool)
+                for field_values in gathered:
+                    if field_values.dtype.kind == "f":
+                        non_null &= ~np.isnan(field_values)
+
+                values = [None] * len(indices)
+                if non_null.any():
+                    compact_fields = [field_values[non_null] for field_values in gathered]
+                    computed = np.asarray(arg_fn(compact_fields)).tolist()
+                    valid_positions = np.flatnonzero(valid_rows)[non_null].tolist()
+                    for position, value in zip(valid_positions, computed):
+                        values[position] = value
+            else:
+                values = []
+                for idx in indices:
+                    field_values = [
+                        column[idx]
+                        if column is not None and 0 <= idx < len(column)
+                        else self._get_measure_row_value(rows, idx, field)
+                        for field, column in zip(fields, columns)
+                    ]
+                    if any(not self._is_non_null_measure_value(v) for v in field_values):
+                        values.append(None)  # SQL aggregates skip NULL inputs
+                    else:
+                        values.append(arg_fn(field_values))
+            leaf_rows.append((indices, values))
 
         # Running state per leaf.
         states = [
@@ -8902,13 +9172,15 @@ class EnhancedMatcher:
                 "min": None,
                 "max": None,
                 "seen": set(),
+                "position": 0,
+                "base_func": leaf["func"].replace("_DISTINCT", ""),
+                "distinct": leaf["func"].endswith("_DISTINCT"),
             }
-            for _ in plan["leaves"]
+            for leaf in plan["leaves"]
         ]
 
-        def leaf_value(leaf, state):
-            func = leaf["func"]
-            base_func = func.replace("_DISTINCT", "")
+        def leaf_value(state):
+            base_func = state["base_func"]
             if base_func == "COUNT":
                 return state["count"]
             if state["count"] == 0:
@@ -8940,15 +9212,20 @@ class EnhancedMatcher:
             return None
 
         combine = plan["combine"]
-        result: Dict[int, Any] = {}
+        result: List[Any] = []
         for idx in output_indices:
-            for leaf, state, values in zip(plan["leaves"], states, leaf_rows):
-                if idx not in values:
+            for state, (indices, values) in zip(states, leaf_rows):
+                position = state["position"]
+                while position < len(indices) and indices[position] < idx:
+                    position += 1
+                state["position"] = position
+                if position >= len(indices) or indices[position] != idx:
                     continue
-                value = values[idx]
+                value = values[position]
+                state["position"] = position + 1
                 if value is None:
                     continue
-                if leaf["func"].endswith("_DISTINCT"):
+                if state["distinct"]:
                     try:
                         distinct_key = value
                         already_seen = distinct_key in state["seen"]
@@ -8959,7 +9236,7 @@ class EnhancedMatcher:
                         continue
                     state["seen"].add(distinct_key)
                 state["count"] += 1
-                base_func = leaf["func"].replace("_DISTINCT", "")
+                base_func = state["base_func"]
                 if base_func in (
                     "SUM", "AVG", "STDDEV", "STDDEV_SAMP", "STDDEV_POP",
                     "VARIANCE", "VAR_SAMP", "VAR_POP",
@@ -8975,11 +9252,11 @@ class EnhancedMatcher:
                 elif base_func == "MAX":
                     state["max"] = value if state["max"] is None or value > state["max"] else state["max"]
 
-            leaf_values = [leaf_value(leaf, state) for leaf, state in zip(plan["leaves"], states)]
+            leaf_values = [leaf_value(state) for state in states]
             try:
-                result[idx] = combine(leaf_values)
+                result.append(combine(leaf_values))
             except ZeroDivisionError:
-                result[idx] = None
+                result.append(None)
         return result
 
     def _prepare_measure_output_plans(self, measures, rows=None):
@@ -9568,7 +9845,7 @@ class EnhancedMatcher:
         empty_pattern_rows = set(match.get("empty_pattern_rows") or ())
 
         # Process each row in the match range
-        for idx in all_indices:
+        for output_pos, idx in enumerate(all_indices):
             # Skip excluded rows
             if idx in excluded_rows:
                 continue
@@ -9607,8 +9884,9 @@ class EnhancedMatcher:
                         result[alias] = final_compiled_values[alias]
                         continue
 
-                    if alias in running_aggregates and idx in running_aggregates[alias]:
-                        result[alias] = running_aggregates[alias][idx]
+                    running_values = running_aggregates.get(alias)
+                    if running_values is not None and output_pos < len(running_values):
+                        result[alias] = running_values[output_pos]
                         continue
 
                     # For RUNNING semantics or complex navigation expressions, create a context with variables only up to current row
