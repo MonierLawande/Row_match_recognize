@@ -1278,3 +1278,301 @@ class TestUnionVariableJavaReference:
         ]
         result = run_query(query, df)
         assert_rows(result, expected, ["id", "match", "val", "lower_or_higher", "label"])
+
+
+class TestVectorizedPatternCoverage:
+    """Verify that predicate vectorization is independent of pattern syntax.
+
+    MATCH_RECOGNIZE cannot safely vectorize every *matching operation*: empty
+    matches, exclusions, anchors, PERMUTE, SUBSET, non-default skip modes, and
+    context-dependent DEFINE expressions still require the general matcher.
+    Row-local DEFINE predicates, however, must be precomputed for every
+    supported pattern family so the general matcher can use the same boolean
+    decision arrays without changing semantics.
+    """
+
+    @pytest.fixture
+    def categorized_rows(self):
+        return pd.DataFrame({
+            "id": range(1, 9),
+            "category": ["A", "B", "C", "D", "A", "B", "C", "D"],
+            "value": [1, 2, 3, 4, 5, 6, 7, 8],
+        })
+
+    @pytest.mark.parametrize(
+        "pattern,extra_clause,define_clause,expected_variables",
+        [
+            (
+                "A B C",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+                {"A", "B", "C"},
+            ),
+            (
+                "A{1,2} B+ C*",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+                {"A", "B", "C"},
+            ),
+            (
+                "A B? C",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+                {"A", "B", "C"},
+            ),
+            (
+                "(A | B) C",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+                {"A", "B", "C"},
+            ),
+            (
+                "(A | B)+ (C{1,2} D*)+",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C', D AS D.category = 'D'",
+                {"A", "B", "C", "D"},
+            ),
+            (
+                "A {- B -} C",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+                {"A", "B", "C"},
+            ),
+            (
+                "^ A B C D A B C D $",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C', D AS D.category = 'D'",
+                {"A", "B", "C", "D"},
+            ),
+            (
+                "PERMUTE(A, B) C",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+                {"A", "B", "C"},
+            ),
+            (
+                "(() | A)",
+                "",
+                "A AS A.category = 'A'",
+                {"A"},
+            ),
+            (
+                "(A | B) C",
+                "SUBSET U = (A, B)",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+                {"A", "B", "C"},
+            ),
+            (
+                "A B C",
+                "",
+                "A AS A.category = 'A', B AS B.value > PREV(B.value), C AS C.category = 'C'",
+                {"A", "B", "C"},
+            ),
+        ],
+        ids=[
+            "sequence",
+            "bounded-and-unbounded-quantifiers",
+            "optional",
+            "alternation",
+            "nested",
+            "exclusion",
+            "anchors",
+            "permute",
+            "empty-alternation",
+            "subset",
+            "physical-navigation",
+        ],
+    )
+    def test_row_local_predicates_are_vectorized_for_every_pattern_family(
+        self,
+        monkeypatch,
+        categorized_rows,
+        pattern,
+        extra_clause,
+        define_clause,
+        expected_variables,
+    ):
+        from src.matcher.matcher import EnhancedMatcher
+
+        observed = []
+        original = EnhancedMatcher._vectorize_simple_define_conditions
+
+        def record_condition_matrix(matcher, rows):
+            matrix = original(matcher, rows)
+            observed.append(set(matrix))
+            return matrix
+
+        monkeypatch.setattr(
+            EnhancedMatcher,
+            "_vectorize_simple_define_conditions",
+            record_condition_matrix,
+        )
+
+        query = f"""
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES MATCH_NUMBER() AS match_id
+            ONE ROW PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN ({pattern})
+            {extra_clause}
+            DEFINE {define_clause}
+        ) AS m
+        """
+        match_recognize(query, categorized_rows)
+
+        assert observed
+        assert any(expected_variables <= variables for variables in observed)
+
+    def test_cross_variable_string_predicate_is_not_misclassified_as_row_local(
+        self, monkeypatch, categorized_rows
+    ):
+        """Qualified references to another variable require match context."""
+        from src.matcher.matcher import EnhancedMatcher
+
+        observed = []
+        original = EnhancedMatcher._vectorize_simple_define_conditions
+
+        def record_condition_matrix(matcher, rows):
+            matrix = original(matcher, rows)
+            observed.append(set(matrix))
+            return matrix
+
+        monkeypatch.setattr(
+            EnhancedMatcher,
+            "_vectorize_simple_define_conditions",
+            record_condition_matrix,
+        )
+
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES MATCH_NUMBER() AS match_id
+            PATTERN (A B)
+            DEFINE
+                A AS A.category = 'A',
+                B AS B.category = 'B' AND A.category = 'A'
+        ) AS m
+        """
+        match_recognize(query, categorized_rows)
+
+        assert observed
+        assert any("A" in variables for variables in observed)
+        assert all("B" not in variables for variables in observed)
+
+    @pytest.mark.parametrize(
+        "pattern,extra_clause,define_clause",
+        [
+            (
+                "A B C",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+            ),
+            (
+                "A{1,2} B+ C*",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+            ),
+            (
+                "(A | B)+ (C{1,2} D*)+",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C', D AS D.category = 'D'",
+            ),
+            (
+                "A {- B -} C",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+            ),
+            (
+                "^ A B C D A B C D $",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C', D AS D.category = 'D'",
+            ),
+            (
+                "PERMUTE(A, B) C",
+                "",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+            ),
+            (
+                "(() | A)",
+                "",
+                "A AS A.category = 'A'",
+            ),
+            (
+                "(A | B) C",
+                "SUBSET U = (A, B)",
+                "A AS A.category = 'A', B AS B.category = 'B', C AS C.category = 'C'",
+            ),
+            (
+                "A B C",
+                "",
+                "A AS A.category = 'A', B AS B.value > PREV(B.value), C AS C.category = 'C'",
+            ),
+        ],
+        ids=[
+            "sequence",
+            "quantified",
+            "nested-alternation",
+            "exclusion",
+            "anchors",
+            "permute",
+            "empty-alternation",
+            "subset",
+            "physical-navigation",
+        ],
+    )
+    def test_vectorized_results_equal_the_scalar_reference_path(
+        self,
+        monkeypatch,
+        categorized_rows,
+        pattern,
+        extra_clause,
+        define_clause,
+    ):
+        """Optimizations must be observationally identical to scalar matching."""
+        from src.matcher.matcher import EnhancedMatcher
+
+        query = f"""
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                FIRST(id) AS start_id,
+                LAST(id) AS end_id,
+                MATCH_NUMBER() AS match_id
+            ONE ROW PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN ({pattern})
+            {extra_clause}
+            DEFINE {define_clause}
+        ) AS m
+        """
+
+        optimized = match_recognize(query, categorized_rows)
+
+        # Disable both predicate precomputation and complete-pattern fast
+        # plans.  This executes the context-aware scalar matcher as an
+        # independent semantic reference using the same compiled automaton.
+        monkeypatch.setattr(
+            EnhancedMatcher,
+            "_vectorize_simple_define_conditions",
+            lambda matcher, rows: {},
+        )
+        monkeypatch.setattr(
+            EnhancedMatcher,
+            "_can_use_linear_quantifier_plan",
+            lambda matcher, config=None: False,
+        )
+        monkeypatch.setattr(
+            EnhancedMatcher,
+            "_can_use_row_local_dfa_fast_path",
+            lambda matcher, config=None: False,
+        )
+
+        scalar = match_recognize(query, categorized_rows)
+        pd.testing.assert_frame_equal(optimized, scalar)

@@ -552,32 +552,58 @@ This section describes how the engine transforms a validated
 output rows.  The process passes through six distinct stages:
 partition, order, row classification, DFA simulation,
 measure evaluation, and output assembly.
-Figure~\ref{fig:exec-pipeline} places these stages in context
-of the full five-phase architecture introduced at the start of
-this chapter.
+Figure~\ref{fig:exec-pipeline} distinguishes these six execution
+steps from the five top-level phases of the engine.  The first four
+phases transform the SQL query into a compiled matcher; the shaded
+fifth phase combines that matcher with the input DataFrame.
 
 \begin{figure}[htbp]
   \centering
   \begin{tikzpicture}[
-    node distance=0.6cm and 1.6cm,
     every node/.style={font=\small},
-    box/.style={rectangle, draw, rounded corners=3pt,
-                minimum width=2.8cm, minimum height=0.75cm,
-                align=center},
-    arrow/.style={->, thick}
+    source/.style={draw, rounded corners=3pt, thick, fill=gray!12,
+                  text width=1.85cm, minimum height=0.9cm,
+                  align=center},
+    phase/.style={draw, rounded corners=3pt, thick, fill=gray!5,
+                 text width=3.55cm, minimum height=0.85cm,
+                 align=center},
+    execution/.style={draw, rounded corners=4pt, very thick,
+                      fill=blue!12, text width=4.45cm,
+                      minimum height=1.65cm, align=center},
+    arrow/.style={-{Stealth[length=2.2mm]}, thick}
   ]
-    \node[box, fill=gray!15] (parse) {SQL Parsing};
-    \node[box, fill=gray!15, right=of parse] (sem) {Semantic\\Validation};
-    \node[box, fill=gray!15, right=of sem] (plan) {Logical Plan};
-    \node[box, fill=gray!15, right=of plan] (comp) {Pattern\\Compilation};
-    \node[box, fill=blue!15, right=of comp] (exec) {\textbf{Execution}};
-    \draw[arrow] (parse) -- (sem);
-    \draw[arrow] (sem) -- (plan);
-    \draw[arrow] (plan) -- (comp);
-    \draw[arrow] (comp) -- (exec);
+    % The SQL path forms one vertical, ordered chain of engine phases.
+    \node[phase] (parse)
+      {\textbf{1. SQL parsing}\\[-1pt]\scriptsize SQL $\rightarrow$ AST};
+    \node[phase, below=0.35cm of parse] (validate)
+      {\textbf{2. Semantic validation}\\[-1pt]\scriptsize clauses and measure modes};
+    \node[phase, below=0.35cm of validate] (plan)
+      {\textbf{3. Logical-plan construction}\\[-1pt]\scriptsize match configuration};
+    \node[phase, below=0.35cm of plan] (compile)
+      {\textbf{4. Pattern compilation}\\[-1pt]\scriptsize tokens $\rightarrow$ NFA $\rightarrow$ DFA};
+    \node[execution, below=0.45cm of compile] (execute)
+      {\textbf{5. DataFrame execution}\\[-1pt]
+       \scriptsize Partition $\rightarrow$ order $\rightarrow$ classification\\[-1pt]
+       \scriptsize DFA simulation $\rightarrow$ measures $\rightarrow$ output assembly};
+
+    \node[source, left=1.0cm of parse] (sql) {\textbf{Input}\\SQL query};
+    \node[source, left=1.0cm of execute] (data)
+      {\textbf{Input}\\Pandas DataFrame};
+    \node[source, right=1.0cm of execute] (result)
+      {\textbf{Output}\\Result DataFrame};
+
+    \draw[arrow] (sql) -- (parse);
+    \draw[arrow] (parse) -- (validate);
+    \draw[arrow] (validate) -- (plan);
+    \draw[arrow] (plan) -- (compile);
+    \draw[arrow] (compile) -- (execute);
+    \draw[arrow] (data) -- (execute);
+    \draw[arrow] (execute) -- (result);
   \end{tikzpicture}
-  \caption{Five-phase execution pipeline; the execution stage (shaded)
-    is the subject of this section}
+  \caption{Five-phase engine pipeline.  Phases~1--4 transform the SQL
+    query into a compiled DFA; the shaded execution phase applies it to
+    the input DataFrame through six ordered steps and returns a result
+    DataFrame.}
   \label{fig:exec-pipeline}
 \end{figure}
 

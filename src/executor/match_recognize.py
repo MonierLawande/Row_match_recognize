@@ -2312,45 +2312,44 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                                 unmatched_row['_original_row_idx'] = idx
                                 results.append(unmatched_row)
                 
-                # Create result DataFrame with preserved data types
-                # Sort results by match number first, then by row order within each match
-                # Add original index for stable sorting
-                for i, result in enumerate(results):
-                    result['_original_order'] = i
-                
-                # Safe sorting that handles None values properly
-                def safe_sort_key(r):
-                    # For WITH UNMATCHED ROWS, preserve SQL match-output
-                    # order even when matches overlap.  Matched rows sort by
-                    # their match start plus row order within that match;
-                    # unmatched rows sort by their own input position.
-                    if match_config.include_unmatched and '_match_sort_pos' in r:
-                        return (
-                            r.get('_match_sort_pos', 0),
-                            r.get('_match_sort_kind', 0),
-                            r.get('_match_output_order', 0),
-                        )
-                    if match_config.include_unmatched and '_original_row_idx' in r:
-                        return (r.get('_original_row_idx', 0), 0, 0)
-                    
-                    # PRODUCTION FIX: For partitioned queries, sort by partition order first, then by position within partition
-                    # This ensures that all rows from partition 1 come before all rows from partition 2, etc.
-                    if '_partition_index' in r and '_partition_row_index' in r:
-                        partition_idx = r.get('_partition_index', 0)
-                        partition_row_idx = r.get('_partition_row_index', 0)
-                        logger.debug(f"Using partition sort key: partition_idx={partition_idx}, row_idx={partition_row_idx} for result: {r}")
-                        return (partition_idx, partition_row_idx)
-                    
-                    # Otherwise, sort by match number then original order (legacy behavior)
-                    match_num = r.get('match', r.get('MATCH_NUMBER', 0))
-                    if match_num is None:
-                        match_num = 0
-                    original_order = r.get('_original_order', 0)
-                    if original_order is None:
-                        original_order = 0
-                    return (match_num, original_order)
-                
-                sorted_results = sorted(results, key=safe_sort_key)
+                # Partition and match processing above is sequential and
+                # already appends rows in deterministic SQL match-output
+                # order.  Sorting that list again is redundant for ordinary
+                # ALL ROWS output and costs O(r log r) Python work for r
+                # output rows.  WITH UNMATCHED ROWS is different: unmatched
+                # rows are appended after matching and must be merged back by
+                # input/match position, so it retains the stable sort.
+                if match_config.include_unmatched:
+                    for i, result in enumerate(results):
+                        result['_original_order'] = i
+
+                    def safe_sort_key(r):
+                        if '_match_sort_pos' in r:
+                            return (
+                                r.get('_match_sort_pos', 0),
+                                r.get('_match_sort_kind', 0),
+                                r.get('_match_output_order', 0),
+                            )
+                        if '_original_row_idx' in r:
+                            return (r.get('_original_row_idx', 0), 0, 0)
+
+                        if '_partition_index' in r and '_partition_row_index' in r:
+                            return (
+                                r.get('_partition_index', 0),
+                                r.get('_partition_row_index', 0),
+                            )
+
+                        match_num = r.get('match', r.get('MATCH_NUMBER', 0))
+                        if match_num is None:
+                            match_num = 0
+                        original_order = r.get('_original_order', 0)
+                        if original_order is None:
+                            original_order = 0
+                        return (match_num, original_order)
+
+                    sorted_results = sorted(results, key=safe_sort_key)
+                else:
+                    sorted_results = results
                 
                 # PRODUCTION FIX: Check if we used partition sorting before removing the tracking fields
                 used_partition_sorting = partition_by and any(

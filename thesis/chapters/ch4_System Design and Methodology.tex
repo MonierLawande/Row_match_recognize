@@ -757,69 +757,75 @@ implicit ones.
 \label{subsec:logical-measure-sem}
 % ................................
 
-Measure semantics (\textsc{Running} vs.\ \textsc{Final}) can be
-specified explicitly using the keywords \texttt{RUNNING} and
-\texttt{FINAL} in the \texttt{MEASURES} clause, or left implicit
-for the engine to determine.  The resolution algorithm
-(Figure~\ref{fig:measure-sem-resolution}) scans all measure
-expressions in order:
+Measure semantics (\textsc{Running} versus \textsc{Final}) can be
+specified explicitly using \texttt{RUNNING} and \texttt{FINAL} in
+the \texttt{MEASURES} clause, or resolved by the engine.  The
+implementation first scans the complete measure list once and records
+whether at least one expression has an explicit prefix.  It then
+applies the ordered rules in Figure~\ref{fig:measure-sem-resolution}
+to every measure independently.  The first applicable rule wins.
 
-\begin{enumerate}
-  \item If any measure carries an explicit \texttt{RUNNING} or
-    \texttt{FINAL} keyword, the query is in \emph{mixed-semantics
-    mode} and all other measures without an explicit keyword
-    default to \textsc{Final}.
-
-  \item In single-semantics mode (no explicit keywords):
-    \begin{itemize}
-      \item All measures default to \textsc{Final} under
-        \texttt{ONE ROW PER MATCH}.
-      \item Under \texttt{ALL ROWS PER MATCH}: \texttt{LAST()}
-        defaults to \textsc{Running}; \texttt{FIRST()},
-        \texttt{PREV()}, and \texttt{NEXT()} default to
-        \textsc{Final}; aggregate functions (\texttt{COUNT()},
-        \texttt{SUM()}, \texttt{ARRAY\_AGG()}, and the
-        multi-argument forms such as \texttt{MAX\_BY()},
-        \texttt{MIN\_BY()}, and \texttt{STRING\_AGG()}) default to
-        \textsc{Running}; all others default to \textsc{Final}.
-    \end{itemize}
-\end{enumerate}
+This ordering is important.  In \texttt{ALL ROWS PER MATCH},
+navigation-function defaults take precedence over the mixed-semantics
+fallback: expressions containing \texttt{FIRST()}, \texttt{PREV()},
+or \texttt{NEXT()} resolve to \textsc{Final}, whereas expressions
+containing \texttt{LAST()} resolve to \textsc{Running}.  Only an
+otherwise unclassified implicit measure is changed to \textsc{Final}
+because another measure in the same query is explicit.  Without any
+explicit prefix, the supported aggregate families---\texttt{COUNT()},
+\texttt{SUM()}, \texttt{ARRAY\_AGG()}, \texttt{MAX\_BY()},
+\texttt{MIN\_BY()}, \texttt{STRING\_AGG()}, \texttt{COUNT\_IF()},
+\texttt{SUM\_IF()}, and \texttt{AVG\_IF()}---resolve to
+\textsc{Running}; the remaining expressions resolve to
+\textsc{Final}.  Under \texttt{ONE ROW PER MATCH}, every implicit
+measure resolves to \textsc{Final}.
 
 \begin{figure}[htbp]
   \centering
   \begin{tikzpicture}[
-    node distance=0.5cm and 1.8cm,
     every node/.style={font=\small},
-    decision/.style={diamond, draw, aspect=2.2,
-                     inner sep=1pt, align=center},
-    result/.style={rectangle, draw, rounded corners=3pt,
-                   minimum width=2.8cm, minimum height=0.6cm,
-                   align=center},
-    arrow/.style={->, thick}
+    phase/.style={draw, rounded corners=3pt, thick, fill=blue!8,
+                  align=center, inner xsep=8pt, inner ysep=5pt},
+    rules/.style={draw, rounded corners=3pt, thick, fill=gray!4,
+                  align=left, inner xsep=8pt, inner ysep=7pt},
+    output/.style={draw, rounded corners=3pt, thick, fill=green!10,
+                   align=center, inner xsep=8pt, inner ysep=5pt},
+    arrow/.style={-{Stealth[length=2.2mm]}, thick}
   ]
-    \node[decision] (explicit) {Explicit\\keyword?};
-    \node[result, right=2.2cm of explicit] (useexp) {Use stated\\semantics};
-    \node[decision, below=1.2cm of explicit] (mixed) {Any measure\\explicit?};
-    \node[result, right=2.2cm of mixed] (final0) {\textsc{Final}};
-    \node[decision, below=1.2cm of mixed] (onerow) {\texttt{ONE ROW}\\mode?};
-    \node[result, right=2.2cm of onerow] (final1) {\textsc{Final}};
-    \node[decision, below=1.2cm of onerow] (functype) {\texttt{LAST}/\texttt{COUNT}/\\
-      \texttt{SUM}/\texttt{ARRAY\_AGG}?};
-    \node[result, right=2.2cm of functype] (running) {\textsc{Running}};
-    \node[result, below=0.9cm of functype] (final2) {\textsc{Final}};
+    \node[phase] (scan) {\textbf{Phase 1: query-level scan (once)}\\[-1pt]
+      \footnotesize Set \texttt{has\_explicit} when any measure begins with
+      \texttt{RUNNING} or \texttt{FINAL}.};
 
-    \draw[arrow] (explicit) -- node[above,font=\tiny]{yes} (useexp);
-    \draw[arrow] (explicit) -- node[left,font=\tiny]{no} (mixed);
-    \draw[arrow] (mixed) -- node[above,font=\tiny]{yes} (final0);
-    \draw[arrow] (mixed) -- node[left,font=\tiny]{no} (onerow);
-    \draw[arrow] (onerow) -- node[above,font=\tiny]{yes} (final1);
-    \draw[arrow] (onerow) -- node[left,font=\tiny]{no} (functype);
-    \draw[arrow] (functype) -- node[above,font=\tiny]{yes} (running);
-    \draw[arrow] (functype) -- node[left,font=\tiny]{no} (final2);
+    \node[rules, below=0.45cm of scan] (precedence) {\small
+      \begin{tabular}{@{}c p{0.59\textwidth} c@{}}
+        \toprule
+        \textbf{Priority} & \textbf{First condition that holds for a measure} &
+        \textbf{Result} \\
+        \midrule
+        1 & Explicit \texttt{RUNNING} or \texttt{FINAL} prefix &
+            stated mode \\
+        2 & \texttt{ONE ROW PER MATCH} & \textsc{Final} \\
+        3 & Contains \texttt{FIRST()}, \texttt{PREV()}, or \texttt{NEXT()} &
+            \textsc{Final} \\
+        4 & Contains \texttt{LAST()} & \textsc{Running} \\
+        5 & \texttt{has\_explicit = true} & \textsc{Final} \\
+        6 & Starts with a supported running aggregate & \textsc{Running} \\
+        7 & Otherwise & \textsc{Final} \\
+        \bottomrule
+      \end{tabular}\\[-1pt]
+      \centering\footnotesize\emph{Phase 2: apply the rules top to bottom to
+      each measure; stop at the first match.}};
+
+    \node[output, below=0.45cm of precedence] (store) {
+      Store \texttt{measure\_semantics[alias]} as
+      \texttt{RUNNING} or \texttt{FINAL}};
+
+    \draw[arrow] (scan) -- (precedence);
+    \draw[arrow] (precedence) -- (store);
   \end{tikzpicture}
-  \caption{Measure semantics resolution algorithm applied to each
-    measure expression individually.  The decision tree follows
-    SQL:2016 default-semantics rules.}
+  \caption{Measure semantics resolution algorithm.  The query-level
+    scan is performed once; the ordered precedence rules are then
+    applied independently to every measure expression.}
   \label{fig:measure-sem-resolution}
 \end{figure}
 
