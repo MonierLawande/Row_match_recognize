@@ -51,7 +51,7 @@ of twenty measured runs after five warmups, with its standard
 deviation) using five pattern families and six dataset
 sizes from 100\,K to the full 2{,}222{,}742-row dataset.  Across these
 runs, the implementation achieved an average throughput of
-5\,043\,941~rows/s, with throughput remaining stable as input size
+5\,863\,876~rows/s, with throughput remaining stable as input size
 increased.  The main variation came
 from pattern structure: simple sequences and bounded quantifiers
 were the fastest families, while \texttt{complex\_nested}, which
@@ -59,8 +59,8 @@ carries the highest transition and condition-evaluation overhead,
 was the slowest.  In the cross-system
 comparison under
 the same nominal resource budget, the engine recorded the lowest
-average execution time of the three systems (0.20\,s, versus
-0.94\,s for Oracle and 1.93\,s for a fully-warmed Trino): it was
+average execution time of the three systems (0.18\,s, versus
+0.93\,s for Oracle and 1.94\,s for a fully-warmed Trino): it was
 faster than both databases on every one of the 30 pattern--size
 cells, by roughly 6--13$\times$ over Trino and 2.7--5.5$\times$
 over Oracle per family.  This advantage follows from the engine's
@@ -159,8 +159,8 @@ deviation). &
 Execution time scales predictably over the measured range
 ($R^2 \geq 0.98$ for the proposed engine on each of its five pattern
 families), with average throughput of
-5\,043\,941~rows/s and the lowest average execution time of the
-three systems (0.20\,s, versus 0.94\,s for Oracle and 1.93\,s for a
+5\,863\,876~rows/s and the lowest average execution time of the
+three systems (0.18\,s, versus 0.93\,s for Oracle and 1.94\,s for a
 fully-warmed Trino) under the same nominal budget. &
 The benchmark does not establish performance for very large,
 distributed, or highly adversarial workloads. \\
@@ -168,7 +168,7 @@ distributed, or highly adversarial workloads. \\
 Memory use &
 Query-memory and footprint measurements for all 30 benchmark
 scenarios, including the maximum observed query memory of
-173.81\,MB. &
+152.61\,MB. &
 Memory use remains bounded for the evaluated workloads. &
 The measurements are empirical and do not define a formal upper bound
 for all possible patterns or datasets. \\
@@ -299,9 +299,9 @@ procedural Python code needed to express sequential row-pattern
 analysis.  Third, the benchmark over the Amazon UK Products Dataset
 shows stable performance across 30 pattern--size cells from 100\,K to
 the full 2.22\,M rows, with an average throughput of
-5\,043\,941~rows/s, the lowest average execution time of the three
-systems under the same nominal resource budget (0.20\,s, versus
-0.94\,s for Oracle and 1.93\,s for a fully-warmed Trino), and
+5\,863\,876~rows/s, the lowest average execution time of the three
+systems under the same nominal resource budget (0.18\,s, versus
+0.93\,s for Oracle and 1.94\,s for a fully-warmed Trino), and
 bounded memory use in the measured range.
 
 The proposed approach is therefore best understood as a bridge between
