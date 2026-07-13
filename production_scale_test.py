@@ -102,7 +102,7 @@ def create_realistic_patterns_for_amazon_data(df: pd.DataFrame) -> Dict[str, str
     
     return patterns
 
-def test_production_scale_performance(max_rows: int = 100000):
+def run_production_scale_performance(max_rows: int = 100000):
     """Test production scale performance with real Amazon data."""
     
     print("🚀 Production Scale Performance Test")
@@ -235,6 +235,12 @@ def test_production_scale_performance(max_rows: int = 100000):
     
     return results
 
+
+def test_production_scale_performance():
+    """Pytest wrapper: benchmark helpers may return data; tests must not."""
+    results = run_production_scale_performance()
+    assert results, "production-scale benchmark did not execute any scenarios"
+
 def test_full_dataset_capability():
     """Test capability to handle the full 2.2M row dataset."""
     
@@ -321,7 +327,7 @@ def main():
     
     try:
         # Test production scale performance
-        results = test_production_scale_performance()
+        results = run_production_scale_performance()
         
         # Test full dataset capability
         test_full_dataset_capability()

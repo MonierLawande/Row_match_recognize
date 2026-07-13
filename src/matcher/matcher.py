@@ -1097,14 +1097,13 @@ class EnhancedMatcher:
                    f"measures={len(self.measures)}, "
                    f"permute={getattr(self, 'is_permute_pattern', False)}")
         
-        # Memory monitoring using existing utility (use resource manager for proper lifecycle)
+        # Keep resource monitoring available, but do not take a full memory/GC
+        # snapshot on every matcher construction.  ``ResourceManager.get_stats``
+        # walks all GC-tracked Python objects, which is observability work rather
+        # than query execution and costs several milliseconds per query.  The
+        # public ``get_performance_stats`` method still collects it on demand.
         self._resource_manager = get_resource_manager()
-        try:
-            # Get memory stats from resource manager instead of creating new monitor
-            memory_stats = self._resource_manager.get_stats()
-            logger.debug(f"EnhancedMatcher initialized with resource manager stats: {memory_stats}")
-        except Exception:
-            logger.debug("Memory monitoring not available")
+        logger.debug("EnhancedMatcher initialized with lazy resource monitoring")
     
     def __del__(self):
         """Cleanup matcher resources to prevent memory leaks."""
@@ -2427,8 +2426,10 @@ class EnhancedMatcher:
 
         The gate is intentionally conservative.  Navigation functions,
         cross-variable DEFINE dependencies, exclusions, anchors, subsets,
-        non-default skip modes, and ALL ROWS output still use the existing
-        matcher because their semantics depend on full match context.
+        and ALL ROWS output still use the existing matcher because their
+        semantics depend on full match context.  AFTER MATCH SKIP is safe
+        here: it determines the next candidate start after this method has
+        returned a match; it does not alter the DFA traversal for that match.
         """
         condition_matrix = getattr(self, "_condition_matrix", None)
         if not self._can_reuse_row_context_for_matching(condition_matrix):
@@ -2436,8 +2437,6 @@ class EnhancedMatcher:
 
         if config:
             if getattr(config, "rows_per_match", RowsPerMatch.ONE_ROW) != RowsPerMatch.ONE_ROW:
-                return False
-            if config.skip_mode != SkipMode.PAST_LAST_ROW:
                 return False
 
         if self.has_empty_alternation or self.has_exclusions or self.is_permute_pattern:
@@ -2577,19 +2576,33 @@ class EnhancedMatcher:
             self._row_local_transition_index = compact_index
             self._row_local_transition_index_cache_key = cache_key
             return compact_index
+        # Encode variable labels once for the decision-table path.  The row
+        # walk compares and stores small integers instead of repeatedly
+        # retaining/hash-comparing Python strings, and vectorized measure
+        # evaluation can consume the codes directly without a later pandas
+        # factorization pass.
+        var_names: List[str] = []
+        var_codes: Dict[str, int] = {}
+        for transitions in compact_index.values():
+            for var, _target, _excluded, _results, _implicit, _priority in transitions:
+                if var not in var_codes:
+                    var_codes[var] = len(var_names)
+                    var_names.append(var)
+        self._row_local_dfa_var_names = tuple(var_names)
+
         # Decision tables are stored per state as raw bytes (255 = no
         # transition): indexing a bytes object returns a plain int at C
         # speed, which beats both dict lookups and numpy scalar extraction
         # in the row-consuming walk.
-        decision_index: List[Optional[Tuple[bytes, Tuple[Tuple[str, int, bool], ...]]]] = (
+        decision_index: List[Optional[Tuple[bytes, Tuple[Tuple[int, int, bool], ...]]]] = (
             [None] * len(self.dfa.states)
         )
         for state, transitions in compact_index.items():
             decision = np.full(row_count, 255, dtype=np.uint8)
             remaining = np.ones(row_count, dtype=bool)
-            actions: List[Tuple[str, int, bool]] = []
+            actions: List[Tuple[int, int, bool]] = []
             for t_idx, (var, target, is_excluded, var_results, implicit_true, _priority) in enumerate(transitions):
-                actions.append((var, target, is_excluded))
+                actions.append((var_codes[var], target, is_excluded))
                 if implicit_true:
                     decision[remaining] = t_idx
                     remaining[:] = False
@@ -2690,7 +2703,8 @@ class EnhancedMatcher:
                 transition_idx = state_plan[0][current_idx]
                 if transition_idx == 255:
                     break
-                matched_var, state, is_excluded_match = state_plan[1][transition_idx]
+                matched_var_code, state, is_excluded_match = state_plan[1][transition_idx]
+                matched_var = self._row_local_dfa_var_names[matched_var_code]
 
                 if matched_var is not current_var or is_excluded_match != current_excluded:
                     if current_var is not None:
@@ -6009,9 +6023,10 @@ class EnhancedMatcher:
         This is an expression-class optimization, not a benchmark-specific
         shortcut.  The planner accepts only predicates that depend on the
         current input row: comparisons, boolean operators, arithmetic, IN,
-        BETWEEN-style chained comparisons, and NULL checks.  Expressions that
-        need pattern context, navigation, aggregates, classifier state, or
-        cross-variable references fall back to the normal scalar evaluator.
+        BETWEEN-style chained comparisons, NULL checks, and physical PREV/NEXT
+        navigation with literal offsets.  Expressions that need partial-match
+        context, logical FIRST/LAST navigation, aggregates, classifier state,
+        or cross-variable references fall back to the scalar evaluator.
         """
         import re
 
@@ -6403,6 +6418,15 @@ class EnhancedMatcher:
                     return column_map.get(node.id.lower())
                 if (isinstance(node, ast.Attribute)
                         and isinstance(node.value, ast.Name)):
+                    # Keep the factorized string-comparison shortcut under
+                    # exactly the same row-locality rule as the general AST
+                    # evaluator.  A condition for B may read B.category, but
+                    # B.category = A.category depends on the partial match and
+                    # must remain on the scalar/context-aware path.  Skipping
+                    # this qualifier check would incorrectly classify a
+                    # cross-variable equality as a vectorizable row predicate.
+                    if node.value.id.upper() != var_name.upper():
+                        return None
                     return column_map.get(node.attr.lower())
                 return None
 
@@ -6766,80 +6790,6 @@ class EnhancedMatcher:
         is sensitive to output mode and AFTER MATCH SKIP policy.  Keep this
         disabled until it is implemented as a complete semantic plan.
         """
-        return None
-
-        if not hasattr(self, '_condition_matrix') or not self.original_pattern:
-            return None
-            
-        pattern = self.original_pattern.strip()
-        
-        # Detect simple quantified patterns: A+, A*, A{n,m}
-        import re
-        simple_pattern_match = re.match(r'^([A-Z])\s*([+*?]|\{[0-9,]+\})$', pattern)
-        if not simple_pattern_match:
-            return None
-            
-        var_name = simple_pattern_match.group(1)
-        quantifier = simple_pattern_match.group(2)
-        
-        if var_name not in self._condition_matrix:
-            return None
-            
-        logger.info(f"🚀 VECTORIZED SIMPLE PATTERN: Processing {pattern} with {len(rows)} rows using pre-computed matrix")
-        
-        # Get pre-computed boolean array for this variable
-        condition_results = self._condition_matrix[var_name]
-        
-        # Find all matching indices using numpy operations (ultra-fast)
-        import numpy as np
-        matching_indices = np.where(condition_results[start_idx:])[0] + start_idx
-        
-        if len(matching_indices) == 0:
-            if quantifier == '*':
-                # A* allows zero matches - create empty match
-                return [{
-                    "start": start_idx,
-                    "end": start_idx - 1,  # Empty match
-                    "variables": {var_name: []},
-                    "is_empty": True,
-                    "excluded_rows": []
-                }], start_idx + 1
-            else:
-                return None
-        
-        # For A+ and A*, find consecutive sequences
-        matches = []
-        
-        if quantifier in ['+', '*']:
-            # Find consecutive sequences
-            consecutive_groups = []
-            current_group = [matching_indices[0]]
-            
-            for i in range(1, len(matching_indices)):
-                if matching_indices[i] == matching_indices[i-1] + 1:
-                    current_group.append(matching_indices[i])
-                else:
-                    consecutive_groups.append(current_group)
-                    current_group = [matching_indices[i]]
-            consecutive_groups.append(current_group)
-            
-            # Create matches for each consecutive group
-            for group in consecutive_groups:
-                if len(group) > 0:  # A+ requires at least one match
-                    match = {
-                        "start": group[0],
-                        "end": group[-1],
-                        "variables": {var_name: group},
-                        "is_empty": False,
-                        "excluded_rows": []
-                    }
-                    matches.append(match)
-        
-        if matches:
-            next_start_idx = matches[-1]["end"] + 1
-            logger.info(f"✅ VECTORIZED SUCCESS: Found {len(matches)} matches instantly for {var_name}")
-            return matches, next_start_idx
-            
         return None
 
     def find_matches(self, rows, config=None, measures=None):
@@ -8443,8 +8393,15 @@ class EnhancedMatcher:
                 # Vectorized output: the walk records each match's kept
                 # segments into flat lists; measures become grouped numpy
                 # reductions after the scan.
-                seg_var_names: List[Any] = []
-                seg_name_append = seg_var_names.append
+                needed_scope_names = set()
+                for _alias, _kind, scope_names, _column, _prefix, _plain_length in dfa_vector_specs:
+                    needed_scope_names.update(scope_names)
+                needed_var_codes = tuple(
+                    str(var_name).upper() in needed_scope_names
+                    for var_name in self._row_local_dfa_var_names
+                )
+                seg_var_codes: List[int] = []
+                seg_code_append = seg_var_codes.append
                 seg_starts_list: List[int] = []
                 seg_start_append = seg_starts_list.append
                 seg_stops_list: List[int] = []
@@ -8480,11 +8437,17 @@ class EnhancedMatcher:
                     transition_idx = state_plan[0][idx]
                     if transition_idx == 255:
                         break
-                    matched_var, next_state, _is_excluded = state_plan[1][transition_idx]
-                    if matched_var is not current_var:
-                        if current_var is not None:
+                    matched_var_code, next_state, _is_excluded = state_plan[1][transition_idx]
+                    if matched_var_code != current_var:
+                        if (
+                            current_var is not None
+                            and (
+                                dfa_vector_specs is None
+                                or needed_var_codes[current_var]
+                            )
+                        ):
                             segment_records.append((current_var, segment_start, idx))
-                        current_var = matched_var
+                        current_var = matched_var_code
                         segment_start = idx
                     if next_state == state and run_lengths is not None:
                         # Self-loop: the decision byte is constant across the
@@ -8500,7 +8463,13 @@ class EnhancedMatcher:
                 if accepted_end < 0:
                     start += 1
                     continue
-                if current_var is not None:
+                if (
+                    current_var is not None
+                    and (
+                        dfa_vector_specs is None
+                        or needed_var_codes[current_var]
+                    )
+                ):
                     segment_records.append((current_var, segment_start, idx))
                 limit = accepted_end + 1
                 if dfa_vector_specs is not None:
@@ -8508,7 +8477,7 @@ class EnhancedMatcher:
                     for seg_var, seg_start, seg_stop in segment_records:
                         if seg_start >= limit:
                             break
-                        seg_name_append(seg_var)
+                        seg_code_append(seg_var)
                         seg_start_append(seg_start)
                         seg_stop_append(seg_stop if seg_stop <= limit else limit)
                         kept += 1
@@ -8526,23 +8495,14 @@ class EnhancedMatcher:
                 start = accepted_end + 1
 
             if dfa_vector_specs is not None:
-                import pandas as pd
-
                 count = len(match_starts_list)
                 starts_arr = np.asarray(match_starts_list, dtype=np.int64)
-                if seg_var_names:
-                    seg_codes, seg_uniques = pd.factorize(
-                        np.asarray(seg_var_names, dtype=object)
-                    )
-                else:
-                    seg_codes = np.empty(0, dtype=np.int64)
-                    seg_uniques = []
                 env = {
                     "count": count,
                     "starts": starts_arr,
                     "ends": np.asarray(match_ends_list, dtype=np.int64),
-                    "codes": seg_codes,
-                    "uniques": list(seg_uniques),
+                    "codes": np.asarray(seg_var_codes, dtype=np.int16),
+                    "uniques": self._row_local_dfa_var_names,
                     "seg_starts": np.asarray(seg_starts_list, dtype=np.int64),
                     "seg_stops": np.asarray(seg_stops_list, dtype=np.int64),
                     "m_ids": np.repeat(
@@ -9499,8 +9459,11 @@ class EnhancedMatcher:
         if match.get("is_empty", False) and match.get("empty_pattern_rows"):
             context._empty_pattern_rows = set(match["empty_pattern_rows"])
         
-        # Create a single evaluator for better caching
-        measure_evaluator = MeasureEvaluator(context)
+        # The general evaluator builds row-to-variable and navigation indexes
+        # proportional to the match size.  Most ALL ROWS workloads are fully
+        # handled by compiled/precomputed measures below, so construct that
+        # evaluator only if a fallback expression actually needs it.
+        measure_evaluator = None
         
         # For Trino compatibility, we need to include all rows from start to end,
         # skipping only the excluded rows. However, for PERMUTE patterns, we only
@@ -9569,6 +9532,27 @@ class EnhancedMatcher:
                 kind = "general"
             measure_plans.append((alias, expr, semantics, has_complex_navigation, kind))
 
+        # Simple FINAL measures have one value for the entire match.  Reusing
+        # the same compiled plans as ONE ROW PER MATCH avoids evaluating an
+        # identical aggregate/navigation expression once per output row.  Any
+        # expression outside the conservative compiled grammar remains on the
+        # general evaluator path.
+        final_compiled_values = {}
+        for alias, expr, semantics, _has_complex_navigation, kind in measure_plans:
+            if kind != "general" or str(semantics).upper() != "FINAL":
+                continue
+            compiled_plan = self._get_compiled_measure_plan(alias, expr, semantics)
+            if compiled_plan is None:
+                continue
+            if str(compiled_plan.get("semantics", semantics)).upper() != "FINAL":
+                continue
+            try:
+                final_compiled_values[alias] = self._evaluate_compiled_measure_plan(
+                    compiled_plan, match, rows, match_number
+                )
+            except Exception as e:
+                logger.debug(f"Compiled FINAL measure fallback for {alias}: {e}")
+
         # CLASSIFIER() support: map each matched row to its pattern variable
         # once per match instead of scanning the variables dict per row.
         idx_to_var = {}
@@ -9619,6 +9603,10 @@ class EnhancedMatcher:
                         result[alias] = match_number
                         continue
 
+                    if alias in final_compiled_values:
+                        result[alias] = final_compiled_values[alias]
+                        continue
+
                     if alias in running_aggregates and idx in running_aggregates[alias]:
                         result[alias] = running_aggregates[alias][idx]
                         continue
@@ -9657,6 +9645,8 @@ class EnhancedMatcher:
                     else:
                         # Use original context for FINAL semantics
                         context.current_idx = idx
+                        if measure_evaluator is None:
+                            measure_evaluator = MeasureEvaluator(context)
                         result[alias] = measure_evaluator.evaluate(expr, semantics)
                         logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
                     
