@@ -87,16 +87,16 @@ def sort_cost_scaling():
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.4, 4.0))
     ax1.plot(SIZES, ns_row, color="#2a78d6", marker="o", markersize=6,
              linewidth=2, markeredgecolor="white", markeredgewidth=0.7, zorder=3)
-    ax1.set_title("Per-row sort cost rises $\\Rightarrow$ super-linear", fontsize=9)
+    ax1.set_title("Per-row sort cost stays in a narrow band", fontsize=9)
     ax1.set_ylabel("Incremental sort cost (ns / row)")
-    ax1.set_ylim(0, max(ns_row) * 1.25)
+    ax1.set_ylim(0, max(ns_row) * 1.35)
     for sx, sy in zip(SIZES, ns_row):
         ax1.annotate(f"{sy:.0f}", (sx, sy), textcoords="offset points",
                      xytext=(0, 6), ha="center", fontsize=7, color="#2a78d6")
 
     ax2.plot(SIZES, ns_nlogn, color="#199e70", marker="^", markersize=6,
              linewidth=2, markeredgecolor="white", markeredgewidth=0.7, zorder=3)
-    ax2.set_title("Cost / $(n\\log_2 n)$ is flat $\\Rightarrow$ $O(n\\log n)$",
+    ax2.set_title("Cost / $(n\\log_2 n)$ flat $\\Rightarrow$ consistent with $O(n\\log n)$",
                   fontsize=9)
     ax2.set_ylabel("Incremental cost / $(n\\log_2 n)$  (ns)")
     ax2.set_ylim(0, max(ns_nlogn) * 1.4)
