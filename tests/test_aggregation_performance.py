@@ -321,6 +321,78 @@ class TestAggregationPerformance:
         # Results should be identical (or very close for floating point)
         if not result1.empty and not result2.empty:
             pd.testing.assert_frame_equal(result1, result2, rtol=1e-10, atol=1e-15)
+
+    def test_large_running_prefix_aggregates_preserve_sql_semantics(self):
+        """Exercise the large-input prefix path against independent results.
+
+        The row count deliberately exceeds the vectorization threshold.  This
+        protects the optimized implementation from changing integer MIN/MAX
+        types, NULL handling, COUNT semantics, or arithmetic aggregate values.
+        """
+        size = 1024
+        positions = np.arange(size, dtype=np.int64)
+        integer_values = ((positions * 37) % 211 - 105).astype(np.int64)
+        values = (positions.astype(np.float64) / 7.0) - 30.0
+        values[16::17] = np.nan
+        scores = ((positions % 13) + 1).astype(np.float64)
+        df = pd.DataFrame({
+            "id": positions + 1,
+            "integer_value": integer_values,
+            "value": values,
+            "score": scores,
+        })
+
+        query = """
+        SELECT m.id, m.running_min, m.running_max, m.running_sum,
+               m.running_count, m.weighted_value
+        FROM large_data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                RUNNING min(A.integer_value) AS running_min,
+                RUNNING max(A.integer_value) AS running_max,
+                RUNNING sum(A.value) AS running_sum,
+                RUNNING count(A.value) AS running_count,
+                RUNNING sum(A.value * A.score) / sum(A.score)
+                    AS weighted_value
+            ALL ROWS PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (A*)
+            DEFINE A AS true
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        valid_values = np.nan_to_num(values, nan=0.0)
+        expected_sum = np.cumsum(valid_values)
+        expected_count = np.cumsum(~np.isnan(values))
+        expected_weighted = np.cumsum(
+            np.nan_to_num(values * scores, nan=0.0)
+        ) / np.cumsum(scores)
+
+        np.testing.assert_array_equal(
+            result["running_min"].to_numpy(),
+            np.minimum.accumulate(integer_values),
+        )
+        np.testing.assert_array_equal(
+            result["running_max"].to_numpy(),
+            np.maximum.accumulate(integer_values),
+        )
+        np.testing.assert_allclose(
+            result["running_sum"].to_numpy(), expected_sum, rtol=0.0, atol=0.0
+        )
+        np.testing.assert_array_equal(
+            result["running_count"].to_numpy(), expected_count
+        )
+        np.testing.assert_allclose(
+            result["weighted_value"].to_numpy(),
+            expected_weighted,
+            rtol=1e-14,
+            atol=1e-14,
+        )
+        assert result["running_min"].dtype.kind in "iu"
+        assert result["running_max"].dtype.kind in "iu"
     
     def test_benchmark_standard_aggregations(self):
         """Benchmark standard aggregation functions."""
