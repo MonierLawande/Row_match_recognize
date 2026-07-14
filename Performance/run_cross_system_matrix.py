@@ -55,7 +55,7 @@ SQL_DIR = OUTPUT_DIR / "sql"
 TABLE_NAME = "benchmark_matrix"
 LOAD_COLUMNS = ["seq_id", "category", "stars", "price", "reviews", "category_name"]
 
-PANDAS_QUERY_MEMORY_METRIC = "process RSS peak delta MB during measured query"
+PANDAS_QUERY_MEMORY_METRIC = "process RSS peak delta MB over cleaned baseline (gc + malloc_trim)"
 PANDAS_FOOTPRINT_MEMORY_METRIC = "process RSS absolute peak MB"
 TRINO_QUERY_MEMORY_METRIC = "Trino per-query peakMemoryBytes MB"
 ORACLE_QUERY_MEMORY_METRIC = "Oracle session PGA high-water delta MB (fresh session)"
@@ -325,14 +325,39 @@ def get_rss_mb() -> float:
         return usage / 1024
 
 
+def clean_process_memory() -> None:
+    """Release freed-but-pooled memory back to the OS before a measurement.
+
+    Python's small-object allocator and glibc keep freed memory in internal
+    pools instead of returning it, so a plain RSS peak-delta on a long-lived
+    process reads near zero whenever a query's working set fits in already
+    resident pages (the source of the spurious 0.00 readings).  Forcing a
+    garbage collection and a glibc ``malloc_trim`` gives each measured query a
+    clean baseline, so the RSS delta reflects the memory that query actually
+    allocates.
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 def run_with_process_memory_sampling(func) -> tuple[Any, float, float, float]:
     """Run func while sampling process RSS in a background thread.
 
     Returns (result, RSS peak delta MB, RSS absolute peak MB, elapsed
-    seconds).  As with container sampling, elapsed time is measured tightly
-    around func so sampler startup/shutdown does not inflate small
-    measurements.
+    seconds).  Memory is cleaned to the OS before the baseline is taken
+    (clean_process_memory) so the delta is the query's real allocation rather
+    than an artifact of allocator pooling.  As with container sampling, elapsed
+    time is measured tightly around func so sampler startup/shutdown does not
+    inflate small measurements.
     """
+    clean_process_memory()
     start_mb = get_rss_mb()
     samples: list[float] = []
     stop_event = threading.Event()

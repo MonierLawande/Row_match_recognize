@@ -4412,6 +4412,29 @@ class EnhancedMatcher:
             return self._ast_needs_exact_search(inner)
         return False
 
+    @staticmethod
+    def _condition_linear_greedy_plan(ast_root):
+        """Return a compact plan for a greedy variable-only sequence.
+
+        This is an execution specialization of the exact AST, not a separate
+        pattern parser.  Constructs requiring richer control flow return None
+        and retain the generic task-stack interpreter.
+        """
+        if not ast_root or ast_root[0] != "alt" or len(ast_root[1]) != 1:
+            return None
+        sequence = ast_root[1][0]
+        if sequence[0] != "seq":
+            return None
+        plan = []
+        for item in sequence[1]:
+            if item[0] != "var":
+                return None
+            _tag, name, min_rep, max_rep, greedy = item
+            if not greedy:
+                return None
+            plan.append((name, min_rep, max_rep))
+        return tuple(plan)
+
     def _find_single_match_condition_backtracking(
         self, rows, start_idx, context, config=None,
     ) -> Optional[Dict[str, Any]]:
@@ -4420,7 +4443,8 @@ class EnhancedMatcher:
         CLASSIFIER).  Explores alternation branches in declaration order and
         quantifiers greedily (or reluctantly), re-evaluating conditions with
         tentative assignments, exactly like the SQL:2016 matching model.
-        A step budget guards against pathological exponential inputs."""
+        An explicit DFS stack avoids dependence on Python's recursion limit;
+        a step budget guards against pathological exponential inputs."""
         ast_root = getattr(self, "_condition_backtracking_ast", None)
         if ast_root is None:
             return None
@@ -4438,12 +4462,47 @@ class EnhancedMatcher:
         variables: Dict[str, List[int]] = {}
         context.variables = variables
         context.current_var_assignments = variables
-        budget = [200000]
+        # DEFINE aggregates are functions of the tentative assignments.  A
+        # monotonic revision per variable lets the evaluator memoize an
+        # aggregate until (and only until) one of its input variables changes.
+        # Revisions are bumped on both assignment and rollback, so a cached
+        # value can never escape the exact DFS state that produced it.
+        assignment_versions: Optional[Dict[str, int]] = None
+        context._define_assignment_versions = None
+        context._define_aggregate_cache = None
+        step_budget = 200000
+        condition_matrix = getattr(self, "_condition_matrix", None) or {}
+        condition_prefilters = (
+            getattr(self, "_condition_prefilter_matrix", None) or {}
+        )
+        condition_residuals = (
+            getattr(self, "_condition_residual_fns", None) or {}
+        )
 
         def try_var(name, pos):
             if pos >= row_count:
                 return None
-            condition = compiled.get(name)
+            # The preprocessing planner only places a variable in this matrix
+            # when its complete DEFINE expression is row-local and has been
+            # evaluated with SQL NULL semantics.  Reuse that trusted result in
+            # the exact searcher instead of walking the same scalar AST for
+            # every tentative assignment.  Stateful/cross-variable predicates
+            # are absent from the matrix and continue through the evaluator.
+            precomputed = condition_matrix.get(name)
+            if precomputed is not None and pos < len(precomputed):
+                return pos + 1 if bool(precomputed[pos]) else None
+            prefilter = condition_prefilters.get(name)
+            if (
+                prefilter is not None
+                and pos < len(prefilter)
+                and not bool(prefilter[pos])
+            ):
+                return None
+            # When a top-level AND prefilter exists, every removed row-local
+            # conjunct is already known to be True at this position.  Evaluate
+            # only the context-dependent residual; it uses the same standard
+            # ConditionEvaluator as the complete expression.
+            condition = condition_residuals.get(name, compiled.get(name))
             if condition is None:
                 return pos + 1  # implicit TRUE
             context.current_idx = pos
@@ -4455,93 +4514,268 @@ class EnhancedMatcher:
             return pos + 1 if ok else None
 
         def assign(name, pos):
-            variables.setdefault(name, []).append(pos)
+            nonlocal assignment_versions
+            entries = variables.setdefault(name, [])
+            entries.append(pos)
+            if assignment_versions is None and len(entries) >= 16:
+                # Activate revision tracking lazily.  Most matches are short,
+                # where maintaining cache state costs more than rescanning.
+                assignment_versions = defaultdict(int)
+                for active_name in variables:
+                    assignment_versions[str(active_name).upper()] = 1
+                context._define_assignment_versions = assignment_versions
+                context._define_aggregate_cache = {}
+            elif assignment_versions is not None:
+                assignment_versions[str(name).upper()] += 1
 
-        def unassign(name):
-            entries = variables.get(name)
-            if entries:
+        # The recursive implementation used nested continuations for every
+        # consumed row.  A long quantified run therefore consumed several
+        # Python frames per row and could fail around only a few hundred rows.
+        # This small interpreter stores those continuations as ordinary tasks.
+        # Assignments are mutated once and restored from an undo journal when
+        # a choice is revisited, avoiding an O(match_length^2) copy per state.
+        Task = Tuple[Any, ...]
+        tasks: List[Task] = [("node", ast_root)]
+        choices: List[Tuple[List[Task], int, int]] = []
+        assignment_undo: List[str] = []
+        position = start_idx
+        explored_steps = 0
+        end_pos: Optional[int] = None
+
+        def rollback(undo_size: int) -> None:
+            while len(assignment_undo) > undo_size:
+                name = assignment_undo.pop()
+                entries = variables[name]
                 entries.pop()
+                if assignment_versions is not None:
+                    assignment_versions[str(name).upper()] += 1
                 if not entries:
                     del variables[name]
 
-        def match_node(node, pos, cont):
-            if budget[0] <= 0:
-                return None
-            budget[0] -= 1
-            kind = node[0]
-            if kind == "alt":
-                for branch in node[1]:
-                    result = match_node(branch, pos, cont)
-                    if result is not None:
-                        return result
-                return None
-            if kind == "seq":
-                items = node[1]
+        # A linear greedy sequence does not need the general tuple-task
+        # interpreter.  Consume each quantified variable once, then retain
+        # lower repetition counts as exact preference-ordered choice points.
+        # The DFS depth is the number of pattern variables rather than the
+        # number of input rows, and rollback uses the same assignment journal
+        # as the generic engine.
+        linear_plan = self._condition_linear_greedy_plan(ast_root)
+        if linear_plan is not None:
+            linear_choices: List[Tuple[int, int, int]] = []
+            linear_token = 0
+            linear_steps = 0
 
-                def seq_step(index, position):
-                    if index >= len(items):
-                        return cont(position)
-                    return match_item(items[index], position,
-                                      lambda p2: seq_step(index + 1, p2))
-                return seq_step(0, pos)
-            return None
+            while linear_steps < step_budget:
+                if linear_token == len(linear_plan):
+                    end_pos = position
+                    if end_pos <= start_idx:
+                        return {
+                            "start": start_idx,
+                            "end": start_idx - 1,
+                            "variables": {},
+                            "state": self.start_state,
+                            "is_empty": True,
+                            "empty_pattern_rows": [start_idx],
+                            "excluded_vars": set(),
+                            "excluded_rows": [],
+                            "has_empty_alternation": self.has_empty_alternation,
+                        }
+                    return {
+                        "start": start_idx,
+                        "end": end_pos - 1,
+                        "variables": {
+                            var: indices[:]
+                            for var, indices in variables.items()
+                        },
+                        "state": self.start_state,
+                        "is_empty": False,
+                        "excluded_vars": set(),
+                        "excluded_rows": [],
+                        "has_empty_alternation": False,
+                    }
 
-        def match_item(item, pos, cont):
-            if budget[0] <= 0:
-                return None
-            kind = item[0]
-            if kind == "empty":
-                return cont(pos)
-            if kind == "anchor":
-                if item[1] == "^":
-                    return cont(pos) if pos == 0 else None
-                return cont(pos) if pos == row_count else None
-            if kind == "var":
-                _tag, name, min_rep, max_rep, greedy = item
-                return match_repeat(
-                    lambda p, c: step_var(name, p, c), min_rep, max_rep, greedy, pos, cont)
-            if kind == "group":
-                _tag, inner, min_rep, max_rep, greedy = item
-                return match_repeat(
-                    lambda p, c: match_node(inner, p, c), min_rep, max_rep, greedy, pos, cont)
-            return None
+                name, min_rep, max_rep = linear_plan[linear_token]
+                base_position = position
+                base_undo = len(assignment_undo)
+                count = 0
 
-        def step_var(name, pos, cont):
-            next_pos = try_var(name, pos)
-            if next_pos is None:
-                return None
-            assign(name, pos)
-            result = cont(next_pos)
-            if result is None:
-                unassign(name)
-            return result
+                while max_rep is None or count < max_rep:
+                    linear_steps += 1
+                    next_position = try_var(name, position)
+                    if next_position is None:
+                        break
+                    assign(name, position)
+                    assignment_undo.append(name)
+                    position = next_position
+                    count += 1
+                    if linear_steps >= step_budget:
+                        break
 
-        def match_repeat(step, min_rep, max_rep, greedy, pos, cont):
-            def rec(count, position):
-                if budget[0] <= 0:
+                if count >= min_rep and linear_steps < step_budget:
+                    # Append low-to-high so LIFO resumes max-1 first, matching
+                    # SQL greedy preference exactly.
+                    for alternative_count in range(min_rep, count):
+                        linear_choices.append((
+                            linear_token + 1,
+                            base_position + alternative_count,
+                            base_undo + alternative_count,
+                        ))
+                    linear_token += 1
+                    continue
+
+                rollback(base_undo)
+                if not linear_choices:
+                    variables.clear()
                     return None
-                budget[0] -= 1
+                linear_token, position, undo_size = linear_choices.pop()
+                rollback(undo_size)
+
+            variables.clear()
+            return None
+
+        def resume_choice() -> bool:
+            nonlocal tasks, position
+            if not choices:
+                return False
+            tasks, position, undo_size = choices.pop()
+            rollback(undo_size)
+            return True
+
+        while explored_steps < step_budget:
+            if not tasks:
+                end_pos = position
+                break
+
+            task = tasks.pop()
+            explored_steps += 1
+            task_kind = task[0]
+            failed = False
+
+            if task_kind == "node":
+                node = task[1]
+                node_kind = node[0]
+                if node_kind == "seq":
+                    # LIFO task stack: append in reverse so the SQL sequence
+                    # is still evaluated from left to right.
+                    for item in reversed(node[1]):
+                        tasks.append(("item", item))
+                elif node_kind == "alt":
+                    branches = node[1]
+                    if not branches:
+                        failed = True
+                    else:
+                        continuation = tasks.copy()
+                        undo_size = len(assignment_undo)
+                        # Later branches are saved in reverse, leaving the
+                        # second declared branch at the top of the DFS stack.
+                        for branch in reversed(branches[1:]):
+                            choices.append((
+                                continuation + [("node", branch)],
+                                position,
+                                undo_size,
+                            ))
+                        tasks.append(("node", branches[0]))
+                else:
+                    failed = True
+
+            elif task_kind == "item":
+                item = task[1]
+                item_kind = item[0]
+                if item_kind == "empty":
+                    pass
+                elif item_kind == "anchor":
+                    if item[1] == "^":
+                        failed = position != 0
+                    else:
+                        failed = position != row_count
+                elif item_kind == "var":
+                    _tag, name, min_rep, max_rep, greedy = item
+                    tasks.append((
+                        "repeat", ("var_once", name), min_rep, max_rep,
+                        greedy, 0,
+                    ))
+                elif item_kind == "group":
+                    _tag, inner, min_rep, max_rep, greedy = item
+                    tasks.append((
+                        "repeat", ("node", inner), min_rep, max_rep,
+                        greedy, 0,
+                    ))
+                else:
+                    failed = True
+
+            elif task_kind == "var_once":
+                name = task[1]
+                next_pos = try_var(name, position)
+                if next_pos is None:
+                    failed = True
+                else:
+                    assign(name, position)
+                    assignment_undo.append(name)
+                    position = next_pos
+
+            elif task_kind == "repeat":
+                _tag, base_task, min_rep, max_rep, greedy, count = task
                 can_more = max_rep is None or count < max_rep
-                if greedy:
-                    if can_more:
-                        result = step(position, lambda p2: (
-                            rec(count + 1, p2) if p2 != position or True else None))
-                        if result is not None:
-                            return result
-                    if count >= min_rep:
-                        return cont(position)
-                    return None
-                if count >= min_rep:
-                    result = cont(position)
-                    if result is not None:
-                        return result
-                if can_more:
-                    return step(position, lambda p2: rec(count + 1, p2))
-                return None
-            return rec(0, pos)
+                can_stop = count >= min_rep
 
-        end_pos = match_node(ast_root, start_idx, lambda p: p)
-        if end_pos is None or budget[0] <= 0:
+                more_tasks = None
+                if can_more:
+                    more_tasks = tasks.copy()
+                    more_tasks.append((
+                        "repeat_after", base_task, min_rep, max_rep,
+                        greedy, count + 1, position,
+                    ))
+                    more_tasks.append(base_task)
+
+                if greedy and more_tasks is not None:
+                    if can_stop:
+                        choices.append((
+                            tasks.copy(), position, len(assignment_undo)
+                        ))
+                    tasks = more_tasks
+                elif not greedy and can_stop:
+                    if more_tasks is not None:
+                        choices.append((
+                            more_tasks, position, len(assignment_undo)
+                        ))
+                    # Stopping means the existing continuation remains.
+                elif can_stop:
+                    # A greedy bounded repetition has reached its maximum;
+                    # its only legal continuation is to stop successfully.
+                    pass
+                elif more_tasks is not None:
+                    tasks = more_tasks
+                else:
+                    failed = True
+
+            elif task_kind == "repeat_after":
+                (_tag, base_task, min_rep, max_rep, greedy, count,
+                 previous_position) = task
+                if position == previous_position:
+                    # Repeating a zero-width group cannot discover new input.
+                    # Satisfy a positive minimum a bounded number of times,
+                    # then stop.  This removes the old empty-cycle recursion
+                    # while preserving the only observable row assignment.
+                    if count < min_rep and (
+                        max_rep is None or count < max_rep
+                    ):
+                        tasks.append((
+                            "repeat_after", base_task, min_rep, max_rep,
+                            greedy, count + 1, position,
+                        ))
+                        tasks.append(base_task)
+                    elif count < min_rep:
+                        failed = True
+                else:
+                    tasks.append((
+                        "repeat", base_task, min_rep, max_rep, greedy, count
+                    ))
+            else:
+                failed = True
+
+            if failed and not resume_choice():
+                break
+
+        if end_pos is None:
             variables.clear()
             return None
         if end_pos <= start_idx:
@@ -5991,7 +6225,11 @@ class EnhancedMatcher:
         the DFA traversal logic, maintaining 100% compatibility.
         """
         logger.info(f"🔍 Smart preprocessing for {len(rows)} rows")
-        
+
+        # Per-pass state: never allow a prefilter built for an earlier
+        # partition/input to leak into the next matching pass.
+        self._condition_prefilter_matrix = {}
+        self._condition_residual_fns = {}
         condition_matrix = self._vectorize_simple_define_conditions(rows)
         self._linear_plan_run_lengths = None
         self._linear_plan_run_lengths_row_count = None
@@ -6054,14 +6292,46 @@ class EnhancedMatcher:
         self._column_factorize_cache = {}
 
         condition_matrix = {}
+        condition_prefilters = {}
+        condition_residual_fns = {}
         for var_name, condition_expr in (self.define_conditions or {}).items():
+            var_name = str(var_name)
+            condition_expr = str(condition_expr)
             vectorized = self._vectorize_simple_condition_expression(
                 df=df,
-                var_name=str(var_name),
-                condition_expr=str(condition_expr),
+                var_name=var_name,
+                condition_expr=condition_expr,
             )
             if vectorized is not None:
-                condition_matrix[str(var_name)] = vectorized
+                condition_matrix[var_name] = vectorized
+            else:
+                prefilter_plan = self._vectorize_condition_and_prefilter(
+                    df=df,
+                    var_name=var_name,
+                    condition_expr=condition_expr,
+                )
+                if prefilter_plan is not None:
+                    prefilter, residual_node = prefilter_plan
+                    condition_prefilters[var_name] = prefilter
+                    try:
+                        from src.matcher.condition_evaluator import (
+                            compile_condition_ast,
+                        )
+                        condition_residual_fns[var_name] = compile_condition_ast(
+                            residual_node,
+                            source_condition=condition_expr,
+                        )
+                    except Exception:
+                        # Planning is optional.  If the residual cannot be
+                        # compiled by the standard evaluator, discard the
+                        # whole plan and preserve the scalar fallback.
+                        condition_prefilters.pop(var_name, None)
+
+        # A prefilter is only a necessary condition.  The exact scalar
+        # predicate is still evaluated for True entries; False entries cannot
+        # satisfy the original conjunction and can be rejected immediately.
+        self._condition_prefilter_matrix = condition_prefilters
+        self._condition_residual_fns = condition_residual_fns
 
         # Variables without DEFINE predicates are implicit TRUE.
         if self.original_pattern:
@@ -6071,6 +6341,72 @@ class EnhancedMatcher:
                     condition_matrix[var_name] = np.ones(len(rows), dtype=bool)
 
         return condition_matrix
+
+    def _vectorize_condition_and_prefilter(
+        self, df, var_name: str, condition_expr: str,
+    ):
+        """Return a safe row-local guard for a mixed AND predicate.
+
+        SQL conjunction is True only when every conjunct is True.  Therefore,
+        any top-level conjunct that is independently row-local can reject rows
+        before the context-dependent remainder is evaluated.  The method does
+        not optimize mixed OR expressions, and it never treats the guard as a
+        complete DEFINE result.
+        """
+        try:
+            import numpy as np
+            from src.matcher.condition_evaluator import _sql_to_python_condition
+
+            python_expr = _sql_to_python_condition(
+                (condition_expr or "").strip()
+            )
+            root = ast.parse(python_expr, mode="eval").body
+        except Exception:
+            return None
+
+        if not isinstance(root, ast.BoolOp) or not isinstance(root.op, ast.And):
+            return None
+
+        def flatten_and(node):
+            if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+                for value in node.values:
+                    yield from flatten_and(value)
+            else:
+                yield node
+
+        masks = []
+        residual_nodes = []
+        for conjunct in flatten_and(root):
+            try:
+                value = self._vectorized_eval_row_local_ast(
+                    df, conjunct, var_name
+                )
+            except Exception:
+                residual_nodes.append(conjunct)
+                continue
+            if isinstance(value, np.ndarray):
+                masks.append(value.astype(bool, copy=False))
+            elif hasattr(value, "to_numpy"):
+                masks.append(value.fillna(False).to_numpy(dtype=bool))
+            elif isinstance(value, (bool, np.bool_)):
+                masks.append(np.full(len(df), bool(value), dtype=bool))
+            else:
+                residual_nodes.append(conjunct)
+
+        # At least one conjunct must be proved by the vectorizer and at least
+        # one must remain for context-dependent evaluation.  A fully row-local
+        # expression is handled by the complete condition matrix above.
+        if not masks or not residual_nodes:
+            return None
+        result = masks[0]
+        for mask in masks[1:]:
+            result = np.logical_and(result, mask)
+        if len(residual_nodes) == 1:
+            residual = residual_nodes[0]
+        else:
+            residual = ast.BoolOp(op=ast.And(), values=residual_nodes)
+            ast.fix_missing_locations(residual)
+        return result, residual
 
     def _vectorize_simple_condition_expression(self, df, var_name: str, condition_expr: str):
         """
