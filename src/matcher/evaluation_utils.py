@@ -19,6 +19,7 @@ Version: 1.0.0
 
 import ast
 import math
+import operator
 import re
 import datetime
 import decimal
@@ -37,6 +38,19 @@ logger = get_logger(__name__)
 # Constants for production-ready behavior
 MAX_EXPRESSION_LENGTH = 10000  # Prevent extremely long expressions
 MAX_RECURSION_DEPTH = 50      # Prevent infinite recursion
+
+_COMPARISON_OPERATORS = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.Is: operator.is_,
+    ast.IsNot: operator.is_not,
+    ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
+}
 
 class EvaluationMode(Enum):
     """Enumeration of evaluation modes."""
@@ -446,28 +460,12 @@ def safe_compare(left: Any, right: Any, op: Union[Callable, ast.operator]) -> An
     if is_null(left) or is_null(right):
         return None
     
-    # Map AST operators to Python functions
-    import operator
-    
-    op_map = {
-        ast.Eq: operator.eq,
-        ast.NotEq: operator.ne,
-        ast.Lt: operator.lt,
-        ast.LtE: operator.le,
-        ast.Gt: operator.gt,
-        ast.GtE: operator.ge,
-        ast.Is: operator.is_,
-        ast.IsNot: operator.is_not,
-        ast.In: lambda a, b: a in b,
-        ast.NotIn: lambda a, b: a not in b,
-    }
-    
     try:
         # If op is a callable, use it directly; otherwise map from AST type
         if callable(op):
             return op(left, right)
         else:
-            op_func = op_map.get(type(op))
+            op_func = _COMPARISON_OPERATORS.get(type(op))
             if op_func:
                 return op_func(left, right)
             else:

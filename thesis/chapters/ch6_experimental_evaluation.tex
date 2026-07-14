@@ -1066,10 +1066,11 @@ or overlapping skip modes such as \texttt{SKIP TO NEXT ROW}---cannot be
 vectorized; the engine falls back to an exact preference-ordered search
 whose worst case is exponential but is bounded by a fixed
 $200\,000$-step budget per match
-(Section~\ref{subsec:meth-exec-backtracking}), so it does not run away
-exponentially---though the current \emph{recursive} implementation can
-still exceed Python's recursion depth on very large inputs
-(Section~\ref{subsec:eval-worst-cases}).  The benchmark and the ordering
+(Section~\ref{subsec:meth-exec-backtracking}) and driven by an
+explicit-stack search that does not depend on Python's recursion limit,
+so it terminates over the full size range---though far more slowly than
+the vectorized path (Section~\ref{subsec:eval-worst-cases}).  The
+benchmark and the ordering
 scenarios stay on the row-local fast path and therefore exercise
 Axis~1; Section~\ref{subsec:eval-worst-cases} exercises Axis~2
 empirically \emph{across all three systems}, and there the databases'
@@ -1778,9 +1779,10 @@ the fast path onto the exact preference-ordered backtracking searcher
 evaluate it on their native engines.  Concretely, the benchmark's
 \texttt{simple\_sequence} pattern is reused with the single change
 \texttt{B AS category='B' AND price > AVG(A.price)}.  All three systems
-were run on this query, and all three produce \emph{identical} output
-(the same $4{,}322$/$9{,}067$/$16{,}093$ matches at the three sizes;
-correctness verified), so the comparison in
+were run on this query across the full size range, and all three
+produce \emph{identical} output at every size (from $9{,}067$ matches at
+$100{,}000$ rows up to $181{,}147$ at the full $2.22$\,M; correctness
+verified), so the comparison in
 Table~\ref{tab:worstcase_coverage} and Figure~\ref{fig:worstcase_coverage}
 is fair.
 
@@ -1797,9 +1799,12 @@ is fair.
 \textbf{Size (rows)} & \textbf{Proposed engine (s)}
   & \textbf{Trino~473 (s)} & \textbf{Oracle XE~21c (s)} \\
 \midrule
-50{,}000  & 0.83 & 0.49 & 0.046 \\
-100{,}000 & 1.76 & 0.30 & 0.072 \\
-200{,}000 & 3.26 & 0.53 & 0.133 \\
+100{,}000 & 1.66 & 0.71 & 0.07 \\
+200{,}000 & 3.10 & 0.53 & 0.13 \\
+400{,}000 & 14.35 & 3.65 & 0.35 \\
+800{,}000 & 25.48 & 5.14 & 0.67 \\
+1{,}600{,}000 & 43.65 & 6.43 & 1.63 \\
+2{,}222{,}742 & 64.41 & 8.67 & 2.32 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1819,8 +1824,9 @@ is fair.
 
 The ranking \emph{reverses}.  On the row-local benchmark the proposed
 engine is $5$--$11\times$ faster than the databases; on this
-state-dependent query it is the \emph{slowest} of the three---Oracle is
-about $18$--$25\times$ faster and Trino about $2$--$6\times$ faster.
+state-dependent query it is the \emph{slowest} of the three, at every
+size---Oracle is about $23$--$41\times$ faster and Trino about
+$2$--$7\times$ faster.
 The reason is exactly the specialization argument stated at the start
 of the section, seen from the other side: the engine's speed comes from
 compiling row-local predicates to vectorized array operations, and a
@@ -1829,18 +1835,23 @@ way, so the engine falls back to a per-row search while Trino and Oracle
 apply mature, cost-based execution engines built for exactly this kind
 of general predicate.  For scale, the same-shaped row-local query runs
 in about $0.02$\,s at $100{,}000$ rows on the engine
-(Table~\ref{tab:execution_times}), against $1.76$\,s here---roughly
-$90\times$ slower on its own worst case than its best case.  Two
+(Table~\ref{tab:execution_times}), against $1.66$\,s here---roughly
+$80\times$ slower on its own worst case than its best case.  Two
 honest consequences follow.  First, the proposed engine's advantage is
 \emph{not universal}: it holds on the supported row-local fast path and
 disappears on query classes that leave it, where a general-purpose
-database is the better tool.  Second, the fallback is a genuine
-limitation of scale as well as speed---at $400{,}000$ rows the current
-\emph{recursive} backtracking implementation exceeds Python's default
-recursion depth and raises an error, so this comparison caps at
-$200{,}000$ rows; a production deployment would route state-dependent
-predicates to a database engine, or replace the recursive searcher with
-an iterative one.  Together with the sorting scenarios, this completes
+database is the better tool.  Second, replacing recursive continuations
+with an explicit depth-first-search stack removes dependence on Python's
+recursion limit: the proposed engine now completes the \emph{full} size
+range up to the $2.22$\,M-row dataset---about $64$\,s there, against
+Oracle's $2.3$\,s and Trino's $8.7$\,s---with output identical to Trino
+and Oracle.  This change removes an implementation ceiling, but it does
+not change the backtracking search's worst-case growth.  The search therefore retains a
+fixed exploration budget to guarantee termination on pathological
+inputs; exhausting that budget ends the candidate search without a
+match.  A production deployment should still route highly ambiguous or
+state-dependent workloads to a database engine when predictable latency
+is required.  Together with the sorting scenarios, this completes
 the picture across both axes: the engine is optimal $\Theta(n)$ and
 fastest on the ordered row-local workload, keeps its lead through the
 $O(n\log n)$ sorting worst case, and cedes the lead---by a wide

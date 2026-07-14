@@ -99,8 +99,12 @@ class ConditionEvaluator(ast.NodeVisitor):
         # Initialize visit stack for recursion tracking
         self.visit_stack = set()
         
-        # Build optimized indices
-        self._build_evaluation_indices()
+        # CLASSIFIER lookup is the only condition operation that needs this
+        # row-to-variable index.  Keep it lazy: rebuilding it for every
+        # running-aggregate comparison makes long matches quadratic even when
+        # the expression never reads CLASSIFIER.
+        self._row_var_index = {}
+        self._evaluation_indices_ready = False
 
     def reset(
         self,
@@ -113,8 +117,9 @@ class ConditionEvaluator(ast.NodeVisitor):
 
         Compiled conditions are evaluated many times while the DFA scans rows.
         Reusing the evaluator avoids repeated object allocation while preserving
-        the same public semantics.  The evaluation indices are rebuilt because
-        variable assignments may change as a match grows.
+        the same public semantics.  Variable assignments may change as a match
+        grows, so the optional classifier index is marked dirty and rebuilt
+        only if an expression requests it.
         """
         if not isinstance(context, RowContext):
             raise ValueError(f"Expected RowContext, got {type(context)}")
@@ -131,7 +136,7 @@ class ConditionEvaluator(ast.NodeVisitor):
             "navigation_calls": 0,
             "math_function_calls": 0
         }
-        self._build_evaluation_indices()
+        self._evaluation_indices_ready = False
         return self
 
     
@@ -157,9 +162,16 @@ class ConditionEvaluator(ast.NodeVisitor):
                                     if idx not in self._row_var_index:
                                         self._row_var_index[idx] = set()
                                     self._row_var_index[idx].add(subset_name)
+                self._evaluation_indices_ready = True
         except Exception as e:
             logger.warning(f"Error building evaluation indices: {e}")
             self._row_var_index = {}
+            self._evaluation_indices_ready = True
+
+    def _ensure_evaluation_indices(self) -> None:
+        """Build classifier indices only when a condition needs them."""
+        if not self._evaluation_indices_ready:
+            self._build_evaluation_indices()
 
     def _safe_compare(self, left: Any, right: Any, op: Union[Callable, ast.operator]) -> Any:
         """Perform SQL-style comparison with NULL handling."""
@@ -481,6 +493,13 @@ class ConditionEvaluator(ast.NodeVisitor):
             raise ValueError(f"{func_name} in DEFINE requires {expected_args} argument(s)")
         arg = node.args[0]
         key_arg = node.args[1] if expected_args == 2 else None
+        simple_field = (
+            arg.attr
+            if key_arg is None
+            and isinstance(arg, ast.Attribute)
+            and isinstance(arg.value, ast.Name)
+            else None
+        )
 
         context = self.context
         variables = getattr(context, "variables", {}) or {}
@@ -501,6 +520,139 @@ class ConditionEvaluator(ast.NodeVisitor):
                     members = list(subset_members)
                     break
             member_set = {str(m).upper() for m in members}
+
+        # The exact backtracking searcher supplies per-variable assignment
+        # revisions.  Aggregates scoped to A, for example, do not change while
+        # rows are tentatively added to B.  Cache against only the revisions
+        # that can affect this aggregate, plus the current tentative row when
+        # it belongs to the aggregate scope.  Assignment and rollback both
+        # advance revisions, which makes stale reuse impossible.
+        aggregate_cache = getattr(context, "_define_aggregate_cache", None)
+        assignment_versions = (
+            getattr(context, "_define_assignment_versions", None)
+            if aggregate_cache is not None
+            else None
+        )
+        aggregate_cache_key = None
+        if aggregate_cache is not None and assignment_versions is not None:
+            tentative_in_scope = (
+                current_idx is not None
+                and 0 <= current_idx < len(rows)
+                and (
+                    member_set is None
+                    or (
+                        current_var
+                        and str(current_var).upper() in member_set
+                    )
+                )
+            )
+            # Memoization only pays when the aggregate scope is unchanged by
+            # the tentative row and contains enough rows to make rescanning
+            # materially more expensive than key construction.  If the
+            # tentative row belongs to the scope, every input position has a
+            # distinct value and the cache would add overhead without reuse.
+            # Universal aggregates always include the tentative row, so the
+            # cheap gate also avoids constructing member sets for them.
+            if not tentative_in_scope and member_set is not None:
+                scope_cardinality = 0
+                for var_name, var_indices in variables.items():
+                    if str(var_name).upper() in member_set:
+                        scope_cardinality += len(var_indices)
+                # Below this point a direct scan is cheaper on CPython.  This
+                # threshold is a cost-model decision, independent of any
+                # pattern or column name; long unchanged scopes still obtain
+                # linear rather than repeated-scan behavior.
+                if scope_cardinality < 16:
+                    relevant_members = None
+                else:
+                    relevant_members = member_set
+            else:
+                relevant_members = None
+            if relevant_members is not None:
+                revision_key = tuple(
+                    (member, assignment_versions.get(member, 0))
+                    for member in sorted(relevant_members)
+                )
+                aggregate_cache_key = (id(node), func_name, revision_key)
+                if aggregate_cache_key in aggregate_cache:
+                    return aggregate_cache[aggregate_cache_key]
+
+        def finish(value):
+            if aggregate_cache_key is not None:
+                # Bound pathological ambiguous searches.  Clearing affects
+                # performance only; revision keys preserve correctness.
+                if len(aggregate_cache) >= 4096:
+                    aggregate_cache.clear()
+                aggregate_cache[aggregate_cache_key] = value
+            return value
+
+        # A single qualified field over one primary variable already has an
+        # ordered assignment list.  Stream it directly instead of creating a
+        # set, sorting indices, building classifier labels, and materializing
+        # all values.  Subsets/multiple case variants and expression-valued
+        # arguments retain the generic implementation below.
+        if simple_field is not None and member_set is not None and len(member_set) == 1:
+            matching_lists = [
+                var_indices
+                for var_name, var_indices in variables.items()
+                if str(var_name).upper() in member_set
+            ]
+            if len(matching_lists) <= 1:
+                assigned_indices = matching_lists[0] if matching_lists else []
+                include_current = (
+                    current_idx is not None
+                    and 0 <= current_idx < len(rows)
+                    and current_var
+                    and str(current_var).upper() in member_set
+                    and current_idx not in assigned_indices
+                )
+
+                count = 0
+                total = 0
+                minimum = None
+                maximum = None
+                first = None
+                array_values = [] if func_name == "ARRAY_AGG" else None
+
+                def consume(row_index):
+                    nonlocal count, total, minimum, maximum, first
+                    value = rows[row_index].get(simple_field)
+                    if value is None or value != value:  # SQL NULL/NaN
+                        return
+                    count += 1
+                    if first is None:
+                        first = value
+                    if func_name in ("SUM", "AVG"):
+                        total += value
+                    elif func_name == "MIN":
+                        minimum = value if minimum is None else min(minimum, value)
+                    elif func_name == "MAX":
+                        maximum = value if maximum is None else max(maximum, value)
+                    elif array_values is not None:
+                        array_values.append(value)
+
+                for row_index in assigned_indices:
+                    if 0 <= row_index < len(rows):
+                        consume(row_index)
+                if include_current:
+                    consume(current_idx)
+
+                if func_name == "COUNT":
+                    return finish(count)
+                if count == 0:
+                    return finish(None)
+                if func_name == "SUM":
+                    return finish(total)
+                if func_name == "AVG":
+                    return finish(total / count)
+                if func_name == "MIN":
+                    return finish(minimum)
+                if func_name == "MAX":
+                    return finish(maximum)
+                if func_name == "ARRAY_AGG":
+                    return finish(array_values)
+                if func_name == "ARBITRARY":
+                    return finish(first)
 
         indices = set()
         for var_name, var_indices in variables.items():
@@ -525,11 +677,6 @@ class ConditionEvaluator(ast.NodeVisitor):
         if current_idx is not None and current_idx >= 0:
             index_labels.setdefault(current_idx, current_var)
 
-        simple_field = (
-            arg.attr if scope_var is not None and isinstance(arg, ast.Attribute) else None
-        )
-        if key_arg is not None:
-            simple_field = None  # two-argument aggregates always re-evaluate
         values = []
         keys = []
         saved_row = self.current_row
@@ -558,24 +705,24 @@ class ConditionEvaluator(ast.NodeVisitor):
             context.current_var = saved_var
 
         if func_name == "COUNT":
-            return len(values)
+            return finish(len(values))
         if not values:
-            return None
+            return finish(None)
         if func_name in ("MAX_BY", "MIN_BY"):
             pick = max if func_name == "MAX_BY" else min
             best_index = pick(range(len(keys)), key=lambda i: keys[i])
-            return values[best_index]
+            return finish(values[best_index])
         if func_name == "SUM":
-            return sum(values)
+            return finish(sum(values))
         if func_name == "AVG":
-            return sum(values) / len(values)
+            return finish(sum(values) / len(values))
         if func_name == "MIN":
-            return min(values)
+            return finish(min(values))
         if func_name == "MAX":
-            return max(values)
+            return finish(max(values))
         if func_name == "ARRAY_AGG":
-            return values
-        return values[0]  # ARBITRARY
+            return finish(values)
+        return finish(values[0])  # ARBITRARY
 
     def _handle_navigation_function(self, node: ast.Call, func_name: str) -> Any:
         """Handle navigation function calls with comprehensive support."""
@@ -1466,6 +1613,7 @@ class ConditionEvaluator(ast.NodeVisitor):
         
         # Get the classifier for the current row
         current_idx = self.context.current_idx
+        self._ensure_evaluation_indices()
         
         # Check which variable(s) this row belongs to
         if hasattr(self, '_row_var_index') and current_idx in self._row_var_index:
@@ -2097,7 +2245,11 @@ class ConditionEvaluator(ast.NodeVisitor):
             has_none = False
             for value in node.values:
                 result = self.visit(value)
-                if result is True:
+                # DataFrame scalar comparisons commonly produce numpy.bool_
+                # rather than the singleton ``True``.  Identity comparison
+                # incorrectly treated those true values as false and broke
+                # OR whenever only that branch matched.
+                if result is not None and bool(result):
                     return True
                 elif result is None:
                     has_none = True
@@ -2272,6 +2424,271 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
     return None
 
 
+class _FastConditionUnsupported(Exception):
+    """Internal signal that a residual expression needs the AST evaluator."""
+
+
+def _compile_fast_condition_expression(node):
+    """Compile a safe DEFINE-expression subset into direct callables.
+
+    The returned functions still use the production aggregate and comparison
+    primitives; this removes only repeated ``ast.NodeVisitor`` dispatch.  Any
+    node whose semantics are context-sensitive beyond this subset rejects the
+    whole plan and falls back to the standard evaluator.
+    """
+    if isinstance(node, ast.Constant):
+        value = node.value
+        return lambda evaluator, row, context: value
+
+    if isinstance(node, ast.Name):
+        name = node.id
+        if name.upper() in {
+            "PREV", "NEXT", "FIRST", "LAST", "CLASSIFIER",
+            "MATCH_NUMBER", "GET_VAR_VALUE",
+        } or name == "row":
+            raise _FastConditionUnsupported
+
+        def read_current_field(evaluator, row, context):
+            if name in getattr(context, "pattern_variables", ()):
+                return None
+            if row is not None:
+                return row.get(name)
+            index = getattr(context, "current_idx", -1)
+            rows = getattr(context, "rows", ())
+            if 0 <= index < len(rows):
+                return rows[index].get(name)
+            return None
+
+        return read_current_field
+
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        func_name = node.func.id.upper()
+        if func_name in {
+            "SUM", "AVG", "MIN", "MAX", "COUNT", "ARBITRARY",
+            "ARRAY_AGG", "MAX_BY", "MIN_BY",
+        }:
+            return lambda evaluator, row, context: (
+                evaluator._handle_define_aggregate(node, func_name)
+            )
+        if func_name == "_IS_NULL" and len(node.args) == 1 and not node.keywords:
+            argument = _compile_fast_condition_expression(node.args[0])
+            return lambda evaluator, row, context: is_null(
+                argument(evaluator, row, context)
+            )
+        if func_name in MATH_FUNCTIONS and not node.keywords:
+            arguments = tuple(
+                _compile_fast_condition_expression(arg) for arg in node.args
+            )
+
+            def evaluate_math(evaluator, row, context):
+                values = [part(evaluator, row, context) for part in arguments]
+                evaluator.stats["math_function_calls"] += 1
+                return evaluate_math_function(func_name, *values)
+
+            return evaluate_math
+        raise _FastConditionUnsupported
+
+    if isinstance(node, ast.Compare):
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            raise _FastConditionUnsupported
+        op_node = node.ops[0]
+        if isinstance(op_node, (ast.In, ast.NotIn)):
+            raise _FastConditionUnsupported
+        comparison = {
+            ast.Eq: operator.eq,
+            ast.NotEq: operator.ne,
+            ast.Lt: operator.lt,
+            ast.LtE: operator.le,
+            ast.Gt: operator.gt,
+            ast.GtE: operator.ge,
+            ast.Is: operator.is_,
+            ast.IsNot: operator.is_not,
+        }.get(type(op_node))
+        if comparison is None:
+            raise _FastConditionUnsupported
+        left = _compile_fast_condition_expression(node.left)
+        right = _compile_fast_condition_expression(node.comparators[0])
+        return lambda evaluator, row, context: evaluator._safe_compare(
+            left(evaluator, row, context),
+            right(evaluator, row, context),
+            comparison,
+        )
+
+    if isinstance(node, ast.BoolOp):
+        parts = tuple(
+            _compile_fast_condition_expression(value) for value in node.values
+        )
+        if isinstance(node.op, ast.And):
+            def evaluate_and(evaluator, row, context):
+                has_null = False
+                for part in parts:
+                    result = part(evaluator, row, context)
+                    if result is None:
+                        has_null = True
+                    elif not bool(result):
+                        return False
+                return None if has_null else True
+
+            return evaluate_and
+        if isinstance(node.op, ast.Or):
+            def evaluate_or(evaluator, row, context):
+                has_null = False
+                for part in parts:
+                    result = part(evaluator, row, context)
+                    if result is None:
+                        has_null = True
+                    elif bool(result):
+                        return True
+                return None if has_null else False
+
+            return evaluate_or
+        raise _FastConditionUnsupported
+
+    if isinstance(node, ast.BinOp):
+        operation = {
+            ast.Add: operator.add,
+            ast.Sub: operator.sub,
+            ast.Mult: operator.mul,
+            ast.Div: operator.truediv,
+            ast.FloorDiv: operator.floordiv,
+            ast.Mod: operator.mod,
+            ast.Pow: operator.pow,
+            ast.LShift: operator.lshift,
+            ast.RShift: operator.rshift,
+            ast.BitOr: operator.or_,
+            ast.BitXor: operator.xor,
+            ast.BitAnd: operator.and_,
+        }.get(type(node.op))
+        if operation is None:
+            raise _FastConditionUnsupported
+        left = _compile_fast_condition_expression(node.left)
+        right = _compile_fast_condition_expression(node.right)
+
+        def evaluate_binary(evaluator, row, context):
+            try:
+                left_value = left(evaluator, row, context)
+                right_value = right(evaluator, row, context)
+                if left_value is None or right_value is None:
+                    return None
+                return operation(left_value, right_value)
+            except Exception:
+                return None
+
+        return evaluate_binary
+
+    if isinstance(node, ast.UnaryOp):
+        operation = {
+            ast.Not: operator.not_,
+            ast.UAdd: operator.pos,
+            ast.USub: operator.neg,
+            ast.Invert: operator.invert,
+        }.get(type(node.op))
+        if operation is None:
+            raise _FastConditionUnsupported
+        operand = _compile_fast_condition_expression(node.operand)
+
+        def evaluate_unary(evaluator, row, context):
+            try:
+                value = operand(evaluator, row, context)
+                return None if value is None else operation(value)
+            except Exception:
+                return None
+
+        return evaluate_unary
+
+    raise _FastConditionUnsupported
+
+
+def _compile_condition_node(
+    condition_node,
+    *,
+    source_condition: str,
+    python_condition: str,
+    evaluation_mode: str,
+    compiled_expression=None,
+):
+    """Compile an already parsed condition AST node.
+
+    The matcher planner uses this entry point after it has proved some
+    top-level AND conjuncts with a vectorized row-local guard.  Evaluating the
+    remaining node is exactly equivalent on rows where that guard is true,
+    and avoids converting/parsing the residual expression again.  Keeping the
+    evaluator construction here also ensures planned and unplanned predicates
+    share one implementation and identical SQL semantics.
+    """
+    is_boolean_expression = _is_boolean_expression(condition_node)
+    thread_state = threading.local()
+
+    def evaluate_condition(row, ctx):
+        # Reuse one evaluator per compiled condition and thread.  If the same
+        # condition is re-entered recursively, use a temporary evaluator so
+        # the active evaluation state is not corrupted.
+        in_use = getattr(thread_state, "in_use", False)
+        if in_use:
+            evaluator = ConditionEvaluator(ctx, evaluation_mode)
+        else:
+            evaluator = getattr(thread_state, "evaluator", None)
+            if evaluator is None:
+                evaluator = ConditionEvaluator(ctx, evaluation_mode)
+                thread_state.evaluator = evaluator
+            else:
+                evaluator.reset(ctx, evaluation_mode)
+
+        thread_state.in_use = True
+        try:
+            evaluator.current_row = row
+            if compiled_expression is None:
+                result = evaluator.visit(condition_node)
+            else:
+                result = compiled_expression(evaluator, row, ctx)
+            if is_boolean_expression:
+                return bool(result)
+            return result
+        except Exception as exc:
+            logger.error(
+                f"Error evaluating condition '{source_condition}': {exc}"
+            )
+            return False
+        finally:
+            thread_state.in_use = False
+
+    evaluate_condition.original_condition = source_condition
+    evaluate_condition.python_condition = python_condition
+    evaluate_condition.is_boolean_expression = is_boolean_expression
+    evaluate_condition.uses_compiled_expression = compiled_expression is not None
+    # Aggregates read accumulated match state, so results for the same input
+    # position can differ between tentative match assignments.
+    evaluate_condition.uses_match_state = bool(
+        re.search(
+            r'\b(?:sum|avg|min|max|count|arbitrary|array_agg)\s*\(',
+            source_condition,
+            re.IGNORECASE,
+        )
+    )
+    return evaluate_condition
+
+
+def compile_condition_ast(condition_node, source_condition, evaluation_mode='DEFINE'):
+    """Compile a trusted normalized AST node using the standard evaluator.
+
+    This is deliberately a narrow internal planning API: callers must obtain
+    the node from the normal SQL-to-Python parser, rather than constructing a
+    separate expression language.
+    """
+    python_condition = ast.unparse(condition_node)
+    try:
+        compiled_expression = _compile_fast_condition_expression(condition_node)
+    except _FastConditionUnsupported:
+        compiled_expression = None
+    return _compile_condition_node(
+        condition_node,
+        source_condition=source_condition,
+        python_condition=python_condition,
+        evaluation_mode=evaluation_mode,
+        compiled_expression=compiled_expression,
+    )
+
+
 def compile_condition(condition_str, evaluation_mode='DEFINE'):
     """
     Compile a condition string into a callable function.
@@ -2297,56 +2714,12 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
         
         # Parse the condition
         tree = ast.parse(python_condition, mode='eval')
-        is_boolean_expression = _is_boolean_expression(tree.body)
-        thread_state = threading.local()
-        
-        # Create a function that evaluates the condition with the given row and context
-        def evaluate_condition(row, ctx):
-            # Reuse one evaluator per compiled condition and thread.  If the
-            # same condition is re-entered recursively, fall back to a temporary
-            # evaluator to avoid corrupting the active evaluation state.
-            in_use = getattr(thread_state, "in_use", False)
-            if in_use:
-                evaluator = ConditionEvaluator(ctx, evaluation_mode)
-            else:
-                evaluator = getattr(thread_state, "evaluator", None)
-                if evaluator is None:
-                    evaluator = ConditionEvaluator(ctx, evaluation_mode)
-                    thread_state.evaluator = evaluator
-                else:
-                    evaluator.reset(ctx, evaluation_mode)
-
-            thread_state.in_use = True
-            try:
-                evaluator.current_row = row
-                result = evaluator.visit(tree.body)
-                
-                # Determine if we should return boolean or actual value based on expression structure
-                # If the top-level expression is a boolean operation, comparison, etc., return boolean
-                # If it's a simple value expression (like standalone CLASSIFIER(U)), return the actual value
-                if is_boolean_expression:
-                    return bool(result)
-                else:
-                    # For standalone value expressions, return the actual value
-                    return result
-                        
-            except Exception as e:
-                logger.error(f"Error evaluating condition '{condition_str}': {e}")
-                return False
-            finally:
-                thread_state.in_use = False
-                
-        evaluate_condition.original_condition = condition_str
-        evaluate_condition.python_condition = python_condition
-        evaluate_condition.is_boolean_expression = is_boolean_expression
-        # Aggregates read the accumulated match state, so results for the
-        # same (row, current_idx) can differ between match attempts and must
-        # not be served from position-keyed caches.
-        evaluate_condition.uses_match_state = bool(
-            re.search(r'\b(?:sum|avg|min|max|count|arbitrary|array_agg)\s*\(',
-                      condition_str, re.IGNORECASE)
+        return _compile_condition_node(
+            tree.body,
+            source_condition=condition_str,
+            python_condition=python_condition,
+            evaluation_mode=evaluation_mode,
         )
-        return evaluate_condition
     except SyntaxError as e:
         # Log the error and return a function that always returns False
         logger.error(f"Syntax error in condition '{condition_str}': {e}")

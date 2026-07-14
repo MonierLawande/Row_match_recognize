@@ -309,6 +309,218 @@ class TestExponentialProtection:
             assert 'classy' in result.columns
             # Should find some valid partitioning of the 1s into A+, B+, C+
 
+    def test_state_dependent_backtracking_is_not_limited_by_python_stack(self):
+        """Long quantified matches use the iterative exact-search stack.
+
+        The match is deliberately longer than Python's default recursion
+        limit.  B's predicate reads A's tentative assignments, ensuring this
+        exercises the state-dependent backtracking path rather than the
+        row-local linear matcher.
+        """
+        a_rows = 1600
+        df = pd.DataFrame({
+            'seq_id': range(a_rows + 1),
+            'category': ['A'] * a_rows + ['B'],
+            'price': [1.0] * a_rows + [2.0],
+        })
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                FIRST(A.seq_id) AS start_row,
+                LAST(B.seq_id) AS end_row,
+                COUNT(*) AS match_length
+            ONE ROW PER MATCH
+            PATTERN (A+ B+)
+            DEFINE
+                A AS category = 'A',
+                B AS category = 'B' AND price > AVG(A.price)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result.to_dict('records') == [{
+            'start_row': 0,
+            'end_row': a_rows,
+            'match_length': a_rows + 1,
+        }]
+
+    def test_state_dependent_or_does_not_use_and_prefilter(self):
+        """Mixed OR remains on the complete exact predicate.
+
+        The row-local branch is false for the final row, while the running
+        aggregate branch is true.  An AND-style vectorized guard would reject
+        this valid match.  NumPy-backed DataFrame scalars must also participate
+        in SQL OR using truth-value semantics rather than object identity.
+        """
+        df = pd.DataFrame({
+            'seq_id': [0, 1, 2],
+            'category': ['A', 'A', 'C'],
+            'price': [1.0, 2.0, 10.0],
+        })
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                FIRST(A.seq_id) AS start_row,
+                LAST(B.seq_id) AS end_row
+            ONE ROW PER MATCH
+            PATTERN (A+ B+)
+            DEFINE
+                A AS category = 'A',
+                B AS category = 'B' OR price > AVG(A.price)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result.to_dict('records') == [{
+            'start_row': 0,
+            'end_row': 2,
+        }]
+
+    def test_running_aggregate_does_not_build_unused_classifier_index(self):
+        """Long aggregate-only matches keep condition evaluation linear."""
+        from src.matcher.condition_evaluator import ConditionEvaluator
+
+        a_rows = 128
+        b_rows = 128
+        df = pd.DataFrame({
+            'seq_id': range(a_rows + b_rows),
+            'category': ['A'] * a_rows + ['B'] * b_rows,
+            'price': [1.0] * a_rows + [2.0] * b_rows,
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES COUNT(*) AS match_length
+            ONE ROW PER MATCH
+            PATTERN (A+ B+)
+            DEFINE
+                A AS category = 'A',
+                B AS category = 'B' AND price > AVG(A.price)
+        )
+        """
+
+        original = ConditionEvaluator._build_evaluation_indices
+        builds = 0
+
+        def counted_build(evaluator):
+            nonlocal builds
+            builds += 1
+            return original(evaluator)
+
+        ConditionEvaluator._build_evaluation_indices = counted_build
+        try:
+            result = match_recognize(query, df)
+        finally:
+            ConditionEvaluator._build_evaluation_indices = original
+
+        assert result.to_dict('records') == [{
+            'match_length': a_rows + b_rows,
+        }]
+        assert builds == 0
+
+    def test_aggregate_memo_is_invalidated_after_backtracking_rollback(self):
+        """A cached aggregate cannot survive a change to its label scope."""
+        prices = [1.0] + [100.0] * 16 + [40.0]
+        df = pd.DataFrame({
+            'seq_id': range(len(prices)),
+            'price': prices,
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                FIRST(A.seq_id) AS start_row,
+                LAST(B.seq_id) AS end_row,
+                COUNT(*) AS match_length
+            ONE ROW PER MATCH
+            PATTERN (A+ B+ $)
+            DEFINE B AS price > AVG(A.price)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        # With 17 rows assigned to A, the final 40 cannot satisfy B.  Exact
+        # search must roll A back to only the first row and recompute AVG(A),
+        # after which all remaining rows satisfy B and the end anchor matches.
+        assert result.to_dict('records') == [{
+            'start_row': 0,
+            'end_row': len(prices) - 1,
+            'match_length': len(prices),
+        }]
+
+    def test_compiled_residual_has_strict_navigation_fallback(self):
+        """Only the explicitly supported residual IR bypasses AST dispatch."""
+        import ast
+        from src.matcher.condition_evaluator import (
+            _sql_to_python_condition,
+            compile_condition_ast,
+        )
+
+        aggregate_node = ast.parse(
+            _sql_to_python_condition("price > AVG(A.price) + 1"),
+            mode='eval',
+        ).body
+        aggregate_condition = compile_condition_ast(
+            aggregate_node,
+            source_condition="price > AVG(A.price) + 1",
+        )
+        assert aggregate_condition.uses_compiled_expression is True
+
+        navigation_node = ast.parse(
+            _sql_to_python_condition("price > PREV(price)"),
+            mode='eval',
+        ).body
+        navigation_condition = compile_condition_ast(
+            navigation_node,
+            source_condition="price > PREV(price)",
+        )
+        assert navigation_condition.uses_compiled_expression is False
+
+    def test_compiled_linear_exact_search_preserves_greedy_backtracking(self):
+        """A greedy linear token rolls back when a later token needs its row."""
+        df = pd.DataFrame({
+            'seq_id': [0, 1, 2],
+            'category': ['A', 'B', 'C'],
+            'price': [1.0, 5.0, 10.0],
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                FIRST(A.seq_id) AS start_row,
+                LAST(C.seq_id) AS end_row,
+                COUNT(*) AS match_length
+            ONE ROW PER MATCH
+            PATTERN (A+ B+ C+)
+            DEFINE
+                A AS category = 'A' OR category = 'B',
+                B AS category = 'B',
+                C AS category = 'C' AND price > AVG(A.price)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        # A greedily accepts row 1 first.  Exact preference search must return
+        # it to B after B's required repetition initially fails.
+        assert result.to_dict('records') == [{
+            'start_row': 0,
+            'end_row': 2,
+            'match_length': 3,
+        }]
+
     def test_memory_usage_protection(self):
         """Test that memory usage doesn't explode with exponential patterns."""
         df = pd.DataFrame({
