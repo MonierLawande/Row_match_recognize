@@ -2533,8 +2533,8 @@ def _mark_composed_fast_condition_part(part, children):
     )
 
 
-class _LinearAggregateState:
-    """Rollback-safe prefix state for one contiguous exact-search scope."""
+class _RollbackAggregateState:
+    """Prefix aggregate state maintained by exact-search append/rollback."""
 
     def __init__(self, func_name, column_values, rows, field_name, indices):
         self.func_name = func_name
@@ -2558,6 +2558,17 @@ class _LinearAggregateState:
         present = value is not None and value == value
         if self.func_name == "COUNT":
             return previous + (1 if present else 0)
+        if self.func_name in {"MIN", "MAX", "ARBITRARY"}:
+            has_value, current = previous
+            if not present or (self.func_name == "ARBITRARY" and has_value):
+                return previous
+            if not has_value:
+                return True, value
+            if self.func_name == "MIN":
+                return True, min(current, value)
+            if self.func_name == "MAX":
+                return True, max(current, value)
+            return previous
         total, count = previous
         if present:
             total = total + value
@@ -2570,7 +2581,15 @@ class _LinearAggregateState:
         previous = (
             self.snapshots[-1]
             if self.snapshots
-            else (0 if self.func_name == "COUNT" else (0, 0))
+            else (
+                0
+                if self.func_name == "COUNT"
+                else (
+                    (False, None)
+                    if self.func_name in {"MIN", "MAX", "ARBITRARY"}
+                    else (0, 0)
+                )
+            )
         )
         try:
             self.snapshots.append(self._advance(previous, row_index))
@@ -2589,7 +2608,15 @@ class _LinearAggregateState:
         current = (
             self.snapshots[-1]
             if self.snapshots
-            else (0 if self.func_name == "COUNT" else (0, 0))
+            else (
+                0
+                if self.func_name == "COUNT"
+                else (
+                    (False, None)
+                    if self.func_name in {"MIN", "MAX", "ARBITRARY"}
+                    else (0, 0)
+                )
+            )
         )
         if include_index is not None:
             try:
@@ -2598,6 +2625,9 @@ class _LinearAggregateState:
                 return _UNBOUND_FAST_VALUE
         if self.func_name == "COUNT":
             return current
+        if self.func_name in {"MIN", "MAX", "ARBITRARY"}:
+            has_value, value = current
+            return value if has_value else None
         total, count = current
         if count == 0:
             return None
@@ -2647,13 +2677,20 @@ def _evaluate_prepared_simple_aggregate(
     # prefix states that are extended on assignment and truncated on rollback.
     # Stored prefixes preserve the original left-to-right arithmetic exactly;
     # no inverse floating-point operation is used.
-    linear_states = getattr(context, "_define_linear_aggregate_states", None)
+    incremental_states = getattr(
+        context, "_define_incremental_aggregate_states", None
+    )
+    incremental_threshold = getattr(
+        context, "_define_incremental_aggregate_threshold", 16
+    )
     if (
-        linear_states is not None
-        and func_name in {"SUM", "AVG", "COUNT"}
-        and len(assigned) >= 16
+        incremental_states is not None
+        and func_name in {
+            "SUM", "AVG", "COUNT", "MIN", "MAX", "ARBITRARY"
+        }
+        and len(assigned) >= incremental_threshold
     ):
-        scope_states = linear_states.setdefault(
+        scope_states = incremental_states.setdefault(
             str(exact_scope).upper(), {}
         )
         state_key = (field_name, func_name)
@@ -2670,7 +2707,7 @@ def _evaluate_prepared_simple_aggregate(
                     exact_column_at(field_name)
                     if exact_column_at is not None else None
                 )
-            state = _LinearAggregateState(
+            state = _RollbackAggregateState(
                 func_name,
                 bound_column,
                 rows,
@@ -2925,9 +2962,9 @@ def _compile_fast_condition_expression(node):
                         exact_column_at(field_name)
                         if exact_column_at is not None else None
                     )
+
                     def evaluate_bound_aggregate(evaluator, row, context):
-                        return (
-                        _evaluate_prepared_simple_aggregate(
+                        return _evaluate_prepared_simple_aggregate(
                             evaluator,
                             node,
                             func_name,
@@ -2936,7 +2973,6 @@ def _compile_fast_condition_expression(node):
                             context,
                             exact_scope,
                             column_values,
-                        )
                         )
 
                     # The value is stable while another pattern variable is
@@ -3071,7 +3107,10 @@ def _compile_fast_condition_expression(node):
                 )
 
                 if scalar_is_proved_stable:
-                    def true_run_length(evaluator, start, stop):
+                    suffix_extrema = {}
+
+                    def prepared_vector_operands(evaluator, start, stop):
+                        """Return a safe numeric window and stable scalar."""
                         current_var = str(
                             getattr(context, "current_var", "") or ""
                         ).upper()
@@ -3085,11 +3124,36 @@ def _compile_fast_condition_expression(node):
                                 return None
                             start_index = max(0, int(start))
                             stop_index = min(len(values), int(stop))
-                            if stop_index <= start_index:
-                                return 0
-
                             scalar_value = scalar_part(evaluator, None, context)
                             if is_null(scalar_value):
+                                return values, start_index, stop_index, None
+                            return (
+                                values,
+                                start_index,
+                                stop_index,
+                                scalar_value,
+                            )
+                        except Exception:
+                            return None
+
+                    def true_run_length(evaluator, start, stop):
+                        prepared = prepared_vector_operands(
+                            evaluator, start, stop
+                        )
+                        if prepared is None:
+                            return None
+                        try:
+                            import numpy as np
+
+                            (
+                                values,
+                                start_index,
+                                stop_index,
+                                scalar_value,
+                            ) = prepared
+                            if stop_index <= start_index:
+                                return 0
+                            if scalar_value is None:
                                 return 0
                             window = values[start_index:stop_index]
                             compared = (
@@ -3113,6 +3177,175 @@ def _compile_fast_condition_expression(node):
 
                     true_run_length.minimum_size = 32
                     evaluate_bound_compare.true_run_length = true_run_length
+
+                    def entire_range_is_true(evaluator, start, stop):
+                        """Prove a complete numeric suffix without row scans.
+
+                        The terminal-anchor executor only asks about the whole
+                        remaining suffix.  Ordered and equality comparisons can
+                        answer that question from suffix minima/maxima and a
+                        suffix non-NULL flag.  ``!=`` cannot be proved by
+                        extrema alone and deliberately retains a vector scan.
+                        """
+                        prepared = prepared_vector_operands(
+                            evaluator, start, stop
+                        )
+                        if prepared is None:
+                            return None
+                        try:
+                            import numpy as np
+
+                            (
+                                values,
+                                start_index,
+                                stop_index,
+                                scalar_value,
+                            ) = prepared
+                            if stop_index <= start_index:
+                                return True
+                            if scalar_value is None:
+                                return False
+                            window = values[start_index:stop_index]
+
+                            if (
+                                stop_index == len(values)
+                                and not isinstance(op_node, ast.NotEq)
+                            ):
+                                if not suffix_extrema:
+                                    valid = (
+                                        ~np.isnan(values)
+                                        if values.dtype.kind == "f"
+                                        else np.ones(len(values), dtype=bool)
+                                    )
+                                    suffix_extrema["all_valid"] = (
+                                        np.logical_and.accumulate(
+                                            valid[::-1]
+                                        )[::-1].copy()
+                                    )
+                                    needs_minimum = (
+                                        isinstance(op_node, ast.Eq)
+                                        or (
+                                            left_column is not None
+                                            and isinstance(
+                                                op_node, (ast.Gt, ast.GtE)
+                                            )
+                                        )
+                                        or (
+                                            left_column is None
+                                            and isinstance(
+                                                op_node, (ast.Lt, ast.LtE)
+                                            )
+                                        )
+                                    )
+                                    needs_maximum = (
+                                        isinstance(op_node, ast.Eq)
+                                        or (
+                                            left_column is not None
+                                            and isinstance(
+                                                op_node, (ast.Lt, ast.LtE)
+                                            )
+                                        )
+                                        or (
+                                            left_column is None
+                                            and isinstance(
+                                                op_node, (ast.Gt, ast.GtE)
+                                            )
+                                        )
+                                    )
+                                    if needs_minimum:
+                                        minimum_values = np.where(
+                                            valid, values, np.inf
+                                        )
+                                        suffix_extrema["minimum"] = (
+                                            np.minimum.accumulate(
+                                                minimum_values[::-1]
+                                            )[::-1].copy()
+                                        )
+                                    if needs_maximum:
+                                        maximum_values = np.where(
+                                            valid, values, -np.inf
+                                        )
+                                        suffix_extrema["maximum"] = (
+                                            np.maximum.accumulate(
+                                                maximum_values[::-1]
+                                            )[::-1].copy()
+                                        )
+                                if not bool(
+                                    suffix_extrema["all_valid"][start_index]
+                                ):
+                                    return False
+                                if isinstance(op_node, ast.Eq):
+                                    minimum = suffix_extrema[
+                                        "minimum"
+                                    ][start_index]
+                                    maximum = suffix_extrema[
+                                        "maximum"
+                                    ][start_index]
+                                    return bool(
+                                        minimum == scalar_value
+                                        and maximum == scalar_value
+                                    )
+                                if left_column is not None:
+                                    if isinstance(op_node, ast.Gt):
+                                        return bool(
+                                            suffix_extrema["minimum"][start_index]
+                                            > scalar_value
+                                        )
+                                    if isinstance(op_node, ast.GtE):
+                                        return bool(
+                                            suffix_extrema["minimum"][start_index]
+                                            >= scalar_value
+                                        )
+                                    if isinstance(op_node, ast.Lt):
+                                        return bool(
+                                            suffix_extrema["maximum"][start_index]
+                                            < scalar_value
+                                        )
+                                    if isinstance(op_node, ast.LtE):
+                                        return bool(
+                                            suffix_extrema["maximum"][start_index]
+                                            <= scalar_value
+                                        )
+                                else:
+                                    if isinstance(op_node, ast.Gt):
+                                        return bool(
+                                            suffix_extrema["maximum"][start_index]
+                                            < scalar_value
+                                        )
+                                    if isinstance(op_node, ast.GtE):
+                                        return bool(
+                                            suffix_extrema["maximum"][start_index]
+                                            <= scalar_value
+                                        )
+                                    if isinstance(op_node, ast.Lt):
+                                        return bool(
+                                            suffix_extrema["minimum"][start_index]
+                                            > scalar_value
+                                        )
+                                    if isinstance(op_node, ast.LtE):
+                                        return bool(
+                                            suffix_extrema["minimum"][start_index]
+                                            >= scalar_value
+                                        )
+
+                            compared = (
+                                comparison(window, scalar_value)
+                                if left_column is not None
+                                else comparison(scalar_value, window)
+                            )
+                            accepted = np.asarray(compared, dtype=bool)
+                            if accepted.shape != window.shape:
+                                return None
+                            if values.dtype.kind == "f":
+                                accepted = accepted & ~np.isnan(window)
+                            return bool(np.all(accepted))
+                        except Exception:
+                            return None
+
+                    entire_range_is_true.minimum_size = 32
+                    evaluate_bound_compare.entire_range_is_true = (
+                        entire_range_is_true
+                    )
 
             return _mark_composed_fast_condition_part(
                 evaluate_bound_compare, (bound_left, bound_right)
@@ -3384,6 +3617,17 @@ def _compile_condition_node(
                 expression_true_run, "minimum_size", 32
             )
             evaluate_bound.true_run_length = true_run_length
+        expression_entire_range = getattr(
+            bound_expression, "entire_range_is_true", None
+        )
+        if expression_entire_range is not None:
+            def entire_range_is_true(start, stop):
+                return expression_entire_range(evaluator, start, stop)
+
+            entire_range_is_true.minimum_size = getattr(
+                expression_entire_range, "minimum_size", 32
+            )
+            evaluate_bound.entire_range_is_true = entire_range_is_true
 
         return evaluate_bound
 

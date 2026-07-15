@@ -362,7 +362,8 @@ class RowContext:
             # revision or aggregate value can cross a match-attempt boundary.
             self._define_assignment_versions = None
             self._define_aggregate_cache = None
-            self._define_linear_aggregate_states = None
+            self._define_incremental_aggregate_states = None
+            self._define_incremental_aggregate_threshold = 16
 
         return self
 
@@ -415,7 +416,8 @@ class RowContext:
             self._position_cache.clear()
         self._define_assignment_versions = None
         self._define_aggregate_cache = None
-        self._define_linear_aggregate_states = None
+        self._define_incremental_aggregate_states = None
+        self._define_incremental_aggregate_threshold = 16
         return self
     
     def update_variable(self, var_name: str, indices: List[int]) -> None:
