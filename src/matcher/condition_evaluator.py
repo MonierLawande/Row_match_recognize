@@ -488,18 +488,49 @@ class ConditionEvaluator(ast.NodeVisitor):
         every aggregated row with the evaluator positioned at that row, so
         CLASSIFIER()/MATCH_NUMBER()-dependent arguments work.
         """
-        expected_args = 2 if func_name in ("MAX_BY", "MIN_BY") else 1
-        if len(node.args) != expected_args or node.keywords:
-            raise ValueError(f"{func_name} in DEFINE requires {expected_args} argument(s)")
-        arg = node.args[0]
-        key_arg = node.args[1] if expected_args == 2 else None
-        simple_field = (
-            arg.attr
-            if key_arg is None
-            and isinstance(arg, ast.Attribute)
-            and isinstance(arg.value, ast.Name)
-            else None
-        )
+        # The AST is immutable after condition compilation.  Resolve its
+        # argument shape once instead of repeating multiple ``isinstance``
+        # walks for every candidate row in the exact searcher.
+        aggregate_plan = getattr(node, "_rowmatch_define_aggregate_plan", None)
+        if aggregate_plan is None:
+            expected_args = 2 if func_name in ("MAX_BY", "MIN_BY") else 1
+            if len(node.args) != expected_args or node.keywords:
+                raise ValueError(
+                    f"{func_name} in DEFINE requires {expected_args} argument(s)"
+                )
+            arg = node.args[0]
+            key_arg = node.args[1] if expected_args == 2 else None
+            simple_field = (
+                arg.attr
+                if key_arg is None
+                and isinstance(arg, ast.Attribute)
+                and isinstance(arg.value, ast.Name)
+                else None
+            )
+            scope_var = (
+                arg.value.id
+                if isinstance(arg, ast.Attribute)
+                and isinstance(arg.value, ast.Name)
+                else None
+            )
+            scope_upper = scope_var.upper() if scope_var is not None else None
+            aggregate_plan = (
+                arg,
+                key_arg,
+                simple_field,
+                scope_var,
+                scope_upper,
+                frozenset((scope_upper,)) if scope_upper is not None else None,
+            )
+            node._rowmatch_define_aggregate_plan = aggregate_plan
+        (
+            arg,
+            key_arg,
+            simple_field,
+            scope_var,
+            scope_upper,
+            single_member_set,
+        ) = aggregate_plan
 
         context = self.context
         variables = getattr(context, "variables", {}) or {}
@@ -507,19 +538,26 @@ class ConditionEvaluator(ast.NodeVisitor):
         current_idx = getattr(context, "current_idx", -1)
         current_var = getattr(context, "current_var", None)
 
-        scope_var = None
-        if isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name):
-            scope_var = arg.value.id
-
         member_set = None
         if scope_var is not None:
-            members = [scope_var]
             subsets = getattr(context, "subsets", {}) or {}
-            for subset_name, subset_members in subsets.items():
-                if str(subset_name).upper() == scope_var.upper():
-                    members = list(subset_members)
-                    break
-            member_set = {str(m).upper() for m in members}
+            if not subsets:
+                member_set = single_member_set
+            else:
+                members = [scope_var]
+                for subset_name, subset_members in subsets.items():
+                    if str(subset_name).upper() == scope_upper:
+                        members = list(subset_members)
+                        break
+                member_set = {str(m).upper() for m in members}
+
+        matching_lists = None
+        if simple_field is not None and member_set is not None and len(member_set) == 1:
+            matching_lists = [
+                var_indices
+                for var_name, var_indices in variables.items()
+                if str(var_name).upper() in member_set
+            ]
 
         # The exact backtracking searcher supplies per-variable assignment
         # revisions.  Aggregates scoped to A, for example, do not change while
@@ -554,10 +592,13 @@ class ConditionEvaluator(ast.NodeVisitor):
             # Universal aggregates always include the tentative row, so the
             # cheap gate also avoids constructing member sets for them.
             if not tentative_in_scope and member_set is not None:
-                scope_cardinality = 0
-                for var_name, var_indices in variables.items():
-                    if str(var_name).upper() in member_set:
-                        scope_cardinality += len(var_indices)
+                if matching_lists is not None:
+                    scope_cardinality = sum(map(len, matching_lists))
+                else:
+                    scope_cardinality = 0
+                    for var_name, var_indices in variables.items():
+                        if str(var_name).upper() in member_set:
+                            scope_cardinality += len(var_indices)
                 # Below this point a direct scan is cheaper on CPython.  This
                 # threshold is a cost-model decision, independent of any
                 # pattern or column name; long unchanged scopes still obtain
@@ -569,10 +610,14 @@ class ConditionEvaluator(ast.NodeVisitor):
             else:
                 relevant_members = None
             if relevant_members is not None:
-                revision_key = tuple(
-                    (member, assignment_versions.get(member, 0))
-                    for member in sorted(relevant_members)
-                )
+                if len(relevant_members) == 1:
+                    member = next(iter(relevant_members))
+                    revision_key = ((member, assignment_versions.get(member, 0)),)
+                else:
+                    revision_key = tuple(
+                        (member, assignment_versions.get(member, 0))
+                        for member in sorted(relevant_members)
+                    )
                 aggregate_cache_key = (id(node), func_name, revision_key)
                 if aggregate_cache_key in aggregate_cache:
                     return aggregate_cache[aggregate_cache_key]
@@ -592,11 +637,6 @@ class ConditionEvaluator(ast.NodeVisitor):
         # all values.  Subsets/multiple case variants and expression-valued
         # arguments retain the generic implementation below.
         if simple_field is not None and member_set is not None and len(member_set) == 1:
-            matching_lists = [
-                var_indices
-                for var_name, var_indices in variables.items()
-                if str(var_name).upper() in member_set
-            ]
             if len(matching_lists) <= 1:
                 assigned_indices = matching_lists[0] if matching_lists else []
                 include_current = (
@@ -613,10 +653,25 @@ class ConditionEvaluator(ast.NodeVisitor):
                 maximum = None
                 first = None
                 array_values = [] if func_name == "ARRAY_AGG" else None
+                column_cache = context._input_column_cache
+                if simple_field in column_cache:
+                    column_values = column_cache[simple_field]
+                else:
+                    exact_column_at = getattr(rows, "column_array_exact", None)
+                    column_values = (
+                        exact_column_at(simple_field)
+                        if exact_column_at is not None
+                        else None
+                    )
+                    column_cache[simple_field] = column_values
 
                 def consume(row_index):
                     nonlocal count, total, minimum, maximum, first
-                    value = rows[row_index].get(simple_field)
+                    value = (
+                        column_values[row_index]
+                        if column_values is not None
+                        else rows[row_index].get(simple_field)
+                    )
                     if value is None or value != value:  # SQL NULL/NaN
                         return
                     count += 1
@@ -2428,6 +2483,327 @@ class _FastConditionUnsupported(Exception):
     """Internal signal that a residual expression needs the AST evaluator."""
 
 
+def _bind_fast_condition_part(part, context):
+    """Return a context-bound compiled expression part when one is safe."""
+    binder = getattr(part, "bind_context", None)
+    return binder(context) if binder is not None else part
+
+
+_UNBOUND_FAST_VALUE = object()
+
+
+def _mark_fast_condition_part(
+    part,
+    *,
+    row_dependent,
+    state_scopes=(),
+    vector_column=_UNBOUND_FAST_VALUE,
+):
+    """Publish conservative dependency metadata on compiled expression IR.
+
+    The metadata is an optional optimization contract, not a second semantic
+    evaluator.  Missing metadata always means "potentially row dependent" and
+    therefore disables batch evaluation.  This lets newly supported or
+    context-sensitive expressions continue through the scalar production
+    evaluator without having to opt out explicitly.
+    """
+    part._fast_row_dependent = bool(row_dependent)
+    part._fast_state_scopes = frozenset(
+        str(scope).upper() for scope in state_scopes
+    )
+    if vector_column is not _UNBOUND_FAST_VALUE:
+        part._fast_vector_column = vector_column
+    return part
+
+
+def _mark_composed_fast_condition_part(part, children):
+    """Propagate only dependency facts proved for every child expression."""
+    children = tuple(children)
+    if any(
+        not hasattr(child, "_fast_row_dependent") for child in children
+    ):
+        return part
+    scopes = set()
+    for child in children:
+        scopes.update(getattr(child, "_fast_state_scopes", ()))
+    return _mark_fast_condition_part(
+        part,
+        row_dependent=any(child._fast_row_dependent for child in children),
+        state_scopes=scopes,
+    )
+
+
+class _LinearAggregateState:
+    """Rollback-safe prefix state for one contiguous exact-search scope."""
+
+    def __init__(self, func_name, column_values, rows, field_name, indices):
+        self.func_name = func_name
+        self.column_values = column_values
+        self.rows = rows
+        self.field_name = field_name
+        self.snapshots = []
+        self.valid = True
+        for row_index in indices:
+            self.append_index(row_index)
+            if not self.valid:
+                break
+
+    def _read(self, row_index):
+        if self.column_values is not None:
+            return self.column_values[row_index]
+        return self.rows[row_index].get(self.field_name)
+
+    def _advance(self, previous, row_index):
+        value = self._read(row_index)
+        present = value is not None and value == value
+        if self.func_name == "COUNT":
+            return previous + (1 if present else 0)
+        total, count = previous
+        if present:
+            total = total + value
+            count += 1
+        return total, count
+
+    def append_index(self, row_index):
+        if not self.valid:
+            return
+        previous = (
+            self.snapshots[-1]
+            if self.snapshots
+            else (0 if self.func_name == "COUNT" else (0, 0))
+        )
+        try:
+            self.snapshots.append(self._advance(previous, row_index))
+        except Exception:
+            # Non-numeric SUM/AVG inputs retain the generic evaluator's error
+            # behavior instead of failing during matcher-state mutation.
+            self.valid = False
+
+    def truncate(self, length):
+        if len(self.snapshots) > length:
+            del self.snapshots[length:]
+
+    def value(self, include_index=None):
+        if not self.valid:
+            return _UNBOUND_FAST_VALUE
+        current = (
+            self.snapshots[-1]
+            if self.snapshots
+            else (0 if self.func_name == "COUNT" else (0, 0))
+        )
+        if include_index is not None:
+            try:
+                current = self._advance(current, include_index)
+            except Exception:
+                return _UNBOUND_FAST_VALUE
+        if self.func_name == "COUNT":
+            return current
+        total, count = current
+        if count == 0:
+            return None
+        return total if self.func_name == "SUM" else total / count
+
+
+def _evaluate_prepared_simple_aggregate(
+    evaluator,
+    node,
+    func_name,
+    scope_upper,
+    field_name,
+    context,
+    exact_scope=_UNBOUND_FAST_VALUE,
+    column_values=_UNBOUND_FAST_VALUE,
+):
+    """Compact exact-search evaluator for ``AGG(variable.field)``.
+
+    The exact matcher publishes a scope map only for pattern variables whose
+    case-folded names are unique.  Its absence, a SUBSET, or a long unchanged
+    scope delegates to the complete evaluator.  This keeps one semantic
+    implementation for every ambiguous case while removing repeated AST and
+    scope discovery from the common short-scope path.
+    """
+    if exact_scope is _UNBOUND_FAST_VALUE:
+        scope_map = getattr(context, "_define_direct_scope_map", None)
+        exact_scope = (
+            scope_map.get(scope_upper) if scope_map is not None else None
+        )
+    if exact_scope is None or getattr(context, "subsets", None):
+        return evaluator._handle_define_aggregate(node, func_name)
+
+    variables = getattr(context, "variables", {}) or {}
+    assigned = variables.get(exact_scope, ())
+    rows = context.rows
+    current_idx = context.current_idx
+    current_var = context.current_var
+    include_current = bool(
+        current_var
+        and str(current_var).upper() == scope_upper
+        and 0 <= current_idx < len(rows)
+        and (not assigned or assigned[-1] != current_idx)
+    )
+
+    # The linear exact executor assigns each case-unique token as one
+    # contiguous scope.  For long SUM/AVG/COUNT scopes it publishes mutable
+    # prefix states that are extended on assignment and truncated on rollback.
+    # Stored prefixes preserve the original left-to-right arithmetic exactly;
+    # no inverse floating-point operation is used.
+    linear_states = getattr(context, "_define_linear_aggregate_states", None)
+    if (
+        linear_states is not None
+        and func_name in {"SUM", "AVG", "COUNT"}
+        and len(assigned) >= 16
+    ):
+        scope_states = linear_states.setdefault(
+            str(exact_scope).upper(), {}
+        )
+        state_key = (field_name, func_name)
+        state = scope_states.get(state_key)
+        if state is None:
+            bound_column = (
+                None
+                if column_values is _UNBOUND_FAST_VALUE
+                else column_values
+            )
+            if bound_column is None:
+                exact_column_at = getattr(rows, "column_array_exact", None)
+                bound_column = (
+                    exact_column_at(field_name)
+                    if exact_column_at is not None else None
+                )
+            state = _LinearAggregateState(
+                func_name,
+                bound_column,
+                rows,
+                field_name,
+                assigned,
+            )
+            scope_states[state_key] = state
+        if state.valid and len(state.snapshots) == len(assigned):
+            state_value = state.value(current_idx if include_current else None)
+            if state_value is not _UNBOUND_FAST_VALUE:
+                return state_value
+
+    # The generic path memoizes a long scope while a different variable is
+    # being tested.  Preserve that asymptotic behavior; the compact path is
+    # for the overwhelmingly common short scopes where memo-key construction
+    # costs more than scanning the few values.
+    if len(assigned) >= 16 and not include_current:
+        return evaluator._handle_define_aggregate(node, func_name)
+
+    if column_values is _UNBOUND_FAST_VALUE:
+        column_cache = context._input_column_cache
+        if field_name in column_cache:
+            column_values = column_cache[field_name]
+        else:
+            exact_column_at = getattr(rows, "column_array_exact", None)
+            column_values = (
+                exact_column_at(field_name)
+                if exact_column_at is not None
+                else None
+            )
+            column_cache[field_name] = column_values
+
+    scope_size = len(assigned) + (1 if include_current else 0)
+    if scope_size <= 1:
+        if assigned:
+            scalar_index = assigned[0]
+        elif include_current:
+            scalar_index = current_idx
+        else:
+            scalar_index = None
+        value = (
+            None
+            if scalar_index is None
+            else (
+                column_values[scalar_index]
+                if column_values is not None
+                else rows[scalar_index].get(field_name)
+            )
+        )
+        present = value is not None and value == value
+        if func_name == "COUNT":
+            return 1 if present else 0
+        if not present:
+            return None
+        if func_name == "ARRAY_AGG":
+            return [value]
+        # SUM, AVG, MIN, MAX and ARBITRARY are all the single non-NULL
+        # value for a one-row scope.
+        return value
+
+    if func_name in ("SUM", "AVG"):
+        count = 0
+        total = 0
+        for row_index in assigned:
+            value = (
+                column_values[row_index]
+                if column_values is not None
+                else rows[row_index].get(field_name)
+            )
+            if value is not None and value == value:
+                total += value
+                count += 1
+        if include_current:
+            value = (
+                column_values[current_idx]
+                if column_values is not None
+                else rows[current_idx].get(field_name)
+            )
+            if value is not None and value == value:
+                total += value
+                count += 1
+        if count == 0:
+            return None
+        return total if func_name == "SUM" else total / count
+
+    if func_name == "COUNT":
+        count = 0
+        for row_index in assigned:
+            value = (
+                column_values[row_index]
+                if column_values is not None
+                else rows[row_index].get(field_name)
+            )
+            if value is not None and value == value:
+                count += 1
+        if include_current:
+            value = (
+                column_values[current_idx]
+                if column_values is not None
+                else rows[current_idx].get(field_name)
+            )
+            if value is not None and value == value:
+                count += 1
+        return count
+
+    values = []
+    for row_index in assigned:
+        value = (
+            column_values[row_index]
+            if column_values is not None
+            else rows[row_index].get(field_name)
+        )
+        if value is not None and value == value:
+            values.append(value)
+    if include_current:
+        value = (
+            column_values[current_idx]
+            if column_values is not None
+            else rows[current_idx].get(field_name)
+        )
+        if value is not None and value == value:
+            values.append(value)
+    if not values:
+        return None
+    if func_name == "MIN":
+        return min(values)
+    if func_name == "MAX":
+        return max(values)
+    if func_name == "ARRAY_AGG":
+        return values
+    return values[0]
+
+
 def _compile_fast_condition_expression(node):
     """Compile a safe DEFINE-expression subset into direct callables.
 
@@ -2438,7 +2814,10 @@ def _compile_fast_condition_expression(node):
     """
     if isinstance(node, ast.Constant):
         value = node.value
-        return lambda evaluator, row, context: value
+        return _mark_fast_condition_part(
+            lambda evaluator, row, context: value,
+            row_dependent=False,
+        )
 
     if isinstance(node, ast.Name):
         name = node.id
@@ -2456,8 +2835,48 @@ def _compile_fast_condition_expression(node):
             index = getattr(context, "current_idx", -1)
             rows = getattr(context, "rows", ())
             if 0 <= index < len(rows):
+                column_cache = context._input_column_cache
+                if name in column_cache:
+                    column_values = column_cache[name]
+                else:
+                    exact_column_at = getattr(rows, "column_array_exact", None)
+                    column_values = (
+                        exact_column_at(name)
+                        if exact_column_at is not None
+                        else None
+                    )
+                    column_cache[name] = column_values
+                if column_values is not None:
+                    return column_values[index]
                 return rows[index].get(name)
             return None
+
+        def bind_current_field(context):
+            if name in getattr(context, "pattern_variables", ()):
+                return lambda evaluator, row, context: None
+            rows = getattr(context, "rows", ())
+            exact_column_at = getattr(rows, "column_array_exact", None)
+            column_values = (
+                exact_column_at(name) if exact_column_at is not None else None
+            )
+            if column_values is None:
+                return read_current_field
+
+            def read_bound_field(evaluator, row, context):
+                if row is not None:
+                    return row.get(name)
+                index = context.current_idx
+                if 0 <= index < len(column_values):
+                    return column_values[index]
+                return None
+
+            return _mark_fast_condition_part(
+                read_bound_field,
+                row_dependent=True,
+                vector_column=column_values,
+            )
+
+        read_current_field.bind_context = bind_current_field
 
         return read_current_field
 
@@ -2467,14 +2886,93 @@ def _compile_fast_condition_expression(node):
             "SUM", "AVG", "MIN", "MAX", "COUNT", "ARBITRARY",
             "ARRAY_AGG", "MAX_BY", "MIN_BY",
         }:
+            if (
+                func_name not in {"MAX_BY", "MIN_BY"}
+                and len(node.args) == 1
+                and not node.keywords
+                and isinstance(node.args[0], ast.Attribute)
+                and isinstance(node.args[0].value, ast.Name)
+            ):
+                scope_upper = node.args[0].value.id.upper()
+                field_name = node.args[0].attr
+                def evaluate_prepared_aggregate(evaluator, row, context):
+                    return (
+                    _evaluate_prepared_simple_aggregate(
+                        evaluator,
+                        node,
+                        func_name,
+                        scope_upper,
+                        field_name,
+                        context,
+                    )
+                    )
+
+                def bind_prepared_aggregate(context):
+                    scope_map = getattr(
+                        context, "_define_direct_scope_map", None
+                    )
+                    exact_scope = (
+                        scope_map.get(scope_upper)
+                        if scope_map is not None else None
+                    )
+                    if exact_scope is None:
+                        return evaluate_prepared_aggregate
+                    rows = context.rows
+                    exact_column_at = getattr(
+                        rows, "column_array_exact", None
+                    )
+                    column_values = (
+                        exact_column_at(field_name)
+                        if exact_column_at is not None else None
+                    )
+                    def evaluate_bound_aggregate(evaluator, row, context):
+                        return (
+                        _evaluate_prepared_simple_aggregate(
+                            evaluator,
+                            node,
+                            func_name,
+                            scope_upper,
+                            field_name,
+                            context,
+                            exact_scope,
+                            column_values,
+                        )
+                        )
+
+                    # The value is stable while another pattern variable is
+                    # being extended.  A caller must still reject batching
+                    # when ``current_var`` is this scope, because DEFINE then
+                    # includes the prospective current row.
+                    return _mark_fast_condition_part(
+                        evaluate_bound_aggregate,
+                        row_dependent=False,
+                        state_scopes=(scope_upper,),
+                    )
+
+                evaluate_prepared_aggregate.bind_context = (
+                    bind_prepared_aggregate
+                )
+                return evaluate_prepared_aggregate
             return lambda evaluator, row, context: (
                 evaluator._handle_define_aggregate(node, func_name)
             )
         if func_name == "_IS_NULL" and len(node.args) == 1 and not node.keywords:
             argument = _compile_fast_condition_expression(node.args[0])
-            return lambda evaluator, row, context: is_null(
+            evaluate_is_null = lambda evaluator, row, context: is_null(
                 argument(evaluator, row, context)
             )
+
+            def bind_is_null(context):
+                bound_argument = _bind_fast_condition_part(argument, context)
+                evaluate_bound_is_null = lambda evaluator, row, context: is_null(
+                    bound_argument(evaluator, row, context)
+                )
+                return _mark_composed_fast_condition_part(
+                    evaluate_bound_is_null, (bound_argument,)
+                )
+
+            evaluate_is_null.bind_context = bind_is_null
+            return evaluate_is_null
         if func_name in MATH_FUNCTIONS and not node.keywords:
             arguments = tuple(
                 _compile_fast_condition_expression(arg) for arg in node.args
@@ -2484,6 +2982,26 @@ def _compile_fast_condition_expression(node):
                 values = [part(evaluator, row, context) for part in arguments]
                 evaluator.stats["math_function_calls"] += 1
                 return evaluate_math_function(func_name, *values)
+
+            def bind_math(context):
+                bound_arguments = tuple(
+                    _bind_fast_condition_part(part, context)
+                    for part in arguments
+                )
+
+                def evaluate_bound_math(evaluator, row, context):
+                    values = [
+                        part(evaluator, row, context)
+                        for part in bound_arguments
+                    ]
+                    evaluator.stats["math_function_calls"] += 1
+                    return evaluate_math_function(func_name, *values)
+
+                return _mark_composed_fast_condition_part(
+                    evaluate_bound_math, bound_arguments
+                )
+
+            evaluate_math.bind_context = bind_math
 
             return evaluate_math
         raise _FastConditionUnsupported
@@ -2508,11 +3026,100 @@ def _compile_fast_condition_expression(node):
             raise _FastConditionUnsupported
         left = _compile_fast_condition_expression(node.left)
         right = _compile_fast_condition_expression(node.comparators[0])
-        return lambda evaluator, row, context: evaluator._safe_compare(
-            left(evaluator, row, context),
-            right(evaluator, row, context),
-            comparison,
-        )
+        def evaluate_compare(evaluator, row, context):
+            return safe_compare(
+                left(evaluator, row, context),
+                right(evaluator, row, context),
+                comparison,
+            )
+
+        def bind_compare(context):
+            bound_left = _bind_fast_condition_part(left, context)
+            bound_right = _bind_fast_condition_part(right, context)
+
+            def evaluate_bound_compare(evaluator, row, context):
+                return safe_compare(
+                bound_left(evaluator, row, context),
+                bound_right(evaluator, row, context),
+                comparison,
+            )
+
+            # A quantified token can consume a contiguous run in one NumPy
+            # operation when (and only when) one operand is an exact numeric
+            # input column and the other is proved independent of the current
+            # input row.  The scalar operand may depend on already assigned
+            # pattern scopes, but not on the variable currently being grown.
+            # SQL NULL behavior is reproduced explicitly below.  Returning
+            # None means "unsupported" and tells the matcher to use the
+            # ordinary scalar predicate without changing semantics.
+            left_column = getattr(bound_left, "_fast_vector_column", None)
+            right_column = getattr(bound_right, "_fast_vector_column", None)
+            if (
+                not isinstance(op_node, (ast.Is, ast.IsNot))
+                and (left_column is None) != (right_column is None)
+            ):
+                scalar_part = bound_right if left_column is not None else bound_left
+                vector_column = (
+                    left_column if left_column is not None else right_column
+                )
+                scalar_is_proved_stable = (
+                    hasattr(scalar_part, "_fast_row_dependent")
+                    and not scalar_part._fast_row_dependent
+                )
+                scalar_scopes = frozenset(
+                    getattr(scalar_part, "_fast_state_scopes", ())
+                )
+
+                if scalar_is_proved_stable:
+                    def true_run_length(evaluator, start, stop):
+                        current_var = str(
+                            getattr(context, "current_var", "") or ""
+                        ).upper()
+                        if current_var in scalar_scopes:
+                            return None
+                        try:
+                            import numpy as np
+
+                            values = np.asarray(vector_column)
+                            if values.ndim != 1 or values.dtype.kind not in "biuf":
+                                return None
+                            start_index = max(0, int(start))
+                            stop_index = min(len(values), int(stop))
+                            if stop_index <= start_index:
+                                return 0
+
+                            scalar_value = scalar_part(evaluator, None, context)
+                            if is_null(scalar_value):
+                                return 0
+                            window = values[start_index:stop_index]
+                            compared = (
+                                comparison(window, scalar_value)
+                                if left_column is not None
+                                else comparison(scalar_value, window)
+                            )
+                            accepted = np.asarray(compared, dtype=bool)
+                            if accepted.shape != window.shape:
+                                return None
+                            if values.dtype.kind == "f":
+                                accepted = accepted & ~np.isnan(window)
+                            rejected = np.flatnonzero(~accepted)
+                            return (
+                                len(window)
+                                if len(rejected) == 0
+                                else int(rejected[0])
+                            )
+                        except Exception:
+                            return None
+
+                    true_run_length.minimum_size = 32
+                    evaluate_bound_compare.true_run_length = true_run_length
+
+            return _mark_composed_fast_condition_part(
+                evaluate_bound_compare, (bound_left, bound_right)
+            )
+
+        evaluate_compare.bind_context = bind_compare
+        return evaluate_compare
 
     if isinstance(node, ast.BoolOp):
         parts = tuple(
@@ -2529,6 +3136,28 @@ def _compile_fast_condition_expression(node):
                         return False
                 return None if has_null else True
 
+            def bind_and(context):
+                bound_parts = tuple(
+                    _bind_fast_condition_part(part, context)
+                    for part in parts
+                )
+
+                def evaluate_bound_and(evaluator, row, context):
+                    has_null = False
+                    for part in bound_parts:
+                        result = part(evaluator, row, context)
+                        if result is None:
+                            has_null = True
+                        elif not bool(result):
+                            return False
+                    return None if has_null else True
+
+                return _mark_composed_fast_condition_part(
+                    evaluate_bound_and, bound_parts
+                )
+
+            evaluate_and.bind_context = bind_and
+
             return evaluate_and
         if isinstance(node.op, ast.Or):
             def evaluate_or(evaluator, row, context):
@@ -2540,6 +3169,28 @@ def _compile_fast_condition_expression(node):
                     elif bool(result):
                         return True
                 return None if has_null else False
+
+            def bind_or(context):
+                bound_parts = tuple(
+                    _bind_fast_condition_part(part, context)
+                    for part in parts
+                )
+
+                def evaluate_bound_or(evaluator, row, context):
+                    has_null = False
+                    for part in bound_parts:
+                        result = part(evaluator, row, context)
+                        if result is None:
+                            has_null = True
+                        elif bool(result):
+                            return True
+                    return None if has_null else False
+
+                return _mark_composed_fast_condition_part(
+                    evaluate_bound_or, bound_parts
+                )
+
+            evaluate_or.bind_context = bind_or
 
             return evaluate_or
         raise _FastConditionUnsupported
@@ -2574,6 +3225,26 @@ def _compile_fast_condition_expression(node):
             except Exception:
                 return None
 
+        def bind_binary(context):
+            bound_left = _bind_fast_condition_part(left, context)
+            bound_right = _bind_fast_condition_part(right, context)
+
+            def evaluate_bound_binary(evaluator, row, context):
+                try:
+                    left_value = bound_left(evaluator, row, context)
+                    right_value = bound_right(evaluator, row, context)
+                    if left_value is None or right_value is None:
+                        return None
+                    return operation(left_value, right_value)
+                except Exception:
+                    return None
+
+            return _mark_composed_fast_condition_part(
+                evaluate_bound_binary, (bound_left, bound_right)
+            )
+
+        evaluate_binary.bind_context = bind_binary
+
         return evaluate_binary
 
     if isinstance(node, ast.UnaryOp):
@@ -2593,6 +3264,22 @@ def _compile_fast_condition_expression(node):
                 return None if value is None else operation(value)
             except Exception:
                 return None
+
+        def bind_unary(context):
+            bound_operand = _bind_fast_condition_part(operand, context)
+
+            def evaluate_bound_unary(evaluator, row, context):
+                try:
+                    value = bound_operand(evaluator, row, context)
+                    return None if value is None else operation(value)
+                except Exception:
+                    return None
+
+            return _mark_composed_fast_condition_part(
+                evaluate_bound_unary, (bound_operand,)
+            )
+
+        evaluate_unary.bind_context = bind_unary
 
         return evaluate_unary
 
@@ -2652,10 +3339,66 @@ def _compile_condition_node(
         finally:
             thread_state.in_use = False
 
+    def bind_context(ctx):
+        """Bind compiled expression evaluation to one matching context.
+
+        Exact matching mutates one :class:`RowContext` while it explores a
+        candidate and then resets that same object for the next candidate.
+        Entering the public thread-local wrapper for every tentative row would
+        repeatedly look up and reset an evaluator even though its context
+        object has not changed.  A context-bound evaluator is safe here
+        because RowContext mutation is already single-threaded and the
+        compiled IR does not use the visitor's re-entrant navigation state.
+
+        Conditions that could not be compiled never expose this binder and
+        continue through ``evaluate_condition`` with the complete AST
+        evaluator.  This keeps navigation, classifier, ambiguous scope, and
+        all unsupported expressions on their existing semantic path.
+        """
+        if compiled_expression is None:
+            return None
+        evaluator = ConditionEvaluator(ctx, evaluation_mode)
+        bound_expression = _bind_fast_condition_part(compiled_expression, ctx)
+
+        def evaluate_bound(row=None):
+            try:
+                evaluator.current_row = row
+                result = bound_expression(evaluator, row, ctx)
+                if is_boolean_expression:
+                    return bool(result)
+                return result
+            except Exception as exc:
+                logger.error(
+                    f"Error evaluating condition '{source_condition}': {exc}"
+                )
+                return False
+
+        expression_true_run = getattr(
+            bound_expression, "true_run_length", None
+        )
+        if expression_true_run is not None:
+            def true_run_length(start, stop):
+                return expression_true_run(evaluator, start, stop)
+
+            true_run_length.minimum_size = getattr(
+                expression_true_run, "minimum_size", 32
+            )
+            evaluate_bound.true_run_length = true_run_length
+
+        return evaluate_bound
+
     evaluate_condition.original_condition = source_condition
     evaluate_condition.python_condition = python_condition
     evaluate_condition.is_boolean_expression = is_boolean_expression
     evaluate_condition.uses_compiled_expression = compiled_expression is not None
+    # A compiled expression resolves current fields from ``context.current_idx``
+    # when no row dictionary is supplied.  Exact-search callers can therefore
+    # avoid materializing a whole DataFrame row for a scalar residual.  AST
+    # fallbacks keep receiving the full row.
+    evaluate_condition.accepts_context_row = compiled_expression is not None
+    evaluate_condition.bind_context = (
+        bind_context if compiled_expression is not None else None
+    )
     # Aggregates read accumulated match state, so results for the same input
     # position can differ between tentative match assignments.
     evaluate_condition.uses_match_state = bool(
@@ -2714,11 +3457,18 @@ def compile_condition(condition_str, evaluation_mode='DEFINE'):
         
         # Parse the condition
         tree = ast.parse(python_condition, mode='eval')
+        try:
+            compiled_expression = _compile_fast_condition_expression(
+                tree.body
+            )
+        except _FastConditionUnsupported:
+            compiled_expression = None
         return _compile_condition_node(
             tree.body,
             source_condition=condition_str,
             python_condition=python_condition,
             evaluation_mode=evaluation_mode,
+            compiled_expression=compiled_expression,
         )
     except SyntaxError as e:
         # Log the error and return a function that always returns False

@@ -1667,15 +1667,16 @@ class EnhancedMatcher:
         context: RowContext,
         start_idx: int,
         subsets: Optional[Dict[str, List[str]]],
+        match_number: Optional[int] = None,
+        reuse_variables: bool = False,
     ) -> RowContext:
         """Reset mutable RowContext fields before reusing it for a new start."""
-        context.variables = {}
-        context.current_var_assignments = {}
-        context.current_match = None
-        context.current_idx = start_idx
-        context.current_var = None
-        context.subsets = subsets.copy() if subsets else {}
-        return context
+        return context.reset_for_match_attempt(
+            start_idx,
+            subsets,
+            match_number=match_number,
+            reuse_variables=reuse_variables,
+        )
     
     def _needs_backtracking(self, rows: List[Dict[str, Any]], start_idx: int, context: RowContext) -> bool:
         """
@@ -4426,14 +4427,522 @@ class EnhancedMatcher:
         if sequence[0] != "seq":
             return None
         plan = []
-        for item in sequence[1]:
+        has_start_anchor = False
+        has_end_anchor = False
+        items = sequence[1]
+        for item_index, item in enumerate(items):
+            if item[0] == "anchor":
+                anchor = item[1]
+                if anchor == "^" and item_index == 0:
+                    has_start_anchor = True
+                    continue
+                if anchor == "$" and item_index == len(items) - 1:
+                    has_end_anchor = True
+                    continue
+                return None
             if item[0] != "var":
                 return None
             _tag, name, min_rep, max_rep, greedy = item
             if not greedy:
                 return None
             plan.append((name, min_rep, max_rep))
-        return tuple(plan)
+        return tuple(plan), has_start_anchor, has_end_anchor
+
+    @staticmethod
+    def _condition_direct_scope_map(ast_root):
+        """Map case-unique exact-search variables by their folded name.
+
+        A compiled DEFINE aggregate may bypass repeated case-insensitive scope
+        discovery only when one pattern variable owns that folded name.  The
+        map is derived from the already parsed pattern AST and is immutable
+        for the matcher lifetime.
+        """
+        names = []
+
+        def collect(node):
+            kind = node[0]
+            if kind == "var":
+                names.append(node[1])
+            elif kind == "alt":
+                for branch in node[1]:
+                    collect(branch)
+            elif kind == "seq":
+                for item in node[1]:
+                    collect(item)
+            elif kind == "group":
+                collect(node[1])
+
+        collect(ast_root)
+        folded_names = defaultdict(set)
+        for name in names:
+            folded = str(name).upper()
+            folded_names[folded].add(name)
+        return {
+            folded: next(iter(exact_names))
+            for folded, exact_names in folded_names.items()
+            if len(exact_names) == 1
+        }
+
+    @staticmethod
+    def _condition_true_run_lengths(
+        mask, row_count, minimum_average_true_run=0
+    ):
+        """Return the contiguous True-run length beginning at every row.
+
+        This representation is prepared once per partition and lets the exact
+        linear matcher consume a proved row-local guard in O(1) at each token
+        start.  Any conversion problem returns None and preserves the complete
+        scalar-mask fallback.
+        """
+        try:
+            import numpy as np
+
+            values = np.asarray(mask, dtype=bool)
+            if len(values) < row_count:
+                padded = np.zeros(row_count, dtype=bool)
+                padded[:len(values)] = values
+                values = padded
+            elif len(values) > row_count:
+                values = values[:row_count]
+            if minimum_average_true_run and len(values):
+                true_count = int(np.count_nonzero(values))
+                if true_count == 0:
+                    return None
+                true_run_starts = int(values[0]) + int(np.count_nonzero(
+                    values[1:] & ~values[:-1]
+                ))
+                if (
+                    true_run_starts <= 0
+                    or true_count / true_run_starts
+                    < minimum_average_true_run
+                ):
+                    return None
+            reversed_values = values[::-1]
+            cumulative = np.cumsum(
+                reversed_values.astype(np.int64, copy=False)
+            )
+            reset_baseline = np.maximum.accumulate(
+                np.where(reversed_values, 0, cumulative)
+            )
+            return (cumulative - reset_baseline)[::-1].copy()
+        except Exception:
+            return None
+
+    def _condition_linear_runtime(
+        self,
+        context,
+        linear_plan,
+        condition_matrix,
+        condition_prefilters,
+        condition_residuals,
+        compiled,
+    ):
+        """Prepare context-bound DEFINE dispatch for a linear exact plan.
+
+        The selected predicate and its vectorized guards are invariant across
+        every candidate start in one partition.  Resolve them once instead of
+        repeating dictionary selection and evaluator binding inside the row
+        loop.  The cache belongs to RowContext because compiled evaluators are
+        deliberately bound to that context and must not cross partitions.
+        """
+        cached = getattr(context, "_define_linear_runtime", None)
+        if cached is not None and cached[0] is self:
+            return cached[1]
+
+        runtime = {}
+        for name, _min_rep, _max_rep in linear_plan:
+            if name in runtime:
+                continue
+            precomputed = condition_matrix.get(name)
+            if precomputed is not None:
+                run_lengths = self._condition_true_run_lengths(
+                    precomputed, len(context.rows)
+                )
+                runtime[name] = (
+                    precomputed,
+                    None,
+                    None,
+                    None,
+                    False,
+                    run_lengths,
+                    None,
+                    None,
+                )
+                continue
+
+            prefilter = condition_prefilters.get(name)
+            condition = condition_residuals.get(name)
+            if condition is None:
+                condition = compiled.get(name)
+            binder = getattr(condition, "bind_context", None)
+            bound = binder(context) if binder is not None else None
+            true_run_length = getattr(bound, "true_run_length", None)
+            prefilter_run_lengths = (
+                self._condition_true_run_lengths(
+                    prefilter,
+                    len(context.rows),
+                    minimum_average_true_run=getattr(
+                        true_run_length, "minimum_size", 32
+                    ),
+                )
+                if prefilter is not None and true_run_length is not None
+                else None
+            )
+            runtime[name] = (
+                None,
+                prefilter,
+                bound,
+                condition,
+                bool(
+                    condition is not None
+                    and getattr(condition, "accepts_context_row", False)
+                ),
+                None,
+                true_run_length,
+                prefilter_run_lengths,
+            )
+
+        context._define_linear_runtime = (self, runtime)
+        return runtime
+
+    def _prepare_condition_linear_execution(self, context):
+        """Prepare a linear exact-search plan once for one partition.
+
+        Returns ``(plan, runtime)`` only when the already parsed exact AST is
+        a greedy variable-only sequence.  All other structures return None
+        and stay on the generic iterative DFS interpreter.
+        """
+        ast_root = getattr(self, "_condition_backtracking_ast", None)
+        if ast_root is None:
+            return None
+
+        if not getattr(self, "_condition_direct_scope_map_ready", False):
+            self._condition_direct_scopes = self._condition_direct_scope_map(
+                ast_root
+            )
+            self._condition_direct_scope_map_ready = True
+        context._define_direct_scope_map = self._condition_direct_scopes
+
+        compiled = getattr(self, "_condition_backtracking_fns", None)
+        if compiled is None:
+            from src.matcher.condition_evaluator import compile_condition
+            compiled = {
+                str(var): compile_condition(str(cond))
+                for var, cond in (self.define_conditions or {}).items()
+            }
+            self._condition_backtracking_fns = compiled
+
+        if not getattr(self, "_condition_backtracking_linear_plan_ready", False):
+            self._condition_backtracking_linear_plan = (
+                self._condition_linear_greedy_plan(ast_root)
+            )
+            self._condition_backtracking_linear_plan_ready = True
+        linear_execution_plan = self._condition_backtracking_linear_plan
+        if linear_execution_plan is None:
+            return None
+        linear_plan, has_start_anchor, has_end_anchor = linear_execution_plan
+
+        runtime = self._condition_linear_runtime(
+            context,
+            linear_plan,
+            getattr(self, "_condition_matrix", None) or {},
+            getattr(self, "_condition_prefilter_matrix", None) or {},
+            getattr(self, "_condition_residual_fns", None) or {},
+            compiled,
+        )
+        return linear_plan, runtime, has_start_anchor, has_end_anchor
+
+    def _find_single_match_condition_linear(
+        self,
+        rows,
+        start_idx,
+        context,
+        linear_plan,
+        runtime,
+        variables,
+        step_budget,
+        has_start_anchor=False,
+        has_end_anchor=False,
+    ):
+        """Run a greedy variable-only exact plan without generic DFS tasks.
+
+        This is the same preference-ordered search as the generic iterative
+        interpreter.  Each choice frame stores a remaining repetition range
+        rather than materializing one tuple per possible rollback point, so a
+        long ``A+`` run uses constant choice metadata.  Unsupported pattern
+        structures never receive a linear plan and therefore cannot enter
+        this executor.
+        """
+        row_count = len(rows)
+        assignment_versions = None
+        assignment_undo = []
+        assigned_count = 0
+        aggregate_states = {}
+        context._define_linear_aggregate_states = aggregate_states
+        choices = []
+        position = start_idx
+        token_index = 0
+        explored_steps = 0
+
+        if has_start_anchor and start_idx != 0:
+            return None
+
+        def rollback(undo_size):
+            nonlocal assigned_count
+            while assigned_count > undo_size:
+                name, segment_count = assignment_undo[-1]
+                remove_count = min(
+                    segment_count, assigned_count - undo_size
+                )
+                entries = variables[name]
+                del entries[-remove_count:]
+                if assignment_versions is not None:
+                    assignment_versions[str(name).upper()] += remove_count
+                assigned_count -= remove_count
+                if remove_count == segment_count:
+                    assignment_undo.pop()
+                else:
+                    assignment_undo[-1][1] -= remove_count
+                if aggregate_states:
+                    scope_upper = str(name).upper()
+                    remaining_length = len(entries)
+                    for state in aggregate_states.get(
+                        scope_upper, {}
+                    ).values():
+                        state.truncate(remaining_length)
+                if not entries:
+                    del variables[name]
+
+        def resume_choice():
+            nonlocal token_index, position
+            if not choices:
+                return False
+            (
+                token_index,
+                base_position,
+                base_undo,
+                alternative_count,
+                minimum_count,
+            ) = choices.pop()
+            if alternative_count > minimum_count:
+                choices.append((
+                    token_index,
+                    base_position,
+                    base_undo,
+                    alternative_count - 1,
+                    minimum_count,
+                ))
+            position = base_position + alternative_count
+            rollback(base_undo + alternative_count)
+            return True
+
+        def assign_range(name, first_position, count):
+            """Assign a proved contiguous run and update rollback state."""
+            nonlocal assigned_count, assignment_versions
+            if count <= 0:
+                return
+            entries = variables.setdefault(name, [])
+            entries.extend(range(first_position, first_position + count))
+            if assignment_versions is None and len(entries) >= 16:
+                assignment_versions = defaultdict(int)
+                for active_name in variables:
+                    assignment_versions[str(active_name).upper()] = 1
+                context._define_assignment_versions = assignment_versions
+                context._define_aggregate_cache = {}
+            elif assignment_versions is not None:
+                assignment_versions[str(name).upper()] += count
+            if aggregate_states:
+                scope_upper = str(name).upper()
+                scope_states = aggregate_states.get(scope_upper, {})
+                if scope_states:
+                    for row_index in range(
+                        first_position, first_position + count
+                    ):
+                        for state in scope_states.values():
+                            state.append_index(row_index)
+            if assignment_undo and assignment_undo[-1][0] == name:
+                assignment_undo[-1][1] += count
+            else:
+                assignment_undo.append([name, count])
+            assigned_count += count
+
+        while explored_steps < step_budget:
+            if token_index == len(linear_plan):
+                if has_end_anchor and position != row_count:
+                    if resume_choice():
+                        continue
+                    variables.clear()
+                    return None
+                if position <= start_idx:
+                    return {
+                        "start": start_idx,
+                        "end": start_idx - 1,
+                        "variables": {},
+                        "state": self.start_state,
+                        "is_empty": True,
+                        "empty_pattern_rows": [start_idx],
+                        "excluded_vars": set(),
+                        "excluded_rows": [],
+                        "has_empty_alternation": self.has_empty_alternation,
+                    }
+                return {
+                    "start": start_idx,
+                    "end": position - 1,
+                    "variables": {
+                        var: indices[:]
+                        for var, indices in variables.items()
+                    },
+                    "state": self.start_state,
+                    "is_empty": False,
+                    "excluded_vars": set(),
+                    "excluded_rows": [],
+                    "has_empty_alternation": False,
+                }
+
+            name, min_rep, max_rep = linear_plan[token_index]
+            base_position = position
+            base_undo = assigned_count
+            count = 0
+            (
+                precomputed,
+                prefilter,
+                bound,
+                condition,
+                accepts_context_row,
+                run_lengths,
+                true_run_length,
+                prefilter_run_lengths,
+            ) = runtime[name]
+
+            used_batch = False
+            if precomputed is not None and run_lengths is not None:
+                available = (
+                    int(run_lengths[position]) if position < row_count else 0
+                )
+                if max_rep is not None and available > max_rep:
+                    available = max_rep
+                # The mask has already proved the entire contiguous run.  The
+                # search budget counts one compact transition, not every row
+                # represented by it; otherwise a deterministic 200,001-row
+                # token could incorrectly fail a 200,000-state protection
+                # limit despite having no combinatorial search.
+                explored_steps += 1
+                assign_range(name, position, available)
+                position += available
+                count = available
+                used_batch = True
+
+            if (
+                not used_batch
+                and true_run_length is not None
+                and (prefilter is None or prefilter_run_lengths is not None)
+                and position < row_count
+            ):
+                stop_position = row_count
+                if max_rep is not None:
+                    stop_position = min(stop_position, position + max_rep)
+                if prefilter_run_lengths is not None:
+                    stop_position = min(
+                        stop_position,
+                        position + int(prefilter_run_lengths[position]),
+                    )
+                minimum_size = getattr(true_run_length, "minimum_size", 32)
+                if stop_position - position >= minimum_size:
+                    context.current_idx = position
+                    context.current_var = name
+                    available = true_run_length(position, stop_position)
+                    if available is not None:
+                        available = max(
+                            0,
+                            min(int(available), stop_position - position),
+                        )
+                        explored_steps += 1
+                        assign_range(name, position, available)
+                        position += available
+                        count = available
+                        used_batch = True
+
+            while (
+                not used_batch
+                and (max_rep is None or count < max_rep)
+            ):
+                explored_steps += 1
+                if position >= row_count:
+                    accepted = False
+                elif precomputed is not None:
+                    accepted = bool(precomputed[position])
+                elif (
+                    prefilter is not None
+                    and position < len(prefilter)
+                    and not bool(prefilter[position])
+                ):
+                    accepted = False
+                elif condition is None:
+                    accepted = True
+                else:
+                    context.current_idx = position
+                    context.current_var = name
+                    try:
+                        if bound is not None:
+                            accepted = bool(bound())
+                        else:
+                            row = None if accepts_context_row else rows[position]
+                            accepted = bool(condition(row, context))
+                    except Exception:
+                        accepted = False
+
+                if not accepted:
+                    break
+
+                entries = variables.setdefault(name, [])
+                entries.append(position)
+                if assignment_versions is None and len(entries) >= 16:
+                    assignment_versions = defaultdict(int)
+                    for active_name in variables:
+                        assignment_versions[str(active_name).upper()] = 1
+                    context._define_assignment_versions = assignment_versions
+                    context._define_aggregate_cache = {}
+                elif assignment_versions is not None:
+                    assignment_versions[str(name).upper()] += 1
+                if aggregate_states:
+                    scope_upper = str(name).upper()
+                    for state in aggregate_states.get(
+                        scope_upper, {}
+                    ).values():
+                        state.append_index(position)
+                if assignment_undo and assignment_undo[-1][0] == name:
+                    assignment_undo[-1][1] += 1
+                else:
+                    assignment_undo.append([name, 1])
+                assigned_count += 1
+                position += 1
+                count += 1
+                if explored_steps >= step_budget:
+                    break
+
+            if count >= min_rep and explored_steps < step_budget:
+                # One range frame represents count-1, count-2, ... min_rep.
+                # Reinsert the frame with the next lower count when resumed.
+                # The final token has no suffix that could fail, so its lower
+                # greedy counts can never be revisited.
+                if count > min_rep and token_index + 1 < len(linear_plan):
+                    choices.append((
+                        token_index + 1,
+                        base_position,
+                        base_undo,
+                        count - 1,
+                        min_rep,
+                    ))
+                token_index += 1
+                continue
+
+            rollback(base_undo)
+            if not resume_choice():
+                variables.clear()
+                return None
+
+        variables.clear()
+        return None
 
     def _find_single_match_condition_backtracking(
         self, rows, start_idx, context, config=None,
@@ -4450,6 +4959,11 @@ class EnhancedMatcher:
             return None
         row_count = len(rows)
 
+        if not getattr(self, "_condition_direct_scope_map_ready", False):
+            self._condition_direct_scopes = self._condition_direct_scope_map(ast_root)
+            self._condition_direct_scope_map_ready = True
+        context._define_direct_scope_map = self._condition_direct_scopes
+
         compiled = getattr(self, "_condition_backtracking_fns", None)
         if compiled is None:
             from src.matcher.condition_evaluator import compile_condition
@@ -4459,7 +4973,14 @@ class EnhancedMatcher:
             }
             self._condition_backtracking_fns = compiled
 
-        variables: Dict[str, List[int]] = {}
+        # ``reset_for_match_attempt`` has already installed an isolated map
+        # when this context is reused.  Consume that map instead of allocating
+        # and discarding a second one for every candidate start.
+        variables = getattr(context, "variables", None)
+        if not isinstance(variables, dict):
+            variables = {}
+        else:
+            variables.clear()
         context.variables = variables
         context.current_var_assignments = variables
         # DEFINE aggregates are functions of the tentative assignments.  A
@@ -4467,7 +4988,7 @@ class EnhancedMatcher:
         # aggregate until (and only until) one of its input variables changes.
         # Revisions are bumped on both assignment and rollback, so a cached
         # value can never escape the exact DFS state that produced it.
-        assignment_versions: Optional[Dict[str, int]] = None
+        assignment_versions = None
         context._define_assignment_versions = None
         context._define_aggregate_cache = None
         step_budget = 200000
@@ -4478,6 +4999,31 @@ class EnhancedMatcher:
         condition_residuals = (
             getattr(self, "_condition_residual_fns", None) or {}
         )
+
+        linear_execution = self._prepare_condition_linear_execution(context)
+        if linear_execution is not None:
+            (
+                linear_plan,
+                runtime,
+                has_start_anchor,
+                has_end_anchor,
+            ) = linear_execution
+            return self._find_single_match_condition_linear(
+                rows,
+                start_idx,
+                context,
+                linear_plan,
+                runtime,
+                variables,
+                step_budget,
+                has_start_anchor,
+                has_end_anchor,
+            )
+
+        bound_conditions = getattr(context, "_define_bound_conditions", None)
+        if bound_conditions is None:
+            bound_conditions = {}
+            context._define_bound_conditions = bound_conditions
 
         def try_var(name, pos):
             if pos >= row_count:
@@ -4502,13 +5048,29 @@ class EnhancedMatcher:
             # conjunct is already known to be True at this position.  Evaluate
             # only the context-dependent residual; it uses the same standard
             # ConditionEvaluator as the complete expression.
-            condition = condition_residuals.get(name, compiled.get(name))
+            condition = condition_residuals.get(name)
+            if condition is None:
+                condition = compiled.get(name)
             if condition is None:
                 return pos + 1  # implicit TRUE
             context.current_idx = pos
             context.current_var = name
             try:
-                ok = condition(rows[pos], context)
+                bound_condition = bound_conditions.get(condition)
+                if bound_condition is None:
+                    binder = getattr(condition, "bind_context", None)
+                    if binder is not None:
+                        bound_condition = binder(context)
+                        bound_conditions[condition] = bound_condition
+                if bound_condition is not None:
+                    ok = bound_condition()
+                else:
+                    condition_row = (
+                        None
+                        if getattr(condition, "accepts_context_row", False)
+                        else rows[pos]
+                    )
+                    ok = condition(condition_row, context)
             except Exception:
                 ok = False
             return pos + 1 if ok else None
@@ -4534,13 +5096,12 @@ class EnhancedMatcher:
         # This small interpreter stores those continuations as ordinary tasks.
         # Assignments are mutated once and restored from an undo journal when
         # a choice is revisited, avoiding an O(match_length^2) copy per state.
-        Task = Tuple[Any, ...]
-        tasks: List[Task] = [("node", ast_root)]
-        choices: List[Tuple[List[Task], int, int]] = []
-        assignment_undo: List[str] = []
+        tasks = [("node", ast_root)]
+        choices = []
+        assignment_undo = []
         position = start_idx
         explored_steps = 0
-        end_pos: Optional[int] = None
+        end_pos = None
 
         def rollback(undo_size: int) -> None:
             while len(assignment_undo) > undo_size:
@@ -4558,80 +5119,6 @@ class EnhancedMatcher:
         # The DFS depth is the number of pattern variables rather than the
         # number of input rows, and rollback uses the same assignment journal
         # as the generic engine.
-        linear_plan = self._condition_linear_greedy_plan(ast_root)
-        if linear_plan is not None:
-            linear_choices: List[Tuple[int, int, int]] = []
-            linear_token = 0
-            linear_steps = 0
-
-            while linear_steps < step_budget:
-                if linear_token == len(linear_plan):
-                    end_pos = position
-                    if end_pos <= start_idx:
-                        return {
-                            "start": start_idx,
-                            "end": start_idx - 1,
-                            "variables": {},
-                            "state": self.start_state,
-                            "is_empty": True,
-                            "empty_pattern_rows": [start_idx],
-                            "excluded_vars": set(),
-                            "excluded_rows": [],
-                            "has_empty_alternation": self.has_empty_alternation,
-                        }
-                    return {
-                        "start": start_idx,
-                        "end": end_pos - 1,
-                        "variables": {
-                            var: indices[:]
-                            for var, indices in variables.items()
-                        },
-                        "state": self.start_state,
-                        "is_empty": False,
-                        "excluded_vars": set(),
-                        "excluded_rows": [],
-                        "has_empty_alternation": False,
-                    }
-
-                name, min_rep, max_rep = linear_plan[linear_token]
-                base_position = position
-                base_undo = len(assignment_undo)
-                count = 0
-
-                while max_rep is None or count < max_rep:
-                    linear_steps += 1
-                    next_position = try_var(name, position)
-                    if next_position is None:
-                        break
-                    assign(name, position)
-                    assignment_undo.append(name)
-                    position = next_position
-                    count += 1
-                    if linear_steps >= step_budget:
-                        break
-
-                if count >= min_rep and linear_steps < step_budget:
-                    # Append low-to-high so LIFO resumes max-1 first, matching
-                    # SQL greedy preference exactly.
-                    for alternative_count in range(min_rep, count):
-                        linear_choices.append((
-                            linear_token + 1,
-                            base_position + alternative_count,
-                            base_undo + alternative_count,
-                        ))
-                    linear_token += 1
-                    continue
-
-                rollback(base_undo)
-                if not linear_choices:
-                    variables.clear()
-                    return None
-                linear_token, position, undo_size = linear_choices.pop()
-                rollback(undo_size)
-
-            variables.clear()
-            return None
-
         def resume_choice() -> bool:
             nonlocal tasks, position
             if not choices:
@@ -7232,8 +7719,21 @@ class EnhancedMatcher:
         iteration_count = 0
         recent_starts = []  # Track recent start positions for TO_NEXT_ROW safety
         reusable_context = None
-        if self._can_reuse_row_context_for_matching(condition_matrix):
+        condition_backtracking_available = self._should_use_condition_backtracking()
+        direct_condition_backtracking = bool(
+            condition_backtracking_available
+            and not self.has_empty_alternation
+        )
+        if (
+            self._can_reuse_row_context_for_matching(condition_matrix)
+            or condition_backtracking_available
+        ):
             reusable_context = RowContext(rows=rows, defined_variables=self.defined_variables)
+        condition_linear_execution = (
+            self._prepare_condition_linear_execution(reusable_context)
+            if direct_condition_backtracking and reusable_context is not None
+            else None
+        )
         linear_plan_available = self._can_use_linear_quantifier_plan(config)
         linear_plan = self._get_linear_quantifier_plan() if linear_plan_available else None
         linear_plan_run_lengths = (
@@ -7442,14 +7942,58 @@ class EnhancedMatcher:
             # FALLBACK: Standard DFA traversal for complex patterns
             if match is None and not used_linear_plan and not used_row_local_dfa:
                 if reusable_context is not None:
-                    context = self._reset_reusable_row_context(reusable_context, start_idx, self.subsets)
+                    if condition_linear_execution is not None:
+                        context = reusable_context.reset_for_exact_match_attempt(
+                            start_idx,
+                            self.subsets,
+                            match_number=match_number,
+                        )
+                    else:
+                        context = self._reset_reusable_row_context(
+                            reusable_context,
+                            start_idx,
+                            self.subsets,
+                            match_number=match_number,
+                            reuse_variables=condition_backtracking_available,
+                        )
                 else:
                     context = RowContext(rows=rows, defined_variables=self.defined_variables)
                     context.subsets = self.subsets.copy() if self.subsets else {}
                 # MATCH_NUMBER() is usable inside DEFINE conditions; the
                 # candidate being attempted has the next match number.
-                context.match_number = match_number
-                match = self._find_single_match(rows, start_idx, context, config)
+                if reusable_context is None:
+                    context.match_number = match_number
+                if condition_linear_execution is not None:
+                    (
+                        exact_plan,
+                        exact_runtime,
+                        exact_start_anchor,
+                        exact_end_anchor,
+                    ) = condition_linear_execution
+                    variables = context.variables
+                    context.current_var_assignments = variables
+                    context._define_assignment_versions = None
+                    context._define_aggregate_cache = None
+                    match = self._find_single_match_condition_linear(
+                        rows,
+                        start_idx,
+                        context,
+                        exact_plan,
+                        exact_runtime,
+                        variables,
+                        200000,
+                        exact_start_anchor,
+                        exact_end_anchor,
+                    )
+                elif direct_condition_backtracking:
+                    match = self._find_single_match_condition_backtracking(
+                        rows,
+                        start_idx,
+                        context,
+                        config,
+                    )
+                else:
+                    match = self._find_single_match(rows, start_idx, context, config)
             if not match:
                 # Move to next position without marking as processed (unmatched rows will be handled later)
                 start_idx += 1

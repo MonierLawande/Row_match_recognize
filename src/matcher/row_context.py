@@ -132,6 +132,7 @@ class RowContext:
     _position_cache: Dict[Any, Any] = field(default_factory=dict, repr=False)
     _row_value_cache: Dict[Tuple[int, str], Any] = field(default_factory=dict, repr=False)
     _partition_cache: Dict[int, Optional[Tuple[int, int]]] = field(default_factory=dict, repr=False)
+    _input_column_cache: Dict[str, Any] = field(default_factory=dict, repr=False)
     
     # Performance and diagnostic metrics
     _metrics: Dict[str, Union[int, float]] = field(default_factory=dict, repr=False)
@@ -292,6 +293,130 @@ class RowContext:
             self._metrics["cache_invalidations"] = self._metrics.get("cache_invalidations", 0) + 1
             
             logger.debug(f"Invalidated {caches_cleared} cache structures")
+
+    def reset_for_match_attempt(
+        self,
+        start_idx: int,
+        subsets: Optional[Dict[str, List[str]]] = None,
+        match_number: Optional[int] = None,
+        reuse_variables: bool = False,
+    ) -> "RowContext":
+        """Reset assignment-dependent state for a new candidate match.
+
+        A partition scan can attempt many matches over the same immutable row
+        sequence.  Constructing a complete context for every start position
+        repeatedly allocates locks, metrics, indices, and cache dictionaries.
+        This reset provides the same clean semantic boundary while retaining
+        only partition/input state that is valid across attempts.
+
+        The matcher mutates ``variables`` directly while exploring a
+        candidate, so a new mapping is installed rather than merely cleared;
+        this also prevents references held by a completed match from observing
+        later attempts.  All caches whose keys depend on assignments or the
+        current position are cleared.  The row-value and partition caches are
+        input-only and can safely survive because ``rows`` and partition
+        boundaries do not change during one ``find_matches`` call.
+        """
+        if start_idx < 0 or (self.rows and start_idx >= len(self.rows)):
+            raise ContextValidationError(
+                f"Match start {start_idx} out of bounds for {len(self.rows)} rows"
+            )
+
+        with self._context_lock:
+            if reuse_variables:
+                variables = self.variables
+                variables.clear()
+            else:
+                variables: Dict[str, List[int]] = {}
+            self.variables = variables
+            self.current_var_assignments = variables
+            self.current_match = None
+            self.current_idx = start_idx
+            self.current_var = None
+            if match_number is not None:
+                self.match_number = match_number
+
+            requested_subsets = subsets or {}
+            if self.subsets != requested_subsets:
+                self.subsets = dict(requested_subsets)
+                self._subset_index.clear()
+                for subset_name, components in self.subsets.items():
+                    for component in components:
+                        self._subset_index.setdefault(component, set()).add(subset_name)
+
+            if self._timeline:
+                self._timeline.clear()
+            self._timeline_dirty = True
+            if self._row_var_index:
+                self._row_var_index.clear()
+
+            if self._navigation_cache:
+                self._navigation_cache.clear()
+            if self._variable_cache:
+                self._variable_cache.clear()
+            if self._position_cache:
+                self._position_cache.clear()
+
+            # These exact-search caches are attached lazily by the matcher.
+            # Reset them even though they are not dataclass fields so no DFS
+            # revision or aggregate value can cross a match-attempt boundary.
+            self._define_assignment_versions = None
+            self._define_aggregate_cache = None
+            self._define_linear_aggregate_states = None
+
+        return self
+
+    def reset_for_exact_match_attempt(
+        self,
+        start_idx: int,
+        subsets: Optional[Dict[str, List[str]]] = None,
+        match_number: Optional[int] = None,
+    ) -> "RowContext":
+        """Reset an exclusively owned context for compiled exact search.
+
+        ``EnhancedMatcher.find_matches`` creates this context locally and is
+        its only mutator for the duration of a partition scan.  The compiled
+        linear executor also copies every successful assignment into the
+        returned match.  It can therefore reuse the assignment mapping and
+        reset it without acquiring the public context lock or allocating a
+        replacement dictionary.  Navigation and assignment-dependent caches
+        are still cleared, preserving the same candidate isolation as
+        :meth:`reset_for_match_attempt`.
+        """
+        variables = self.variables
+        variables.clear()
+        self.current_var_assignments = variables
+        self.current_match = None
+        self.current_idx = start_idx
+        self.current_var = None
+        if match_number is not None:
+            self.match_number = match_number
+
+        requested_subsets = subsets or {}
+        if self.subsets != requested_subsets:
+            self.subsets = dict(requested_subsets)
+            self._subset_index.clear()
+            for subset_name, components in self.subsets.items():
+                for component in components:
+                    self._subset_index.setdefault(component, set()).add(
+                        subset_name
+                    )
+
+        if self._timeline:
+            self._timeline.clear()
+        self._timeline_dirty = True
+        if self._row_var_index:
+            self._row_var_index.clear()
+        if self._navigation_cache:
+            self._navigation_cache.clear()
+        if self._variable_cache:
+            self._variable_cache.clear()
+        if self._position_cache:
+            self._position_cache.clear()
+        self._define_assignment_versions = None
+        self._define_aggregate_cache = None
+        self._define_linear_aggregate_states = None
+        return self
     
     def update_variable(self, var_name: str, indices: List[int]) -> None:
         """
