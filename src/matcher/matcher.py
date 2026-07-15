@@ -4567,6 +4567,7 @@ class EnhancedMatcher:
                     run_lengths,
                     None,
                     None,
+                    None,
                 )
                 continue
 
@@ -4577,6 +4578,9 @@ class EnhancedMatcher:
             binder = getattr(condition, "bind_context", None)
             bound = binder(context) if binder is not None else None
             true_run_length = getattr(bound, "true_run_length", None)
+            entire_range_is_true = getattr(
+                bound, "entire_range_is_true", None
+            )
             prefilter_run_lengths = (
                 self._condition_true_run_lengths(
                     prefilter,
@@ -4600,6 +4604,7 @@ class EnhancedMatcher:
                 None,
                 true_run_length,
                 prefilter_run_lengths,
+                entire_range_is_true,
             )
 
         context._define_linear_runtime = (self, runtime)
@@ -4678,7 +4683,8 @@ class EnhancedMatcher:
         assignment_undo = []
         assigned_count = 0
         aggregate_states = {}
-        context._define_linear_aggregate_states = aggregate_states
+        context._define_incremental_aggregate_states = aggregate_states
+        context._define_incremental_aggregate_threshold = 16
         choices = []
         position = start_idx
         token_index = 0
@@ -4812,6 +4818,7 @@ class EnhancedMatcher:
                 run_lengths,
                 true_run_length,
                 prefilter_run_lengths,
+                entire_range_is_true,
             ) = runtime[name]
 
             used_batch = False
@@ -4831,6 +4838,50 @@ class EnhancedMatcher:
                 position += available
                 count = available
                 used_batch = True
+
+            if (
+                not used_batch
+                and has_end_anchor
+                and token_index + 1 == len(linear_plan)
+                and entire_range_is_true is not None
+                and (prefilter is None or prefilter_run_lengths is not None)
+                and position < row_count
+            ):
+                required_count = row_count - position
+                within_repetition_bounds = (
+                    required_count >= min_rep
+                    and (max_rep is None or required_count <= max_rep)
+                )
+                prefilter_accepts_suffix = (
+                    prefilter is None
+                    or (
+                        prefilter_run_lengths is not None
+                        and int(prefilter_run_lengths[position])
+                        >= required_count
+                    )
+                )
+                minimum_size = getattr(
+                    entire_range_is_true, "minimum_size", 32
+                )
+                if required_count >= minimum_size:
+                    explored_steps += 1
+                    if (
+                        not within_repetition_bounds
+                        or not prefilter_accepts_suffix
+                    ):
+                        suffix_accepted = False
+                    else:
+                        context.current_idx = position
+                        context.current_var = name
+                        suffix_accepted = entire_range_is_true(
+                            position, row_count
+                        )
+                    if suffix_accepted is not None:
+                        if suffix_accepted:
+                            assign_range(name, position, required_count)
+                            position += required_count
+                            count = required_count
+                        used_batch = True
 
             if (
                 not used_batch
@@ -5020,6 +5071,14 @@ class EnhancedMatcher:
                 has_end_anchor,
             )
 
+        aggregate_states = {}
+        context._define_incremental_aggregate_states = aggregate_states
+        # Generic DFS may revisit the same aggregate at exponentially many
+        # label assignments.  Creating the prefix on first use is cheaper than
+        # rescanning even a short scope; linear scans retain their adaptive
+        # threshold because they normally evaluate each short scope once.
+        context._define_incremental_aggregate_threshold = 1
+
         bound_conditions = getattr(context, "_define_bound_conditions", None)
         if bound_conditions is None:
             bound_conditions = {}
@@ -5089,6 +5148,11 @@ class EnhancedMatcher:
                 context._define_aggregate_cache = {}
             elif assignment_versions is not None:
                 assignment_versions[str(name).upper()] += 1
+            if aggregate_states:
+                for state in aggregate_states.get(
+                    str(name).upper(), {}
+                ).values():
+                    state.append_index(pos)
 
         # The recursive implementation used nested continuations for every
         # consumed row.  A long quantified run therefore consumed several
@@ -5110,6 +5174,12 @@ class EnhancedMatcher:
                 entries.pop()
                 if assignment_versions is not None:
                     assignment_versions[str(name).upper()] += 1
+                if aggregate_states:
+                    remaining_length = len(entries)
+                    for state in aggregate_states.get(
+                        str(name).upper(), {}
+                    ).values():
+                        state.truncate(remaining_length)
                 if not entries:
                     del variables[name]
 

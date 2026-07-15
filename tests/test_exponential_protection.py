@@ -708,6 +708,37 @@ class TestExponentialProtection:
 
         assert result['match_length'].tolist() == [row_count]
 
+    def test_nonlinear_incremental_aggregates_follow_dfs_rollback(self):
+        """Prefix aggregates must track alternate-label append/pop states."""
+        df = pd.DataFrame({
+            'id': range(9),
+            'value': [1] * 8 + [0],
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                COUNT(*) AS match_length,
+                COUNT(A.value) AS a_count,
+                COUNT(B.value) AS b_count
+            ONE ROW PER MATCH
+            PATTERN ((A | B)+ FINAL)
+            DEFINE FINAL AS
+                SUM(A.value) = SUM(B.value)
+                AND MIN(A.value) = MAX(B.value)
+                AND ARBITRARY(A.value) = 1
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result.to_dict('records') == [{
+            'match_length': 9,
+            'a_count': 4,
+            'b_count': 4,
+        }]
+
     def test_memory_usage_protection(self):
         """Test that memory usage doesn't explode with exponential patterns."""
         df = pd.DataFrame({
