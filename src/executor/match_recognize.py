@@ -603,6 +603,10 @@ class DataFrameRowAccessor:
         column = self._case_map.get(str(field_name).upper())
         return None if column is None else self._arrays[column]
 
+    def column_array_exact(self, field_name: str):
+        """Return a backing column only for the exact scalar-evaluator key."""
+        return self._arrays.get(field_name)
+
     def non_null_mask(self, field_name: str):
         """Return a cached boolean numpy array of non-null cells for a column, or None."""
         column = self._case_map.get(str(field_name).upper())

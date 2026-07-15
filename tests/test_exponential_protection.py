@@ -459,6 +459,83 @@ class TestExponentialProtection:
             'match_length': len(prices),
         }]
 
+    def test_reused_exact_context_is_isolated_between_match_attempts(self):
+        """Aggregate/cache state from one candidate cannot enter the next."""
+        first_a = 16
+        second_a = 16
+        df = pd.DataFrame({
+            'seq_id': range(first_a + second_a + 2),
+            'category': (
+                ['A'] * first_a + ['B']
+                + ['A'] * second_a + ['B']
+            ),
+            'price': (
+                [1.0] * first_a + [2.0]
+                + [100.0] * second_a + [50.0]
+            ),
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                FIRST(A.seq_id) AS start_row,
+                LAST(B.seq_id) AS end_row,
+                MATCH_NUMBER() AS match_number
+            ONE ROW PER MATCH
+            PATTERN (A+ B+)
+            DEFINE
+                A AS category = 'A',
+                B AS category = 'B' AND price > AVG(A.price)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        # The first B is above AVG(A)=1.  The second is below its own
+        # AVG(A)=100 and must not see the first attempt's cached aggregate.
+        assert result.to_dict('records') == [{
+            'start_row': 0,
+            'end_row': first_a,
+            'match_number': 1,
+        }]
+
+    def test_compiled_exact_search_preserves_simple_aggregate_semantics(self):
+        """The compact aggregate IR agrees across every supported function."""
+        df = pd.DataFrame({
+            'seq_id': [0, 1, 2],
+            'category': ['A', 'A', 'B'],
+            'price': [1.0, 3.0, 5.0],
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                FIRST(A.seq_id) AS start_row,
+                LAST(B.seq_id) AS end_row
+            ONE ROW PER MATCH
+            PATTERN (A+ B+)
+            DEFINE
+                A AS category = 'A',
+                B AS category = 'B'
+                    AND SUM(A.price) = 4
+                    AND AVG(A.price) = 2
+                    AND COUNT(A.price) = 2
+                    AND MIN(A.price) = 1
+                    AND MAX(A.price) = 3
+                    AND ARBITRARY(A.price) = 1
+                    AND ARRAY_AGG(A.price) IS NOT NULL
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result.to_dict('records') == [{
+            'start_row': 0,
+            'end_row': 2,
+        }]
+
     def test_compiled_residual_has_strict_navigation_fallback(self):
         """Only the explicitly supported residual IR bypasses AST dispatch."""
         import ast
@@ -486,6 +563,12 @@ class TestExponentialProtection:
             source_condition="price > PREV(price)",
         )
         assert navigation_condition.uses_compiled_expression is False
+
+        from src.matcher.condition_evaluator import compile_condition
+        complete_aggregate_condition = compile_condition(
+            "price > AVG(A.price)"
+        )
+        assert complete_aggregate_condition.uses_compiled_expression is True
 
     def test_compiled_linear_exact_search_preserves_greedy_backtracking(self):
         """A greedy linear token rolls back when a later token needs its row."""
@@ -520,6 +603,110 @@ class TestExponentialProtection:
             'end_row': 2,
             'match_length': 3,
         }]
+
+    def test_anchored_linear_exact_search_uses_compact_rollback(self):
+        """A terminal anchor remains exact beyond the generic step budget."""
+        row_count = 1000
+        df = pd.DataFrame({
+            'seq_id': range(row_count),
+            'price': [1.0] + [100.0] * (row_count - 2) + [40.0],
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                FIRST(A.seq_id) AS start_row,
+                LAST(B.seq_id) AS end_row,
+                COUNT(*) AS match_length
+            ONE ROW PER MATCH
+            PATTERN (A+ B+ $)
+            DEFINE B AS price > AVG(A.price)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result.to_dict('records') == [{
+            'start_row': 0,
+            'end_row': row_count - 1,
+            'match_length': row_count,
+        }]
+
+    def test_batched_exact_comparison_preserves_null_semantics(self):
+        """A NULL in a numeric run is a rejection, never True for ``!=``."""
+        row_count = 80
+        prices = [1.0] + [5.0] * (row_count - 1)
+        prices[50] = float('nan')
+        df = pd.DataFrame({
+            'seq_id': range(row_count),
+            'category': ['A'] + ['B'] * (row_count - 1),
+            'price': prices,
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES COUNT(*) AS match_length
+            ONE ROW PER MATCH
+            PATTERN (A B+ $)
+            DEFINE
+                A AS category = 'A',
+                B AS category = 'B' AND price != AVG(A.price)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result.empty
+
+    def test_batched_exact_comparison_supports_reversed_arithmetic_operand(self):
+        """Stable aggregate arithmetic can appear on either comparison side."""
+        row_count = 96
+        df = pd.DataFrame({
+            'seq_id': range(row_count),
+            'category': ['A'] + ['B'] * (row_count - 2) + ['C'],
+            'price': [1.0] + [5.0] * (row_count - 2) + [9.0],
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES COUNT(*) AS match_length
+            ONE ROW PER MATCH
+            PATTERN (A B+ C)
+            DEFINE
+                A AS category = 'A',
+                B AS category = 'B' AND AVG(A.price) + 1 < price,
+                C AS category = 'C'
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result['match_length'].tolist() == [row_count]
+
+    def test_same_variable_aggregate_keeps_prospective_row_semantics(self):
+        """Batching is disabled when the aggregate scope is being extended."""
+        row_count = 80
+        df = pd.DataFrame({
+            'seq_id': range(row_count),
+            'price': list(range(1, row_count + 1)),
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES COUNT(*) AS match_length
+            ONE ROW PER MATCH
+            PATTERN (A+ $)
+            DEFINE A AS price >= AVG(A.price)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result['match_length'].tolist() == [row_count]
 
     def test_memory_usage_protection(self):
         """Test that memory usage doesn't explode with exponential patterns."""

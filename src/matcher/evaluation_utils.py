@@ -127,9 +127,16 @@ def is_null(value: Any) -> bool:
         if value is None:
             return True
         
-        # Handle NaN values
-        if isinstance(value, float) and math.isnan(value):
-            return True
+        # Python floats and NumPy floating scalars accepted by ``float`` have
+        # a complete NULL answer here: NaN is NULL and every other value is
+        # not.  Returning immediately avoids repeated NumPy/Pandas dispatch in
+        # hot comparison loops.
+        if isinstance(value, float):
+            return math.isnan(value)
+
+        # These scalar types cannot represent SQL NULL/NaN.
+        if isinstance(value, (bool, int, str, bytes)):
+            return False
         
         # Handle numpy NaN
         try:
