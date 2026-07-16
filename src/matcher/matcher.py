@@ -117,6 +117,82 @@ class PatternSearchLimitError(RuntimeError):
             "instead of advancing and changing leftmost-match semantics"
         )
 
+
+def _append_condition_linear_range(
+    context,
+    variables,
+    assignment_undo,
+    aggregate_states,
+    assignment_versions,
+    assigned_count,
+    name,
+    first_position,
+    count,
+):
+    """Append one proved contiguous exact-search assignment range.
+
+    This helper is module-level so the hot matcher does not construct a
+    closure for every candidate start.  It performs the same journal,
+    revision, and incremental-aggregate updates as scalar assignment.
+    """
+    if count <= 0:
+        return assigned_count, assignment_versions
+    entries = variables.setdefault(name, [])
+    entries.extend(range(first_position, first_position + count))
+    if assignment_versions is None and len(entries) >= 16:
+        assignment_versions = defaultdict(int)
+        for active_name in variables:
+            assignment_versions[str(active_name).upper()] = 1
+        context._define_assignment_versions = assignment_versions
+        context._define_aggregate_cache = {}
+    elif assignment_versions is not None:
+        assignment_versions[str(name).upper()] += count
+    if aggregate_states:
+        scope_states = aggregate_states.get(str(name).upper(), {})
+        if scope_states:
+            for row_index in range(
+                first_position, first_position + count
+            ):
+                for state in scope_states.values():
+                    state.append_index(row_index)
+    if assignment_undo and assignment_undo[-1][0] == name:
+        assignment_undo[-1][1] += count
+    else:
+        assignment_undo.append([name, count])
+    return assigned_count + count, assignment_versions
+
+
+def _rollback_condition_linear_assignments(
+    variables,
+    assignment_undo,
+    aggregate_states,
+    assignment_versions,
+    assigned_count,
+    undo_size,
+):
+    """Restore the compact exact-search journal to ``undo_size``."""
+    while assigned_count > undo_size:
+        name, segment_count = assignment_undo[-1]
+        remove_count = min(segment_count, assigned_count - undo_size)
+        entries = variables[name]
+        del entries[-remove_count:]
+        if assignment_versions is not None:
+            assignment_versions[str(name).upper()] += remove_count
+        assigned_count -= remove_count
+        if remove_count == segment_count:
+            assignment_undo.pop()
+        else:
+            assignment_undo[-1][1] -= remove_count
+        if aggregate_states:
+            remaining_length = len(entries)
+            for state in aggregate_states.get(
+                str(name).upper(), {}
+            ).values():
+                state.truncate(remaining_length)
+        if not entries:
+            del variables[name]
+    return assigned_count
+
 # Backtracking types
 @dataclass
 class BacktrackingState:
@@ -4861,92 +4937,37 @@ class EnhancedMatcher:
         if has_start_anchor and start_idx != 0:
             return None
 
-        def rollback(undo_size):
-            nonlocal assigned_count
-            while assigned_count > undo_size:
-                name, segment_count = assignment_undo[-1]
-                remove_count = min(
-                    segment_count, assigned_count - undo_size
-                )
-                entries = variables[name]
-                del entries[-remove_count:]
-                if assignment_versions is not None:
-                    assignment_versions[str(name).upper()] += remove_count
-                assigned_count -= remove_count
-                if remove_count == segment_count:
-                    assignment_undo.pop()
-                else:
-                    assignment_undo[-1][1] -= remove_count
-                if aggregate_states:
-                    scope_upper = str(name).upper()
-                    remaining_length = len(entries)
-                    for state in aggregate_states.get(
-                        scope_upper, {}
-                    ).values():
-                        state.truncate(remaining_length)
-                if not entries:
-                    del variables[name]
-
-        def resume_choice():
-            nonlocal token_index, position
-            if not choices:
-                return False
-            (
-                token_index,
-                base_position,
-                base_undo,
-                alternative_count,
-                minimum_count,
-            ) = choices.pop()
-            if alternative_count > minimum_count:
-                choices.append((
-                    token_index,
-                    base_position,
-                    base_undo,
-                    alternative_count - 1,
-                    minimum_count,
-                ))
-            position = base_position + alternative_count
-            rollback(base_undo + alternative_count)
-            return True
-
-        def assign_range(name, first_position, count):
-            """Assign a proved contiguous run and update rollback state."""
-            nonlocal assigned_count, assignment_versions
-            if count <= 0:
-                return
-            entries = variables.setdefault(name, [])
-            entries.extend(range(first_position, first_position + count))
-            if assignment_versions is None and len(entries) >= 16:
-                assignment_versions = defaultdict(int)
-                for active_name in variables:
-                    assignment_versions[str(active_name).upper()] = 1
-                context._define_assignment_versions = assignment_versions
-                context._define_aggregate_cache = {}
-            elif assignment_versions is not None:
-                assignment_versions[str(name).upper()] += count
-            if aggregate_states:
-                scope_upper = str(name).upper()
-                scope_states = aggregate_states.get(scope_upper, {})
-                if scope_states:
-                    for row_index in range(
-                        first_position, first_position + count
-                    ):
-                        for state in scope_states.values():
-                            state.append_index(row_index)
-            if assignment_undo and assignment_undo[-1][0] == name:
-                assignment_undo[-1][1] += count
-            else:
-                assignment_undo.append([name, count])
-            assigned_count += count
-
         while explored_steps < step_budget:
             if token_index == len(linear_plan):
                 if has_end_anchor and position != row_count:
-                    if resume_choice():
-                        continue
-                    variables.clear()
-                    return None
+                    if not choices:
+                        variables.clear()
+                        return None
+                    (
+                        token_index,
+                        base_position,
+                        base_undo,
+                        alternative_count,
+                        minimum_count,
+                    ) = choices.pop()
+                    if alternative_count > minimum_count:
+                        choices.append((
+                            token_index,
+                            base_position,
+                            base_undo,
+                            alternative_count - 1,
+                            minimum_count,
+                        ))
+                    position = base_position + alternative_count
+                    assigned_count = _rollback_condition_linear_assignments(
+                        variables,
+                        assignment_undo,
+                        aggregate_states,
+                        assignment_versions,
+                        assigned_count,
+                        base_undo + alternative_count,
+                    )
+                    continue
                 if position <= start_idx:
                     return {
                         "start": start_idx,
@@ -4962,10 +4983,11 @@ class EnhancedMatcher:
                 return {
                     "start": start_idx,
                     "end": position - 1,
-                    "variables": {
-                        var: indices[:]
-                        for var, indices in variables.items()
-                    },
+                    # Exact search exclusively owns this assignment mapping.
+                    # Transfer it to the immutable completed-match lifecycle
+                    # instead of copying every variable list.  The reusable
+                    # RowContext receives a fresh map for the next attempt.
+                    "variables": context.detach_exact_match_assignments(),
                     "state": self.start_state,
                     "is_empty": False,
                     "excluded_vars": set(),
@@ -5004,7 +5026,19 @@ class EnhancedMatcher:
                 if max_rep is not None and available > max_rep:
                     available = max_rep
                 explored_steps += 1
-                assign_range(name, position, available)
+                assigned_count, assignment_versions = (
+                    _append_condition_linear_range(
+                        context,
+                        variables,
+                        assignment_undo,
+                        aggregate_states,
+                        assignment_versions,
+                        assigned_count,
+                        name,
+                        position,
+                        available,
+                    )
+                )
                 position += available
                 count = available
                 used_batch = True
@@ -5020,7 +5054,19 @@ class EnhancedMatcher:
                 # token could incorrectly fail a 200,000-state protection
                 # limit despite having no combinatorial search.
                 explored_steps += 1
-                assign_range(name, position, available)
+                assigned_count, assignment_versions = (
+                    _append_condition_linear_range(
+                        context,
+                        variables,
+                        assignment_undo,
+                        aggregate_states,
+                        assignment_versions,
+                        assigned_count,
+                        name,
+                        position,
+                        available,
+                    )
+                )
                 position += available
                 count = available
                 used_batch = True
@@ -5064,7 +5110,19 @@ class EnhancedMatcher:
                         )
                     if suffix_accepted is not None:
                         if suffix_accepted:
-                            assign_range(name, position, required_count)
+                            assigned_count, assignment_versions = (
+                                _append_condition_linear_range(
+                                    context,
+                                    variables,
+                                    assignment_undo,
+                                    aggregate_states,
+                                    assignment_versions,
+                                    assigned_count,
+                                    name,
+                                    position,
+                                    required_count,
+                                )
+                            )
                             position += required_count
                             count = required_count
                         used_batch = True
@@ -5094,7 +5152,19 @@ class EnhancedMatcher:
                             min(int(available), stop_position - position),
                         )
                         explored_steps += 1
-                        assign_range(name, position, available)
+                        assigned_count, assignment_versions = (
+                            _append_condition_linear_range(
+                                context,
+                                variables,
+                                assignment_undo,
+                                aggregate_states,
+                                assignment_versions,
+                                assigned_count,
+                                name,
+                                position,
+                                available,
+                            )
+                        )
                         position += available
                         count = available
                         used_batch = True
@@ -5173,10 +5243,41 @@ class EnhancedMatcher:
                 token_index += 1
                 continue
 
-            rollback(base_undo)
-            if not resume_choice():
+            assigned_count = _rollback_condition_linear_assignments(
+                variables,
+                assignment_undo,
+                aggregate_states,
+                assignment_versions,
+                assigned_count,
+                base_undo,
+            )
+            if not choices:
                 variables.clear()
                 return None
+            (
+                token_index,
+                base_position,
+                base_undo,
+                alternative_count,
+                minimum_count,
+            ) = choices.pop()
+            if alternative_count > minimum_count:
+                choices.append((
+                    token_index,
+                    base_position,
+                    base_undo,
+                    alternative_count - 1,
+                    minimum_count,
+                ))
+            position = base_position + alternative_count
+            assigned_count = _rollback_condition_linear_assignments(
+                variables,
+                assignment_undo,
+                aggregate_states,
+                assignment_versions,
+                assigned_count,
+                base_undo + alternative_count,
+            )
 
         variables.clear()
         if explored_steps >= step_budget:
@@ -7913,6 +8014,15 @@ class EnhancedMatcher:
         start_idx = 0
         processed_indices = set()  # Track processed indices to prevent infinite loops
         self._matches = []  # Reset matches
+        self._match_count = 0
+        # Executor-owned lazy ONE ROW scans materialize each output row before
+        # advancing.  They can stream completed matches instead of retaining
+        # every assignment map until the partition ends.  Direct matcher
+        # callers and feature paths that need post-processing keep the
+        # historical retained-match behavior by default.
+        retain_completed_matches = getattr(
+            self, "_retain_completed_matches", True
+        )
 
         # Get configuration
         all_rows = config.rows_per_match != RowsPerMatch.ONE_ROW if config else False
@@ -7942,10 +8052,54 @@ class EnhancedMatcher:
                     fast_cols = getattr(self, "_fast_one_row_columns", None)
                     if fast_cols is not None:
                         fast_count = fast_cols[1]
+                self._match_count = fast_count
                 self.timing["total"] = time.time() - start_time
                 self._update_performance_metrics(len(rows), fast_count, self.timing["total"])
                 logger.info(f"Fused one-row pass produced {fast_count} result rows")
                 return fast_results
+
+        # The state-dependent exact matcher cannot use the fused row-local
+        # search above, but it can still emit ordinary ONE ROW results into
+        # columns when every measure has a compiled closure.  This avoids one
+        # dictionary per match and pandas' later list-of-dicts conversion.
+        # Any unsupported measure leaves this disabled and uses the complete
+        # MeasureEvaluator path unchanged.
+        columnar_one_row_output = None
+        if (
+            not all_rows
+            and getattr(self, "_fast_columnar_result", False)
+            and compiled_one_row_measure_plans
+            and all(
+                plan_fn is not None
+                for _alias, _expr, _semantics, _plan, plan_fn
+                in compiled_one_row_measure_plans
+            )
+            and hasattr(rows, "column_array")
+            and self._pattern_can_match_empty(
+                str(self.original_pattern or "")
+            ) is False
+        ):
+            prefix_data = []
+            seen_prefixes = set()
+            for col in list(self.partition_columns) + list(self.order_columns):
+                if col in seen_prefixes:
+                    continue
+                seen_prefixes.add(col)
+                column = rows.column_array(col)
+                if column is not None:
+                    prefix_data.append((col, column, [], [False]))
+            measure_data = [
+                (alias, plan_fn, [])
+                for alias, _expr, _semantics, _plan, plan_fn
+                in compiled_one_row_measure_plans
+            ]
+            columnar_one_row_output = {
+                "prefix": prefix_data,
+                "measures": measure_data,
+                "match_numbers": [],
+                "row_indices": [],
+                "count": 0,
+            }
 
         # UNLIMITED SCALE PROCESSING: Intelligent iteration management without hard limits
         # Remove all artificial iteration constraints for true unlimited dataset processing
@@ -7954,6 +8108,7 @@ class EnhancedMatcher:
         # Dynamic iteration management based on progress tracking
         progress_window = max(1000, len(rows) // 100)  # Adaptive progress check window
         last_progress_check = 0
+        position_at_last_check = -1
         matches_at_last_check = 0
         stagnant_iterations = 0
         max_stagnant_iterations = progress_window * 5  # Allow some stagnation for complex patterns
@@ -8099,8 +8254,12 @@ class EnhancedMatcher:
 
                 # Periodic progress check for massive datasets
                 if iteration_count - last_progress_check >= progress_window:
-                    current_matches = len(results)
-                    if current_matches == matches_at_last_check:
+                    current_matches = self._match_count
+                    made_progress = (
+                        start_idx > position_at_last_check
+                        or current_matches > matches_at_last_check
+                    )
+                    if not made_progress:
                         stagnant_iterations += progress_window
                         if stagnant_iterations >= max_stagnant_iterations:
                             logger.info(f"No progress in {stagnant_iterations} iterations, likely completed processing")
@@ -8109,6 +8268,7 @@ class EnhancedMatcher:
                         stagnant_iterations = 0  # Reset stagnation counter
 
                     last_progress_check = iteration_count
+                    position_at_last_check = start_idx
                     matches_at_last_check = current_matches
 
                     # Progress reporting for large datasets
@@ -8166,7 +8326,9 @@ class EnhancedMatcher:
                     matches, next_start_idx = vectorized_result
                     for match in matches:
                         match["match_number"] = match_number
-                        self._matches.append(match)
+                        self._match_count += 1
+                        if retain_completed_matches:
+                            self._matches.append(match)
                         
                         # Process the match
                         if all_rows:
@@ -8179,6 +8341,7 @@ class EnhancedMatcher:
                                 measures,
                                 match_number,
                                 compiled_one_row_measure_plans,
+                                columnar_one_row_output,
                             )
                             if match_row:
                                 results.append(match_row)
@@ -8296,7 +8459,9 @@ class EnhancedMatcher:
                 continue
             # Store the match for post-processing
             match["match_number"] = match_number
-            self._matches.append(match)
+            self._match_count += 1
+            if retain_completed_matches:
+                self._matches.append(match)
 
             # Process the match
             if all_rows:
@@ -8330,6 +8495,7 @@ class EnhancedMatcher:
                     measures,
                     match_number,
                     compiled_one_row_measure_plans,
+                    columnar_one_row_output,
                 )
                 if match_row:
                     results.append(match_row)
@@ -8404,13 +8570,35 @@ class EnhancedMatcher:
                     results.append(unmatched_row)
                     processed_indices.add(idx)
 
+        if columnar_one_row_output is not None:
+            columns = {}
+            for col, _column, values, seen in columnar_one_row_output["prefix"]:
+                if seen[0]:
+                    columns[col] = values
+            for alias, _plan_fn, values in columnar_one_row_output["measures"]:
+                columns[alias] = values
+            columns["MATCH_NUMBER"] = columnar_one_row_output["match_numbers"]
+            columns["_original_row_idx"] = columnar_one_row_output["row_indices"]
+            self._fast_one_row_columns = (
+                columns,
+                columnar_one_row_output["count"],
+            )
+
+        output_row_count = len(results)
+        if columnar_one_row_output is not None:
+            output_row_count += columnar_one_row_output["count"]
+
         self.timing["total"] = time.time() - start_time
         
         # PRODUCTION ENHANCEMENT: Performance metrics collection
-        self._update_performance_metrics(len(rows), len(results), self.timing["total"])
+        self._update_performance_metrics(
+            len(rows), output_row_count, self.timing["total"]
+        )
         
         logger.info(f"Find matches completed in {self.timing['total']:.6f} seconds")
-        logger.info(f"Processed {len(rows)} rows, found {len(results)} result rows")
+        logger.info(
+            f"Processed {len(rows)} rows, found {output_row_count} result rows"
+        )
         return results
 
 
@@ -10622,7 +10810,15 @@ class EnhancedMatcher:
 
         return MeasureEvaluator(context, final=True)
 
-    def _process_one_row_match(self, match, rows, measures, match_number, compiled_measure_plans=None):
+    def _process_one_row_match(
+        self,
+        match,
+        rows,
+        measures,
+        match_number,
+        compiled_measure_plans=None,
+        columnar_output=None,
+    ):
         """Process one row per match to exactly match Trino's output format."""
         if match["start"] >= len(rows):
             return None
@@ -10634,13 +10830,39 @@ class EnhancedMatcher:
         # Filter out excluded rows if needed
         if self.exclusion_handler and self.exclusion_handler.excluded_vars:
             match = self.exclusion_handler.filter_excluded_rows(match)
+
+        start_pos = match["start"]
+        if columnar_output is not None:
+            # All plans were proved compilable when the collector was created.
+            # Emit before constructing the legacy result dictionary or doing
+            # duplicate prefix lookups.  Per-measure exception isolation stays
+            # identical to the dict path.
+            nan_value = float("nan")
+            for _col, column, values, seen in columnar_output["prefix"]:
+                value = column[start_pos]
+                if value is None:
+                    values.append(nan_value)
+                else:
+                    values.append(value)
+                    seen[0] = True
+            for alias, plan_fn, values in columnar_output["measures"]:
+                try:
+                    values.append(plan_fn(match, match_number))
+                except Exception as exc:
+                    logger.error(
+                        f"Error evaluating compiled measure {alias}: {exc}"
+                    )
+                    values.append(None)
+            columnar_output["match_numbers"].append(match_number)
+            columnar_output["row_indices"].append(start_pos)
+            columnar_output["count"] += 1
+            return None
         
         # Create a new empty result row.  When rows are backed by a
         # DataFrameRowAccessor, fetch only the requested columns instead of
         # materializing the whole start row as a dict for every match.
         result = {}
         start_row = None
-        start_pos = match["start"]
 
         if hasattr(rows, "get_value"):
             for col in self.partition_columns:
@@ -10673,6 +10895,7 @@ class EnhancedMatcher:
             if compiled_measure_plans is not None
             else self._prepare_measure_output_plans(measures, rows)
         )
+
         for alias, expr, semantics, plan, plan_fn in measure_plans:
             try:
                 # Evaluate the expression with appropriate semantics

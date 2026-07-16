@@ -501,6 +501,107 @@ class TestExponentialProtection:
             'match_number': 1,
         }]
 
+    def test_completed_exact_match_owns_detached_assignments(self):
+        """Later context reuse cannot mutate an already completed match.
+
+        The compiled exact executor transfers its assignment dictionary to a
+        successful match to avoid copying every index list.  This lifecycle
+        test retains the raw match objects seen by result processing and
+        verifies that both successful matches keep independent assignments
+        after the reusable context has advanced.
+        """
+        from src.matcher.matcher import EnhancedMatcher
+
+        run = 16
+        df = pd.DataFrame({
+            'seq_id': range((run + 1) * 2),
+            'category': ['A'] * run + ['B'] + ['A'] * run + ['B'],
+            'price': [1.0] * run + [2.0] + [10.0] * run + [20.0],
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                FIRST(A.seq_id) AS start_row,
+                LAST(B.seq_id) AS end_row
+            ONE ROW PER MATCH
+            PATTERN (A+ B+)
+            DEFINE
+                A AS category = 'A',
+                B AS category = 'B' AND price > AVG(A.price)
+        )
+        """
+
+        completed = []
+        original = EnhancedMatcher._process_one_row_match
+
+        def retain_match(matcher, match, *args, **kwargs):
+            completed.append(match)
+            return original(matcher, match, *args, **kwargs)
+
+        EnhancedMatcher._process_one_row_match = retain_match
+        try:
+            result = match_recognize(query, df)
+        finally:
+            EnhancedMatcher._process_one_row_match = original
+
+        assert result.to_dict('records') == [
+            {'start_row': 0, 'end_row': run},
+            {'start_row': run + 1, 'end_row': (run + 1) * 2 - 1},
+        ]
+        assert len(completed) == 2
+        assert completed[0]['variables'] == {
+            'A': list(range(run)),
+            'B': [run],
+        }
+        assert completed[1]['variables'] == {
+            'A': list(range(run + 1, (run + 1) * 2 - 1)),
+            'B': [(run + 1) * 2 - 1],
+        }
+        assert completed[0]['variables'] is not completed[1]['variables']
+
+    def test_columnar_exact_output_counts_input_progress(self):
+        """Streaming output cannot trigger the stagnation safety guard.
+
+        The executor's columnar ONE ROW path intentionally does not append a
+        Python result dictionary for every match.  Progress must therefore be
+        measured from the advancing input position and matcher count, not from
+        the length of that legacy list.
+        """
+        match_count = 6000
+        df = pd.DataFrame({
+            'seq_id': range(match_count * 2),
+            'category': ['A', 'B'] * match_count,
+            'price': [1.0, 2.0] * match_count,
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                FIRST(A.seq_id) AS start_row,
+                LAST(B.seq_id) AS end_row
+            ONE ROW PER MATCH
+            PATTERN (A+ B+)
+            DEFINE
+                A AS category = 'A',
+                B AS category = 'B' AND price > AVG(A.price)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert len(result) == match_count
+        assert result.iloc[0].to_dict() == {
+            'start_row': 0,
+            'end_row': 1,
+        }
+        assert result.iloc[-1].to_dict() == {
+            'start_row': match_count * 2 - 2,
+            'end_row': match_count * 2 - 1,
+        }
+
     def test_compiled_exact_search_preserves_simple_aggregate_semantics(self):
         """The compact aggregate IR agrees across every supported function."""
         df = pd.DataFrame({
