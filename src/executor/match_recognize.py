@@ -1237,6 +1237,46 @@ def _can_use_lazy_partition_rows(matcher, match_config) -> bool:
 def _partition_rows_for_matching(partition: pd.DataFrame, use_lazy_rows: bool):
     return DataFrameRowAccessor(partition) if use_lazy_rows else partition.to_dict('records')
 
+def _collect_partition_matches(
+    matcher,
+    partition_start_idx,
+    all_matches,
+    all_matched_indices,
+    track_matched_indices,
+):
+    """Retain partition matches and translate indices only when necessary.
+
+    Matcher results own their variable-index lists.  For the first partition
+    (and for the lazy ONE ROW path) the global offset is zero, so rebuilding
+    every dictionary and list would only duplicate completed backtracking
+    state.  Later materialized partitions still receive the required offset.
+    The global matched-index set is needed solely by WITH UNMATCHED ROWS.
+    """
+    for match in getattr(matcher, "_matches", ()):
+        variables = match.get("variables")
+        if variables:
+            if partition_start_idx:
+                adjusted_vars = {}
+                for var, indices in variables.items():
+                    adjusted_indices = [
+                        idx + partition_start_idx for idx in indices
+                    ]
+                    adjusted_vars[var] = adjusted_indices
+                    if track_matched_indices:
+                        all_matched_indices.update(adjusted_indices)
+                match["variables"] = adjusted_vars
+            elif track_matched_indices:
+                for indices in variables.values():
+                    all_matched_indices.update(indices)
+
+        if partition_start_idx:
+            if "start" in match:
+                match["start"] += partition_start_idx
+            if "end" in match:
+                match["end"] += partition_start_idx
+
+        all_matches.append(match)
+
 def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher, match_config, 
                                    measures, all_rows, all_matches, all_matched_indices, 
                                    metrics, parallel_manager, results):
@@ -1273,11 +1313,12 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
         work_items.append(work_item)
     
     if not work_items:
-        return
+        return 0
     
     # For now, we'll process sequentially but track that we attempted parallel execution
     # In a future enhancement, we could implement true parallel pattern matching
     start_time = time.time()
+    total_match_count = 0
     
     for partition_idx, partition in partition_data:
         use_lazy_rows = _can_use_lazy_partition_rows(matcher, match_config)
@@ -1289,6 +1330,10 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
         # Find matches
         matcher._source_dataframe = partition
         matcher._fast_columnar_result = True
+        previous_retain_matches = getattr(
+            matcher, "_retain_completed_matches", True
+        )
+        matcher._retain_completed_matches = not use_lazy_rows
         try:
             partition_results = matcher.find_matches(
                 rows=rows,
@@ -1298,6 +1343,11 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
         finally:
             matcher._source_dataframe = None
             matcher._fast_columnar_result = False
+            matcher._retain_completed_matches = previous_retain_matches
+
+        total_match_count += getattr(
+            matcher, "_match_count", len(getattr(matcher, "_matches", ()))
+        )
 
         fast_columns = getattr(matcher, "_fast_one_row_columns", None)
         matcher._fast_one_row_columns = None
@@ -1306,25 +1356,13 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
                 _make_fast_row_chunk(fast_columns, partition_by, rows, partition_idx)
             )
 
-        # Process matches and adjust indices
-        if hasattr(matcher, "_matches"):
-            for match in matcher._matches:
-                # Adjust indices to be relative to all_rows
-                if "variables" in match:
-                    adjusted_vars = {}
-                    for var, indices in match["variables"].items():
-                        adjusted_indices = [idx + partition_start_idx for idx in indices]
-                        adjusted_vars[var] = adjusted_indices
-                        all_matched_indices.update(adjusted_indices)
-                    match["variables"] = adjusted_vars
-                
-                # Adjust start and end indices
-                if "start" in match:
-                    match["start"] += partition_start_idx
-                if "end" in match:
-                    match["end"] += partition_start_idx
-                
-                all_matches.append(match)
+        _collect_partition_matches(
+            matcher,
+            partition_start_idx,
+            all_matches,
+            all_matched_indices,
+            match_config.include_unmatched,
+        )
         
         # Add partition columns if needed
         if partition_by and rows:
@@ -1345,10 +1383,12 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
     metrics["parallel_efficiency"] = 1.0  # Track efficiency
     
     logger.info(f"Parallel-aware partition processing completed in {parallel_time:.3f}s")
+    return total_match_count
 
 def _process_partitions_sequentially(partitions, partition_by, order_by, matcher, match_config, 
                                    measures, all_rows, all_matches, all_matched_indices, results):
     """Process partitions sequentially (original behavior)."""
+    total_match_count = 0
     # Process each partition
     for partition_idx, partition in enumerate(partitions):
         # Skip empty partitions
@@ -1367,6 +1407,10 @@ def _process_partitions_sequentially(partitions, partition_by, order_by, matcher
         # Find matches
         matcher._source_dataframe = partition
         matcher._fast_columnar_result = True
+        previous_retain_matches = getattr(
+            matcher, "_retain_completed_matches", True
+        )
+        matcher._retain_completed_matches = not use_lazy_rows
         try:
             partition_results = matcher.find_matches(
                 rows=rows,
@@ -1376,6 +1420,11 @@ def _process_partitions_sequentially(partitions, partition_by, order_by, matcher
         finally:
             matcher._source_dataframe = None
             matcher._fast_columnar_result = False
+            matcher._retain_completed_matches = previous_retain_matches
+
+        total_match_count += getattr(
+            matcher, "_match_count", len(getattr(matcher, "_matches", ()))
+        )
 
         fast_columns = getattr(matcher, "_fast_one_row_columns", None)
         matcher._fast_one_row_columns = None
@@ -1384,25 +1433,13 @@ def _process_partitions_sequentially(partitions, partition_by, order_by, matcher
                 _make_fast_row_chunk(fast_columns, partition_by, rows, partition_idx)
             )
 
-        # Store matches for post-processing with adjusted indices
-        if hasattr(matcher, "_matches"):
-            for match in matcher._matches:
-                # Adjust indices to be relative to all_rows
-                if "variables" in match:
-                    adjusted_vars = {}
-                    for var, indices in match["variables"].items():
-                        adjusted_indices = [idx + partition_start_idx for idx in indices]
-                        adjusted_vars[var] = adjusted_indices
-                        all_matched_indices.update(adjusted_indices)
-                    match["variables"] = adjusted_vars
-                
-                # Adjust start and end indices
-                if "start" in match:
-                    match["start"] += partition_start_idx
-                if "end" in match:
-                    match["end"] += partition_start_idx
-                
-                all_matches.append(match)
+        _collect_partition_matches(
+            matcher,
+            partition_start_idx,
+            all_matches,
+            all_matched_indices,
+            match_config.include_unmatched,
+        )
         
         # Add partition columns if needed
         if partition_by and rows:
@@ -1417,6 +1454,8 @@ def _process_partitions_sequentially(partitions, partition_by, order_by, matcher
             result['_partition_row_index'] = i
         
         results.extend(partition_results)
+
+    return total_match_count
 
 def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -1885,19 +1924,19 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             if should_use_parallel:
                 logger.info(f"Using parallel execution for {len(partitions)} partitions with {len(df)} total rows")
                 # Process partitions in parallel
-                _process_partitions_in_parallel(
+                total_match_count = _process_partitions_in_parallel(
                     partitions, partition_by, order_by, matcher, match_config, 
                     measures, all_rows, all_matches, all_matched_indices, metrics, parallel_manager, results
                 )
             else:
                 logger.debug(f"Using sequential execution for {len(partitions)} partitions")
                 # Process partitions sequentially (original behavior)
-                _process_partitions_sequentially(
+                total_match_count = _process_partitions_sequentially(
                     partitions, partition_by, order_by, matcher, match_config, 
                     measures, all_rows, all_matches, all_matched_indices, results
                 )
                 
-            metrics["match_count"] = len(all_matches)
+            metrics["match_count"] = total_match_count
             
             # Filter nested PERMUTE patterns
             if mr_clause.pattern and "PERMUTE" in mr_clause.pattern.pattern:
@@ -1945,7 +1984,11 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     partition_by
                 )
             
-            metrics["match_count"] = len(all_matches)
+            if mr_clause.pattern and "PERMUTE" in mr_clause.pattern.pattern:
+                # PERMUTE retains matches for semantic post-filtering, so the
+                # filtered collection is the authoritative final count.
+                total_match_count = len(all_matches)
+                metrics["match_count"] = total_match_count
         except PatternSearchLimitError:
             # Resource exhaustion is a distinct, programmatically observable
             # outcome.  Wrapping it as a generic RuntimeError would discard
@@ -1963,7 +2006,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         processing_start = time.time()
         try:
             # Handle empty results case
-            if not results and not all_matches:
+            if not results and total_match_count == 0:
                 # Create empty DataFrame with appropriate columns from SELECT clause
                 columns = _get_empty_result_columns(ast, partition_by, measures)
                 metrics["result_processing_time"] = time.time() - processing_start

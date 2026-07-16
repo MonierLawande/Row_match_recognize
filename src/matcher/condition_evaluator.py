@@ -2657,18 +2657,24 @@ def _evaluate_prepared_simple_aggregate(
         exact_scope = (
             scope_map.get(scope_upper) if scope_map is not None else None
         )
-    if exact_scope is None or getattr(context, "subsets", None):
+    if exact_scope is None or context.subsets:
         return evaluator._handle_define_aggregate(node, func_name)
 
-    variables = getattr(context, "variables", {}) or {}
+    # Exact-search binding always supplies a RowContext whose assignment
+    # dictionary is cleared and reused between candidates.  Read its stable
+    # containers directly: repeated defensive getattr/case-fold dispatch is
+    # measurable when a short aggregate is evaluated millions of times, but
+    # adds no semantic protection after direct-scope resolution has succeeded.
+    variables = context.variables
     assigned = variables.get(exact_scope, ())
+    assigned_count = len(assigned)
     rows = context.rows
+    row_count = len(rows)
     current_idx = context.current_idx
     current_var = context.current_var
     include_current = bool(
-        current_var
-        and str(current_var).upper() == scope_upper
-        and 0 <= current_idx < len(rows)
+        current_var == exact_scope
+        and 0 <= current_idx < row_count
         and (not assigned or assigned[-1] != current_idx)
     )
 
@@ -2677,18 +2683,14 @@ def _evaluate_prepared_simple_aggregate(
     # prefix states that are extended on assignment and truncated on rollback.
     # Stored prefixes preserve the original left-to-right arithmetic exactly;
     # no inverse floating-point operation is used.
-    incremental_states = getattr(
-        context, "_define_incremental_aggregate_states", None
-    )
-    incremental_threshold = getattr(
-        context, "_define_incremental_aggregate_threshold", 16
-    )
+    incremental_states = context._define_incremental_aggregate_states
+    incremental_threshold = context._define_incremental_aggregate_threshold
     if (
         incremental_states is not None
         and func_name in {
             "SUM", "AVG", "COUNT", "MIN", "MAX", "ARBITRARY"
         }
-        and len(assigned) >= incremental_threshold
+        and assigned_count >= incremental_threshold
     ):
         scope_states = incremental_states.setdefault(
             str(exact_scope).upper(), {}
@@ -2715,7 +2717,7 @@ def _evaluate_prepared_simple_aggregate(
                 assigned,
             )
             scope_states[state_key] = state
-        if state.valid and len(state.snapshots) == len(assigned):
+        if state.valid and len(state.snapshots) == assigned_count:
             state_value = state.value(current_idx if include_current else None)
             if state_value is not _UNBOUND_FAST_VALUE:
                 return state_value
@@ -2724,7 +2726,7 @@ def _evaluate_prepared_simple_aggregate(
     # being tested.  Preserve that asymptotic behavior; the compact path is
     # for the overwhelmingly common short scopes where memo-key construction
     # costs more than scanning the few values.
-    if len(assigned) >= 16 and not include_current:
+    if assigned_count >= 16 and not include_current:
         return evaluator._handle_define_aggregate(node, func_name)
 
     if column_values is _UNBOUND_FAST_VALUE:
@@ -2740,7 +2742,7 @@ def _evaluate_prepared_simple_aggregate(
             )
             column_cache[field_name] = column_values
 
-    scope_size = len(assigned) + (1 if include_current else 0)
+    scope_size = assigned_count + (1 if include_current else 0)
     if scope_size <= 1:
         if assigned:
             scalar_index = assigned[0]
@@ -3107,6 +3109,75 @@ def _compile_fast_condition_expression(node):
                 )
 
                 if scalar_is_proved_stable:
+                    # The bound exact-search evaluator normally receives no
+                    # row dictionary: its current row is the numeric column at
+                    # ``context.current_idx``.  Fuse that proved representation
+                    # with the stable scalar expression so the hottest scalar
+                    # comparison avoids two closure calls plus the fully
+                    # defensive ``safe_compare`` dispatcher.  NULL/NaN and
+                    # exceptional comparisons retain exactly the shared SQL
+                    # semantics by falling back to ``safe_compare``.
+                    try:
+                        import numpy as np
+
+                        numeric_values = np.asarray(vector_column)
+                        numeric_vector = (
+                            numeric_values.ndim == 1
+                            and numeric_values.dtype.kind in "biuf"
+                        )
+                    except (ImportError, TypeError, ValueError):
+                        numeric_values = None
+                        numeric_vector = False
+
+                    if numeric_vector:
+                        generic_bound_compare = evaluate_bound_compare
+
+                        def evaluate_bound_numeric_compare(
+                            evaluator, row, context
+                        ):
+                            if row is not None:
+                                return generic_bound_compare(
+                                    evaluator, row, context
+                                )
+                            index = context.current_idx
+                            if index < 0 or index >= len(numeric_values):
+                                return None
+                            scalar_value = scalar_part(
+                                evaluator, None, context
+                            )
+                            if scalar_value is None:
+                                return None
+                            vector_value = numeric_values[index]
+                            try:
+                                if (
+                                    bool(vector_value != vector_value)
+                                    or bool(scalar_value != scalar_value)
+                                ):
+                                    return None
+                                return (
+                                    comparison(vector_value, scalar_value)
+                                    if left_column is not None
+                                    else comparison(scalar_value, vector_value)
+                                )
+                            except Exception:
+                                return (
+                                    safe_compare(
+                                        vector_value,
+                                        scalar_value,
+                                        comparison,
+                                    )
+                                    if left_column is not None
+                                    else safe_compare(
+                                        scalar_value,
+                                        vector_value,
+                                        comparison,
+                                    )
+                                )
+
+                        evaluate_bound_compare = (
+                            evaluate_bound_numeric_compare
+                        )
+
                     suffix_extrema = {}
 
                     def prepared_vector_operands(evaluator, start, stop):

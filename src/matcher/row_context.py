@@ -377,10 +377,11 @@ class RowContext:
 
         ``EnhancedMatcher.find_matches`` creates this context locally and is
         its only mutator for the duration of a partition scan.  The compiled
-        linear executor also copies every successful assignment into the
-        returned match.  It can therefore reuse the assignment mapping and
-        reset it without acquiring the public context lock or allocating a
-        replacement dictionary.  Navigation and assignment-dependent caches
+        linear executor transfers a successful assignment mapping to the
+        returned match and installs a fresh mapping on this context.  Failed
+        attempts keep and clear the current mapping.  Consequently this reset
+        can reuse whichever mapping the context currently owns without taking
+        the public context lock.  Navigation and assignment-dependent caches
         are still cleared, preserving the same candidate isolation as
         :meth:`reset_for_match_attempt`.
         """
@@ -418,7 +419,28 @@ class RowContext:
         self._define_aggregate_cache = None
         self._define_incremental_aggregate_states = None
         self._define_incremental_aggregate_threshold = 16
+
         return self
+
+    def detach_exact_match_assignments(self) -> Dict[str, List[int]]:
+        """Transfer the exact-search assignment map to a completed match.
+
+        Exact search builds each match in an assignment dictionary owned only
+        by this context.  Copying every variable list on success is therefore
+        unnecessary: the completed match can take ownership, while the
+        reusable context receives a fresh empty dictionary for the next
+        candidate.  Compiled condition closures resolve ``context.variables``
+        at call time, so they never retain a reference to the detached map.
+
+        This method is deliberately limited to the private exact-search
+        lifecycle.  Public/general context reset methods continue to use their
+        defensive copying and locking rules.
+        """
+        completed = self.variables
+        active: Dict[str, List[int]] = {}
+        self.variables = active
+        self.current_var_assignments = active
+        return completed
     
     def update_variable(self, var_name: str, indices: List[int]) -> None:
         """
