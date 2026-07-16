@@ -92,6 +92,31 @@ class MatcherErrorCodes:
     RESOURCE_UNAVAILABLE = "PM005"
     CIRCUIT_BREAKER_OPEN = "PM006"
 
+
+class PatternSearchLimitError(RuntimeError):
+    """Exact pattern search could not finish within its safety budget.
+
+    Returning ``None`` in this situation is not safe: the outer matching loop
+    interprets it as "no match at this start" and advances to a later row,
+    which can silently violate SQL leftmost-match semantics.  Callers must see
+    an explicit error until a semantics-preserving executor can finish the
+    search.
+    """
+
+    error_code = MatcherErrorCodes.PATTERN_COMPLEXITY
+
+    def __init__(self, explored_steps: int, step_budget: int, start_idx: int):
+        self.explored_steps = int(explored_steps)
+        self.step_budget = int(step_budget)
+        self.start_idx = int(start_idx)
+        super().__init__(
+            f"{self.error_code}: exact row-pattern search exhausted its "
+            f"{self.step_budget:,}-step safety budget after "
+            f"{self.explored_steps:,} steps at candidate start row "
+            f"{self.start_idx}; the engine stopped "
+            "instead of advancing and changing leftmost-match semantics"
+        )
+
 # Backtracking types
 @dataclass
 class BacktrackingState:
@@ -4657,6 +4682,22 @@ class EnhancedMatcher:
         )
         return linear_plan, runtime, has_start_anchor, has_end_anchor
 
+    @staticmethod
+    def _condition_linear_step_budget(row_count, linear_plan):
+        """Safety budget for the compact linear exact executor.
+
+        A variable-only sequence has no recursive alternation tree.  Its
+        unavoidable deterministic work is proportional to the input length
+        and the number of pattern tokens, so a fixed 200,000 limit incorrectly
+        rejects large but non-combinatorial matches.  Keep the historical
+        floor for small inputs while allowing one full linear pass per token
+        plus continuation work.  If overlapping quantifiers still create more
+        work than this linear allowance, the executor raises an explicit
+        complexity error rather than changing match semantics.
+        """
+        token_count = max(1, len(linear_plan or ()))
+        return max(200000, (int(row_count) + 1) * (token_count + 1))
+
     def _find_single_match_condition_linear(
         self,
         rows,
@@ -4689,6 +4730,10 @@ class EnhancedMatcher:
         position = start_idx
         token_index = 0
         explored_steps = 0
+        explicit_define_names = {
+            str(name).upper()
+            for name in (self.define_conditions or {})
+        }
 
         if has_start_anchor and start_idx != 0:
             return None
@@ -4822,7 +4867,25 @@ class EnhancedMatcher:
             ) = runtime[name]
 
             used_batch = False
-            if precomputed is not None and run_lengths is not None:
+            if (
+                condition is None
+                and precomputed is None
+                and prefilter is None
+                and str(name).upper() not in explicit_define_names
+            ):
+                # A pattern variable without DEFINE has the SQL implicit-TRUE
+                # predicate.  Consuming it row-by-row is deterministic work,
+                # not a backtracking state.  Compact the whole legal suffix in
+                # exactly the same way as a precomputed all-True mask.
+                available = row_count - position
+                if max_rep is not None and available > max_rep:
+                    available = max_rep
+                explored_steps += 1
+                assign_range(name, position, available)
+                position += available
+                count = available
+                used_batch = True
+            elif precomputed is not None and run_lengths is not None:
                 available = (
                     int(run_lengths[position]) if position < row_count else 0
                 )
@@ -4993,6 +5056,10 @@ class EnhancedMatcher:
                 return None
 
         variables.clear()
+        if explored_steps >= step_budget:
+            raise PatternSearchLimitError(
+                explored_steps, step_budget, start_idx
+            )
         return None
 
     def _find_single_match_condition_backtracking(
@@ -5059,6 +5126,9 @@ class EnhancedMatcher:
                 has_start_anchor,
                 has_end_anchor,
             ) = linear_execution
+            linear_step_budget = self._condition_linear_step_budget(
+                row_count, linear_plan
+            )
             return self._find_single_match_condition_linear(
                 rows,
                 start_idx,
@@ -5066,7 +5136,7 @@ class EnhancedMatcher:
                 linear_plan,
                 runtime,
                 variables,
-                step_budget,
+                linear_step_budget,
                 has_start_anchor,
                 has_end_anchor,
             )
@@ -5334,6 +5404,10 @@ class EnhancedMatcher:
 
         if end_pos is None:
             variables.clear()
+            if explored_steps >= step_budget:
+                raise PatternSearchLimitError(
+                    explored_steps, step_budget, start_idx
+                )
             return None
         if end_pos <= start_idx:
             return {
@@ -8044,6 +8118,9 @@ class EnhancedMatcher:
                     context.current_var_assignments = variables
                     context._define_assignment_versions = None
                     context._define_aggregate_cache = None
+                    exact_step_budget = self._condition_linear_step_budget(
+                        len(rows), exact_plan
+                    )
                     match = self._find_single_match_condition_linear(
                         rows,
                         start_idx,
@@ -8051,7 +8128,7 @@ class EnhancedMatcher:
                         exact_plan,
                         exact_runtime,
                         variables,
-                        200000,
+                        exact_step_budget,
                         exact_start_anchor,
                         exact_end_anchor,
                     )

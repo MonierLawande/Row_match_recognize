@@ -13,6 +13,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.executor.match_recognize import match_recognize
+from src.matcher.matcher import PatternSearchLimitError
 
 class TestExponentialProtection:
     """Test protection against exponential pattern matching complexity."""
@@ -633,6 +634,35 @@ class TestExponentialProtection:
             'match_length': row_count,
         }]
 
+    def test_anchored_implicit_true_run_scales_past_fixed_search_floor(self):
+        """A deterministic run larger than 200K is not search exhaustion."""
+        row_count = 200_001
+        df = pd.DataFrame({
+            'seq_id': range(row_count),
+            'price': [1.0] + [100.0] * (row_count - 2) + [40.0],
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                FIRST(A.seq_id) AS start_row,
+                LAST(B.seq_id) AS end_row,
+                COUNT(*) AS match_length
+            ONE ROW PER MATCH
+            PATTERN (A+ B+ $)
+            DEFINE B AS price > AVG(A.price)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result.to_dict('records') == [{
+            'start_row': 0,
+            'end_row': row_count - 1,
+            'match_length': row_count,
+        }]
+
     def test_batched_exact_comparison_preserves_null_semantics(self):
         """A NULL in a numeric run is a rejection, never True for ``!=``."""
         row_count = 80
@@ -738,6 +768,35 @@ class TestExponentialProtection:
             'a_count': 4,
             'b_count': 4,
         }]
+
+    def test_nonlinear_budget_never_changes_leftmost_match(self):
+        """Resource protection must fail explicitly, not skip start row 0."""
+        label_rows = 24
+        df = pd.DataFrame({
+            'seq_id': range(label_rows + 1),
+            'value': [1] * label_rows + [0],
+        })
+        query = """
+        SELECT * FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES
+                COUNT(*) AS match_length,
+                COUNT(A.value) AS a_count,
+                COUNT(B.value) AS b_count
+            ONE ROW PER MATCH
+            PATTERN ((A | B)+ FINAL $)
+            DEFINE FINAL AS value = 0 AND SUM(A.value) = SUM(B.value)
+        )
+        """
+
+        with pytest.raises(
+            PatternSearchLimitError,
+            match=r"PM004:.*leftmost-match",
+        ) as error:
+            match_recognize(query, df)
+        assert error.value.start_idx == 0
+        assert error.value.explored_steps == error.value.step_budget == 200_000
 
     def test_memory_usage_protection(self):
         """Test that memory usage doesn't explode with exponential patterns."""
