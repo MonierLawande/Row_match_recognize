@@ -20,7 +20,13 @@ from src.parser.match_recognize_extractor import parse_full_query
 from src.matcher.pattern_tokenizer import tokenize_pattern, PermuteHandler
 from src.matcher.automata import NFABuilder
 from src.matcher.dfa import DFABuilder
-from src.matcher.matcher import EnhancedMatcher, MatchConfig, SkipMode, RowsPerMatch
+from src.matcher.matcher import (
+    EnhancedMatcher,
+    MatchConfig,
+    PatternSearchLimitError,
+    RowsPerMatch,
+    SkipMode,
+)
 from src.matcher.row_context import RowContext
 from src.matcher.condition_evaluator import compile_condition, validate_navigation_conditions
 from src.matcher.measure_evaluator import MeasureEvaluator
@@ -1940,6 +1946,11 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 )
             
             metrics["match_count"] = len(all_matches)
+        except PatternSearchLimitError:
+            # Resource exhaustion is a distinct, programmatically observable
+            # outcome.  Wrapping it as a generic RuntimeError would discard
+            # the explored-step and candidate-start diagnostics.
+            raise
         except ValueError as e:
             # Re-raise ValueError as-is for proper SQL error handling
             raise e
