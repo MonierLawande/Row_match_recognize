@@ -22,10 +22,10 @@ IMG = os.path.abspath(os.path.join(HERE, "..", "thesis", "images"))
 
 FILES = {"Engine": "pandas_results.csv", "Oracle": "oracle_results.csv",
          "Trino": "trino_results.csv"}
-SYS_COLOR = {"Engine": "#2a78d6", "Oracle": "#199e70", "Trino": "#eb6834"}
+SYS_COLOR = {"Engine": "#2a78d6", "Oracle": "#199e70", "Trino": "#e3942f"}
 ORDER = ["Engine", "Oracle", "Trino"]
 SIZES = [100000, 200000, 400000, 800000, 1600000, 2222742]
-C_ORD, C_SHUF = "#2a78d6", "#eb6834"
+C_ORD, C_SHUF = "#2a78d6", "#e34948"
 
 plt.rcParams.update({
     "font.family": "serif", "font.size": 9,
@@ -49,11 +49,11 @@ def ordering_scenarios():
                 edgecolor="white", linewidth=0.6, zorder=3)
     b2 = ax.bar(x + w/2, B, w, color=C_SHUF, label="B: shuffled input",
                 edgecolor="white", linewidth=0.6, zorder=3)
-    ax.set_yscale("log")
     ax.set_xticks(x)
     ax.set_xticklabels(ORDER, fontsize=9)
-    ax.set_ylabel("Average execution time (s, log scale)")
-    ax.grid(True, axis="y", which="both", zorder=0)
+    ax.set_ylabel("Average execution time (s)")
+    ax.set_ylim(0, max(B) * 1.22)
+    ax.grid(True, axis="y", zorder=0)
     ax.set_axisbelow(True)
     for i in range(len(ORDER)):
         ax.annotate(f"{B[i]/A[i]:.2f}$\\times$",
@@ -85,16 +85,16 @@ def sort_cost_scaling():
     ns_nlogn = inc / (np.array(SIZES) * np.log2(SIZES)) * 1e9
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.4, 4.0))
-    ax1.plot(SIZES, ns_row, color="#2a78d6", marker="o", markersize=6,
+    ax1.plot(range(len(SIZES)), ns_row, color="#2a78d6", marker="o", markersize=6,
              linewidth=2, markeredgecolor="white", markeredgewidth=0.7, zorder=3)
     ax1.set_title("Per-row sort cost stays in a narrow band", fontsize=9)
     ax1.set_ylabel("Incremental sort cost (ns / row)")
     ax1.set_ylim(0, max(ns_row) * 1.35)
-    for sx, sy in zip(SIZES, ns_row):
+    for sx, sy in zip(range(len(SIZES)), ns_row):
         ax1.annotate(f"{sy:.0f}", (sx, sy), textcoords="offset points",
                      xytext=(0, 6), ha="center", fontsize=7, color="#2a78d6")
 
-    ax2.plot(SIZES, ns_nlogn, color="#199e70", marker="^", markersize=6,
+    ax2.plot(range(len(SIZES)), ns_nlogn, color="#199e70", marker="^", markersize=6,
              linewidth=2, markeredgecolor="white", markeredgewidth=0.7, zorder=3)
     ax2.set_title("Cost / $(n\\log_2 n)$ flat $\\Rightarrow$ consistent with $O(n\\log n)$",
                   fontsize=9)
@@ -102,13 +102,12 @@ def sort_cost_scaling():
     ax2.set_ylim(0, max(ns_nlogn) * 1.4)
 
     for ax in (ax1, ax2):
-        ax.set_xscale("log")
-        ax.set_xticks(SIZES)
-        ax.xaxis.set_major_formatter(size_fmt)
-        ax.set_xlabel("Dataset size (rows, log scale)")
-        ax.set_xlim(9e4, 2.5e6)
+        ax.set_xticks(range(len(SIZES)))
+        ax.set_xticklabels(["100K", "200K", "400K", "800K", "1.6M", "2.2M"],
+                           fontsize=7.5)
+        ax.set_xlabel("Dataset size (rows)")
+        ax.set_xlim(-0.35, len(SIZES) - 0.65)
         ax.grid(True, which="major", zorder=0)
-        ax.grid(True, which="minor", alpha=0.3, zorder=0)
         ax.tick_params(labelsize=7.5)
     fig.tight_layout()
     fig.savefig(os.path.join(IMG, "viz_sort_cost_scaling.png"), bbox_inches="tight")

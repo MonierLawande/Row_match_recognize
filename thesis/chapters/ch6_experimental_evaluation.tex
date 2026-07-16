@@ -81,14 +81,20 @@ and six sizes, execution time is the \emph{client-observed end-to-end
 latency} per pattern--size run---including result transfer and
 DataFrame construction, so not pure engine time.  Each cell is run
 five times as warmups (which let the JVM-based Trino reach steady
-state) and then twenty times as measured runs; the reported time is
-the \emph{mean} of the twenty, with its sample \emph{standard
-deviation} (and min/max) alongside, read as mean~$\pm$~std.
+state) and then twenty times as measured runs, each preceded by a
+five-second idle window that establishes a pre-query memory baseline.
+Outliers are excluded independently for each metric by the
+$1.5\times$~interquartile-range rule, with the number of excluded
+runs recorded per cell; the reported time is the \emph{mean} of the
+retained runs, with its sample \emph{standard deviation} (and
+min/max) alongside, read as mean~$\pm$~std.
 Throughput is dataset size divided by this mean, averaged over a
 system's 30 cells; all summaries are computed at full precision and
 only displayed values are rounded, so rounded columns need not sum
-exactly.  The two memory metrics measured alongside timing are defined
-where they are reported (Section~\ref{subsec:eval-memory}).
+exactly.  The two memory metrics measured alongside timing---taken
+from a single instrument applied identically to all three
+systems---are defined where they are reported
+(Section~\ref{subsec:eval-memory}).
 
 \paragraph{Scalability.}
 Scaling behaviour is characterised both descriptively and by an
@@ -788,8 +794,8 @@ already exists in Trino and Oracle, and the engine returns identical
 results---but \emph{where} it runs: in-process, directly on an
 in-memory \texttt{pandas} DataFrame, avoiding the
 \texttt{CREATE TABLE}/\texttt{INSERT} round-trip and keeping the
-footprint small (below 1\,GB, against roughly 2.4\,GB for Oracle and
-23\,GB for Trino, Section~\ref{subsec:eval-memory}), while remaining
+footprint small (below 0.6\,GB, against roughly 2.0\,GB for Oracle and
+14.6\,GB for Trino, Section~\ref{subsec:eval-memory}), while remaining
 portable back to those engines.  The trade-off is scope: the engine
 supports the subset of Section~\ref{subsec:eval-feature-coverage}, not
 the full SQL surface, optimiser, or distributed execution of Trino and
@@ -1096,13 +1102,14 @@ dataset), giving 30 pattern--size cells per system; the derived
 detailed with the benchmark patterns in
 Section~\ref{subsec:eval-pattern-defs}.  Each cell is reported as the
 mean of twenty measured runs after five warmups, together with its
-standard deviation.  All 90 cross-system cells completed successfully.
+standard deviation, after per-metric $1.5\times$IQR outlier
+filtering.  All 90 cross-system cells completed successfully.
 Over its 30 cells the proposed engine achieved an average throughput
-of approximately 5\,863\,876~rows/s, and the sum of its 30 mean cell
-times was about 5.51\,s (this figure aggregates the reported means,
+of approximately 4\,976\,348~rows/s, and the sum of its 30 mean cell
+times was about 5.85\,s (this figure aggregates the reported means,
 not the total duration of all repetitions).  The results show
 predictable, approximately linear scaling over the evaluated range
-($R^2 \geq 0.98$ for the proposed engine's time-versus-size fit on
+($R^2 \geq 0.99$ for the proposed engine's time-versus-size fit on
 each of its five pattern families): simple sequences and bounded
 quantifiers are the fastest families, while complex nested patterns
 incur higher transition and condition-evaluation overhead.
@@ -1272,7 +1279,13 @@ each deployment: an address-space \texttt{rlimit} for the Python
 process, and a container memory limit with \texttt{-{}-memory-swap}
 equal to the limit (no extra swap) for the databases.  These
 mechanisms are equivalent in budget but not identical in enforcement
-semantics.  The 32\,GB figure is therefore an
+semantics.  In addition, the engine process runs inside a dedicated
+control group (a systemd user scope with memory accounting), so its
+memory is read from the same cgroup~v2 interface that meters the two
+database containers, and each database container is stopped and
+restarted before every dataset size, so that all sizes start from an
+identical clean instance state (the per-cell warmups then re-warm
+caches and, for Trino, the JIT compiler).  The 32\,GB figure is therefore an
 \emph{engine/container} memory budget: it caps the Pandas engine
 process and each database container.  The budget is below the
 workstation's 64\,GB of installed RAM, so it is an actually enforced
@@ -1308,11 +1321,12 @@ fixed-size patterns, and records the lowest average execution time of
 the three systems on every one of the 30 pattern--size cells; the
 per-cell figures and the per-family speedups are reported below and
 summarised in Section~\ref{subsec:eval-key-findings}.  Memory is
-reported using the two metrics defined in
-Section~\ref{subsec:eval-metrics}: the engine-reported
-system-native \emph{query-memory indicators}, and the
-\emph{operational footprint}, which documents the cost of the
-resident process or database container and is reported separately.
+reported using the two unified metrics defined in
+Section~\ref{subsec:eval-memory}: the \emph{incremental peak} over a
+per-run idle baseline, which isolates per-query working memory, and
+the \emph{absolute peak} (operational footprint), which documents the
+cost of the resident process or database container and is reported
+separately.
 
 % ................................................................
 \subsection{Cross-System Comparison Under a Common Resource Budget}
@@ -1339,9 +1353,9 @@ systems (this is exactly what the correctness comparison verifies).
 per-pattern variation in the time and memory tables that follow.
 
 % Final run (each cell = 5 warmup + 20 measured; 1 core, 32GB; sizes 100K-2.22M; mean +/- sample std)
-% pandas: total=5.51, avg=0.18, avgthr=5{,}863{,}876, minthr=2{,}249{,}311, maxthr=8{,}948{,}638, maxqmem=152.61, maxfmem=658.55, medCV=3.4%
-% Trino~473: total=58.34, avg=1.94, avgthr=602{,}279, minthr=147{,}721, maxthr=1{,}039{,}859, maxqmem=41.76, maxfmem=23{,}633.92, medCV=11.0%
-% Oracle XE~21c: total=27.88, avg=0.93, avgthr=1{,}298{,}321, minthr=363{,}428, maxthr=1{,}815{,}091, maxqmem=58.19, maxfmem=2{,}044.72, medCV=2.2%
+% pandas: total=5.85, avg=0.20, avgthr=4{,}976{,}348, minthr=2{,}173{,}146, maxthr=7{,}185{,}316, maxqmem=290.11, maxfmem=584.56, medCV=1.6%
+% Trino~473: total=59.33, avg=1.98, avgthr=602{,}098, minthr=144{,}049, maxthr=996{,}563, maxqmem=20.75, maxfmem=14{,}992.9, medCV=3.8%
+% Oracle XE~21c: total=31.34, avg=1.04, avgthr=1{,}156{,}106, minthr=308{,}102, maxthr=1{,}698{,}711, maxqmem=58.71, maxfmem=2{,}057.17, medCV=2.3%
 
 Figure~\ref{fig:summary_by_pattern} gives the high-level picture by
 pattern family, averaged across all six dataset sizes; the underlying
@@ -1351,8 +1365,8 @@ Appendix~\ref{app:benchmark-tables}.  The proposed engine records the
 highest average throughput and the lowest average time on all five
 pattern families in this run, against both database systems.  The
 largest gap is on \texttt{complex\_nested}, the family where Trino
-shows by far its largest relative cost (5.01\,s versus 0.37\,s on
-average, about 13.5$\times$).  This indicates that both implementation
+shows by far its largest relative cost (5.28\,s versus 0.36\,s on
+average, about 14.5$\times$).  This indicates that both implementation
 strategy and pattern structure affect the measured runtime.
 
 \begin{figure}[htbp]
@@ -1387,7 +1401,7 @@ Table~\ref{tab:size_summary}.
   \includegraphics[width=\textwidth]{images/viz_summary_by_size.png}
   \caption[Performance summary by dataset size]{Average throughput
     (left, higher is better) and average execution time (right, lower
-    is better, log scale) by dataset size and system, each averaged
+    is better) by dataset size and system, each averaged
     over the five pattern families.  Underlying values in
     Table~\ref{tab:size_summary} and Table~\ref{tab:avg_time_by_size}
     (Appendix~\ref{app:benchmark-tables}).}
@@ -1396,13 +1410,12 @@ Table~\ref{tab:size_summary}.
 
 
 Figure~\ref{fig:execution_times} plots the detailed execution-time
-matrix on log--log axes, one panel per pattern; the full per-cell
+matrix, one panel per pattern; the full per-cell
 numbers (mean~$\pm$~standard deviation) are in
 Table~\ref{tab:execution_times}
 (Appendix~\ref{app:benchmark-tables}).  The proposed engine grows
 predictably with input size and is the lowest curve in every panel at
-every size; the three systems track near-parallel straight lines (near
-power-law growth), and the relative cost of each pattern depends on the
+every size; the relative cost of each pattern depends on the
 matcher path selected for it.  The gap widens most for
 \texttt{complex\_nested}---the most expensive pattern family for Trino
 and Oracle---where the databases bend upward past $400{,}000$ rows
@@ -1412,7 +1425,7 @@ while the engine stays close to linear.
   \centering
   \includegraphics[width=\textwidth]{images/execution_times.png}
   \caption[Execution time by pattern, size, and system]{Execution time
-    versus dataset size by pattern and system (log--log axes), plotting
+    versus dataset size by pattern and system (linear axes), plotting
     the data of Table~\ref{tab:execution_times}.  The proposed engine
     (blue) is the lowest curve in every panel; the margin over Trino and
     Oracle is widest for \texttt{complex\_nested}.}
@@ -1427,7 +1440,7 @@ while the engine stays close to linear.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_throughput.png}
-  \caption[Throughput by pattern, size, and system]{Throughput (rows/s) versus dataset size by pattern and system (log--log axes), one panel per pattern.  Higher is better, so the proposed engine is the highest curve in every panel.  The full matrix is in Table~\ref{tab:throughput} (Appendix~\ref{app:benchmark-tables}).}
+  \caption[Throughput by pattern, size, and system]{Throughput (rows/s) versus dataset size by pattern and system (linear axes), one panel per pattern.  Higher is better, so the proposed engine is the highest curve in every panel.  The full matrix is in Table~\ref{tab:throughput} (Appendix~\ref{app:benchmark-tables}).}
   \label{fig:throughput}
 \end{figure}
 
@@ -1442,94 +1455,95 @@ indicate faster evaluation.
 \label{subsec:eval-memory}
 % ................................................................
 
-Memory is reported using the two metrics defined in
-Section~\ref{subsec:eval-metrics}.  \emph{Query memory}
+Both memory metrics come from a single instrument applied identically
+to all three systems: the cgroup~v2 \texttt{memory.current} counter
+of the control group that contains the measured system---the Docker
+container for Trino and Oracle, and a dedicated control group for the
+engine process---sampled every 50\,ms throughout the run.  Each
+measured run is preceded by a five-second idle window whose average
+defines the run's \emph{baseline}; the \emph{absolute peak} is the
+maximum sample observed during query execution; and the
+\emph{incremental peak}---the primary per-query metric---is their
+difference, which removes each system's fixed resident overhead (the
+already-loaded input DataFrame for the engine, Oracle's SGA, Trino's
+JVM heap) from the comparison.  Like the timing figures, every
+memory statistic is the mean over the twenty measured runs after
+per-metric $1.5\times$IQR outlier filtering.  \emph{Query memory}
 (Figure~\ref{fig:query_memory}; Table~\ref{tab:memory_cache} in
-Appendix~\ref{app:benchmark-tables}) is the peak additional memory
-attributable to executing the measured query, taken from each
-system's own memory accounting: process RSS peak delta for the
-Pandas engine, the per-query \texttt{peakMemoryBytes} counter for
-Trino, and the session PGA high-water delta of a fresh session for
-Oracle.  All three exclude the stored table data and the idle
-engine.  They are, however, \emph{system-native indicators} rather
-than one instrument: RSS counts operating-system pages, Trino counts
-reserved user memory, and Oracle counts allocated work-area memory.
-The values should therefore be read as order-of-magnitude and
-per-system trend evidence, not as directly comparable measurements
-of identical quantities.
-\emph{Footprint memory} (Figure~\ref{fig:footprint_memory};
-Table~\ref{tab:memory_footprint} in
-Appendix~\ref{app:benchmark-tables}) is the
-absolute process RSS peak for the Pandas engine and the Docker
-container peak for Trino and Oracle; it documents the practical
-deployment cost of the resident engine and is \emph{not} a
-per-query or algorithm-level metric.
+Appendix~\ref{app:benchmark-tables}) reports the incremental peak;
+\emph{footprint memory} (Figure~\ref{fig:footprint_memory};
+Table~\ref{tab:memory_footprint}) reports the absolute peak, which
+documents the practical deployment cost of the resident engine or
+container and is \emph{not} a per-query or algorithm-level metric.
+Two supporting values are recorded per cell in the released
+artifacts: a \emph{memory-per-million-rows} normalization (the
+incremental peak divided by the input size in millions, meaningful
+mainly at the larger sizes) and each database's own per-query
+counter (Trino's \texttt{peakMemoryBytes}, Oracle's session-PGA
+high-water delta), which serve as cross-checks below.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_query_memory.png}
-  \caption[Query memory by pattern, size, and system]{Query-memory indicator (MB) versus dataset size by pattern and system (log--log axes).  These are system-native indicators and not directly comparable instruments (Section~\ref{subsec:eval-memory}).  The full values are in Table~\ref{tab:memory_cache} (Appendix~\ref{app:benchmark-tables}).}
+  \caption[Query memory by pattern, size, and system]{Incremental peak memory (MB) versus dataset size by pattern and system (linear axes): the peak of cgroup~v2 \texttt{memory.current} during query execution over a five-second pre-query baseline, sampled every 50\,ms.  Trino's readings sit at the JVM floor discussed in Section~\ref{subsec:eval-memory}.  The full values are in Table~\ref{tab:memory_cache} (Appendix~\ref{app:benchmark-tables}).}
   \label{fig:query_memory}
 \end{figure}
 
-Figure~\ref{fig:query_memory} shows that the average query-memory
-indicators generally increase with input size, as expected for a
-per-query working set.  For the most memory-intensive pattern
-families at the largest input (the full 2.22\,M rows), the three
-indicators fall between roughly 41 and 153\,MB; this range describes
-only those worst-case cells, not the benchmark as a whole, where most
-readings are far smaller.  At 2.22\,M rows the Pandas engine's
-vectorized execution path trades additional working memory for its
-lower execution times: its indicators there range from
-\texttt{optional\_pattern} (152.61\,MB), \texttt{quantified}
-(112.25\,MB), and \texttt{complex\_nested} (88.04\,MB) down to
-\texttt{simple\_sequence} (83.26\,MB) and \texttt{alternation}
-(59.36\,MB), all above Trino's roughly 41.4--41.8\,MB and at or above
-Oracle's 58.19\,MB.  Averaged over all 30 cells, however, the engine's
-query-memory indicator (about 20\,MB) lies between Trino's (about
-16\,MB) and Oracle's (about 22\,MB), so the per-query cost is
-comparable to the databases' rather than systematically higher.
+Figure~\ref{fig:query_memory} shows that the engine's and Oracle's
+incremental peaks grow almost exactly linearly with input size, as
+expected for a per-query working set: the engine from 5.7\,MB at the
+smallest cells to 290.1\,MB at the full 2.22\,M rows
+(\texttt{quantified} 290.11\,MB, \texttt{optional\_pattern}
+289.13\,MB, \texttt{simple\_sequence} 270.32\,MB,
+\texttt{complex\_nested} 132.97\,MB, \texttt{alternation}
+129.28\,MB), and Oracle from about 2.4 to 58.7\,MB with almost no
+dependence on the pattern family, consistent with scan- and
+work-area-dominated execution.  The comparison is honest in a
+direction the earlier system-native counters obscured: under one
+shared instrument the engine's per-query working memory is the
+largest of the three at every size---averaged over the 30 cells it
+uses 89.7\,MB against Oracle's 23.6\,MB (about $3.8\times$)---which
+is the price of materializing whole-column intermediates on the
+vectorized fast path.  The engine buys its lower execution times
+with per-query memory, and the normalized cost is roughly
+54--139\,MB of incremental peak per million input rows.
 
-Values of 0.00 in Table~\ref{tab:memory_cache} do not mean that a
-query executed without memory; they mean that the query's working
-set stayed below the resolution of the corresponding counter.
-Oracle pre-allocates an initial block of PGA to every new session at
-connect time, so a small query whose \texttt{MATCH\_\allowbreak{}RECOGNIZE}
-work areas fit inside that initial allocation never raises the
-session's PGA high-water mark, and the measured delta is zero.
-Likewise, a Pandas run that fits into pages already resident in the
-Python process produces no RSS growth.  Readings close to this floor
-are also quantized to the runtime's allocation granularity (Oracle,
-for example, extends session PGA in small fixed-size chunks), so
-near-floor values should not be compared against each other.  At larger input sizes the database counters
-grow steadily with the input, while the RSS-based Pandas readings
-fluctuate more (values can rise, fall, or return to zero between
-neighboring cells) because RSS deltas depend on page reuse and
-garbage-collection timing inside the Python process; the overall
-upward trend beyond the measurement floor is what the metric is
-intended to show.
+Trino's readings require a caveat that the unified instrument makes
+explicit rather than hides: the JVM serves query allocations from
+its pre-committed heap, so most of Trino's per-query working memory
+never crosses the operating-system boundary that
+\texttt{memory.current} observes.  Its incremental peak therefore
+sits near a small floor (about 0.5--3\,MB in most cells, with
+occasional larger readings when a garbage-collection or
+heap-expansion event happens to fall inside the query window) and
+\emph{understates} its true per-query cost.  Trino's own
+\texttt{peakMemoryBytes} counter, recorded alongside as the
+cross-check, grows steadily from about 1.4\,MB at 100\,K rows to
+about 41.5\,MB at the full size (mean 15.6\,MB) and is the fairer
+per-query reference for Trino; Oracle's incremental peak, by
+contrast, agrees closely with its native PGA indicator, and the
+engine's needs no such cross-check because its baseline already
+contains the loaded input DataFrame.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_footprint_memory.png}
-  \caption[Footprint memory by pattern, size, and system]{Footprint memory (MB) versus dataset size by pattern and system (log--log axes).  The Pandas engine is a single process; the Trino and Oracle values are container peaks.  The full values are in Table~\ref{tab:memory_footprint} (Appendix~\ref{app:benchmark-tables}).}
+  \caption[Footprint memory by pattern, size, and system]{Absolute peak memory (MB) versus dataset size by pattern and system (linear axes), from the same cgroup~v2 instrument as Figure~\ref{fig:query_memory}.  The Pandas engine is a single process; the Trino and Oracle values are container peaks, with every container restarted before each dataset size.  The full values are in Table~\ref{tab:memory_footprint} (Appendix~\ref{app:benchmark-tables}).}
   \label{fig:footprint_memory}
 \end{figure}
 
 Figure~\ref{fig:footprint_memory} shows the practical deployment
 footprints, whose boundaries differ by construction: the Pandas value
 is one Python process including the loaded input DataFrame, and peaks
-at about 0.64\,GB at the full 2.22\,M rows, whereas the database
-values cover entire Docker containers---Trino's grows to about 23\,GB
-(its memory connector holds the benchmark table in the JVM heap) and
-Oracle's stays near 2.0\,GB.  The database figures are per-run
-samples of a container that persists across dataset sizes within a
-pass (restarted only between systems), so they carry allocations
-retained from earlier sizes and must not be read as independent
-per-size footprints; restarting the container before each size would
-give per-size figures and is a recommended refinement for future
-runs.  These values document deployment cost; per-query comparisons
-should use Table~\ref{tab:memory_cache}.
+at about 0.57\,GB at the full 2.22\,M rows, whereas the database
+values cover entire Docker containers---Trino's grows from about
+8.2\,GB to 14.6\,GB with input size (its memory connector holds the
+benchmark table in the JVM heap) and Oracle's stays near 2.0\,GB at
+every size (SGA-dominated).  Because each container is restarted
+before every dataset size, these are independent per-size figures
+rather than accumulations carried over from earlier sizes.  These
+values document deployment cost; per-query comparisons should use
+Table~\ref{tab:memory_cache}.
 
 % ................................................................
 \subsection{Key Findings}
@@ -1539,21 +1553,21 @@ should use Table~\ref{tab:memory_cache}.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=0.95\textwidth]{images/viz_overall_stats.png}
-  \caption[Overall benchmark statistics by system]{Overall benchmark statistics by system: average execution time, average throughput, maximum query-memory indicator, and maximum footprint (log scale).  The underlying values are in Table~\ref{tab:overall_stats} (Appendix~\ref{app:benchmark-tables}).}
+  \caption[Overall benchmark statistics by system]{Overall benchmark statistics by system: average execution time, average throughput, maximum incremental peak memory, and maximum footprint.  The underlying values are in Table~\ref{tab:overall_stats} (Appendix~\ref{app:benchmark-tables}).}
   \label{fig:overall_stats}
 \end{figure}
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=0.82\textwidth]{images/viz_avg_memory_by_size.png}
-  \caption[Average query memory by dataset size]{Average query-memory indicator by dataset size and system (log--log).  The underlying values are in Table~\ref{tab:avg_memory_by_size} (Appendix~\ref{app:benchmark-tables}).}
+  \caption[Average query memory by dataset size]{Average incremental peak memory by dataset size and system (linear axes).  The underlying values are in Table~\ref{tab:avg_memory_by_size} (Appendix~\ref{app:benchmark-tables}).}
   \label{fig:avg_memory_by_size}
 \end{figure}
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=0.82\textwidth]{images/viz_avg_footprint_by_size.png}
-  \caption[Average footprint memory by dataset size]{Average footprint memory by dataset size and system (log--log).  The underlying values are in Table~\ref{tab:avg_footprint_by_size} (Appendix~\ref{app:benchmark-tables}).}
+  \caption[Average footprint memory by dataset size]{Average footprint memory by dataset size and system (linear axes).  The underlying values are in Table~\ref{tab:avg_footprint_by_size} (Appendix~\ref{app:benchmark-tables}).}
   \label{fig:avg_footprint_by_size}
 \end{figure}
 
@@ -1565,32 +1579,28 @@ normalized output for all 30 pattern--size combinations each---verified
 cell by cell in Table~\ref{tab:cross_system_correctness}
 (Appendix~\ref{app:benchmark-tables}), so all three systems produced
 identical result sets.  The proposed Pandas engine had the lowest average
-execution time in this benchmark (0.18\,s), ahead of Oracle
-(0.93\,s) and a fully-warmed Trino (1.94\,s): it recorded the
+execution time in this benchmark (0.20\,s), ahead of Oracle
+(1.04\,s) and a fully-warmed Trino (1.98\,s): it recorded the
 lowest time on all 30 pattern--size cells, faster than Trino by
-roughly 6--14$\times$ per family and faster than Oracle by roughly
-2.7--7$\times$, with the widest margins on \texttt{complex\_nested}
-(where Trino averages 5.01\,s against the engine's 0.37\,s).  The
-system-native
-query-memory indicators of all three systems fall in the same order
-of magnitude, reaching at most 41--153\,MB for the most
-memory-intensive patterns at the full 2.22\,M rows---where the
-engine's largest indicators (\texttt{optional\_pattern} at
-152.61\,MB and \texttt{quantified} at 112.25\,MB)
-exceed Oracle's 58.19\,MB and Trino's roughly 41.5\,MB, though
-averaged over all cells the engine's query memory (about 20\,MB) sits
-between Trino's (about 16\,MB) and Oracle's (about 22\,MB)---and the
-operational
-footprints differ substantially: the Pandas engine peaks at about
-0.64\,GB as a single Python process, the Oracle container stays near
-2.0\,GB (about 3.1$\times$ the Pandas peak), and the Trino
-container reaches about 23\,GB under its memory-connector setup.
+roughly 5.5--14.5$\times$ per family and faster than Oracle by
+roughly 2.8--6.9$\times$, with the widest margins on
+\texttt{complex\_nested} (where Trino averages 5.28\,s against the
+engine's 0.36\,s).  The unified memory instrument makes the price of
+this speed explicit: the engine's incremental peak is the largest of
+the three at every size, reaching 290\,MB at the full 2.22\,M rows
+against Oracle's 58.5\,MB, while Trino's reading sits at its JVM
+floor (1.6--7.2\,MB there; its native counter reports about
+41.5\,MB, Section~\ref{subsec:eval-memory}).  The operational
+footprints invert that picture: the Pandas engine peaks at about
+0.57\,GB as a single Python process, the Oracle container stays near
+2.0\,GB (about $3.5\times$ the Pandas peak), and the Trino container
+reaches about 14.6\,GB under its memory-connector setup.
 Across the twenty measured runs per cell, run-to-run variability is
 low: the median \emph{coefficient of variation} (the standard
-deviation as a fraction of the mean) is about 3\% for the Pandas
-engine, 11\% for Trino, and 2\% for Oracle; the five warmup runs
-remove the cold-start outliers that a single warmup had left behind
-for the JVM-based Trino.  These
+deviation as a fraction of the mean) is about 1.6\% for the Pandas
+engine, 3.8\% for Trino, and 2.3\% for Oracle; the five warmup runs
+and the per-metric IQR rule remove the cold-start outliers that a
+single warmup had left behind for the JVM-based Trino.  These
 results are not presented as a claim that one system is universally
 better; they show the trade-off observed under the selected
 workload, data sizes, and resource configuration.
@@ -1625,19 +1635,23 @@ sorting entirely---is examined on its own in
 Section~\ref{subsec:eval-ordering}, which confirms the ranking is
 unchanged once that shortcut is removed.  This speedup holds only for
 the supported feature subset and single-node in-memory setting, and
-it costs more per-query working memory on the sequence-style families
-(Figure~\ref{fig:query_memory}).
+it costs more per-query working memory than either database under
+the unified metric (Figure~\ref{fig:query_memory}).
 
 Figure~\ref{fig:relative_comparison} condenses the trade-off into a
 single relative view, expressing each metric as an \emph{advantage
 factor}---how many times better the proposed engine is than each SQL
 engine, read against parity at $1\times$.  It shows the shape of the
-result compactly: large execution-time ($5.0$--$11\times$) and
-throughput ($4.5$--$9.7\times$) advantages and a far smaller
-operational footprint ($6.3$--$50\times$), obtained at a per-query
-memory indicator close to parity---$0.78\times$ versus Trino (about
-$29\%$ above its counter, the only point below parity) but
-$1.10\times$ versus Oracle (about $9\%$ below it).
+result compactly: large execution-time ($5.4$--$10\times$) and
+throughput ($4.3$--$8.3\times$) advantages and a far smaller
+operational footprint ($7.9$--$44\times$), obtained at a per-query
+incremental memory below parity against both databases:
+$0.26\times$ versus Oracle, and nominally $0.02\times$ versus
+Trino---a factor exaggerated by Trino's JVM floor
+(Section~\ref{subsec:eval-memory}); against Trino's own per-query
+counter the factor is about $0.17\times$.  The memory rows are the
+engine's trade-off, deliberately shown at the same scale as its
+advantages.
 
 \begin{figure}[htbp]
   \centering
@@ -1646,8 +1660,10 @@ $1.10\times$ versus Oracle (about $9\%$ below it).
     factor of the proposed engine over each SQL engine, averaged over
     the 30 benchmark cells and read against parity at $1\times$ (log
     scale): a value of $n\times$ means the engine is $n$ times better
-    on that metric, and the single point left of parity (query memory
-    versus Trino) is the engine's one trade-off.  The underlying signed
+    on that metric, and the query-memory points left of parity are
+    the engine's trade-off.  The Trino query-memory point is measured
+    against its JVM-floored incremental counter and overstates the
+    gap (Section~\ref{subsec:eval-memory}).  The underlying signed
     percentages are in Table~\ref{tab:relative_comparison}
     (Appendix~\ref{app:benchmark-tables}).}
   \label{fig:relative_comparison}
@@ -1687,7 +1703,7 @@ Table~\ref{tab:ordering_by_size} (Appendix~\ref{app:benchmark-tables}).
   \includegraphics[width=0.78\textwidth]{images/viz_ordering_scenarios.png}
   \caption[Ordered vs shuffled input by system]{Average execution time
     under ordered (Scenario~A) and shuffled (Scenario~B) input, over
-    all 30 pattern--size cells per system (log scale); the B/A slowdown
+    all 30 pattern--size cells per system; the B/A slowdown
     is shown above each pair.  Scenario~B forces a genuine sort in
     every system, and match counts are identical between the two
     scenarios.  Underlying values in Table~\ref{tab:ordering_scenarios}
@@ -1696,6 +1712,12 @@ Table~\ref{tab:ordering_by_size} (Appendix~\ref{app:benchmark-tables}).
   \label{fig:ordering_scenarios}
 \end{figure}
 
+The two scenarios form a self-contained controlled pair, measured
+under the same earlier per-run procedure as each other (before the
+per-run memory baselines of Section~\ref{subsec:eval-memory} were
+added), so Scenario~A's absolute times differ marginally from the
+main matrix of Section~\ref{subsec:eval-cross-system}; all
+comparisons in this section are strictly A against B.
 Three observations follow.  \emph{First}, the proposed engine incurs
 the largest relative slowdown ($1.30\times$) because it is the only
 system that skips sorting in the ordered case; the penalty is
@@ -1813,8 +1835,8 @@ is fair.
   \centering
   \includegraphics[width=0.78\textwidth]{images/viz_worstcase_xsys.png}
   \caption[Pattern-driven worst case, all systems]{Execution time on a
-    state-dependent \texttt{DEFINE} query, all three systems (log--log,
-    ordered input).  The result reverses the row-local ranking: the
+    state-dependent \texttt{DEFINE} query, all three systems (linear
+    axes, ordered input).  The result reverses the row-local ranking: the
     proposed engine is the \emph{slowest} because the predicate forces
     its backtracking searcher, whereas Oracle and Trino evaluate it
     natively.  Underlying values in
@@ -1823,7 +1845,7 @@ is fair.
 \end{figure}
 
 The ranking \emph{reverses}.  On the row-local benchmark the proposed
-engine is $5$--$11\times$ faster than the databases; on this
+engine is $2.8$--$14.5\times$ faster than the databases; on this
 state-dependent query it is the \emph{slowest} of the three, at every
 size---Oracle is about $23$--$41\times$ faster and Trino about
 $2$--$7\times$ faster.
