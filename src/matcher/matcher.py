@@ -4698,6 +4698,124 @@ class EnhancedMatcher:
         token_count = max(1, len(linear_plan or ()))
         return max(200000, (int(row_count) + 1) * (token_count + 1))
 
+    def _condition_linear_feasible_start_mask(
+        self,
+        row_count,
+        linear_plan,
+        runtime,
+        has_start_anchor=False,
+        has_end_anchor=False,
+    ):
+        """Return starts that can satisfy every proved row-local guard.
+
+        This is a necessary-condition analysis, not an alternate matcher.
+        Complete vectorized DEFINE predicates are exact guards; mixed
+        state-dependent predicates contribute only their row-local ``AND``
+        prefilter; predicates without either contribute an all-True guard.
+        A backward dynamic program checks whether some legal repetition count
+        can reach a feasible suffix.  Consequently False is proof that no
+        exact match can start there, while True always delegates to the normal
+        preference-ordered searcher.
+        """
+        if row_count <= 0 or not linear_plan:
+            return None
+        try:
+            import numpy as np
+
+            feasible_after = np.zeros(row_count + 1, dtype=bool)
+            if has_end_anchor:
+                feasible_after[row_count] = True
+            else:
+                feasible_after[:] = True
+
+            positions = np.arange(row_count + 1, dtype=np.int64)
+            for name, min_rep, max_rep in reversed(linear_plan):
+                (
+                    precomputed,
+                    prefilter,
+                    _bound,
+                    _condition,
+                    _accepts_context_row,
+                    run_lengths,
+                    _true_run_length,
+                    prefilter_run_lengths,
+                    _entire_range_is_true,
+                ) = runtime[name]
+
+                unconstrained = False
+                if precomputed is not None:
+                    token_runs = run_lengths
+                    if token_runs is None:
+                        token_runs = self._condition_true_run_lengths(
+                            precomputed, row_count
+                        )
+                elif prefilter is not None:
+                    token_runs = prefilter_run_lengths
+                    if token_runs is None:
+                        token_runs = self._condition_true_run_lengths(
+                            prefilter, row_count
+                        )
+                else:
+                    # No row-local fact is available.  All rows remain
+                    # possible; the exact residual decides them later.
+                    token_runs = None
+                    unconstrained = True
+
+                if token_runs is None and not unconstrained:
+                    return None
+                lower = positions + int(min_rep)
+                upper = positions.copy()
+                if unconstrained:
+                    if max_rep is None:
+                        upper.fill(row_count)
+                    else:
+                        upper += int(max_rep)
+                        np.minimum(upper, row_count, out=upper)
+                else:
+                    run_values = np.asarray(token_runs, dtype=np.int64)
+                    if len(run_values) != row_count:
+                        return None
+                    if max_rep is None:
+                        upper[:-1] += run_values
+                    else:
+                        upper[:-1] += np.minimum(run_values, int(max_rep))
+                valid_range = (
+                    (lower <= row_count)
+                    & (upper <= row_count)
+                    & (lower <= upper)
+                )
+
+                # Prefix counts answer "does the feasible suffix contain any
+                # position in [lower, upper]?" for every input row at once.
+                prefix = np.empty(row_count + 2, dtype=np.int64)
+                prefix[0] = 0
+                np.cumsum(feasible_after, dtype=np.int64, out=prefix[1:])
+                feasible_before = np.zeros(row_count + 1, dtype=bool)
+                valid_positions = np.flatnonzero(valid_range)
+                feasible_counts = prefix[upper[valid_positions] + 1]
+                feasible_counts -= prefix[lower[valid_positions]]
+                feasible_before[valid_positions] = feasible_counts > 0
+                feasible_after = feasible_before
+
+            result = feasible_after[:row_count]
+            if has_start_anchor:
+                anchored = np.zeros(row_count, dtype=bool)
+                anchored[0] = bool(result[0])
+                result = anchored
+            return result
+        except (
+            AttributeError,
+            ImportError,
+            IndexError,
+            KeyError,
+            OverflowError,
+            TypeError,
+            ValueError,
+        ):
+            # Planning is optional.  Any unsupported representation retains
+            # the existing exact search over the original start mask.
+            return None
+
     def _find_single_match_condition_linear(
         self,
         rows,
@@ -4730,10 +4848,15 @@ class EnhancedMatcher:
         position = start_idx
         token_index = 0
         explored_steps = 0
-        explicit_define_names = {
-            str(name).upper()
-            for name in (self.define_conditions or {})
-        }
+        explicit_define_names = getattr(
+            self, "_condition_explicit_define_names", None
+        )
+        if explicit_define_names is None:
+            explicit_define_names = frozenset(
+                str(name).upper()
+                for name in (self.define_conditions or {})
+            )
+            self._condition_explicit_define_names = explicit_define_names
 
         if has_start_anchor and start_idx != 0:
             return None
@@ -7878,6 +8001,7 @@ class EnhancedMatcher:
             if direct_condition_backtracking and reusable_context is not None
             else None
         )
+        condition_linear_step_budget = None
         linear_plan_available = self._can_use_linear_quantifier_plan(config)
         linear_plan = self._get_linear_quantifier_plan() if linear_plan_available else None
         linear_plan_run_lengths = (
@@ -7900,6 +8024,34 @@ class EnhancedMatcher:
             )
             row_local_dfa_plan_ready = True
         start_position_mask = self._build_start_position_mask(len(rows))
+        if condition_linear_execution is not None:
+            (
+                exact_plan,
+                exact_runtime,
+                exact_start_anchor,
+                exact_end_anchor,
+            ) = condition_linear_execution
+            condition_linear_step_budget = self._condition_linear_step_budget(
+                len(rows), exact_plan
+            )
+            feasible_starts = self._condition_linear_feasible_start_mask(
+                len(rows),
+                exact_plan,
+                exact_runtime,
+                exact_start_anchor,
+                exact_end_anchor,
+            )
+            if feasible_starts is not None:
+                if start_position_mask is None:
+                    start_position_mask = feasible_starts
+                else:
+                    try:
+                        import numpy as np
+                        start_position_mask = np.logical_and(
+                            start_position_mask, feasible_starts
+                        )
+                    except Exception:
+                        pass
         start_positions = None
         if start_position_mask is not None:
             try:
@@ -8118,9 +8270,6 @@ class EnhancedMatcher:
                     context.current_var_assignments = variables
                     context._define_assignment_versions = None
                     context._define_aggregate_cache = None
-                    exact_step_budget = self._condition_linear_step_budget(
-                        len(rows), exact_plan
-                    )
                     match = self._find_single_match_condition_linear(
                         rows,
                         start_idx,
@@ -8128,7 +8277,7 @@ class EnhancedMatcher:
                         exact_plan,
                         exact_runtime,
                         variables,
-                        exact_step_budget,
+                        condition_linear_step_budget,
                         exact_start_anchor,
                         exact_end_anchor,
                     )
