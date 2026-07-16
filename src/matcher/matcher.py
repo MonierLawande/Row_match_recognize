@@ -4714,9 +4714,10 @@ class EnhancedMatcher:
     def _prepare_condition_linear_execution(self, context):
         """Prepare a linear exact-search plan once for one partition.
 
-        Returns ``(plan, runtime)`` only when the already parsed exact AST is
-        a greedy variable-only sequence.  All other structures return None
-        and stay on the generic iterative DFS interpreter.
+        Returns the plan, its prejoined execution tokens, predicate runtime,
+        and anchor flags only when the already parsed exact AST is a greedy
+        variable-only sequence.  All other structures return None and stay on
+        the generic iterative DFS interpreter.
         """
         ast_root = getattr(self, "_condition_backtracking_ast", None)
         if ast_root is None:
@@ -4756,7 +4757,44 @@ class EnhancedMatcher:
             getattr(self, "_condition_residual_fns", None) or {},
             compiled,
         )
-        return linear_plan, runtime, has_start_anchor, has_end_anchor
+        explicit_define_names = getattr(
+            self, "_condition_explicit_define_names", None
+        )
+        if explicit_define_names is None:
+            explicit_define_names = frozenset(
+                str(name).upper()
+                for name in (self.define_conditions or {})
+            )
+            self._condition_explicit_define_names = explicit_define_names
+
+        # Join immutable plan metadata and context-bound predicate dispatch
+        # once per partition.  The exact matcher visits these tokens for every
+        # candidate match, so repeating a runtime dictionary lookup and
+        # implicit-TRUE classification there is pure interpreter overhead.
+        execution_tokens = []
+        for name, min_rep, max_rep in linear_plan:
+            token_runtime = runtime[name]
+            precomputed, prefilter, _bound, condition = token_runtime[:4]
+            implicit_true = bool(
+                condition is None
+                and precomputed is None
+                and prefilter is None
+                and str(name).upper() not in explicit_define_names
+            )
+            execution_tokens.append((
+                name,
+                min_rep,
+                max_rep,
+                implicit_true,
+                *token_runtime,
+            ))
+        return (
+            linear_plan,
+            tuple(execution_tokens),
+            runtime,
+            has_start_anchor,
+            has_end_anchor,
+        )
 
     @staticmethod
     def _condition_linear_step_budget(row_count, linear_plan):
@@ -4897,12 +4935,12 @@ class EnhancedMatcher:
         rows,
         start_idx,
         context,
-        linear_plan,
-        runtime,
+        execution_tokens,
         variables,
         step_budget,
         has_start_anchor=False,
         has_end_anchor=False,
+        compact_match=False,
     ):
         """Run a greedy variable-only exact plan without generic DFS tasks.
 
@@ -4923,22 +4961,13 @@ class EnhancedMatcher:
         choices = []
         position = start_idx
         token_index = 0
+        token_count = len(execution_tokens)
         explored_steps = 0
-        explicit_define_names = getattr(
-            self, "_condition_explicit_define_names", None
-        )
-        if explicit_define_names is None:
-            explicit_define_names = frozenset(
-                str(name).upper()
-                for name in (self.define_conditions or {})
-            )
-            self._condition_explicit_define_names = explicit_define_names
-
         if has_start_anchor and start_idx != 0:
             return None
 
         while explored_steps < step_budget:
-            if token_index == len(linear_plan):
+            if token_index == token_count:
                 if has_end_anchor and position != row_count:
                     if not choices:
                         variables.clear()
@@ -4980,6 +5009,14 @@ class EnhancedMatcher:
                         "excluded_rows": [],
                         "has_empty_alternation": self.has_empty_alternation,
                     }
+                completed_variables = context.detach_exact_match_assignments()
+                if compact_match:
+                    return {
+                        "start": start_idx,
+                        "end": position - 1,
+                        "variables": completed_variables,
+                        "is_empty": False,
+                    }
                 return {
                     "start": start_idx,
                     "end": position - 1,
@@ -4987,7 +5024,7 @@ class EnhancedMatcher:
                     # Transfer it to the immutable completed-match lifecycle
                     # instead of copying every variable list.  The reusable
                     # RowContext receives a fresh map for the next attempt.
-                    "variables": context.detach_exact_match_assignments(),
+                    "variables": completed_variables,
                     "state": self.start_state,
                     "is_empty": False,
                     "excluded_vars": set(),
@@ -4995,11 +5032,11 @@ class EnhancedMatcher:
                     "has_empty_alternation": False,
                 }
 
-            name, min_rep, max_rep = linear_plan[token_index]
-            base_position = position
-            base_undo = assigned_count
-            count = 0
             (
+                name,
+                min_rep,
+                max_rep,
+                implicit_true,
                 precomputed,
                 prefilter,
                 bound,
@@ -5009,15 +5046,13 @@ class EnhancedMatcher:
                 true_run_length,
                 prefilter_run_lengths,
                 entire_range_is_true,
-            ) = runtime[name]
+            ) = execution_tokens[token_index]
+            base_position = position
+            base_undo = assigned_count
+            count = 0
 
             used_batch = False
-            if (
-                condition is None
-                and precomputed is None
-                and prefilter is None
-                and str(name).upper() not in explicit_define_names
-            ):
+            if implicit_true:
                 # A pattern variable without DEFINE has the SQL implicit-TRUE
                 # predicate.  Consuming it row-by-row is deterministic work,
                 # not a backtracking state.  Compact the whole legal suffix in
@@ -5074,7 +5109,7 @@ class EnhancedMatcher:
             if (
                 not used_batch
                 and has_end_anchor
-                and token_index + 1 == len(linear_plan)
+                and token_index + 1 == token_count
                 and entire_range_is_true is not None
                 and (prefilter is None or prefilter_run_lengths is not None)
                 and position < row_count
@@ -5232,7 +5267,7 @@ class EnhancedMatcher:
                 # Reinsert the frame with the next lower count when resumed.
                 # The final token has no suffix that could fail, so its lower
                 # greedy counts can never be revisited.
-                if count > min_rep and token_index + 1 < len(linear_plan):
+                if count > min_rep and token_index + 1 < token_count:
                     choices.append((
                         token_index + 1,
                         base_position,
@@ -5346,6 +5381,7 @@ class EnhancedMatcher:
         if linear_execution is not None:
             (
                 linear_plan,
+                execution_tokens,
                 runtime,
                 has_start_anchor,
                 has_end_anchor,
@@ -5357,8 +5393,7 @@ class EnhancedMatcher:
                 rows,
                 start_idx,
                 context,
-                linear_plan,
-                runtime,
+                execution_tokens,
                 variables,
                 linear_step_budget,
                 has_start_anchor,
@@ -8182,6 +8217,7 @@ class EnhancedMatcher:
         if condition_linear_execution is not None:
             (
                 exact_plan,
+                exact_tokens,
                 exact_runtime,
                 exact_start_anchor,
                 exact_end_anchor,
@@ -8220,7 +8256,17 @@ class EnhancedMatcher:
         # AFTER MATCH SKIP PAST LAST ROW and advance start_idx on every
         # outcome, so the stagnation/progress machinery cannot trigger there
         # and is skipped to keep the per-iteration cost down.
-        needs_progress_guards = not (linear_plan_available or row_local_dfa_available)
+        is_past_last_row = bool(
+            config and config.skip_mode == SkipMode.PAST_LAST_ROW
+        )
+        exact_linear_makes_monotonic_progress = bool(
+            condition_linear_execution is not None and is_past_last_row
+        )
+        needs_progress_guards = not (
+            linear_plan_available
+            or row_local_dfa_available
+            or exact_linear_makes_monotonic_progress
+        )
         is_to_next_row = bool(config and config.skip_mode == SkipMode.TO_NEXT_ROW)
         allow_overlap = bool(
             config and config.skip_mode in (SkipMode.TO_NEXT_ROW, SkipMode.TO_FIRST, SkipMode.TO_LAST)
@@ -8423,12 +8469,6 @@ class EnhancedMatcher:
                 if reusable_context is None:
                     context.match_number = match_number
                 if condition_linear_execution is not None:
-                    (
-                        exact_plan,
-                        exact_runtime,
-                        exact_start_anchor,
-                        exact_end_anchor,
-                    ) = condition_linear_execution
                     variables = context.variables
                     context.current_var_assignments = variables
                     context._define_assignment_versions = None
@@ -8437,12 +8477,15 @@ class EnhancedMatcher:
                         rows,
                         start_idx,
                         context,
-                        exact_plan,
-                        exact_runtime,
+                        exact_tokens,
                         variables,
                         condition_linear_step_budget,
                         exact_start_anchor,
                         exact_end_anchor,
+                        compact_match=bool(
+                            columnar_one_row_output is not None
+                            and not retain_completed_matches
+                        ),
                     )
                 elif direct_condition_backtracking:
                     match = self._find_single_match_condition_backtracking(
@@ -8458,7 +8501,13 @@ class EnhancedMatcher:
                 start_idx += 1
                 continue
             # Store the match for post-processing
-            match["match_number"] = match_number
+            # A streamed ONE ROW match is consumed immediately and receives
+            # its match number as an explicit evaluator argument.  Publishing
+            # the same value into the short-lived internal mapping only
+            # creates an extra dictionary mutation per match.  Retained paths
+            # preserve the historical metadata contract.
+            if retain_completed_matches:
+                match["match_number"] = match_number
             self._match_count += 1
             if retain_completed_matches:
                 self._matches.append(match)
@@ -8523,7 +8572,13 @@ class EnhancedMatcher:
                     logger.debug(f"Empty match, advancing from {old_start_idx} to {start_idx}")
             else:
                 # For non-empty matches, use the skip mode
-                if config and config.skip_mode:
+                if is_past_last_row:
+                    # The common SQL default is a direct end-boundary move.
+                    # Its position is independent of variables, subsets, and
+                    # exclusion metadata, so the general skip dispatcher adds
+                    # no validation or semantics here.
+                    start_idx = match["end"] + 1
+                elif config and config.skip_mode:
                     start_idx = self._get_skip_position(config.skip_mode, config.skip_var, match)
                 else:
                     start_idx = match["end"] + 1
