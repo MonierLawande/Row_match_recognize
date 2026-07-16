@@ -16,13 +16,13 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, ScalarFormatter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RES = os.path.join(HERE, "results_1core_5w20_v3")
+RES = os.path.join(HERE, "results_1core_5w20_unified")
 IMG = os.path.abspath(os.path.join(HERE, "..", "..", "thesis", "images"))
 
 SYSTEMS = [
     ("proposed_pandas_engine", "Proposed engine", "#2a78d6", "o"),
     ("oracle",                 "Oracle XE 21c",   "#199e70", "^"),
-    ("trino",                  "Trino 473",       "#eb6834", "s"),
+    ("trino",                  "Trino 473",       "#e3942f", "s"),
 ]
 PATTERNS = ["simple_sequence", "alternation", "quantified",
             "optional_pattern", "complex_nested"]
@@ -47,33 +47,45 @@ def load():
 FR = load()
 size_fmt = FuncFormatter(lambda v, _: f"{v/1e6:.1f}M" if v >= 1e6 else f"{int(v/1e3)}K")
 
+# Equal-spaced categorical x axis showing every dataset size.
+SIZE_LABELS = ["100K", "200K", "400K", "800K", "1.6M", "2.2M"]
+
+
+def cat_x(sizes):
+    return [SIZES.index(int(s)) for s in sizes]
+
+
+def cat_axis(ax, labelsize=7.5):
+    ax.set_xticks(range(len(SIZES)))
+    ax.set_xticklabels(SIZE_LABELS, fontsize=labelsize)
+    ax.set_xlim(-0.35, len(SIZES) - 0.65)
+
 
 def small_multiples(metric, ylabel, fname, logy=True):
     """5 pattern panels + legend cell; one line per system."""
     fig, axes = plt.subplots(2, 3, figsize=(9.6, 5.8), sharex=True, sharey=True)
     axes = axes.ravel()
+    ymax = 0.0
     for ax, pat in zip(axes, PATTERNS):
         for key, label, color, marker in SYSTEMS:
             d = FR[key]
             d = d[d["pattern_name"] == pat].sort_values("dataset_size")
-            ax.plot(d["dataset_size"], d[metric], color=color, marker=marker,
-                    markersize=5, linewidth=2, markeredgecolor="white",
-                    markeredgewidth=0.6, label=label, zorder=3)
-        ax.set_xscale("log")
-        if logy:
-            ax.set_yscale("log")
+            ax.plot(cat_x(d["dataset_size"]), d[metric], color=color,
+                    marker=marker, markersize=5, linewidth=2,
+                    markeredgecolor="white", markeredgewidth=0.6,
+                    label=label, zorder=3)
+            ymax = max(ymax, d[metric].max())
         ax.set_title(pat)
         ax.grid(True, which="major", zorder=0)
-        ax.grid(True, which="minor", alpha=0.35, zorder=0)
-        ax.xaxis.set_major_formatter(size_fmt)
-        ax.set_xticks([1e5, 2e5, 4e5, 8e5, 1.6e6])
+        cat_axis(ax)
         ax.tick_params(labelsize=7.5)
+    axes[0].set_ylim(0, ymax * 1.09)
     axes[5].axis("off")
     h, l = axes[0].get_legend_handles_labels()
     axes[5].legend(h, l, loc="center", frameon=False, fontsize=10,
                    title="System", title_fontsize=10, handlelength=2.2,
                    labelspacing=1.1)
-    fig.supxlabel("Dataset size (rows, log scale)", fontsize=9)
+    fig.supxlabel("Dataset size (rows)", fontsize=9)
     fig.supylabel(ylabel, fontsize=9)
     fig.tight_layout(rect=(0.015, 0.0, 1, 1))
     fig.savefig(os.path.join(IMG, fname), bbox_inches="tight")
@@ -86,24 +98,21 @@ def lines_by_size(metric, ylabel, fname, logy=True):
     fig, ax = plt.subplots(figsize=(6.4, 4.0))
     for key, label, color, marker in SYSTEMS:
         d = FR[key].groupby("dataset_size")[metric].mean().reindex(SIZES)
-        ax.plot(d.index, d.values, color=color, marker=marker, markersize=6,
-                linewidth=2, markeredgecolor="white", markeredgewidth=0.7,
-                label=label, zorder=3)
+        ax.plot(range(len(SIZES)), d.values, color=color, marker=marker,
+                markersize=6, linewidth=2, markeredgecolor="white",
+                markeredgewidth=0.7, label=label, zorder=3)
         ax.annotate(f"{d.values[-1]:,.0f}" if d.values[-1] >= 100
                     else f"{d.values[-1]:.2f}",
-                    (d.index[-1], d.values[-1]), textcoords="offset points",
+                    (len(SIZES) - 1, d.values[-1]),
+                    textcoords="offset points",
                     xytext=(6, 0), fontsize=7.5, color=color, va="center")
-    ax.set_xscale("log")
-    if logy:
-        ax.set_yscale("log")
-    ax.set_xticks(SIZES)
-    ax.xaxis.set_major_formatter(size_fmt)
+    cat_axis(ax, labelsize=8.5)
+    ax.set_xlim(-0.35, len(SIZES) - 0.25)
     ax.grid(True, which="major", zorder=0)
-    ax.grid(True, which="minor", alpha=0.3, zorder=0)
-    ax.set_xlabel("Dataset size (rows, log scale)")
+    ax.set_xlabel("Dataset size (rows)")
     ax.set_ylabel(ylabel)
     ax.legend(frameon=False, fontsize=8.5)
-    ax.set_xlim(9e4, 3.1e6)
+    ax.set_ylim(bottom=0)
     fig.tight_layout()
     fig.savefig(os.path.join(IMG, fname), bbox_inches="tight")
     plt.close(fig)
@@ -112,15 +121,15 @@ def lines_by_size(metric, ylabel, fname, logy=True):
 
 # ---- 6.12 throughput -------------------------------------------------------
 small_multiples("throughput_rows_per_second",
-                "Throughput (rows/s, log scale)", "viz_throughput.png")
+                "Throughput (rows/s)", "viz_throughput.png")
 
 # ---- 6.13 query memory -----------------------------------------------------
 small_multiples("query_memory_mb",
-                "Query memory (MB, log scale)", "viz_query_memory.png")
+                "Query memory (MB)", "viz_query_memory.png")
 
 # ---- 6.14 footprint memory -------------------------------------------------
 small_multiples("footprint_memory_mb",
-                "Footprint memory (MB, log scale)", "viz_footprint_memory.png")
+                "Footprint memory (MB)", "viz_footprint_memory.png")
 
 # ---- 6.16 avg execution time by pattern (grouped bars) ---------------------
 def grouped_bars_by_pattern():
@@ -150,11 +159,11 @@ def grouped_bars_by_pattern():
 grouped_bars_by_pattern()
 
 # ---- 6.17/6.18/6.19 averaged-by-size line charts ---------------------------
-lines_by_size("execution_time_seconds", "Average execution time (s, log scale)",
+lines_by_size("execution_time_seconds", "Average execution time (s)",
               "viz_avg_time_by_size.png")
-lines_by_size("query_memory_mb", "Average query memory (MB, log scale)",
+lines_by_size("query_memory_mb", "Average query memory (MB)",
               "viz_avg_memory_by_size.png")
-lines_by_size("footprint_memory_mb", "Average footprint memory (MB, log scale)",
+lines_by_size("footprint_memory_mb", "Average footprint memory (MB)",
               "viz_avg_footprint_by_size.png")
 
 # ---- 6.15 overall stats (2x2 single-metric bars) ---------------------------
@@ -171,7 +180,7 @@ def overall_stats():
         ("Max query memory (MB)", agg(np.max, "query_memory_mb"),
          "{:.1f}", False),
         ("Max footprint memory (MB)", agg(np.max, "footprint_memory_mb"),
-         "{:,.0f}", True),
+         "{:,.0f}", False),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(8.4, 5.6))
     for ax, (title, vals, fmt, logy) in zip(axes.ravel(), panels):
@@ -230,16 +239,24 @@ correctness_matrix()
 
 # ---- 6.21 relative comparison (advantage-factor lollipop, log scale) -------
 def relative_comparison():
-    # Signed percentages from Table tab:relative_comparison (engine vs each
-    # SQL engine; +/- means engine higher/lower on that metric).  Converted to
-    # an "advantage factor" = how many times BETTER the engine is (>1 better,
-    # <1 worse), so every metric is read against parity at 1x.
+    # Signed percentages (engine vs each SQL engine; +/- means engine
+    # higher/lower on that metric), computed from the result CSVs with the
+    # same ratio-of-means formula as Table tab:relative_comparison.  Converted
+    # to an "advantage factor" = how many times BETTER the engine is (>1
+    # better, <1 worse), so every metric is read against parity at 1x.
     # lower-is-better: factor = 1/(1 + p/100); higher-is-better: factor = 1 + p/100.
     metrics = ["Execution time", "Throughput", "Operational footprint",
                "Query memory"]
     lower_better = [True, False, True, True]
-    pct_trino = [-91, 874, -98, 29]
-    pct_oracle = [-80, 352, -84, -9]
+    P, T, O = FR["proposed_pandas_engine"], FR["trino"], FR["oracle"]
+
+    def pct(a, b):
+        return (a / b - 1) * 100.0
+
+    cols = ["execution_time_seconds", "throughput_rows_per_second",
+            "footprint_memory_mb", "query_memory_mb"]
+    pct_trino = [pct(P[c].mean(), T[c].mean()) for c in cols]
+    pct_oracle = [pct(P[c].mean(), O[c].mean()) for c in cols]
 
     def factor(p, lb):
         return 1.0 / (1 + p / 100.0) if lb else (1 + p / 100.0)
@@ -251,9 +268,10 @@ def relative_comparison():
     off = 0.18
     fig, ax = plt.subplots(figsize=(8.0, 4.2))
     ax.set_xscale("log")
+    xmin = min(0.55, min(ft + fo) * 0.55)
     # shaded "better / worse" regions around parity
     ax.axvspan(1, 200, color="#199e70", alpha=0.05, zorder=0)
-    ax.axvspan(0.5, 1, color="#e34948", alpha=0.05, zorder=0)
+    ax.axvspan(xmin, 1, color="#e34948", alpha=0.05, zorder=0)
     ax.axvline(1, color="#555555", linewidth=1.1, zorder=2)
 
     def draw(vals, yoff, color, label):
@@ -275,15 +293,16 @@ def relative_comparison():
     ax.set_yticks(y)
     ax.set_yticklabels(metrics, fontsize=9.5)
     ax.set_ylim(-0.6, len(metrics) - 0.4)
-    ax.set_xlim(0.55, 120)
-    ax.set_xticks([1, 2, 5, 10, 20, 50, 100])
-    ax.set_xticklabels(["1$\\times$\n(parity)", "2$\\times$", "5$\\times$",
-                        "10$\\times$", "20$\\times$", "50$\\times$", "100$\\times$"],
-                       fontsize=7.5)
+    ax.set_xlim(xmin, 120)
+    ticks = [t for t in (0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100)
+             if t >= xmin]
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(["1$\\times$\n(parity)" if t == 1 else f"{t:g}$\\times$"
+                        for t in ticks], fontsize=7.5)
     ax.set_xlabel("How many times better the proposed engine is (log scale)")
     ax.grid(True, axis="x", which="major", zorder=0, alpha=0.5)
-    ax.text(0.72, len(metrics) - 0.5, "engine worse", fontsize=7.5,
-            color="#b03a3a", ha="center", style="italic")
+    ax.text((xmin * 1.0) ** 0.5, len(metrics) - 0.5, "engine worse",
+            fontsize=7.5, color="#b03a3a", ha="center", style="italic")
     ax.text(11, len(metrics) - 0.5, "engine better $\\rightarrow$", fontsize=7.5,
             color="#137a54", ha="center", style="italic")
     ax.legend(frameon=False, fontsize=8.5, loc="lower right")
@@ -333,25 +352,20 @@ def summary_by_size():
     for key, label, color, marker in SYSTEMS:
         thr = FR[key].groupby("dataset_size")["throughput_rows_per_second"].mean().reindex(SIZES) / 1e6
         tim = FR[key].groupby("dataset_size")["execution_time_seconds"].mean().reindex(SIZES)
-        ax1.plot(thr.index, thr.values, color=color, marker=marker, markersize=6,
-                 linewidth=2, markeredgecolor="white", markeredgewidth=0.7,
-                 label=label, zorder=3)
-        ax2.plot(tim.index, tim.values, color=color, marker=marker, markersize=6,
-                 linewidth=2, markeredgecolor="white", markeredgewidth=0.7,
-                 label=label, zorder=3)
+        ax1.plot(range(len(SIZES)), thr.values, color=color, marker=marker,
+                 markersize=6, linewidth=2, markeredgecolor="white",
+                 markeredgewidth=0.7, label=label, zorder=3)
+        ax2.plot(range(len(SIZES)), tim.values, color=color, marker=marker,
+                 markersize=6, linewidth=2, markeredgecolor="white",
+                 markeredgewidth=0.7, label=label, zorder=3)
     for ax in (ax1, ax2):
-        ax.set_xscale("log")
-        ax.set_xticks(SIZES)
-        ax.xaxis.set_major_formatter(size_fmt)
+        cat_axis(ax)
         ax.grid(True, which="major", zorder=0)
-        ax.grid(True, which="minor", alpha=0.3, zorder=0)
-        ax.set_xlabel("Dataset size (rows, log scale)")
-        ax.set_xlim(9e4, 2.5e6)
-        ax.tick_params(labelsize=7.5)
+        ax.set_xlabel("Dataset size (rows)")
+        ax.set_ylim(bottom=0)
     ax1.set_ylabel("Avg throughput (M rows/s)")
     ax1.set_title("Higher is better", fontsize=9)
-    ax2.set_yscale("log")
-    ax2.set_ylabel("Avg execution time (s, log scale)")
+    ax2.set_ylabel("Avg execution time (s)")
     ax2.set_title("Lower is better", fontsize=9)
     ax1.legend(frameon=False, fontsize=8.5)
     fig.tight_layout()

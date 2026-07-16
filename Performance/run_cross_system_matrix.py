@@ -1127,17 +1127,21 @@ def run_trino_system(
 ) -> list[RunResult]:
     print("\n=== Running Trino system ===")
     docker_stop("oracle-free")
-    docker_update("trino-473", cpu_count, memory_gb)
-    docker_start("trino-473")
-    wait_for_trino(900)
-
-    conn = connect_trino()
-    cur = conn.cursor()
     all_results: list[RunResult] = []
 
     for size in sizes:
         df = load_input(size)
         print(f"  Trino size={size:,}")
+        # Fresh instance per size: server state (JVM heap growth, pool bloat)
+        # accumulates over the phase and inflates later sizes, so every size
+        # starts from the same clean instance; per-cell warmups re-warm it.
+        docker_stop("trino-473")
+        docker_update("trino-473", cpu_count, memory_gb)
+        docker_start("trino-473")
+        wait_for_trino(900)
+        print("    restarted trino-473 (clean instance state)")
+        conn = connect_trino()
+        cur = conn.cursor()
         load_trino_table(df, chunk_size)
         for pattern_name, info in PATTERNS.items():
             print(f"    pattern={pattern_name}")
@@ -1222,17 +1226,19 @@ def run_oracle_system(
 ) -> list[RunResult]:
     print("\n=== Running Oracle system ===")
     docker_stop("trino-473")
-    docker_update("oracle-free", cpu_count, memory_gb)
-    docker_start("oracle-free")
-    wait_for_oracle(password, dsn, 900)
-
-    conn = connect_oracle(password, dsn)
-    cur = conn.cursor()
     all_results: list[RunResult] = []
 
     for size in sizes:
         df = load_input(size)
         print(f"  Oracle size={size:,}")
+        # Fresh instance per size, same rationale as the Trino runner.
+        docker_stop("oracle-free")
+        docker_update("oracle-free", cpu_count, memory_gb)
+        docker_start("oracle-free")
+        wait_for_oracle(password, dsn, 900)
+        print("    restarted oracle-free (clean instance state)")
+        conn = connect_oracle(password, dsn)
+        cur = conn.cursor()
         load_oracle_table(df, password, dsn, chunk_size)
         for pattern_name, info in PATTERNS.items():
             print(f"    pattern={pattern_name}")
