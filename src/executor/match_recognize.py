@@ -566,7 +566,34 @@ class DataFrameRowAccessor:
         self._df = df
         self._length = len(df)
         self._columns = list(df.columns)
-        self._arrays = {column: df[column].to_numpy(copy=False) for column in self._columns}
+        # Keep vector and scalar views of each column.  NumPy arrays are
+        # efficient for vectorized conditions and aggregates.  Their datetime
+        # and timedelta scalars, however, can be interpreted as floating-point
+        # nanoseconds by downstream DataFrame constructors, so those two
+        # physical dtypes use pandas' logical scalar view when rows are
+        # reconstructed.  Other extension dtypes already produce logical
+        # values (for example Timestamp with timezone, Period, categorical,
+        # nullable scalar, or Python object) from ``to_numpy`` and avoid the
+        # extra extension-array boxing cost on every emitted cell.  Native
+        # boolean columns are normalized separately because downstream
+        # constructors are deprecating index-like handling of ``np.bool_``.
+        self._arrays = {
+            column: df[column].to_numpy(copy=False)
+            for column in self._columns
+        }
+        self._scalar_arrays = {
+            column: (
+                df[column].array
+                if getattr(array.dtype, "kind", None) in {"M", "m"}
+                else array
+            )
+            for column, array in self._arrays.items()
+        }
+        self._boolean_columns = tuple(
+            column
+            for column, array in self._arrays.items()
+            if getattr(array.dtype, "kind", None) == "b"
+        )
         self._case_map = {str(column).upper(): column for column in self._columns}
         self._row_cache: Dict[int, Dict[str, Any]] = {}
         self._non_null_masks: Dict[str, Any] = {}
@@ -588,7 +615,12 @@ class DataFrameRowAccessor:
         cached = self._row_cache.get(index)
         if cached is not None:
             return cached
-        row = {column: self._arrays[column][index] for column in self._columns}
+        row = {
+            column: self._scalar_arrays[column][index]
+            for column in self._columns
+        }
+        for column in self._boolean_columns:
+            row[column] = bool(row[column])
         self._row_cache[index] = row
         return row
 
@@ -602,7 +634,8 @@ class DataFrameRowAccessor:
         column = self._case_map.get(str(field_name).upper())
         if column is None:
             return None
-        return self._arrays[column][row_idx]
+        value = self._scalar_arrays[column][row_idx]
+        return bool(value) if column in self._boolean_columns else value
 
     def column_array(self, field_name: str):
         """Return the backing numpy array for a column (case-insensitive), or None."""
@@ -1222,15 +1255,17 @@ def _can_use_lazy_partition_rows(matcher, match_config) -> bool:
     """
     Return True when partition rows can be accessed lazily.
 
-    Lazy rows avoid DataFrame.to_dict('records') for the common ONE ROW PER
-    MATCH path.  Queries that need full row reconstruction after matching
-    (ALL ROWS modes, unmatched rows, PERMUTE post-filters, or non-default skip
-    modes) keep the materialized representation.
+    Lazy rows avoid DataFrame.to_dict('records') for ordinary output paths.
+    DataFrameRowAccessor reconstructs exactly the rows that are emitted and
+    exposes column arrays to compiled measures, so both ONE ROW and ALL ROWS
+    can use it when matches are consumed immediately.  Unmatched-row output,
+    PERMUTE post-filters, and non-default skip modes retain materialization
+    because they revisit the global retained-match/input collections.
     """
     pattern = (getattr(matcher, "original_pattern", "") or "").upper()
     return (
-        match_config.rows_per_match == RowsPerMatch.ONE_ROW
-        and match_config.skip_mode == SkipMode.PAST_LAST_ROW
+        match_config.skip_mode == SkipMode.PAST_LAST_ROW
+        and not getattr(match_config, "include_unmatched", False)
         and "PERMUTE" not in pattern
     )
 

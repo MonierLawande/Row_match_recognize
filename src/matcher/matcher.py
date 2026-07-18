@@ -82,6 +82,18 @@ MatchResult = Dict[str, Any]
 VariableAssignments = Dict[str, List[int]]
 RowData = Dict[str, Any]
 
+
+class _AllRowsMeasurePlans(NamedTuple):
+    """Query-invariant projection plan for ALL ROWS PER MATCH output."""
+
+    entries: Tuple[Tuple[Any, ...], ...]
+    output_entries: Tuple[Tuple[Any, ...], ...]
+    running_entries: Tuple[Tuple[Any, ...], ...]
+    final_entries: Tuple[Tuple[Any, ...], ...]
+    has_classifier: bool
+    has_uncompiled_final_fallback: bool
+    permute_matched_rows_only: bool
+
 # PRODUCTION ENHANCEMENT: Enterprise error codes
 class MatcherErrorCodes:
     """Standardized error codes for enterprise monitoring."""
@@ -8098,6 +8110,10 @@ class EnhancedMatcher:
         show_empty = config.show_empty if config else True
         include_unmatched = config.include_unmatched if config else False
         compiled_one_row_measure_plans = None if all_rows else self._prepare_measure_output_plans(measures, rows)
+        compiled_all_rows_measure_plans = (
+            self._prepare_all_rows_measure_plans(measures)
+            if all_rows else None
+        )
         unmatched_indices = set(range(len(rows))) if include_unmatched else None
         track_processed_indices = (
             include_unmatched
@@ -8412,7 +8428,14 @@ class EnhancedMatcher:
                         
                         # Process the match
                         if all_rows:
-                            match_rows = self._process_all_rows_match(match, rows, measures, match_number, config)
+                            match_rows = self._process_all_rows_match(
+                                match,
+                                rows,
+                                measures,
+                                match_number,
+                                config,
+                                compiled_all_rows_measure_plans,
+                            )
                             results.extend(match_rows)
                         else:
                             match_row = self._process_one_row_match(
@@ -8551,7 +8574,14 @@ class EnhancedMatcher:
                 match_time_start = time.time()
                 if DEBUG_ENABLED:
                     logger.debug(f"Processing match {match_number} with ALL ROWS PER MATCH")
-                match_rows = self._process_all_rows_match(match, rows, measures, match_number, config)
+                match_rows = self._process_all_rows_match(
+                    match,
+                    rows,
+                    measures,
+                    match_number,
+                    config,
+                    compiled_all_rows_measure_plans,
+                )
                 results.extend(match_rows)
                 self.timing["process_match"] += time.time() - match_time_start
 
@@ -11190,7 +11220,129 @@ class EnhancedMatcher:
 
 
 
-    def _process_all_rows_match(self, match, rows, measures, match_number, config=None):
+    def _prepare_all_rows_measure_plans(self, measures):
+        """Compile query-invariant ALL ROWS measure metadata once.
+
+        Running aggregate recognition, arithmetic-AST compilation, navigation
+        classification, and FINAL-plan lookup depend on the query, not on an
+        individual match.  Keeping them outside the per-match output loop
+        removes repeated regex/AST work while every unsupported expression
+        still carries a None plan and falls through to MeasureEvaluator.
+
+        Each returned tuple contains:
+        ``(alias, expression, output semantics, navigation flag, kind,
+        simple-running plan, arithmetic-running plan, final plan)``.
+        """
+        prepared = []
+        for alias, expr in (measures or {}).items():
+            compilation_semantics = self.measure_semantics.get(alias, "FINAL")
+            simple_running_plan = self._compile_simple_running_aggregate_plan(
+                expr, compilation_semantics
+            )
+            arithmetic_running_plan = None
+            if simple_running_plan is None:
+                arithmetic_running_plan = (
+                    self._compile_running_aggregate_arithmetic_plan(
+                        expr, compilation_semantics
+                    )
+                )
+
+            if alias in self.measure_semantics:
+                output_semantics = self.measure_semantics[alias]
+            else:
+                # SQL:2016 default for ALL ROWS PER MATCH.
+                output_semantics = "RUNNING"
+
+            expr_upper = expr.upper()
+            has_complex_navigation = (
+                ('+' in expr or '-' in expr or '*' in expr or '/' in expr)
+                and any(
+                    nav_func in expr_upper
+                    for nav_func in ('FIRST(', 'LAST(', 'PREV(', 'NEXT(')
+                )
+                and sum(
+                    expr_upper.count(nav_func)
+                    for nav_func in ('FIRST(', 'LAST(', 'PREV(', 'NEXT(')
+                ) > 1
+            )
+
+            expr_canonical = expr_upper.strip()
+            if expr_canonical == "CLASSIFIER()":
+                kind = "classifier"
+            elif expr_canonical == "MATCH_NUMBER()":
+                kind = "match_number"
+            else:
+                kind = "general"
+
+            final_plan = None
+            if kind == "general" and str(output_semantics).upper() == "FINAL":
+                candidate = self._get_compiled_measure_plan(
+                    alias, expr, output_semantics
+                )
+                if (
+                    candidate is not None
+                    and str(
+                        candidate.get("semantics", output_semantics)
+                    ).upper() == "FINAL"
+                ):
+                    final_plan = candidate
+
+            prepared.append((
+                alias,
+                expr,
+                output_semantics,
+                has_complex_navigation,
+                kind,
+                simple_running_plan,
+                arithmetic_running_plan,
+                final_plan,
+            ))
+        entries = tuple(prepared)
+        output_entries = tuple(entry[:5] for entry in entries)
+        running_entries = tuple(
+            (entry[0], entry[5], entry[6])
+            for entry in entries
+            if entry[5] is not None or entry[6] is not None
+        )
+        final_entries = tuple(
+            (entry[0], entry[7])
+            for entry in entries
+            if entry[7] is not None
+        )
+        has_classifier = any(
+            entry[4] == "classifier" for entry in entries
+        )
+        has_uncompiled_final_fallback = any(
+            entry[4] == "general"
+            and str(entry[2]).upper() != "RUNNING"
+            and not entry[3]
+            and entry[7] is None
+            for entry in entries
+        )
+        permute_matched_rows_only = (
+            hasattr(self.dfa, "metadata")
+            and self.dfa.metadata.get("has_permute", False)
+            and self.dfa.metadata.get("has_alternations", False)
+        )
+        return _AllRowsMeasurePlans(
+            entries=entries,
+            output_entries=output_entries,
+            running_entries=running_entries,
+            final_entries=final_entries,
+            has_classifier=has_classifier,
+            has_uncompiled_final_fallback=has_uncompiled_final_fallback,
+            permute_matched_rows_only=permute_matched_rows_only,
+        )
+
+    def _process_all_rows_match(
+        self,
+        match,
+        rows,
+        measures,
+        match_number,
+        config=None,
+        prepared_measure_plans=None,
+    ):
         """
         Process ALL rows in a match with proper handling for multiple rows and exclusions.
         
@@ -11204,15 +11356,16 @@ class EnhancedMatcher:
         Returns:
             List of result rows
         """
-        process_start = time.time()
         results = []
         
         # Extract excluded variables and rows
-        excluded_vars = match.get("excluded_vars", set())
         excluded_rows = match.get("excluded_rows", [])
-        
-        logger.debug(f"Excluded variables: {excluded_vars}")
-        logger.debug(f"Excluded rows: {excluded_rows}")
+        excluded_row_set = set(excluded_rows) if excluded_rows else set()
+        if DEBUG_ENABLED:
+            logger.debug(
+                f"Excluded variables: {match.get('excluded_vars', set())}"
+            )
+            logger.debug(f"Excluded rows: {excluded_rows}")
         
         # Handle empty matches
         if match.get("is_empty", False) or (match["start"] > match["end"]):
@@ -11228,72 +11381,62 @@ class EnhancedMatcher:
                             match["empty_pattern_rows"] = [match["start"]]
                         
                         results.append(empty_row)
-                        logger.debug(f"Added empty match row for index {match['start']}")
+                        if DEBUG_ENABLED:
+                            logger.debug(
+                                f"Added empty match row for index {match['start']}"
+                            )
            
             return results
-        
-        # Get all matched indices, excluding excluded rows
-        matched_indices = []
-        for var, indices in match["variables"].items():
-            matched_indices.extend(indices)
-        
-        # Sort indices for consistent processing
-        matched_indices = sorted(set(matched_indices))
-        
-        if DEBUG_ENABLED:
-            logger.debug(f"Processing match {match_number}, included indices: {matched_indices}")
-        if excluded_rows:
-            logger.debug(f"Excluded rows: {sorted(excluded_rows)}")
-        
-        # Create context once for all rows with optimized structures
-        context = RowContext(defined_variables=self.defined_variables)
-        context.rows = rows
-        context.variables = match["variables"]
-        context.match_number = match_number
-        context.subsets = self.subsets.copy() if self.subsets else {}
-        context.excluded_rows = excluded_rows
-        
-        # Add empty pattern tracking for proper CLASSIFIER() handling
-        if match.get("is_empty", False) and match.get("empty_pattern_rows"):
-            context._empty_pattern_rows = set(match["empty_pattern_rows"])
-        
-        # The general evaluator builds row-to-variable and navigation indexes
-        # proportional to the match size.  Most ALL ROWS workloads are fully
-        # handled by compiled/precomputed measures below, so construct that
-        # evaluator only if a fallback expression actually needs it.
-        measure_evaluator = None
         
         # For Trino compatibility, we need to include all rows from start to end,
         # skipping only the excluded rows. However, for PERMUTE patterns, we only
         # include rows that actually participated in variable matches
-        if (hasattr(self.dfa, 'metadata') and 
-            self.dfa.metadata.get('has_permute', False) and 
-            self.dfa.metadata.get('has_alternations', False)):
+        prepared = (
+            prepared_measure_plans
+            if prepared_measure_plans is not None
+            else self._prepare_all_rows_measure_plans(measures)
+        )
+        if prepared.permute_matched_rows_only:
             # For PERMUTE with alternations, only include matched variable rows
-            all_indices = matched_indices.copy()
-            logger.debug(f"PERMUTE pattern: using only matched indices {all_indices}")
+            matched_indices = {
+                idx
+                for indices in match["variables"].values()
+                for idx in indices
+            }
+            all_indices = sorted(matched_indices)
+            if DEBUG_ENABLED:
+                logger.debug(
+                    f"PERMUTE pattern: using only matched indices {all_indices}"
+                )
         else:
             # Regular pattern: include all rows from start to end
-            all_indices = list(range(match["start"], match["end"] + 1))
-            logger.debug(f"Regular pattern: using range {all_indices}")
-        
+            all_indices = range(match["start"], match["end"] + 1)
+            if DEBUG_ENABLED:
+                logger.debug(f"Regular pattern: using range {all_indices}")
+
+        if DEBUG_ENABLED:
+            logger.debug(
+                f"Processing match {match_number}, included indices: {all_indices}"
+            )
+            if excluded_rows:
+                logger.debug(f"Excluded rows: {sorted(excluded_rows)}")
+
         # Pre-calculate simple RUNNING aggregates once per match.  Without
         # this, ALL ROWS PER MATCH recomputes SUM/AVG/STDDEV prefixes for
         # every output row, which is O(n^2) on long matches.
         running_aggregates = {}
-        for alias, expr in measures.items():
-            semantics = self.measure_semantics.get(alias, "FINAL")
-            plan = self._compile_simple_running_aggregate_plan(expr, semantics)
+        for alias, simple_running_plan, arithmetic_running_plan in (
+            prepared.running_entries
+        ):
             try:
-                if plan is not None:
+                if simple_running_plan is not None:
                     running_aggregates[alias] = self._precompute_simple_running_aggregate(
-                        plan, match, rows, all_indices
+                        simple_running_plan, match, rows, all_indices
                     )
                     continue
-                arithmetic_plan = self._compile_running_aggregate_arithmetic_plan(expr, semantics)
-                if arithmetic_plan is not None:
+                if arithmetic_running_plan is not None:
                     running_aggregates[alias] = self._precompute_running_aggregate_arithmetic(
-                        arithmetic_plan, match, rows, all_indices
+                        arithmetic_running_plan, match, rows, all_indices
                     )
             except Exception as e:
                 logger.warning(f"Failed to precompute running aggregate {alias}: {e}")
@@ -11303,32 +11446,7 @@ class EnhancedMatcher:
         # navigation detection, and trivially-per-row measures do not depend
         # on the current row, and re-deriving them for every output row
         # dominated ALL ROWS PER MATCH profiles.
-        measure_plans = []
-        for alias, expr in measures.items():
-            if alias in self.measure_semantics:
-                semantics = self.measure_semantics[alias]
-            else:
-                # SQL:2016: in ALL ROWS PER MATCH, measures without an
-                # explicit FINAL keyword use RUNNING semantics.
-                semantics = "RUNNING"
-
-            expr_upper = expr.upper()
-            has_complex_navigation = (
-                # Complex expressions with arithmetic and navigation
-                ('+' in expr or '-' in expr or '*' in expr or '/' in expr) and
-                any(nav_func in expr_upper for nav_func in ['FIRST(', 'LAST(', 'PREV(', 'NEXT(']) and
-                # Skip simple expressions like "FIRST(value) + 1"
-                (expr_upper.count('FIRST(') + expr_upper.count('LAST(') + expr_upper.count('PREV(') + expr_upper.count('NEXT(')) > 1
-            )
-
-            expr_canonical = expr_upper.strip()
-            if expr_canonical == "CLASSIFIER()":
-                kind = "classifier"
-            elif expr_canonical == "MATCH_NUMBER()":
-                kind = "match_number"
-            else:
-                kind = "general"
-            measure_plans.append((alias, expr, semantics, has_complex_navigation, kind))
+        measure_plans = prepared.output_entries
 
         # Simple FINAL measures have one value for the entire match.  Reusing
         # the same compiled plans as ONE ROW PER MATCH avoids evaluating an
@@ -11336,39 +11454,60 @@ class EnhancedMatcher:
         # expression outside the conservative compiled grammar remains on the
         # general evaluator path.
         final_compiled_values = {}
-        for alias, expr, semantics, _has_complex_navigation, kind in measure_plans:
-            if kind != "general" or str(semantics).upper() != "FINAL":
-                continue
-            compiled_plan = self._get_compiled_measure_plan(alias, expr, semantics)
-            if compiled_plan is None:
-                continue
-            if str(compiled_plan.get("semantics", semantics)).upper() != "FINAL":
-                continue
+        compiled_final_failed = False
+        for alias, final_plan in prepared.final_entries:
             try:
                 final_compiled_values[alias] = self._evaluate_compiled_measure_plan(
-                    compiled_plan, match, rows, match_number
+                    final_plan, match, rows, match_number
                 )
             except Exception as e:
-                logger.debug(f"Compiled FINAL measure fallback for {alias}: {e}")
+                compiled_final_failed = True
+                if DEBUG_ENABLED:
+                    logger.debug(
+                        f"Compiled FINAL measure fallback for {alias}: {e}"
+                    )
+
+        has_classifier_measure = prepared.has_classifier
+        needs_final_fallback_context = (
+            prepared.has_uncompiled_final_fallback
+            or compiled_final_failed
+        )
+
+        # Create the relatively rich RowContext only when CLASSIFIER or a
+        # general FINAL fallback consumes it.  Compiled MATCH_NUMBER/running
+        # plans need neither the navigation indexes nor validation structures.
+        context = None
+        if has_classifier_measure or needs_final_fallback_context:
+            context = RowContext(defined_variables=self.defined_variables)
+            context.rows = rows
+            context.variables = match["variables"]
+            context.match_number = match_number
+            context.subsets = self.subsets.copy() if self.subsets else {}
+            context.excluded_rows = excluded_rows
 
         # CLASSIFIER() support: map each matched row to its pattern variable
         # once per match instead of scanning the variables dict per row.
         idx_to_var = {}
-        for var, indices in match["variables"].items():
-            for var_idx in indices:
-                if var_idx not in idx_to_var:
-                    idx_to_var[var_idx] = var
+        if has_classifier_measure:
+            for var, indices in match["variables"].items():
+                for var_idx in indices:
+                    if var_idx not in idx_to_var:
+                        idx_to_var[var_idx] = var
         classifier_cache = {}
-        classifier_forced_null = (
-            match.get("is_empty", False)
-            or match.get("has_empty_alternation", False)
-        )
-        empty_pattern_rows = set(match.get("empty_pattern_rows") or ())
+        classifier_forced_null = False
+        empty_pattern_rows = set()
+        if has_classifier_measure:
+            classifier_forced_null = (
+                match.get("is_empty", False)
+                or match.get("has_empty_alternation", False)
+            )
+            empty_pattern_rows = set(match.get("empty_pattern_rows") or ())
 
         # Process each row in the match range
+        measure_evaluator = None
         for output_pos, idx in enumerate(all_indices):
             # Skip excluded rows
-            if idx in excluded_rows:
+            if idx in excluded_row_set:
                 continue
 
             # Skip rows outside the valid range
@@ -11377,7 +11516,8 @@ class EnhancedMatcher:
 
             # Create result row from original data
             result = dict(rows[idx])
-            context.current_idx = idx
+            if context is not None:
+                context.current_idx = idx
 
             # Calculate measures
             for alias, expr, semantics, has_complex_navigation, kind in measure_plans:
@@ -11390,6 +11530,8 @@ class EnhancedMatcher:
                             if pattern_var is not None:
                                 cased = classifier_cache.get(pattern_var)
                                 if cased is None:
+                                    # has_classifier_measure guarantees that
+                                    # the shared context was constructed.
                                     cased = context._apply_case_sensitivity_rule(pattern_var)
                                     classifier_cache[pattern_var] = cased
                                 result[alias] = cased
@@ -11447,7 +11589,11 @@ class EnhancedMatcher:
                         if measure_evaluator is None:
                             measure_evaluator = MeasureEvaluator(context)
                         result[alias] = measure_evaluator.evaluate(expr, semantics)
-                        logger.debug(f"Evaluated measure {alias} for row {idx} with {semantics} semantics: {result[alias]}")
+                        if DEBUG_ENABLED:
+                            logger.debug(
+                                f"Evaluated measure {alias} for row {idx} "
+                                f"with {semantics} semantics: {result[alias]}"
+                            )
                     
                 except Exception as e:
                     logger.error(f"Error evaluating measure {alias} for row {idx}: {e}")
@@ -11464,7 +11610,8 @@ class EnhancedMatcher:
             result["_match_output_order"] = len(results)
             
             results.append(result)
-            logger.debug(f"Added row {idx} to results")
+            if DEBUG_ENABLED:
+                logger.debug(f"Added row {idx} to results")
         
         return results
 
