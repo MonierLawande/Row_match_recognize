@@ -52,6 +52,36 @@ MAX_CACHE_SIZE = 1000          # LRU cache limit for aggregate results
 MAX_ARRAY_SIZE = 100000        # Maximum array aggregation size
 PERFORMANCE_LOG_THRESHOLD = 0.1  # Log slow operations (100ms)
 
+
+def _expression_literal(value: Any) -> str:
+    """Return a restricted-expression literal for a runtime scalar.
+
+    Row stores may expose either Python or NumPy scalar values.  ``repr`` of
+    a NumPy scalar (for example ``np.int64(2)``) is a constructor call rather
+    than a literal, which the deliberately restricted FILTER/MEASURES AST
+    evaluator must reject.  Normalize NumPy scalars to their logical Python
+    value, represent SQL null-like values as ``None``, and use stable ISO
+    strings for temporal scalars.  This keeps expression substitution
+    independent of the physical row-store implementation.
+    """
+    if value is None:
+        return "None"
+    if isinstance(value, (np.datetime64, np.timedelta64)):
+        if np.isnat(value):
+            return "None"
+        return repr(str(value))
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and math.isnan(value):
+        return "None"
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        try:
+            return repr(isoformat())
+        except (TypeError, ValueError):
+            pass
+    return repr(value)
+
 class AggregateMode(Enum):
     """Aggregate evaluation modes."""
     RUNNING = "RUNNING"     # Include only rows up to current position
@@ -488,7 +518,11 @@ class ProductionAggregateEvaluator:
                 start = prefix_match.start()
 
             value = self.evaluate_aggregate(call["text"], leaf_semantics)
-            working = working[:start] + repr(value) + working[call["end"]:]
+            working = (
+                working[:start]
+                + _expression_literal(value)
+                + working[call["end"]:]
+            )
 
         try:
             from src.matcher.condition_evaluator import ConditionEvaluator
@@ -2712,7 +2746,11 @@ class ProductionAggregateEvaluator:
                 )
             finally:
                 self.context.current_idx = old_idx
-            expr = expr[:call["start"]] + repr(value) + expr[call["end"]:]
+            expr = (
+                expr[:call["start"]]
+                + _expression_literal(value)
+                + expr[call["end"]:]
+            )
 
         # Navigation in a FILTER predicate is evaluated at the outer
         # aggregate frame, not independently at every candidate row.  For
@@ -2730,7 +2768,11 @@ class ProductionAggregateEvaluator:
                 value = self._evaluate_navigation_call(call)
             finally:
                 self.context.current_idx = old_idx
-            expr = expr[:call["start"]] + repr(value) + expr[call["end"]:]
+            expr = (
+                expr[:call["start"]]
+                + _expression_literal(value)
+                + expr[call["end"]:]
+            )
 
         # Replace variable.column references with values from the candidate row.
         def replace_var_col(match: re.Match) -> str:
@@ -2740,7 +2782,9 @@ class ProductionAggregateEvaluator:
             if row_idx not in valid_indices:
                 return "None"
             if 0 <= row_idx < len(self.context.rows):
-                return repr(self.context.rows[row_idx].get(col_name))
+                return _expression_literal(
+                    self.context.rows[row_idx].get(col_name)
+                )
             return "None"
 
         expr = re.sub(
