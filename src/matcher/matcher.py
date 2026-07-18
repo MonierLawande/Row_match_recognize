@@ -8134,6 +8134,10 @@ class EnhancedMatcher:
         self._fast_one_row_columns = None
         if not all_rows and not include_unmatched and not track_processed_indices:
             fast_results = self._run_fast_one_row_pass(rows, config, measures)
+            if fast_results is None:
+                fast_results = self._run_fast_condition_linear_one_row_pass(
+                    rows, config, measures
+                )
             if fast_results is not None:
                 fast_count = len(fast_results)
                 if not fast_count:
@@ -9772,6 +9776,14 @@ class EnhancedMatcher:
         cannot produce empty matches, and measures fully covered by compiled
         plans.
         """
+        result_processor = getattr(
+            self._process_one_row_match, "__func__", self._process_one_row_match
+        )
+        if not getattr(result_processor, "_fused_bypass_safe", False):
+            # Embedders and tests may override the result processor to attach
+            # auditing, lifecycle, or custom projection behavior.  A fused
+            # executor must preserve that extension point.
+            return None
         if config is not None:
             if getattr(config, "rows_per_match", RowsPerMatch.ONE_ROW) != RowsPerMatch.ONE_ROW:
                 return None
@@ -10160,6 +10172,194 @@ class EnhancedMatcher:
 
         # Direct callers (tests, embedding code) keep the historical
         # list-of-dicts shape.
+        names = list(columns.keys())
+        value_lists = list(columns.values())
+        return [
+            dict(zip(names, row_values))
+            for row_values in zip(*value_lists)
+        ] if match_count else []
+
+    def _run_fast_condition_linear_one_row_pass(
+        self, rows, config, measures,
+    ):
+        """Fuse exact linear matching with compiled ONE ROW output.
+
+        State-dependent ``DEFINE`` expressions cannot use the row-local DFA
+        executor because their truth changes with the tentative assignment.
+        A large and useful subset still has a linear pattern shape, however,
+        and is already handled exactly by
+        :meth:`_find_single_match_condition_linear`.  The general
+        ``find_matches`` loop previously wrapped that executor in progress,
+        skip, retained-match, and dictionary-oriented output machinery for
+        every match even when the query requested the ordinary SQL defaults.
+
+        This method removes only that orchestration overhead.  Predicate
+        evaluation, greedy rollback, search-budget enforcement, measure
+        closures, and start-feasibility proofs are the same implementations
+        used by the complete path.  Any unsupported output expression or
+        feature returns ``None`` before matching begins, causing the caller to
+        use the general executor unchanged.
+        """
+        result_processor = getattr(
+            self._process_one_row_match, "__func__", self._process_one_row_match
+        )
+        if not getattr(result_processor, "_fused_bypass_safe", False):
+            return None
+        if config is not None:
+            if (
+                getattr(config, "rows_per_match", RowsPerMatch.ONE_ROW)
+                != RowsPerMatch.ONE_ROW
+            ):
+                return None
+            if config.skip_mode != SkipMode.PAST_LAST_ROW:
+                return None
+            if getattr(config, "include_unmatched", False):
+                return None
+        if not measures or not hasattr(rows, "column_array"):
+            return None
+        if self.has_empty_alternation or not self._should_use_condition_backtracking():
+            return None
+
+        measure_plans = self._prepare_measure_output_plans(measures, rows)
+        if not measure_plans or any(
+            plan_fn is None
+            for _alias, _expr, _semantics, _plan, plan_fn in measure_plans
+        ):
+            return None
+
+        row_count = len(rows)
+        if row_count == 0:
+            return None
+        context = RowContext(
+            rows=rows,
+            defined_variables=self.defined_variables,
+        )
+        linear_execution = self._prepare_condition_linear_execution(context)
+        if linear_execution is None:
+            return None
+        (
+            linear_plan,
+            execution_tokens,
+            runtime,
+            has_start_anchor,
+            has_end_anchor,
+        ) = linear_execution
+        if sum(token[1] for token in linear_plan) < 1:
+            return None
+
+        start_mask = self._build_start_position_mask(row_count)
+        feasible_mask = self._condition_linear_feasible_start_mask(
+            row_count,
+            linear_plan,
+            runtime,
+            has_start_anchor,
+            has_end_anchor,
+        )
+        if feasible_mask is not None:
+            if start_mask is None:
+                start_mask = feasible_mask
+            else:
+                start_mask = np.logical_and(start_mask, feasible_mask)
+        start_positions = (
+            np.flatnonzero(start_mask) if start_mask is not None else None
+        )
+        step_budget = self._condition_linear_step_budget(
+            row_count, linear_plan
+        )
+
+        prefix_data = []
+        seen_prefixes = set()
+        for col in list(self.partition_columns) + list(self.order_columns):
+            if col in seen_prefixes:
+                continue
+            seen_prefixes.add(col)
+            column = rows.column_array(col)
+            if column is not None:
+                prefix_data.append((col, column, [], [False]))
+        measure_data = [
+            (alias, plan_fn, [])
+            for alias, _expr, _semantics, _plan, plan_fn in measure_plans
+        ]
+        match_numbers = []
+        row_indices = []
+        match_count = 0
+        match_number = 1
+        start = 0
+        nan_value = float("nan")
+
+        positions = start_positions
+        position_count = len(positions) if positions is not None else 0
+        cursor = 0
+        while start < row_count:
+            if positions is not None:
+                while cursor < position_count and positions[cursor] < start:
+                    cursor += 1
+                if cursor >= position_count:
+                    break
+                start = int(positions[cursor])
+                cursor += 1
+
+            context.reset_for_exact_match_attempt(
+                start,
+                self.subsets,
+                match_number=match_number,
+            )
+            variables = context.variables
+            context.current_var_assignments = variables
+            context._define_assignment_versions = None
+            context._define_aggregate_cache = None
+            match = self._find_single_match_condition_linear(
+                rows,
+                start,
+                context,
+                execution_tokens,
+                variables,
+                step_budget,
+                has_start_anchor,
+                has_end_anchor,
+                compact_match=True,
+            )
+            if match is None:
+                start += 1
+                continue
+
+            match_start = match["start"]
+            for _col, column, values, seen in prefix_data:
+                value = column[match_start]
+                if value is None:
+                    values.append(nan_value)
+                else:
+                    values.append(value)
+                    seen[0] = True
+            for alias, plan_fn, values in measure_data:
+                try:
+                    values.append(plan_fn(match, match_number))
+                except Exception as exc:
+                    # Match the complete ONE ROW evaluator's per-measure
+                    # failure isolation.  A compiled output optimization is
+                    # never allowed to change whether the match exists.
+                    logger.error(
+                        f"Error evaluating compiled measure {alias}: {exc}"
+                    )
+                    values.append(None)
+            match_numbers.append(match_number)
+            row_indices.append(match_start)
+            match_count += 1
+            match_number += 1
+            start = match["end"] + 1
+
+        columns = {}
+        for col, _column, values, seen in prefix_data:
+            if seen[0]:
+                columns[col] = values
+        for alias, _plan_fn, values in measure_data:
+            columns[alias] = values
+        columns["MATCH_NUMBER"] = match_numbers
+        columns["_original_row_idx"] = row_indices
+
+        if getattr(self, "_fast_columnar_result", False):
+            self._fast_one_row_columns = (columns, match_count)
+            return []
         names = list(columns.keys())
         value_lists = list(columns.values())
         return [
@@ -11176,7 +11376,11 @@ class EnhancedMatcher:
         
         return result
 
-    
+    # The built-in processor's semantics are reproduced by the guarded fused
+    # ONE ROW executors.  Overrides intentionally do not inherit this marker,
+    # so custom lifecycle/projection hooks force the complete path.
+    _process_one_row_match._fused_bypass_safe = True
+
 
     def _get_state_description(self, state_idx):
         """Get a human-readable description of a state."""
