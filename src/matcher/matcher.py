@@ -93,6 +93,9 @@ class _AllRowsMeasurePlans(NamedTuple):
     has_classifier: bool
     has_uncompiled_final_fallback: bool
     permute_matched_rows_only: bool
+    fully_compiled: bool
+    direct_projection: bool
+    classifier_names: Dict[str, str]
 
 # PRODUCTION ENHANCEMENT: Enterprise error codes
 class MatcherErrorCodes:
@@ -8186,6 +8189,42 @@ class EnhancedMatcher:
                 "count": 0,
             }
 
+        # Ordinary immediate ALL ROWS output can retain only row indices and
+        # compiled measure vectors until the partition finishes.  Eligibility
+        # is proof-based: every measure must have a complete compiled plan,
+        # the pattern cannot emit empty matches, and no later semantic phase
+        # may revisit retained matches or unmatched rows.  Any runtime plan
+        # failure flushes this compact state to legacy dictionaries and
+        # permanently resumes the general evaluator for the partition.
+        columnar_all_rows_output = None
+        if (
+            all_rows
+            and not include_unmatched
+            and not track_processed_indices
+            and not retain_completed_matches
+            and getattr(self, "_fast_columnar_result", False)
+            and compiled_all_rows_measure_plans is not None
+            and compiled_all_rows_measure_plans.fully_compiled
+            and not compiled_all_rows_measure_plans.permute_matched_rows_only
+            and hasattr(rows, "column_array_exact")
+            and hasattr(rows, "column_names")
+            and self._pattern_can_match_empty(
+                str(self.original_pattern or "")
+            ) is False
+        ):
+            columnar_all_rows_output = {
+                "row_indices": [],
+                "measures": {
+                    alias: []
+                    for alias, _expr, _semantics, _navigation, _kind
+                    in compiled_all_rows_measure_plans.output_entries
+                },
+                "match_numbers": [],
+                "match_starts": [],
+                "match_output_order": [],
+                "count": 0,
+            }
+
         # UNLIMITED SCALE PROCESSING: Intelligent iteration management without hard limits
         # Remove all artificial iteration constraints for true unlimited dataset processing
         # Implement smart infinite loop detection instead of arbitrary iteration limits
@@ -8428,15 +8467,31 @@ class EnhancedMatcher:
                         
                         # Process the match
                         if all_rows:
-                            match_rows = self._process_all_rows_match(
-                                match,
-                                rows,
-                                measures,
-                                match_number,
-                                config,
-                                compiled_all_rows_measure_plans,
-                            )
-                            results.extend(match_rows)
+                            if columnar_all_rows_output is not None:
+                                appended = self._append_compiled_all_rows_match(
+                                    columnar_all_rows_output,
+                                    match,
+                                    rows,
+                                    match_number,
+                                    compiled_all_rows_measure_plans,
+                                )
+                                if not appended:
+                                    results.extend(
+                                        self._materialize_compiled_all_rows(
+                                            columnar_all_rows_output, rows
+                                        )
+                                    )
+                                    columnar_all_rows_output = None
+                            if columnar_all_rows_output is None:
+                                match_rows = self._process_all_rows_match(
+                                    match,
+                                    rows,
+                                    measures,
+                                    match_number,
+                                    config,
+                                    compiled_all_rows_measure_plans,
+                                )
+                                results.extend(match_rows)
                         else:
                             match_row = self._process_one_row_match(
                                 match,
@@ -8574,15 +8629,31 @@ class EnhancedMatcher:
                 match_time_start = time.time()
                 if DEBUG_ENABLED:
                     logger.debug(f"Processing match {match_number} with ALL ROWS PER MATCH")
-                match_rows = self._process_all_rows_match(
-                    match,
-                    rows,
-                    measures,
-                    match_number,
-                    config,
-                    compiled_all_rows_measure_plans,
-                )
-                results.extend(match_rows)
+                if columnar_all_rows_output is not None:
+                    appended = self._append_compiled_all_rows_match(
+                        columnar_all_rows_output,
+                        match,
+                        rows,
+                        match_number,
+                        compiled_all_rows_measure_plans,
+                    )
+                    if not appended:
+                        results.extend(
+                            self._materialize_compiled_all_rows(
+                                columnar_all_rows_output, rows
+                            )
+                        )
+                        columnar_all_rows_output = None
+                if columnar_all_rows_output is None:
+                    match_rows = self._process_all_rows_match(
+                        match,
+                        rows,
+                        measures,
+                        match_number,
+                        config,
+                        compiled_all_rows_measure_plans,
+                    )
+                    results.extend(match_rows)
                 self.timing["process_match"] += time.time() - match_time_start
 
                 # Update unmatched indices efficiently only when tracking is active.
@@ -8703,9 +8774,19 @@ class EnhancedMatcher:
                 columnar_one_row_output["count"],
             )
 
+        if (
+            columnar_all_rows_output is not None
+            and columnar_all_rows_output["count"]
+        ):
+            self._fast_one_row_columns = self._compiled_all_rows_columns(
+                columnar_all_rows_output, rows
+            )
+
         output_row_count = len(results)
         if columnar_one_row_output is not None:
             output_row_count += columnar_one_row_output["count"]
+        if columnar_all_rows_output is not None:
+            output_row_count += columnar_all_rows_output["count"]
 
         self.timing["total"] = time.time() - start_time
         
@@ -11324,6 +11405,28 @@ class EnhancedMatcher:
             and self.dfa.metadata.get("has_permute", False)
             and self.dfa.metadata.get("has_alternations", False)
         )
+        fully_compiled = all(
+            entry[4] in {"classifier", "match_number"}
+            or entry[5] is not None
+            or entry[6] is not None
+            or entry[7] is not None
+            for entry in entries
+        )
+        direct_projection = all(
+            entry[4] in {"classifier", "match_number"}
+            for entry in entries
+        )
+        classifier_names = {}
+        if has_classifier:
+            classifier_context = RowContext(
+                defined_variables=self.defined_variables
+            )
+            classifier_names = {
+                variable: classifier_context._apply_case_sensitivity_rule(
+                    variable
+                )
+                for variable in self._pattern_variable_set
+            }
         return _AllRowsMeasurePlans(
             entries=entries,
             output_entries=output_entries,
@@ -11332,7 +11435,264 @@ class EnhancedMatcher:
             has_classifier=has_classifier,
             has_uncompiled_final_fallback=has_uncompiled_final_fallback,
             permute_matched_rows_only=permute_matched_rows_only,
+            fully_compiled=fully_compiled,
+            direct_projection=direct_projection,
+            classifier_names=classifier_names,
         )
+
+    @staticmethod
+    def _ordinary_all_rows_indices(match, prepared):
+        """Return the SQL output positions for one non-empty match."""
+        if prepared.permute_matched_rows_only:
+            matched_indices = {
+                idx
+                for indices in match["variables"].values()
+                for idx in indices
+            }
+            return sorted(matched_indices)
+        return range(match["start"], match["end"] + 1)
+
+    def _append_compiled_all_rows_match(
+        self,
+        state,
+        match,
+        rows,
+        match_number,
+        prepared,
+    ):
+        """Append one match to a staged columnar ALL ROWS result.
+
+        The method commits values only after every compiled measure succeeds.
+        ``False`` therefore means the caller can materialize the previously
+        staged rows and evaluate this match with the complete row-oriented
+        path without duplicating or losing output.
+        """
+        if match.get("is_empty", False) or match["start"] > match["end"]:
+            return False
+
+        if prepared.direct_projection:
+            return self._append_direct_all_rows_match(
+                state, match, rows, match_number, prepared
+            )
+
+        all_indices = self._ordinary_all_rows_indices(match, prepared)
+        excluded_rows = match.get("excluded_rows") or ()
+        excluded = set(excluded_rows) if excluded_rows else None
+        selected = [
+            (position, idx)
+            for position, idx in enumerate(all_indices)
+            if (excluded is None or idx not in excluded)
+            and 0 <= idx < len(rows)
+        ]
+        if not selected:
+            return True
+
+        running_values = {}
+        try:
+            for alias, simple_plan, arithmetic_plan in prepared.running_entries:
+                if simple_plan is not None:
+                    running_values[alias] = (
+                        self._precompute_simple_running_aggregate(
+                            simple_plan, match, rows, all_indices
+                        )
+                    )
+                else:
+                    running_values[alias] = (
+                        self._precompute_running_aggregate_arithmetic(
+                            arithmetic_plan, match, rows, all_indices
+                        )
+                    )
+
+            final_values = {
+                alias: self._evaluate_compiled_measure_plan(
+                    final_plan, match, rows, match_number
+                )
+                for alias, final_plan in prepared.final_entries
+            }
+        except Exception as exc:
+            if DEBUG_ENABLED:
+                logger.debug(
+                    "Columnar ALL ROWS measure fallback for match %s: %s",
+                    match_number,
+                    exc,
+                )
+            return False
+
+        classifier_by_row = None
+        if prepared.has_classifier:
+            classifier_by_row = {}
+            if not match.get("has_empty_alternation", False):
+                for variable, indices in match["variables"].items():
+                    classifier = prepared.classifier_names.get(variable)
+                    if classifier is None:
+                        # Direct/custom matcher calls may provide a variable
+                        # absent from compiled pattern metadata.
+                        context = RowContext(
+                            defined_variables=self.defined_variables
+                        )
+                        classifier = context._apply_case_sensitivity_rule(
+                            variable
+                        )
+                    for idx in indices:
+                        classifier_by_row.setdefault(idx, classifier)
+
+        staged_measures = {}
+        selected_positions = [position for position, _idx in selected]
+        output_count = len(selected)
+        for (
+            alias,
+            _expr,
+            _semantics,
+            _has_complex_navigation,
+            kind,
+        ) in prepared.output_entries:
+            if kind == "match_number":
+                values = [match_number] * output_count
+            elif kind == "classifier":
+                values = [
+                    classifier_by_row.get(idx)
+                    for _position, idx in selected
+                ]
+            elif alias in final_values:
+                values = [final_values[alias]] * output_count
+            elif alias in running_values:
+                complete_values = running_values[alias]
+                if any(
+                    position >= len(complete_values)
+                    for position in selected_positions
+                ):
+                    return False
+                values = [
+                    complete_values[position]
+                    for position in selected_positions
+                ]
+            else:
+                return False
+            staged_measures[alias] = values
+
+        # Commit after all expressions have succeeded.  The state owns only
+        # compact indices and measure vectors; source rows are gathered once
+        # when the partition is complete.
+        state["row_indices"].extend(idx for _position, idx in selected)
+        for alias, values in staged_measures.items():
+            state["measures"][alias].extend(values)
+        state["match_numbers"].extend([match_number] * output_count)
+        state["match_starts"].extend([match["start"]] * output_count)
+        state["match_output_order"].extend(range(output_count))
+        state["count"] += output_count
+        return True
+
+    def _append_direct_all_rows_match(
+        self,
+        state,
+        match,
+        rows,
+        match_number,
+        prepared,
+    ):
+        """Append source rows with only metadata measures.
+
+        This is the terminal form of the compiled projection plan: it is
+        valid for any pattern when every measure is MATCH_NUMBER or
+        CLASSIFIER.  No expression evaluation can fail, so indices and
+        metadata can be appended directly without per-match staging maps.
+        """
+        start_idx = match["start"]
+        end_idx = match["end"]
+        excluded_rows = match.get("excluded_rows") or ()
+        if excluded_rows:
+            excluded = set(excluded_rows)
+            output_indices = [
+                idx
+                for idx in range(start_idx, end_idx + 1)
+                if idx not in excluded and 0 <= idx < len(rows)
+            ]
+        elif start_idx >= 0 and end_idx < len(rows):
+            output_indices = range(start_idx, end_idx + 1)
+        else:
+            output_indices = [
+                idx
+                for idx in range(start_idx, end_idx + 1)
+                if 0 <= idx < len(rows)
+            ]
+
+        output_count = len(output_indices)
+        if not output_count:
+            return True
+
+        classifier_by_row = None
+        if prepared.has_classifier:
+            classifier_by_row = {}
+            if not match.get("has_empty_alternation", False):
+                for variable, indices in match["variables"].items():
+                    classifier = prepared.classifier_names.get(variable)
+                    if classifier is None:
+                        context = RowContext(
+                            defined_variables=self.defined_variables
+                        )
+                        classifier = context._apply_case_sensitivity_rule(
+                            variable
+                        )
+                    for idx in indices:
+                        classifier_by_row.setdefault(idx, classifier)
+
+        state["row_indices"].extend(output_indices)
+        for alias, _expr, _semantics, _navigation, kind in (
+            prepared.output_entries
+        ):
+            if kind == "match_number":
+                state["measures"][alias].extend(
+                    [match_number] * output_count
+                )
+            else:
+                state["measures"][alias].extend(
+                    classifier_by_row.get(idx) for idx in output_indices
+                )
+        state["match_numbers"].extend([match_number] * output_count)
+        state["match_starts"].extend([start_idx] * output_count)
+        state["match_output_order"].extend(range(output_count))
+        state["count"] += output_count
+        return True
+
+    @staticmethod
+    def _compiled_all_rows_columns(state, rows):
+        """Gather staged ALL ROWS output into one columnar partition block."""
+        indices = np.asarray(state["row_indices"], dtype=np.intp)
+        columns = {}
+        for column_name in rows.column_names():
+            source = rows.column_array_exact(column_name)
+            if source is None:
+                columns[column_name] = [
+                    rows[idx].get(column_name) for idx in state["row_indices"]
+                ]
+            else:
+                columns[column_name] = source[indices]
+        for alias, values in state["measures"].items():
+            columns[alias] = values
+        columns["MATCH_NUMBER"] = state["match_numbers"]
+        columns["IS_EMPTY_MATCH"] = [False] * state["count"]
+        columns["_original_row_idx"] = indices
+        columns["_match_sort_pos"] = state["match_starts"]
+        columns["_match_sort_kind"] = [1] * state["count"]
+        columns["_match_output_order"] = state["match_output_order"]
+        return columns, state["count"]
+
+    def _materialize_compiled_all_rows(self, state, rows):
+        """Convert staged output to legacy dictionaries after a fallback."""
+        materialized = []
+        aliases = tuple(state["measures"])
+        for position, idx in enumerate(state["row_indices"]):
+            result = dict(rows[idx])
+            for alias in aliases:
+                result[alias] = state["measures"][alias][position]
+            result["MATCH_NUMBER"] = state["match_numbers"][position]
+            result["IS_EMPTY_MATCH"] = False
+            result["_original_row_idx"] = idx
+            result["_match_sort_pos"] = state["match_starts"][position]
+            result["_match_sort_kind"] = 1
+            result["_match_output_order"] = state["match_output_order"][position]
+            materialized.append(result)
+        return materialized
 
     def _process_all_rows_match(
         self,

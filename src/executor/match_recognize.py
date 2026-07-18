@@ -646,6 +646,10 @@ class DataFrameRowAccessor:
         """Return a backing column only for the exact scalar-evaluator key."""
         return self._arrays.get(field_name)
 
+    def column_names(self):
+        """Return source column names in their original DataFrame order."""
+        return tuple(self._columns)
+
     def non_null_mask(self, field_name: str):
         """Return a cached boolean numpy array of non-null cells for a column, or None."""
         column = self._case_map.get(str(field_name).upper())
@@ -2412,6 +2416,9 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 # output rows.  WITH UNMATCHED ROWS is different: unmatched
                 # rows are appended after matching and must be merged back by
                 # input/match position, so it retains the stable sort.
+                has_columnar_chunks = any(
+                    isinstance(item, _FastRowChunk) for item in results
+                )
                 if match_config.include_unmatched:
                     for i, result in enumerate(results):
                         result['_original_order'] = i
@@ -2443,20 +2450,47 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     sorted_results = sorted(results, key=safe_sort_key)
                 else:
                     sorted_results = results
-                
-                # PRODUCTION FIX: Check if we used partition sorting before removing the tracking fields
-                used_partition_sorting = partition_by and any(
-                    ('_partition_index' in result and '_partition_row_index' in result) 
-                    for result in sorted_results[:1] if sorted_results
-                )
-                
-                # Remove the temporary ordering fields
-                for result in sorted_results:
-                    result.pop('_original_order', None)
-                    result.pop('_partition_index', None)
-                    result.pop('_partition_row_index', None)
-                
-                result_df = _create_dataframe_with_preserved_types(sorted_results)
+
+                if has_columnar_chunks:
+                    # Columnar ALL ROWS is enabled only for immediate output
+                    # modes, so chunks are already appended in partition and
+                    # match order.  Assemble source/measure arrays directly;
+                    # the ordinary DataFrame pipeline below still applies
+                    # SELECT projection, aliases, outer ordering, and removal
+                    # of internal columns.
+                    result_df = _build_one_row_result_frame(sorted_results)
+                    used_partition_sorting = bool(partition_by)
+                    result_df.drop(
+                        columns=[
+                            column
+                            for column in (
+                                '_original_order',
+                                '_partition_index',
+                                '_partition_row_index',
+                            )
+                            if column in result_df.columns
+                        ],
+                        inplace=True,
+                    )
+                    # Recovery loops below are only needed for dictionary
+                    # rows.  A chunk contains every compiled measure column.
+                    sorted_results = []
+                else:
+                    # PRODUCTION FIX: Check if we used partition sorting before removing the tracking fields
+                    used_partition_sorting = partition_by and any(
+                        ('_partition_index' in result and '_partition_row_index' in result)
+                        for result in sorted_results[:1] if sorted_results
+                    )
+
+                    # Remove the temporary ordering fields
+                    for result in sorted_results:
+                        result.pop('_original_order', None)
+                        result.pop('_partition_index', None)
+                        result.pop('_partition_row_index', None)
+
+                    result_df = _create_dataframe_with_preserved_types(
+                        sorted_results
+                    )
                 
                 # Reset the DataFrame index to be sequential
                 result_df.reset_index(drop=True, inplace=True)
