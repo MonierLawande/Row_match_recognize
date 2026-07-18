@@ -4802,6 +4802,7 @@ class EnhancedMatcher:
                 max_rep,
                 implicit_true,
                 *token_runtime,
+                getattr(token_runtime[2], "prepare_linear_token", None),
             ))
         return (
             linear_plan,
@@ -5061,6 +5062,7 @@ class EnhancedMatcher:
                 true_run_length,
                 prefilter_run_lengths,
                 entire_range_is_true,
+                prepare_linear_token,
             ) = execution_tokens[token_index]
             base_position = position
             base_undo = assigned_count
@@ -5220,23 +5222,20 @@ class EnhancedMatcher:
                         used_batch = True
 
             prepared_token_condition = None
-            if not used_batch and bound is not None:
-                prepare_linear_token = getattr(
-                    bound, "prepare_linear_token", None
-                )
-                if prepare_linear_token is not None:
-                    # The compiler only exposes this hook when the condition
-                    # has one row-local numeric operand and a scalar operand
-                    # proved invariant while ``name`` is extended.  Bind the
-                    # scalar after all preceding-token assignments are in
-                    # place, and discard it before any rollback can change
-                    # those assignments.
-                    context.current_idx = position
-                    context.current_var = name
-                    try:
-                        prepared_token_condition = prepare_linear_token(name)
-                    except Exception:
-                        prepared_token_condition = None
+            if not used_batch and prepare_linear_token is not None:
+                # The compiler only exposes this hook when the condition has
+                # one row-local numeric operand and a scalar operand proved
+                # invariant while ``name`` is extended.  Bind the scalar after
+                # all preceding-token assignments are in place, and discard
+                # it before any rollback can change those assignments.  The
+                # hook itself is prejoined into the immutable execution token
+                # rather than rediscovered in every candidate match.
+                context.current_idx = position
+                context.current_var = name
+                try:
+                    prepared_token_condition = prepare_linear_token(name)
+                except Exception:
+                    prepared_token_condition = None
 
             while (
                 not used_batch
@@ -10220,7 +10219,15 @@ class EnhancedMatcher:
         if self.has_empty_alternation or not self._should_use_condition_backtracking():
             return None
 
-        measure_plans = self._prepare_measure_output_plans(measures, rows)
+        measure_plans = self._prepare_measure_output_plans(
+            measures,
+            rows,
+            # The exact linear executor appends row positions monotonically
+            # and transfers those lists without reordering.  Direct variable
+            # FIRST/LAST measures may therefore read their endpoints.  Other
+            # matchers and subset unions retain defensive min/max resolution.
+            ordered_assignments=True,
+        )
         if not measure_plans or any(
             plan_fn is None
             for _alias, _expr, _semantics, _plan, plan_fn in measure_plans
@@ -11023,7 +11030,9 @@ class EnhancedMatcher:
                 result.append(None)
         return result
 
-    def _prepare_measure_output_plans(self, measures, rows=None):
+    def _prepare_measure_output_plans(
+        self, measures, rows=None, *, ordered_assignments=False,
+    ):
         """Precompile measure expressions once per output pass.
 
         The previous implementation looked up/compiled the same measure plan
@@ -11040,11 +11049,20 @@ class EnhancedMatcher:
         for alias, expr in measures.items():
             semantics = self.measure_semantics.get(alias, "FINAL")
             plan = self._get_compiled_measure_plan(alias, expr, semantics)
-            plan_fn = self._compile_measure_plan_closure(plan, rows) if plan is not None else None
+            plan_fn = (
+                self._compile_measure_plan_closure(
+                    plan,
+                    rows,
+                    ordered_assignments=ordered_assignments,
+                )
+                if plan is not None else None
+            )
             plans.append((alias, expr, semantics, plan, plan_fn))
         return plans
 
-    def _compile_measure_plan_closure(self, plan, rows):
+    def _compile_measure_plan_closure(
+        self, plan, rows, *, ordered_assignments=False,
+    ):
         """Compile a simple measure plan into a per-match closure.
 
         Returns ``fn(match, match_number)`` or None when the row store does
@@ -11100,8 +11118,15 @@ class EnhancedMatcher:
                     direct_scope_key = folded_matches[0]
 
         if direct_scope_key is not None:
-            def var_indices(match, _key=direct_scope_key):
-                return (match.get("variables", {}) or {}).get(_key, [])
+            if ordered_assignments:
+                def var_indices(match, _key=direct_scope_key):
+                    # Exact linear matches always publish the assignment map;
+                    # bypass compatibility-oriented missing/None handling in
+                    # the fused executor only.
+                    return match["variables"].get(_key, ())
+            else:
+                def var_indices(match, _key=direct_scope_key):
+                    return (match.get("variables", {}) or {}).get(_key, [])
         elif is_subset_scope:
             def var_indices(match):
                 return self._resolve_scope_indices(
@@ -11153,19 +11178,33 @@ class EnhancedMatcher:
             return count_field
 
         if kind == "FIRST":
-            def first_field(match, match_number):
-                indices = var_indices(match)
-                if not indices:
-                    return None
-                return column[min(indices)]
+            if ordered_assignments and direct_scope_key is not None:
+                def first_field(match, match_number):
+                    indices = var_indices(match)
+                    if not indices:
+                        return None
+                    return column[indices[0]]
+            else:
+                def first_field(match, match_number):
+                    indices = var_indices(match)
+                    if not indices:
+                        return None
+                    return column[min(indices)]
             return first_field
 
         if kind == "LAST":
-            def last_field(match, match_number):
-                indices = var_indices(match)
-                if not indices:
-                    return None
-                return column[max(indices)]
+            if ordered_assignments and direct_scope_key is not None:
+                def last_field(match, match_number):
+                    indices = var_indices(match)
+                    if not indices:
+                        return None
+                    return column[indices[-1]]
+            else:
+                def last_field(match, match_number):
+                    indices = var_indices(match)
+                    if not indices:
+                        return None
+                    return column[max(indices)]
             return last_field
 
         if kind in {"SUM_FIELD", "AVG_FIELD", "MIN_FIELD", "MAX_FIELD"}:

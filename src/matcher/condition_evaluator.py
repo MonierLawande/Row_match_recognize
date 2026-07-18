@@ -3178,6 +3178,46 @@ def _compile_fast_condition_expression(node):
                             evaluate_bound_numeric_compare
                         )
 
+                        # One context-bound predicate is reused for successive
+                        # token attempts.  The exact matcher is single-threaded
+                        # per RowContext and consumes the predicate immediately
+                        # after preparation, so replacing a freshly allocated
+                        # closure with one mutable scalar slot cannot leak state
+                        # across candidates.  The scalar itself is still
+                        # recomputed after preceding-scope assignments or
+                        # rollback, preserving dependency semantics.
+                        prepared_scalar = [_UNBOUND_FAST_VALUE]
+
+                        def evaluate_prepared_token_index(index):
+                            scalar_value = prepared_scalar[0]
+                            if scalar_value is _UNBOUND_FAST_VALUE:
+                                return None
+                            if index < 0 or index >= len(numeric_values):
+                                return None
+                            vector_value = numeric_values[index]
+                            try:
+                                if bool(vector_value != vector_value):
+                                    return None
+                                return (
+                                    comparison(vector_value, scalar_value)
+                                    if left_column is not None
+                                    else comparison(scalar_value, vector_value)
+                                )
+                            except Exception:
+                                return (
+                                    safe_compare(
+                                        vector_value,
+                                        scalar_value,
+                                        comparison,
+                                    )
+                                    if left_column is not None
+                                    else safe_compare(
+                                        scalar_value,
+                                        vector_value,
+                                        comparison,
+                                    )
+                                )
+
                         def prepare_linear_token(evaluator, current_var):
                             """Bind the state-only operand once for one token.
 
@@ -3208,44 +3248,12 @@ def _compile_fast_condition_expression(node):
                                 return None
 
                             if is_null(scalar_value):
-                                # SQL UNKNOWN is false in DEFINE.  A closure
-                                # keeps the same contract as the ordinary
-                                # compiled expression while avoiding repeated
-                                # aggregate evaluation for the remaining run.
-                                return lambda _index: None
-
-                            def evaluate_token_index(index):
-                                if index < 0 or index >= len(numeric_values):
-                                    return None
-                                vector_value = numeric_values[index]
-                                try:
-                                    if bool(vector_value != vector_value):
-                                        return None
-                                    return (
-                                        comparison(
-                                            vector_value, scalar_value
-                                        )
-                                        if left_column is not None
-                                        else comparison(
-                                            scalar_value, vector_value
-                                        )
-                                    )
-                                except Exception:
-                                    return (
-                                        safe_compare(
-                                            vector_value,
-                                            scalar_value,
-                                            comparison,
-                                        )
-                                        if left_column is not None
-                                        else safe_compare(
-                                            scalar_value,
-                                            vector_value,
-                                            comparison,
-                                        )
-                                    )
-
-                            return evaluate_token_index
+                                # SQL UNKNOWN is false in DEFINE.  The shared
+                                # predicate returns None for this attempt.
+                                prepared_scalar[0] = _UNBOUND_FAST_VALUE
+                            else:
+                                prepared_scalar[0] = scalar_value
+                            return evaluate_prepared_token_index
 
                         evaluate_bound_compare.prepare_linear_token = (
                             prepare_linear_token
