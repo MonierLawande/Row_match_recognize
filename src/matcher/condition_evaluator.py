@@ -3178,6 +3178,79 @@ def _compile_fast_condition_expression(node):
                             evaluate_bound_numeric_compare
                         )
 
+                        def prepare_linear_token(evaluator, current_var):
+                            """Bind the state-only operand once for one token.
+
+                            The exact linear matcher mutates only the current
+                            pattern variable while it consumes a token.  If
+                            the scalar side of this comparison is proved to
+                            depend exclusively on other scopes, its value is
+                            invariant for that token attempt.  Returning a
+                            row-index predicate avoids re-running aggregates
+                            such as ``AVG(A.price)`` for every row of ``B+``.
+
+                            This is deliberately an optional compiler
+                            contract.  SUBSET scopes, self-dependent
+                            expressions, non-numeric columns, and evaluation
+                            failures return None and retain the complete
+                            scalar evaluator.
+                            """
+                            if context.subsets:
+                                return None
+                            current_upper = str(current_var or "").upper()
+                            if current_upper in scalar_scopes:
+                                return None
+                            try:
+                                scalar_value = scalar_part(
+                                    evaluator, None, context
+                                )
+                            except Exception:
+                                return None
+
+                            if is_null(scalar_value):
+                                # SQL UNKNOWN is false in DEFINE.  A closure
+                                # keeps the same contract as the ordinary
+                                # compiled expression while avoiding repeated
+                                # aggregate evaluation for the remaining run.
+                                return lambda _index: None
+
+                            def evaluate_token_index(index):
+                                if index < 0 or index >= len(numeric_values):
+                                    return None
+                                vector_value = numeric_values[index]
+                                try:
+                                    if bool(vector_value != vector_value):
+                                        return None
+                                    return (
+                                        comparison(
+                                            vector_value, scalar_value
+                                        )
+                                        if left_column is not None
+                                        else comparison(
+                                            scalar_value, vector_value
+                                        )
+                                    )
+                                except Exception:
+                                    return (
+                                        safe_compare(
+                                            vector_value,
+                                            scalar_value,
+                                            comparison,
+                                        )
+                                        if left_column is not None
+                                        else safe_compare(
+                                            scalar_value,
+                                            vector_value,
+                                            comparison,
+                                        )
+                                    )
+
+                            return evaluate_token_index
+
+                        evaluate_bound_compare.prepare_linear_token = (
+                            prepare_linear_token
+                        )
+
                     suffix_extrema = {}
 
                     def prepared_vector_operands(evaluator, start, stop):
@@ -3699,6 +3772,15 @@ def _compile_condition_node(
                 expression_entire_range, "minimum_size", 32
             )
             evaluate_bound.entire_range_is_true = entire_range_is_true
+
+        expression_prepare_token = getattr(
+            bound_expression, "prepare_linear_token", None
+        )
+        if expression_prepare_token is not None:
+            def prepare_linear_token(current_var):
+                return expression_prepare_token(evaluator, current_var)
+
+            evaluate_bound.prepare_linear_token = prepare_linear_token
 
         return evaluate_bound
 

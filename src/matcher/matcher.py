@@ -5204,6 +5204,25 @@ class EnhancedMatcher:
                         count = available
                         used_batch = True
 
+            prepared_token_condition = None
+            if not used_batch and bound is not None:
+                prepare_linear_token = getattr(
+                    bound, "prepare_linear_token", None
+                )
+                if prepare_linear_token is not None:
+                    # The compiler only exposes this hook when the condition
+                    # has one row-local numeric operand and a scalar operand
+                    # proved invariant while ``name`` is extended.  Bind the
+                    # scalar after all preceding-token assignments are in
+                    # place, and discard it before any rollback can change
+                    # those assignments.
+                    context.current_idx = position
+                    context.current_var = name
+                    try:
+                        prepared_token_condition = prepare_linear_token(name)
+                    except Exception:
+                        prepared_token_condition = None
+
             while (
                 not used_batch
                 and (max_rep is None or count < max_rep)
@@ -5221,6 +5240,21 @@ class EnhancedMatcher:
                     accepted = False
                 elif condition is None:
                     accepted = True
+                elif prepared_token_condition is not None:
+                    try:
+                        accepted = bool(
+                            prepared_token_condition(position)
+                        )
+                    except Exception:
+                        # Optimization hooks are never semantic authorities.
+                        # If a prepared predicate cannot handle a value, use
+                        # the complete compiled condition for that row.
+                        context.current_idx = position
+                        context.current_var = name
+                        try:
+                            accepted = bool(bound())
+                        except Exception:
+                            accepted = False
                 else:
                     context.current_idx = position
                     context.current_var = name
@@ -10728,27 +10762,60 @@ class EnhancedMatcher:
             return count_star
 
         var_name = plan.get("var")
-        # The variables dict uses the same key casing for every match of a
-        # query, so resolve the case-insensitive key once and cache it.
-        resolved_key_cell = []
-
         scope_members = self._measure_scope_members(var_name)
         is_subset_scope = len(scope_members) > 1 or (
             var_name and str(var_name).upper() not in scope_members
         )
 
-        def var_indices(match):
-            variables = match.get("variables", {}) or {}
-            if is_subset_scope:
-                return self._resolve_scope_indices(variables, var_name)
-            if resolved_key_cell:
-                key = resolved_key_cell[0]
-                if key is not None and key in variables:
-                    return variables.get(key, [])
-            key = self._resolve_mapping_key(variables, var_name) if var_name else None
-            resolved_key_cell.clear()
-            resolved_key_cell.append(key)
-            return variables.get(key, []) if key is not None else []
+        # Pattern-variable spelling is immutable for the compiled matcher.
+        # When the requested scope has one unambiguous direct key, bind that
+        # key once instead of repeating case-insensitive dictionary discovery
+        # for every emitted measure.  Exact spelling retains precedence, just
+        # like _resolve_mapping_key.  SUBSET unions and case-colliding labels
+        # keep the complete runtime resolver.
+        direct_scope_key = None
+        if var_name and not is_subset_scope:
+            pattern_keys = tuple(self._pattern_variable_set or ())
+            if var_name in pattern_keys:
+                direct_scope_key = var_name
+            else:
+                requested_upper = str(var_name).upper()
+                folded_matches = [
+                    key
+                    for key in pattern_keys
+                    if str(key).upper() == requested_upper
+                ]
+                if len(folded_matches) == 1:
+                    direct_scope_key = folded_matches[0]
+
+        if direct_scope_key is not None:
+            def var_indices(match, _key=direct_scope_key):
+                return (match.get("variables", {}) or {}).get(_key, [])
+        elif is_subset_scope:
+            def var_indices(match):
+                return self._resolve_scope_indices(
+                    match.get("variables", {}) or {}, var_name
+                )
+        else:
+            # Direct callers may supply assignment dictionaries whose keys
+            # were not present in the compiled pattern metadata.  Preserve
+            # the historical lazy resolution and cache in that compatibility
+            # path.
+            resolved_key_cell = []
+
+            def var_indices(match):
+                variables = match.get("variables", {}) or {}
+                if resolved_key_cell:
+                    key = resolved_key_cell[0]
+                    if key is not None and key in variables:
+                        return variables.get(key, [])
+                key = (
+                    self._resolve_mapping_key(variables, var_name)
+                    if var_name else None
+                )
+                resolved_key_cell.clear()
+                resolved_key_cell.append(key)
+                return variables.get(key, []) if key is not None else []
 
         if kind == "COUNT_VAR_STAR":
             return lambda match, match_number: len(var_indices(match))
