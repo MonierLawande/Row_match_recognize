@@ -9842,7 +9842,6 @@ class EnhancedMatcher:
             or prepared is None
             or not prepared.fully_compiled
             or not prepared.direct_projection
-            or prepared.has_classifier
             or prepared.permute_matched_rows_only
             or self.has_exclusions
             or self._pattern_can_match_empty(str(self.original_pattern or ""))
@@ -9852,10 +9851,12 @@ class EnhancedMatcher:
         ):
             return None
 
-        # A direct projection without CLASSIFIER can contain only
-        # MATCH_NUMBER entries.  Keep the explicit check local so future plan
-        # kinds cannot accidentally enter this representation.
-        if any(entry[4] != "match_number" for entry in prepared.output_entries):
+        # Keep the accepted output grammar explicit so future plan kinds
+        # cannot accidentally enter this boundary/classifier representation.
+        if any(
+            entry[4] not in {"match_number", "classifier"}
+            for entry in prepared.output_entries
+        ):
             return None
 
         row_count = len(rows)
@@ -9886,6 +9887,28 @@ class EnhancedMatcher:
         output_count = 0
         segments = []
         append_segment = segments.append
+        classifier_runs = [] if prepared.has_classifier else None
+
+        def append_classifier_run(variable, count):
+            if classifier_runs is None or count <= 0:
+                return
+            classifier = prepared.classifier_names.get(variable)
+            if classifier is None:
+                # Direct/custom matcher metadata may use a variable that was
+                # absent when the immutable plan was prepared.  Resolve its
+                # SQL casing once rather than abandoning a semantically valid
+                # row-local plan.
+                classifier_context = RowContext(
+                    defined_variables=self.defined_variables
+                )
+                classifier = classifier_context._apply_case_sensitivity_rule(
+                    variable
+                )
+                prepared.classifier_names[variable] = classifier
+            if classifier_runs and classifier_runs[-1][1] == classifier:
+                classifier_runs[-1][0] += count
+            else:
+                classifier_runs.append([count, classifier])
 
         if linear_available:
             plan = self._get_linear_quantifier_plan()
@@ -9938,13 +9961,14 @@ class EnhancedMatcher:
 
                 end_position = start
                 for (
-                    _variable,
+                    variable,
                     segment_start,
                     segment_count,
                 ) in matched_segments:
                     segment_stop = segment_start + segment_count
                     if segment_stop > end_position:
                         end_position = segment_stop
+                    append_classifier_run(variable, segment_count)
                 if end_position <= start:
                     # The minimum-width proof should make this unreachable.
                     # Fall back rather than risk suppressing empty semantics
@@ -9987,13 +10011,25 @@ class EnhancedMatcher:
                 state_plan = decisions[state]
                 idx = start
                 accepted_end = -1
+                classifier_segments = []
+                current_variable_code = None
+                classifier_segment_start = start
                 while idx < row_count and state_plan is not None:
                     transition_idx = state_plan[0][idx]
                     if transition_idx == 255:
                         break
-                    _variable_code, next_state, _is_excluded = (
+                    variable_code, next_state, _is_excluded = (
                         state_plan[1][transition_idx]
                     )
+                    if variable_code != current_variable_code:
+                        if current_variable_code is not None:
+                            classifier_segments.append((
+                                current_variable_code,
+                                classifier_segment_start,
+                                idx,
+                            ))
+                        current_variable_code = variable_code
+                        classifier_segment_start = idx
                     if (
                         next_state == state
                         and decision_run_lengths is not None
@@ -10009,16 +10045,47 @@ class EnhancedMatcher:
                 if accepted_end < start:
                     start += 1
                     continue
+                if current_variable_code is not None:
+                    classifier_segments.append((
+                        current_variable_code,
+                        classifier_segment_start,
+                        idx,
+                    ))
+                accepted_stop = accepted_end + 1
+                for variable_code, segment_start, segment_stop in (
+                    classifier_segments
+                ):
+                    if segment_start >= accepted_stop:
+                        break
+                    stop = min(segment_stop, accepted_stop)
+                    append_classifier_run(
+                        self._row_local_dfa_var_names[variable_code],
+                        stop - segment_start,
+                    )
                 append_segment((start, accepted_end, match_number))
                 output_count += accepted_end - start + 1
                 match_count += 1
                 match_number += 1
                 start = accepted_end + 1
 
+        if (
+            classifier_runs is not None
+            and sum(run[0] for run in classifier_runs) != output_count
+        ):
+            # A classifier must cover every emitted row exactly once.  Any
+            # planner/runtime disagreement keeps the complete path in charge.
+            return None
+
         state = {
             "row_indices": [],
             "segments": segments,
             "segment_projection": True,
+            "classifier_runs": classifier_runs,
+            "measure_kinds": {
+                alias: kind
+                for alias, _expr, _semantics, _navigation, kind
+                in prepared.output_entries
+            },
             "measures": {
                 alias: []
                 for alias, _expr, _semantics, _navigation, _kind
@@ -11993,13 +12060,30 @@ class EnhancedMatcher:
         all_indices = self._ordinary_all_rows_indices(match, prepared)
         excluded_rows = match.get("excluded_rows") or ()
         excluded = set(excluded_rows) if excluded_rows else None
-        selected = [
-            (position, idx)
-            for position, idx in enumerate(all_indices)
-            if (excluded is None or idx not in excluded)
-            and 0 <= idx < len(rows)
-        ]
-        if not selected:
+        contiguous_selection = bool(
+            not prepared.permute_matched_rows_only
+            and excluded is None
+            and match["start"] >= 0
+            and match["end"] < len(rows)
+        )
+        if contiguous_selection:
+            output_count = match["end"] - match["start"] + 1
+            selected_indices = all_indices
+            selected_positions = range(output_count)
+            selected = None
+        else:
+            selected = [
+                (position, idx)
+                for position, idx in enumerate(all_indices)
+                if (excluded is None or idx not in excluded)
+                and 0 <= idx < len(rows)
+            ]
+            output_count = len(selected)
+            selected_positions = [
+                position for position, _idx in selected
+            ]
+            selected_indices = (idx for _position, idx in selected)
+        if not output_count:
             return True
 
         running_values = {}
@@ -12052,8 +12136,6 @@ class EnhancedMatcher:
                         classifier_by_row.setdefault(idx, classifier)
 
         staged_measures = {}
-        selected_positions = [position for position, _idx in selected]
-        output_count = len(selected)
         for (
             alias,
             _expr,
@@ -12064,23 +12146,41 @@ class EnhancedMatcher:
             if kind == "match_number":
                 values = [match_number] * output_count
             elif kind == "classifier":
-                values = [
-                    classifier_by_row.get(idx)
-                    for _position, idx in selected
-                ]
+                if contiguous_selection:
+                    values = [
+                        classifier_by_row.get(idx)
+                        for idx in selected_indices
+                    ]
+                    # The range is reusable, but keep the intent explicit for
+                    # any future one-shot index representation.
+                    selected_indices = all_indices
+                else:
+                    values = [
+                        classifier_by_row.get(idx)
+                        for _position, idx in selected
+                    ]
             elif alias in final_values:
                 values = [final_values[alias]] * output_count
             elif alias in running_values:
                 complete_values = running_values[alias]
-                if any(
-                    position >= len(complete_values)
-                    for position in selected_positions
-                ):
-                    return False
-                values = [
-                    complete_values[position]
-                    for position in selected_positions
-                ]
+                if contiguous_selection:
+                    if len(complete_values) < output_count:
+                        return False
+                    values = (
+                        complete_values
+                        if len(complete_values) == output_count
+                        else complete_values[:output_count]
+                    )
+                else:
+                    if any(
+                        position >= len(complete_values)
+                        for position in selected_positions
+                    ):
+                        return False
+                    values = [
+                        complete_values[position]
+                        for position in selected_positions
+                    ]
             else:
                 return False
             staged_measures[alias] = values
@@ -12088,7 +12188,7 @@ class EnhancedMatcher:
         # Commit after all expressions have succeeded.  The state owns only
         # compact indices and measure vectors; source rows are gathered once
         # when the partition is complete.
-        state["row_indices"].extend(idx for _position, idx in selected)
+        state["row_indices"].extend(selected_indices)
         for alias, values in staged_measures.items():
             state["measures"][alias].extend(values)
         state["match_numbers"].extend([match_number] * output_count)
@@ -12222,6 +12322,22 @@ class EnhancedMatcher:
         )
 
     @staticmethod
+    def _expand_direct_classifier_runs(state):
+        """Expand compact ``(count, classifier)`` runs in output order."""
+        runs = state.get("classifier_runs")
+        if runs is None:
+            return None
+        if not runs:
+            return np.empty(0, dtype=object)
+        counts = np.fromiter(
+            (run[0] for run in runs), dtype=np.int64, count=len(runs)
+        )
+        classifiers = np.asarray(
+            [run[1] for run in runs], dtype=object
+        )
+        return np.repeat(classifiers, counts)
+
+    @staticmethod
     def _compiled_all_rows_columns(state, rows):
         """Gather staged ALL ROWS output into one columnar partition block."""
         if state.get("segment_projection"):
@@ -12232,11 +12348,15 @@ class EnhancedMatcher:
                 match_output_order,
             ) = EnhancedMatcher._expand_direct_all_rows_segments(state)
             indices = indices.astype(np.intp, copy=False)
+            classifier_values = (
+                EnhancedMatcher._expand_direct_classifier_runs(state)
+            )
         else:
             indices = np.asarray(state["row_indices"], dtype=np.intp)
             match_numbers = state["match_numbers"]
             match_starts = state["match_starts"]
             match_output_order = state["match_output_order"]
+            classifier_values = None
         columns = {}
         for column_name in rows.column_names():
             source = rows.column_array_exact(column_name)
@@ -12247,9 +12367,17 @@ class EnhancedMatcher:
             else:
                 columns[column_name] = source[indices]
         for alias, values in state["measures"].items():
-            columns[alias] = (
-                match_numbers if state.get("segment_projection") else values
-            )
+            if state.get("segment_projection"):
+                kind = state.get("measure_kinds", {}).get(
+                    alias, "match_number"
+                )
+                columns[alias] = (
+                    classifier_values
+                    if kind == "classifier"
+                    else match_numbers
+                )
+            else:
+                columns[alias] = values
         columns["MATCH_NUMBER"] = match_numbers
         columns["IS_EMPTY_MATCH"] = np.zeros(state["count"], dtype=bool)
         columns["_original_row_idx"] = indices
@@ -12267,13 +12395,19 @@ class EnhancedMatcher:
                 match_starts,
                 match_output_order,
             ) = self._expand_direct_all_rows_segments(state)
+            classifier_values = self._expand_direct_classifier_runs(state)
+            measure_kinds = state.get("measure_kinds", {})
             aliases = tuple(state["measures"])
             materialized = []
             for position, idx in enumerate(row_indices):
                 result = dict(rows[int(idx)])
                 match_number = int(match_numbers[position])
                 for alias in aliases:
-                    result[alias] = match_number
+                    result[alias] = (
+                        classifier_values[position]
+                        if measure_kinds.get(alias) == "classifier"
+                        else match_number
+                    )
                 result["MATCH_NUMBER"] = match_number
                 result["IS_EMPTY_MATCH"] = False
                 result["_original_row_idx"] = int(idx)
