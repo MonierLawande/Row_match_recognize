@@ -2527,7 +2527,9 @@ class EnhancedMatcher:
             "linear_quantifier_plan": True,
         }
 
-    def _can_use_row_local_dfa_fast_path(self, config=None) -> bool:
+    def _can_use_row_local_dfa_fast_path(
+        self, config=None, *, allow_all_rows=False,
+    ) -> bool:
         """
         Return True when the DFA can be evaluated directly from precomputed
         row-local DEFINE results.
@@ -2543,17 +2545,23 @@ class EnhancedMatcher:
 
         The gate is intentionally conservative.  Navigation functions,
         cross-variable DEFINE dependencies, exclusions, anchors, subsets,
-        and ALL ROWS output still use the existing matcher because their
-        semantics depend on full match context.  AFTER MATCH SKIP is safe
-        here: it determines the next candidate start after this method has
-        returned a match; it does not alter the DFA traversal for that match.
+        and ordinary ALL ROWS output still use the existing matcher because
+        their semantics depend on full match context.  A caller may set
+        ``allow_all_rows`` only when a separate output-plan proof needs match
+        boundaries but no variable assignments.  AFTER MATCH SKIP is safe
+        here: it determines the next candidate start after matching; it does
+        not alter DFA traversal for that match.
         """
         condition_matrix = getattr(self, "_condition_matrix", None)
         if not self._can_reuse_row_context_for_matching(condition_matrix):
             return False
 
         if config:
-            if getattr(config, "rows_per_match", RowsPerMatch.ONE_ROW) != RowsPerMatch.ONE_ROW:
+            if (
+                not allow_all_rows
+                and getattr(config, "rows_per_match", RowsPerMatch.ONE_ROW)
+                != RowsPerMatch.ONE_ROW
+            ):
                 return False
 
         if self.has_empty_alternation or self.has_exclusions or self.is_permute_pattern:
@@ -8124,13 +8132,38 @@ class EnhancedMatcher:
 
         logger.info(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
 
+        # Direct ALL ROWS output with only MATCH_NUMBER measures needs match
+        # boundaries, not per-variable row lists.  A proven row-local linear
+        # plan can therefore enumerate the same greedy/reluctant matches and
+        # publish compact intervals directly to the columnar output builder.
+        # The method returns None unless every semantic and extension-point
+        # guard is satisfied.
+        self._fast_one_row_columns = None
+        if all_rows and not include_unmatched and not track_processed_indices:
+            fast_all_rows = self._run_fast_all_rows_segment_pass(
+                rows,
+                config,
+                compiled_all_rows_measure_plans,
+            )
+            if fast_all_rows is not None:
+                fast_columns = getattr(self, "_fast_one_row_columns", None)
+                output_count = fast_columns[1] if fast_columns is not None else 0
+                self.timing["total"] = time.time() - start_time
+                self._update_performance_metrics(
+                    len(rows), output_count, self.timing["total"]
+                )
+                logger.info(
+                    "Fused ALL ROWS segment pass produced %s output rows",
+                    output_count,
+                )
+                return fast_all_rows
+
         # FUSED FAST PASS: for plain ONE ROW PER MATCH / SKIP PAST LAST ROW
         # queries fully covered by the compiled matchers and measure plans,
         # enumerate matches and emit output rows directly.  Semantics are
         # identical to the loop below; every non-default feature bails out.
         # Clear any columnar payload from a previous pass so the executor
         # never consumes stale columns when this pass takes another path.
-        self._fast_one_row_columns = None
         if not all_rows and not include_unmatched and not track_processed_indices:
             fast_results = self._run_fast_one_row_pass(rows, config, measures)
             if fast_results is None:
@@ -8215,8 +8248,22 @@ class EnhancedMatcher:
                 str(self.original_pattern or "")
             ) is False
         ):
+            # MATCH_NUMBER-only projections need not stage one Python value
+            # per output row during matching.  With neither exclusions nor a
+            # classifier, ordinary ALL ROWS output is exactly each match's
+            # contiguous [start, end] interval.  Retain those intervals and
+            # expand them once after enumeration.  This proof is independent
+            # of pattern shape; all queries outside it keep the established
+            # compiled output representation.
+            segment_projection = bool(
+                compiled_all_rows_measure_plans.direct_projection
+                and not compiled_all_rows_measure_plans.has_classifier
+                and not self.has_exclusions
+            )
             columnar_all_rows_output = {
                 "row_indices": [],
+                "segments": [] if segment_projection else None,
+                "segment_projection": segment_projection,
                 "measures": {
                     alias: []
                     for alias, _expr, _semantics, _navigation, _kind
@@ -9762,6 +9809,231 @@ class EnhancedMatcher:
         values = np.full(count, np.nan)
         values[found] = column[pos[found]]
         return values
+
+    def _run_fast_all_rows_segment_pass(self, rows, config, prepared):
+        """Enumerate compiled row-local matches into ALL ROWS segments.
+
+        This executor deliberately reuses the established linear-search or
+        row-local-DFA decisions.  It removes only assignment dictionaries and
+        expanded output lists when the projection planner proves that match
+        boundaries plus MATCH_NUMBER are sufficient. Unsupported features
+        return ``None`` before enumeration, preserving the complete executor
+        as the semantic authority.
+        """
+        result_processor = getattr(
+            self._process_all_rows_match,
+            "__func__",
+            self._process_all_rows_match,
+        )
+        if result_processor is not EnhancedMatcher._process_all_rows_match:
+            return None
+        if config is None:
+            return None
+        if (
+            getattr(config, "rows_per_match", RowsPerMatch.ONE_ROW)
+            == RowsPerMatch.ONE_ROW
+            or config.skip_mode != SkipMode.PAST_LAST_ROW
+            or getattr(config, "include_unmatched", False)
+        ):
+            return None
+        if (
+            getattr(self, "_retain_completed_matches", True)
+            or not getattr(self, "_fast_columnar_result", False)
+            or prepared is None
+            or not prepared.fully_compiled
+            or not prepared.direct_projection
+            or prepared.has_classifier
+            or prepared.permute_matched_rows_only
+            or self.has_exclusions
+            or self._pattern_can_match_empty(str(self.original_pattern or ""))
+            is not False
+            or not hasattr(rows, "column_array_exact")
+            or not hasattr(rows, "column_names")
+        ):
+            return None
+
+        # A direct projection without CLASSIFIER can contain only
+        # MATCH_NUMBER entries.  Keep the explicit check local so future plan
+        # kinds cannot accidentally enter this representation.
+        if any(entry[4] != "match_number" for entry in prepared.output_entries):
+            return None
+
+        row_count = len(rows)
+        if row_count == 0:
+            return None
+
+        linear_available = self._can_use_linear_quantifier_plan(config)
+        dfa_available = bool(
+            not linear_available
+            and self._can_use_row_local_dfa_fast_path(
+                config, allow_all_rows=True
+            )
+        )
+        if not linear_available and not dfa_available:
+            return None
+
+        start_mask = self._build_start_position_mask(row_count)
+        start_positions = (
+            np.flatnonzero(start_mask) if start_mask is not None else None
+        )
+        position_count = (
+            len(start_positions) if start_positions is not None else 0
+        )
+        cursor = 0
+        start = 0
+        match_number = 1
+        match_count = 0
+        output_count = 0
+        segments = []
+        append_segment = segments.append
+
+        if linear_available:
+            plan = self._get_linear_quantifier_plan()
+            if not plan or sum(token["min"] for token in plan) < 1:
+                return None
+            run_lengths = self._get_linear_plan_run_lengths(row_count)
+            if run_lengths is None:
+                return None
+            search_ctx = self._get_linear_search_ctx(
+                plan, run_lengths, row_count
+            )
+            steps = search_ctx[3]
+            failed = search_ctx[4]
+            dp_ctx = (
+                self._get_linear_dp_match_ctx(
+                    plan, run_lengths, row_count
+                )
+                if self._linear_plan_benefits_from_dp(plan)
+                else None
+            )
+            dp_token_ends = dp_ctx[5] if dp_ctx is not None else None
+
+            while start < row_count:
+                if start_positions is not None:
+                    while (
+                        cursor < position_count
+                        and start_positions[cursor] < start
+                    ):
+                        cursor += 1
+                    if cursor >= position_count:
+                        break
+                    start = int(start_positions[cursor])
+                    cursor += 1
+
+                if dp_token_ends is not None:
+                    matched_segments = self._linear_dp_segments(
+                        dp_token_ends, start
+                    )
+                elif steps is not None:
+                    matched_segments = self._linear_search_iterative(
+                        steps, start, row_count, failed
+                    )
+                else:
+                    matched_segments = self._linear_search_scalar(
+                        plan, start, row_count
+                    )
+                if matched_segments is None:
+                    start += 1
+                    continue
+
+                end_position = start
+                for (
+                    _variable,
+                    segment_start,
+                    segment_count,
+                ) in matched_segments:
+                    segment_stop = segment_start + segment_count
+                    if segment_stop > end_position:
+                        end_position = segment_stop
+                if end_position <= start:
+                    # The minimum-width proof should make this unreachable.
+                    # Fall back rather than risk suppressing empty semantics
+                    # if a custom planner violates that contract.
+                    return None
+
+                append_segment((start, end_position - 1, match_number))
+                output_count += end_position - start
+                match_count += 1
+                match_number += 1
+                start = end_position
+        else:
+            self._build_row_local_transition_index(
+                self.has_quantifiers
+                and bool(self.define_conditions)
+                and self._has_cross_variable_references()
+            )
+            decisions = getattr(self, "_row_local_dfa_decisions", None)
+            if decisions is None:
+                return None
+            accept_flags = self._row_local_dfa_accept_flags
+            decision_run_lengths = getattr(
+                self, "_row_local_mask_run_lengths", None
+            )
+            start_state = self.start_state
+
+            while start < row_count:
+                if start_positions is not None:
+                    while (
+                        cursor < position_count
+                        and start_positions[cursor] < start
+                    ):
+                        cursor += 1
+                    if cursor >= position_count:
+                        break
+                    start = int(start_positions[cursor])
+                    cursor += 1
+
+                state = start_state
+                state_plan = decisions[state]
+                idx = start
+                accepted_end = -1
+                while idx < row_count and state_plan is not None:
+                    transition_idx = state_plan[0][idx]
+                    if transition_idx == 255:
+                        break
+                    _variable_code, next_state, _is_excluded = (
+                        state_plan[1][transition_idx]
+                    )
+                    if (
+                        next_state == state
+                        and decision_run_lengths is not None
+                    ):
+                        idx += int(decision_run_lengths[idx])
+                    else:
+                        state = next_state
+                        state_plan = decisions[state]
+                        idx += 1
+                    if accept_flags[state]:
+                        accepted_end = idx - 1
+
+                if accepted_end < start:
+                    start += 1
+                    continue
+                append_segment((start, accepted_end, match_number))
+                output_count += accepted_end - start + 1
+                match_count += 1
+                match_number += 1
+                start = accepted_end + 1
+
+        state = {
+            "row_indices": [],
+            "segments": segments,
+            "segment_projection": True,
+            "measures": {
+                alias: []
+                for alias, _expr, _semantics, _navigation, _kind
+                in prepared.output_entries
+            },
+            "match_numbers": [],
+            "match_starts": [],
+            "match_output_order": [],
+            "count": output_count,
+        }
+        self._fast_one_row_columns = self._compiled_all_rows_columns(
+            state, rows
+        )
+        self._match_count = match_count
+        return []
 
     def _run_fast_one_row_pass(self, rows, config, measures):
         """Fused enumeration + output for ONE ROW PER MATCH fast paths.
@@ -11843,6 +12115,24 @@ class EnhancedMatcher:
         start_idx = match["start"]
         end_idx = match["end"]
         excluded_rows = match.get("excluded_rows") or ()
+        if state.get("segment_projection"):
+            # Planning already proved contiguous MATCH_NUMBER-only output.
+            # Validate the concrete match as a final guard for embedders that
+            # may supply custom match mappings; an unexpected shape triggers
+            # the established row-oriented fallback instead of being clipped.
+            if (
+                prepared.has_classifier
+                or excluded_rows
+                or start_idx < 0
+                or end_idx < start_idx
+                or end_idx >= len(rows)
+            ):
+                return False
+            output_count = end_idx - start_idx + 1
+            state["segments"].append((start_idx, end_idx, match_number))
+            state["count"] += output_count
+            return True
+
         if excluded_rows:
             excluded = set(excluded_rows)
             output_indices = [
@@ -11898,9 +12188,55 @@ class EnhancedMatcher:
         return True
 
     @staticmethod
+    def _expand_direct_all_rows_segments(state):
+        """Expand compact match intervals into ALL ROWS metadata arrays.
+
+        The default PAST LAST ROW executor publishes intervals monotonically,
+        and each interval preserves row order.  NumPy can therefore expand
+        all matches together without changing match or row ordering.
+        """
+        segments = state.get("segments") or ()
+        if not segments:
+            empty = np.empty(0, dtype=np.int64)
+            return empty, empty, empty, empty
+
+        segment_array = np.asarray(segments, dtype=np.int64)
+        starts = segment_array[:, 0]
+        counts = segment_array[:, 1] - starts + 1
+        match_numbers = segment_array[:, 2]
+        total = int(counts.sum(dtype=np.int64))
+
+        exclusive_offsets = np.cumsum(counts, dtype=np.int64) - counts
+        flat_positions = np.arange(total, dtype=np.int64)
+        row_indices = flat_positions + np.repeat(
+            starts - exclusive_offsets, counts
+        )
+        repeated_starts = np.repeat(starts, counts)
+        repeated_match_numbers = np.repeat(match_numbers, counts)
+        output_order = row_indices - repeated_starts
+        return (
+            row_indices,
+            repeated_match_numbers,
+            repeated_starts,
+            output_order,
+        )
+
+    @staticmethod
     def _compiled_all_rows_columns(state, rows):
         """Gather staged ALL ROWS output into one columnar partition block."""
-        indices = np.asarray(state["row_indices"], dtype=np.intp)
+        if state.get("segment_projection"):
+            (
+                indices,
+                match_numbers,
+                match_starts,
+                match_output_order,
+            ) = EnhancedMatcher._expand_direct_all_rows_segments(state)
+            indices = indices.astype(np.intp, copy=False)
+        else:
+            indices = np.asarray(state["row_indices"], dtype=np.intp)
+            match_numbers = state["match_numbers"]
+            match_starts = state["match_starts"]
+            match_output_order = state["match_output_order"]
         columns = {}
         for column_name in rows.column_names():
             source = rows.column_array_exact(column_name)
@@ -11911,17 +12247,44 @@ class EnhancedMatcher:
             else:
                 columns[column_name] = source[indices]
         for alias, values in state["measures"].items():
-            columns[alias] = values
-        columns["MATCH_NUMBER"] = state["match_numbers"]
-        columns["IS_EMPTY_MATCH"] = [False] * state["count"]
+            columns[alias] = (
+                match_numbers if state.get("segment_projection") else values
+            )
+        columns["MATCH_NUMBER"] = match_numbers
+        columns["IS_EMPTY_MATCH"] = np.zeros(state["count"], dtype=bool)
         columns["_original_row_idx"] = indices
-        columns["_match_sort_pos"] = state["match_starts"]
-        columns["_match_sort_kind"] = [1] * state["count"]
-        columns["_match_output_order"] = state["match_output_order"]
+        columns["_match_sort_pos"] = match_starts
+        columns["_match_sort_kind"] = np.ones(state["count"], dtype=np.int8)
+        columns["_match_output_order"] = match_output_order
         return columns, state["count"]
 
     def _materialize_compiled_all_rows(self, state, rows):
         """Convert staged output to legacy dictionaries after a fallback."""
+        if state.get("segment_projection"):
+            (
+                row_indices,
+                match_numbers,
+                match_starts,
+                match_output_order,
+            ) = self._expand_direct_all_rows_segments(state)
+            aliases = tuple(state["measures"])
+            materialized = []
+            for position, idx in enumerate(row_indices):
+                result = dict(rows[int(idx)])
+                match_number = int(match_numbers[position])
+                for alias in aliases:
+                    result[alias] = match_number
+                result["MATCH_NUMBER"] = match_number
+                result["IS_EMPTY_MATCH"] = False
+                result["_original_row_idx"] = int(idx)
+                result["_match_sort_pos"] = int(match_starts[position])
+                result["_match_sort_kind"] = 1
+                result["_match_output_order"] = int(
+                    match_output_order[position]
+                )
+                materialized.append(result)
+            return materialized
+
         materialized = []
         aliases = tuple(state["measures"])
         for position, idx in enumerate(state["row_indices"]):
