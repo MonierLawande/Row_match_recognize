@@ -297,7 +297,8 @@ with \texttt{NULL} measures for unmatched ones.
   \caption{Output modes and their row-count and measure-semantics
     behavior}
   \label{tab:rows-per-match}
-  \begin{tabular}{llp{7cm}}
+  \begin{tabular}{>{\raggedright\arraybackslash}p{3.2cm}%
+    >{\raggedright\arraybackslash}p{2.3cm}p{6.6cm}}
     \toprule
     \textbf{Mode} & \textbf{Rows out} & \textbf{Measure evaluation context} \\
     \midrule
@@ -341,81 +342,72 @@ cumulatively), whereas a final measure always sees the complete match.
 % ----------------------------------------------------------------
 
 The optimisations fall into two groups.  The first is a set of
-\emph{compiled execution fast paths} inside the matcher: specialised
-code paths selected per query after inspecting the pattern and the
-\texttt{DEFINE} predicates, each of which falls back to the general
-evaluator whenever a construct it does not cover appears.  Every fast
-path is required to be output-identical to the general path, and this
-is enforced with differential tests that compare complete result
-DataFrames between the two.  The second group is
-\emph{auxiliary infrastructure}---caching, memory management, and
-scheduling.  Table~\ref{tab:perf-summary} lists every technique with
-its activation condition and benefit; the paragraphs below describe the
-fast paths, which is where most of the measured speed-up comes from.
+\emph{compiled fast paths} in the matcher: per-query code paths chosen
+after inspecting the pattern and its \texttt{DEFINE} predicates, each
+falling back to the general evaluator when it meets a construct it does
+not cover.  Every fast path must be output-identical to the general
+one, checked by differential tests that compare full result DataFrames.
+The second group is \emph{auxiliary infrastructure}---caching, memory
+management, and scheduling.  Table~\ref{tab:perf-summary} lists every
+technique with its trigger and benefit; the paragraphs below cover the
+fast paths, where most of the speed-up comes from.
 
 \paragraph{Vectorised row-local conditions.}
 A \texttt{DEFINE} predicate built only from the current row's columns
 and \emph{physical} navigation (\texttt{PREV}/\texttt{NEXT}, which
-address row $i\mp k$ of the partition regardless of variable
-assignment) does not depend on the match state at all.  Such a
-predicate is evaluated once per partition as a column expression:
-navigation becomes a Pandas \texttt{shift($k$)}, comparisons become
-vectorised Boolean arrays, and the DFA simulation reads precomputed
-per-row truth values instead of calling a Python closure per row.
-Predicates that use \texttt{FIRST}/\texttt{LAST}, \texttt{CLASSIFIER},
+address row $i\mp k$ regardless of variable assignment) does not depend
+on the match state.  So it is evaluated once per partition as a column
+expression: navigation becomes a Pandas \texttt{shift($k$)},
+comparisons become vectorised Boolean arrays, and the DFA reads
+precomputed truth values instead of calling a Python closure per row.
+Predicates using \texttt{FIRST}/\texttt{LAST}, \texttt{CLASSIFIER},
 aggregates, or cross-variable references keep the scalar evaluator.
 
 \paragraph{Row-local DFA decision tables.}
-When every predicate of a pattern is vectorised, the winning transition
-of each DFA state becomes a pure function of the row index.  The engine
-precomputes, for each state, a byte array over the partition whose
-$i$-th entry encodes the highest-priority transition that holds at row
-$i$, so the simulation loop reduces to indexing \texttt{bytes} objects
-at C speed.  Assignments are recorded as
-$(\mathit{var}, \mathit{start}, \mathit{stop})$ run segments rather
-than per-row appends, and expanded to row lists only for the accepted
-match, so failed exploratory walks never materialise per-row
+When every predicate is vectorised, each DFA state's winning transition
+is a pure function of the row index.  For each state the engine
+precomputes a byte array over the partition whose $i$-th entry encodes
+the highest-priority transition that holds at row $i$, so the
+simulation loop is just indexing \texttt{bytes} objects at C speed.
+Assignments are stored as $(\mathit{var}, \mathit{start},
+\mathit{stop})$ run segments, not per-row appends, and expanded to rows
+only for the accepted match---so failed walks never materialise per-row
 structures.
 
 \paragraph{Linear-pattern fast path and fused driver.}
-A pattern that is a plain concatenation of quantified variables (such
-as \texttt{A\{1,5\} B* C+}) uses vectorised run-length tables---for each
-row, how many consecutive rows satisfy a variable---searched
-iteratively with a memo of failed \emph{(token, position)} states that
-is shared across all start positions, turning repeated backtracking
-into table lookups.  On top of this, when a query uses
-\texttt{ONE ROW PER MATCH} with \texttt{SKIP PAST LAST ROW}, no
-anchors, and a pattern the compiled matchers cover, a fused driver
-enumerates matches and emits each output row straight from its run
-segments through measure closures compiled once per query, never
-building the intermediate per-match dictionaries or row context of the
-general path.
+A pattern that is a plain concatenation of quantified variables (say
+\texttt{A\{1,5\} B* C+}) uses vectorised run-length tables---for each
+row, how many consecutive rows satisfy a variable---searched with a
+memo of failed \emph{(token, position)} states shared across all start
+positions, turning repeated backtracking into table lookups.  On top of
+that, when a query uses \texttt{ONE ROW PER MATCH} with
+\texttt{SKIP PAST LAST ROW}, no anchors, and a pattern the compiled
+matchers cover, a fused driver enumerates matches and emits each output
+row straight from its run segments through measure closures compiled
+once per query---never building the intermediate per-match dictionaries
+or row context of the general path.
 
 \paragraph{Compiled measure plans and prefix aggregation.}
-Measure evaluation follows the same compile-once philosophy: column
-arrays, null masks, and case-insensitive variable keys are resolved
-once per partition pass rather than once per match, and per-measure
-semantics analysis is hoisted out of the per-row loop.  Arithmetic over
-\emph{running} aggregates (for example
-\texttt{RUNNING sum(A.value*A.score)/sum(A.score)}), which a naive
+Measures follow the same compile-once idea: column arrays, null masks,
+and case-insensitive variable keys are resolved once per partition
+pass, not once per match, and semantics analysis is hoisted out of the
+per-row loop.  Arithmetic over \emph{running} aggregates (for example
+\texttt{RUNNING sum(A.value * A.score) / sum(A.score)}), which naive
 per-row evaluation would make quadratic, is compiled into a single
 $O(n)$ prefix pass over the match rows.
 
 \paragraph{Auxiliary infrastructure.}
-Behind the fast paths sit four supporting mechanisms.  A thread-safe
+Four supporting mechanisms sit behind the fast paths.  A thread-safe
 \emph{LRU pattern cache} maps a hash of the pattern and its
-\texttt{DEFINE} predicates to the fully compiled NFA/DFA result,
-eliminating redundant compilation across repeated queries.  Because
-partitions are independent, a parallel-aware scheduling layer preserves
-a boundary for future concurrent partition execution while the current
-path processes partitions sequentially.  Memory management is
-partition-oriented---partitions are processed one at a time, RSS is
-monitored with \texttt{psutil}, and garbage collection is triggered
-before configured limits are reached---and an object pool reuses
-frequently allocated objects on long-running queries.  Finally, for
-large partitions the engine enlarges its condition-evaluation cache and
-pre-warms common predicate paths on a sample of rows before the full
-scan.
+\texttt{DEFINE} predicates to the compiled NFA/DFA, so repeated queries
+never recompile.  Because partitions are independent, a parallel-aware
+scheduling layer keeps a boundary for future concurrent execution while
+the current path runs partitions one at a time.  Memory management is
+partition-oriented---one partition at a time, RSS watched with
+\texttt{psutil}, garbage collection triggered before limits---and an
+object pool reuses hot objects on long queries.  Finally, for large
+partitions the engine enlarges its condition cache and pre-warms common
+predicate paths on a sample of rows before the full scan.
 
 \begin{table}[htbp]
   \centering

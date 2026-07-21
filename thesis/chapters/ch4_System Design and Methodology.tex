@@ -38,7 +38,7 @@ data and returns a DataFrame.
 
 \begin{figure}[htbp]
   \centering
-  \begin{tikzpicture}[
+  \makebox[\textwidth][l]{\hspace*{-2cm}\begin{tikzpicture}[
     node distance=0.7cm and 0.7cm,
     every node/.style={font=\small},
     phase/.style={rectangle, draw, rounded corners=3pt,
@@ -71,7 +71,7 @@ data and returns a DataFrame.
     \draw[arrow] (plan) -- (logical);
     \draw[arrow] (compile) -- (automata);
     \draw[arrow] (execute) -- (dfout);
-  \end{tikzpicture}
+  \end{tikzpicture}}
   \caption{Five-stage architecture of the Pandas
     \texttt{MATCH\_RECOGNIZE} engine}
   \label{fig:system-architecture}
@@ -149,7 +149,7 @@ bounded quantifiers, and \texttt{pglast}~\cite{pglast_tool} cannot
 parse \texttt{MATCH\_RECOGNIZE} at all.  Rather than extend one of
 these, the engine reuses the community ANTLR4 grammar for the Trino
 SQL dialect~\cite{antlr_trino_sql,Parr2013}, whose \texttt{.g4} files
-already contain a \texttt{patternRecognition} rule covering all eight
+already contain a \texttt{pattern\-Recognition} rule covering all eight
 sub-clauses.  ANTLR4 generates the lexer, parser, and traversal
 scaffolding directly from that grammar, so no grammar changes were
 needed, and syntax errors are reported with the exact line, column,
@@ -199,33 +199,29 @@ dialect, other vendors' extensions may need small grammar adjustments.
 % ----------------------------------------------------------------
 
 Once the AST exists, a validation pass runs before any automaton is
-built.  It rejects queries that parse but cannot be given a
-well-defined meaning under the supported subset, and normalises a few
-things for the stages that follow.  The checks fall into three groups.
+built.  It rejects queries that parse but have no well-defined meaning
+in the supported subset, and normalises a few things for later stages.
+The checks fall into three groups.
 
-First, \emph{references must resolve}.  Every column named in
-\texttt{PARTITION BY}, \texttt{ORDER BY}, \texttt{DEFINE}, or
-\texttt{MEASURES} must exist in the input DataFrame, and every
-pattern-variable reference must name a variable from the
-\texttt{PATTERN} clause or a declared \texttt{SUBSET} alias.  A
-variable listed in the pattern but never defined is legal and is
-treated as an implicit always-true variable, and subset aliases are
-normalised so later stages can resolve them to their member variables.
+\emph{References must resolve.}  Every column in \texttt{PARTITION BY},
+\texttt{ORDER BY}, \texttt{DEFINE}, or \texttt{MEASURES} must exist in
+the input, and every variable reference must name a \texttt{PATTERN}
+variable or a declared \texttt{SUBSET} alias.  A variable used in the
+pattern but never defined is legal---it becomes an implicit always-true
+variable---and subset aliases are resolved to their members.
 
-Second, \emph{navigation must be ordered consistently}.  The validator
-builds a timeline of the order in which variables first appear in the
-pattern and checks that cross-variable \texttt{NEXT}/\texttt{PREV}
-references point in a valid direction; nested forms such as
-\texttt{NEXT(PREV(A.price, 1), 1)} are supported.  A navigation
-condition that cannot hold for the pattern yields an empty result set
-rather than an exception, matching the reference engines' behaviour.
+\emph{Navigation must be consistently ordered.}  The validator builds a
+timeline of when each variable first appears and checks that
+cross-variable \texttt{NEXT}/\texttt{PREV} references point a valid way;
+nested forms like \texttt{NEXT(PREV(A.price, 1), 1)} are supported.  A
+condition that can never hold yields an empty result, not an
+exception---matching the reference engines.
 
-Third, \emph{output and skip modes must be compatible}.  For example,
-the pattern-exclusion syntax \texttt{\{-\ \ldots\ -\}} is incompatible
-with \texttt{ALL ROWS PER MATCH WITH UNMATCHED ROWS} and is rejected;
-\texttt{AFTER MATCH SKIP TO FIRST/LAST~$V$} must target a real pattern
-variable or subset alias; and a skip that would re-anchor matching at
-the start of the previous match is caught, since it would otherwise
+\emph{Output and skip modes must be compatible.}  The exclusion syntax
+\texttt{\{-\ \ldots\ -\}} clashes with \texttt{ALL ROWS PER MATCH WITH
+UNMATCHED ROWS} and is rejected; \texttt{AFTER MATCH SKIP TO
+FIRST/LAST~$V$} must target a real variable or alias; and a skip that
+would re-anchor at the previous match's start is caught, since it would
 loop forever.  When every check passes, the validator records the
 resolved configuration---output mode, skip mode, implicit-variable
 defaults, and measure semantics---ready for planning.
@@ -235,11 +231,11 @@ defaults, and measure semantics---ready for planning.
 \label{sec:meth-logical}
 % ................................................................
 
-The logical plan flattens the validated AST into a single canonical
-structure that drives every later phase without touching the SQL text
-again.  In the implementation it is a set of typed attributes
-extracted from the \texttt{MatchRecognizeClause} and passed explicitly
-to the execution functions (Table~\ref{tab:logical-plan}).
+The logical plan flattens the validated AST into one canonical
+structure that drives every later phase without re-reading the SQL.  It
+is a set of typed attributes pulled from the
+\texttt{MatchRecognizeClause} and passed explicitly to the execution
+functions (Table~\ref{tab:logical-plan}).
 
 \begin{table}[htbp]
   \centering
@@ -277,18 +273,17 @@ to the execution functions (Table~\ref{tab:logical-plan}).
   \end{tabular}
 \end{table}
 
-Two normalisations are worth noting.  First, pattern variables that
-appear without a \texttt{DEFINE} are given the always-true predicate
-\texttt{"True"}, so downstream code can treat every variable
-uniformly.  Second, each measure is tagged \textsc{Running} or
-\textsc{Final}---either from an explicit prefix or, when none is given,
-by the fixed precedence in Figure~\ref{fig:measure-sem-resolution}.
-The engine scans the measure list once to note whether any measure is
-explicit, then applies the rules top to bottom to each measure: under
-\texttt{ONE ROW PER MATCH} everything is \textsc{Final}; under
+Two normalisations matter.  First, pattern variables with no
+\texttt{DEFINE} get the always-true predicate \texttt{"True"}, so
+downstream code treats every variable the same.  Second, each measure
+is tagged \textsc{Running} or \textsc{Final}---from an explicit prefix,
+or, when none is given, by the fixed precedence in
+Figure~\ref{fig:measure-sem-resolution}.  The engine scans the measures
+once to see whether any is explicit, then applies the rules top to
+bottom: under \texttt{ONE ROW PER MATCH} all are \textsc{Final}; under
 \texttt{ALL ROWS PER MATCH}, \texttt{FIRST}/\texttt{PREV}/\texttt{NEXT}
-resolve to \textsc{Final} and \texttt{LAST} to \textsc{Running},
-supported aggregates default to \textsc{Running}, and anything else to
+are \textsc{Final} and \texttt{LAST} \textsc{Running}, supported
+aggregates default to \textsc{Running}, and anything else to
 \textsc{Final}.
 
 \begin{figure}[htbp]
@@ -340,8 +335,8 @@ supported aggregates default to \textsc{Running}, and anything else to
   \label{fig:measure-sem-resolution}
 \end{figure}
 
-Once these attributes are resolved, the logical plan is assembled and
-handed to the pattern-compilation phase described in
+With these attributes resolved, the logical plan is assembled and
+handed to the pattern-compilation phase of
 Chapter~\ref{chap:implementation}.
 
 % ----------------------------------------------------------------
