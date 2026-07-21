@@ -109,33 +109,27 @@ gap.
 \section{Research Objectives and Contributions}
 \label{sec:intro-objectives}
 % ----------------------------------------------------------------
-This thesis explores how to bring SQL:2016 \texttt{MATCH\_RECOGNIZE} row pattern recognition into Python data analysis with Pandas. The goal is to combine the strengths of relational pattern queries and flexible in-memory analytics. The work was guided by three main objectives, each matched with a specific contribution described below.
+This thesis brings SQL:2016 \texttt{MATCH\_RECOGNIZE} row-pattern recognition into Pandas, joining relational pattern queries with in-memory analytics. Three objectives guided the work, each tied to a contribution.
 
 \begin{enumerate}
 
-\item \textbf{An In-Process Engine Supporting Core SQL:2016 Feature~R010-Style Capabilities for Pandas DataFrames.}
+\item \textbf{An in-process engine with core SQL:2016 Feature~R010-style capabilities for Pandas DataFrames.}
 
-Without a declarative alternative in Python, a data scientist must write the many lines of hand-crafted loops like in Listing~\ref{lst:ch1-udf} to detect a simple pattern like three steps declining-price pattern. This thesis delivers an in-process \texttt{MATCH\_RECOGNIZE}-style implementation supporting the core Feature~R010 behavior evaluated in this thesis. It runs entirely alongside Pandas, with no external database server or cloud subscription required, reducing that loop to a single declarative call like in Listing~\ref{lst:ch1-mr} and avoiding the requirement for external SQL engine dependencies or intricate Python code.
+Without a declarative option in Python, detecting even a three-step price drop means hand-written loops like Listing~\ref{lst:ch1-udf}. This thesis delivers an in-process \texttt{MATCH\_RECOGNIZE}-style engine for the evaluated Feature~R010 behavior. It runs alongside Pandas---no database server or cloud subscription---collapsing that loop into a single declarative call (Listing~\ref{lst:ch1-mr}).
 
-\item \textbf{Broad Coverage and Cross-Engine Correctness Validation.}
+\item \textbf{Broad construct coverage and cross-engine correctness.}
 
-The engine works with many SQL:2016-style row-pattern features. It handles quantifiers (\texttt{*}, \texttt{+}, \texttt{?}, and \texttt{{n,m}}), alternation (\texttt{|}), grouping, anchors, exclusions (\texttt{{- -}}), and \texttt{PERMUTE}. For example, a fraud analyst might describe a probe-and-drain sequence like this:
+The engine handles quantifiers (\texttt{*}, \texttt{+}, \texttt{?}, \texttt{{n,m}}), alternation (\texttt{|}), grouping, anchors, exclusions (\texttt{{- -}}), and \texttt{PERMUTE}. A fraud analyst could, for instance, write a probe-and-drain sequence:
 
 \begin{lstlisting}[language=SQL]
 PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)
 \end{lstlisting}
 
-The engine reads, compiles, and runs the pattern directly on pandas DataFrames. Correct behavior is verified through focused automated tests and by comparing results with Oracle and Trino.
+The engine reads, compiles, and runs the pattern directly on DataFrames. Correctness is checked with focused automated tests and against Oracle and Trino: across more than 500 queries spanning different pattern families, constructs, and output modes, the engine matched both references on every tested case---matches, order, measures, and output rows.
 
-More than 500 queries were run using different pattern families, SQL constructs, and output scenarios. For the cases tested, the proposed engine gave results that matched those from Oracle and Trino, including detected matches, match order, measures, and output rows.
+\item \textbf{Empirical validation on real-world data.}
 
-\item \textbf{Empirical Validation Using a Real-World Dataset.}
-
-Performance is assessed with targeted automated tests on the Amazon UK Products~2023 catalog~\cite{asaniczka2023amazon}. This real-world e-commerce dataset has about 2.2 million product records and offers good tabular data for testing price-based row-pattern recognition.
-
-Performance was evaluated using five pattern families and six input sizes, from 100,000 rows up to the full 2,222,742-row Amazon UK Products catalog, constructed as nested prefixes of the source data.
-
-A total of 30 pattern--size benchmark cells were measured for the proposed engine (90 cells across the three compared systems), and every cell completed successfully. The results show almost linear scaling across the tested range, with the expected differences in runtime for simple, alternation, quantified, optional, and nested pattern types; under the shared one-core, 32\,GB resource budget the engine recorded the lowest average execution time of the three systems, while the two database references validated its output row-for-row.
+Performance is measured on the Amazon UK Products~2023 catalog~\cite{asaniczka2023amazon}, an e-commerce dataset of about 2.2~million product records, using five pattern families and six sizes (100\,K rows up to the full 2{,}222{,}742, as nested prefixes). All 30 pattern--size cells for the engine (90 across the three systems) completed, with almost linear scaling and the lowest average time of the three under a shared one-core, 32\,GB budget; the two databases validated its output row for row. A separate scalability test then pushed all three on the larger Amazon Reviews~2023 corpus~\cite{hou2024amazonreviews}, up to 227.9~million rows---about 100$\times$ the main dataset---where the engine stayed near-linear and $6$--$11\times$ faster than both databases.
 
 \end{enumerate}
 
@@ -174,11 +168,12 @@ This chapter explains how the engine is built. It looks at finite-automata compi
 
 
 \textbf{Chapter~6 --- Experimental Evaluation}
-presents the evaluation methodology, the benchmark dataset
-(Amazon UK Products 2023, 2.2~million rows), and experimental
+presents the evaluation methodology, the benchmark datasets
+(Amazon UK Products~2023 for the cross-system comparison and the
+larger Amazon Reviews~2023 corpus for scalability), and experimental
 results covering functional correctness, performance across five
-pattern families and six input sizes, scalability, pattern
-complexity, and comparison with existing systems.
+pattern families and six input sizes, scalability to 227.9~million
+rows, pattern complexity, and comparison with existing systems.
 
 \textbf{Chapter~7 --- Conclusions and Future Work}
 This chapter summarizes the main contributions, discusses the limitations of the current implementation, and suggests directions for future research and further extensions.

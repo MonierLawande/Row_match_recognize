@@ -226,104 +226,80 @@ a native execution operator inside DuckDB itself.
 \label{subsec:related-restrictions}
 % ................................
 
-Existing implementations of row pattern recognition impose
-implementation-specific restrictions during use.  Examples reported
-across systems~\cite{oracle2022,oracle2021dwhsg,trino2022,flink,snowflake2025match_recognize,petkovic2022rpr}
-include:
+Existing row-pattern implementations each carry their own
+restrictions~\cite{oracle2022,oracle2021dwhsg,trino2022,flink,snowflake2025match_recognize,petkovic2022rpr}:
 
 \begin{itemize}
-  \item supported contexts differ, with some systems documenting
-    row patterns only in the \texttt{FROM} clause and others also
-    documenting window-oriented row pattern recognition;
-  \item the availability of pattern-recognition functions such as
-    \texttt{CLASSIFIER()} and \texttt{MATCH\_NUMBER()} differs
-    between \texttt{MEASURES}, \texttt{DEFINE}, and output modes;
-  \item aggregate support differs across engines, including
-    restrictions on \texttt{DISTINCT} aggregates and on expressions
-    used as aggregate arguments;
-  \item support for empty matches, exclusions, reluctant
-    quantifiers, and skip modes is not uniform across all systems.
+  \item supported contexts differ---some allow row patterns only in
+    the \texttt{FROM} clause, others also in a window;
+  \item functions like \texttt{CLASSIFIER()} and
+    \texttt{MATCH\_NUMBER()} are not equally available across
+    \texttt{MEASURES}, \texttt{DEFINE}, and output modes;
+  \item aggregate support varies, including limits on
+    \texttt{DISTINCT} aggregates and on aggregate arguments;
+  \item empty matches, exclusions, reluctant quantifiers, and skip
+    modes are not handled uniformly.
 \end{itemize}
 
-For many users---especially those with modest analytics needs or who
-work independently---installing and managing large-scale systems
-like Oracle, Trino, Snowflake, or Flink can be overly complicated.
-These users may only need occasional pattern detection and may prefer
-to avoid the overhead of learning different functions or dealing
-with varying syntax for similar queries across
-platforms~\cite{8509400}.  Table~\ref{tab:engine-comparison}
-summarizes the key characteristics and documented scope of the
-systems discussed above.
+For users with limited or occasional needs, standing up Oracle, Trino,
+Snowflake, or Flink is heavy--- installing and managing large-scale systems and learning each system's slightly
+different syntax for the same query adds hassle~\cite{8509400}.
+Table~\ref{tab:engine-comparison} summarizes the systems above.
 
-Additionally, for datasets that already fit comfortably in memory,
-Pandas can offer a lower-friction workflow than deploying a separate
-database server, cluster, or cloud warehouse~\cite{Evaluation,in-memory_processing}.
-This does not replace the
-strengths of Oracle, Trino, Snowflake, or Flink for large-scale or
-streaming workloads; rather, it highlights a different use case:
-lightweight, local, Python-centered analysis where data preparation,
-pattern extraction, and downstream modeling can remain in the same
-environment.
+When the data already fits in memory, Pandas can offer a lower-friction
+workflow than a separate server, cluster, or cloud
+warehouse~\cite{Evaluation,in-memory_processing}---the gap the next
+subsection makes precise.
 
 % ................................
 \subsection{Synthesis of the Research Gap}
 \label{subsec:related-gap-synthesis}
 % ................................
 
-The reviewed systems show that row-pattern recognition is a mature
-and useful abstraction, but they also reveal a deployment and
-workflow gap.  Oracle and Snowflake provide powerful managed or
-commercial database environments; Trino provides a distributed
-open-source SQL engine; and Flink targets streaming workloads.  These
-systems are appropriate when data already resides in their execution
-environment or when the workload requires distributed processing.
-They are less convenient when the analyst is working with a Pandas
-DataFrame that already fits in memory and wants to remain inside a
-Python notebook, script, or experimental pipeline.
+The reviewed systems show row-pattern recognition is a mature, useful
+abstraction---but they also expose a deployment and workflow gap.
+Oracle and Snowflake are managed or commercial databases, Trino a
+distributed open-source SQL engine, Flink a streaming platform.  Each
+fits when the data already lives in its environment or the workload
+needs distributed processing.  None is convenient when the analyst has
+a Pandas DataFrame that already fits in memory and wants to stay in a
+Python notebook or script.
 
-The research problem addressed in this thesis is therefore not the
-absence of \texttt{MATCH\_RECOGNIZE} in SQL engines in general.
-Rather, it is the absence of a Pandas-native row-pattern interface
-that preserves the main declarative structure of SQL row-pattern
-recognition while avoiding a round trip through an external database
-or stream-processing system.  This distinction defines the scope of
-the contribution: the proposed engine targets in-process, offline
-DataFrame analytics and evaluates core R010-style behavior and
-selected SQL:2016 pattern constructs.  It is not intended to replace
-distributed engines for large-scale or streaming workloads.
+So the problem this thesis addresses is not the absence of
+\texttt{MATCH\_RECOGNIZE} in SQL engines at large.  It is the absence
+of a Pandas-native row-pattern interface that keeps the declarative
+structure of SQL row-pattern recognition without a round trip through
+an external database or stream processor.  That sets the scope: the
+engine targets in-process, offline DataFrame analytics and covers core
+R010-style behavior plus selected SQL:2016 constructs---not a
+replacement for distributed or streaming engines.
 
 % ----------------------------------------------------------------
 \section{Pandas and the Python Ecosystem Gap}
 \label{sec:related-pandas-gap}
 % ----------------------------------------------------------------
 
-Pandas is a popular, open-source Python library for data analysis
-and manipulation~\cite{McKinney2010}.  Its straightforward installation process, broad
-community adoption, and integration with the Python data-science
-ecosystem make it attractive for students, researchers, and
-practitioners who need to analyze tabular data without deploying a
-separate database system.  Pandas provides useful primitives for
-sorting, filtering, grouping, rolling windows, shifting columns, and
-basic time-series analysis.
+Pandas is a popular open-source Python library for data
+analysis~\cite{McKinney2010}.  Easy installation, broad adoption, and
+tight integration with the Python data-science stack make it a natural
+choice for anyone analyzing tabular data without a separate database.
+It offers solid primitives for sorting, filtering, grouping, rolling
+windows, shifting columns, and basic time series.
 
-These primitives are powerful, but they are low-level building
-blocks rather than a declarative row-pattern language.  Expressing a
-multi-step sequence usually requires combinations of
-\texttt{groupby}, \texttt{shift}, \texttt{rolling}, custom Python
-loops, or intermediate Boolean columns.  Such implementations become
-verbose and error-prone as patterns grow longer, require overlap
-control, or involve conditions over previously matched rows.
+But those are low-level building blocks, not a declarative row-pattern
+language.  Expressing a multi-step sequence usually means stitching
+together \texttt{groupby}, \texttt{shift}, \texttt{rolling}, custom
+loops, or intermediate Boolean columns---code that turns verbose and
+error-prone as patterns lengthen, need overlap control, or reference
+already-matched rows.
 
-Despite this broad adoption, Pandas does not provide
-a native SQL:2016 \texttt{MATCH\_\allowbreak RECOGNIZE}-style primitive for row
-pattern recognition.  In this setting, analysts often need to
-manually implement stateful logic using
-\texttt{DataFrame.\allowbreak apply()} chains, \texttt{iterrows()}, or external
-database round-trips---all of which are error-prone, verbose, and
-difficult to maintain.  Within the scope of this thesis, alternative
-DataFrame libraries such as Dask, Polars, and Modin similarly lack a
-direct equivalent to SQL row pattern recognition.  Even DuckDB, which
-supports window functions and in-process analytics~\cite{findling2025bringing},
+Despite its reach, Pandas has no native SQL:2016
+\texttt{MATCH\_\allowbreak RECOGNIZE}-style primitive.  Analysts fall
+back on \texttt{DataFrame.\allowbreak apply()} chains,
+\texttt{iterrows()}, or database round-trips---all verbose and hard to
+maintain.  Within this thesis's scope, other DataFrame libraries (Dask,
+Polars, Modin) lack a direct equivalent too, and even DuckDB, with its
+in-process analytics and window functions~\cite{findling2025bringing},
 does not yet expose a native \texttt{MATCH\_RECOGNIZE} interface.
 
 % ----------------------------------------------------------------
@@ -331,28 +307,26 @@ does not yet expose a native \texttt{MATCH\_RECOGNIZE} interface.
 \label{sec:related-contribution}
 % ----------------------------------------------------------------
 
-This thesis addresses the identified gap with the following
-contributions:
+This thesis closes that gap with five contributions.
 
 \begin{enumerate}
-  \item A \textbf{Pandas-native \texttt{MATCH\_RECOGNIZE} engine}
-    supporting core SQL:2016 Feature~R010-style capabilities in an
-    in-process Python workflow,A separate database server or cloud warehouse is not required.
-  \item \textbf{Broad pattern construct support}, including
-    quantifiers, alternation, grouping, anchors, exclusions, and
-    \texttt{PERMUTE}, following the main row-pattern constructs used
-    by SQL:2016 \texttt{MATCH\_RECOGNIZE}.
-  \item An \textbf{optimization layer} comprising
-    LRU pattern caching, partition-wise memory management, and
-    thread-safe access to shared cache components.
-  \item A \textbf{safe expression evaluation pipeline} that
-    reduces code-injection risk by parsing user-defined predicates
-    into a controlled representation rather than executing raw
-    Python expressions.
-  \item \textbf{Empirical validation} using targeted functional
-    tests and experiments on the Amazon UK Products~2023 catalog,
-    up to its full 2.2~million rows, with the detailed methodology
-    and results reported in Chapter~\ref{chap:evaluation}.
+  \item A \textbf{Pandas-native engine} for core SQL:2016
+    \texttt{MATCH\_\allowbreak RECOGNIZE} (Feature~R010-style), running
+    in-process with no separate database server or cloud warehouse.
+  \item \textbf{Broad pattern-construct support}---quantifiers,
+    alternation, grouping, anchors, exclusions, and
+    \texttt{PERMUTE}---following the main SQL:2016
+    \texttt{MATCH\_RECOGNIZE} constructs.
+  \item An \textbf{optimization layer}: LRU pattern caching,
+    partition-wise memory management, and thread-safe access to shared
+    caches.
+  \item A \textbf{safe expression-evaluation pipeline} that parses
+    user predicates into a controlled representation instead of running
+    raw Python, cutting code-injection risk.
+  \item \textbf{Empirical validation} on the Amazon UK Products~2023
+    catalog (up to 2.2~million rows) and, for scalability, the larger
+    Amazon Reviews~2023 corpus (up to 227.9~million rows), with full
+    methodology and results in Chapter~\ref{chap:evaluation}.
 \end{enumerate}
 
 % ----------------------------------------------------------------
