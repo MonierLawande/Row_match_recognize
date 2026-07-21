@@ -109,29 +109,43 @@ gap.
 \section{Research Objectives and Contributions}
 \label{sec:intro-objectives}
 % ----------------------------------------------------------------
-This thesis brings SQL:2016 \texttt{MATCH\_RECOGNIZE} row-pattern recognition into Pandas, joining relational pattern queries with in-memory analytics. Three objectives guided the work, each tied to a contribution.
+This thesis asks whether SQL:2016 row-pattern recognition can be
+brought into Pandas without a database server.  Three objectives guide
+the work.
+
+\paragraph{Research objectives.}
 
 \begin{enumerate}
+  \item \textbf{Build a Pandas-native engine.}  The engine should parse
+    a \texttt{MATCH\_RECOGNIZE} query, compile its row pattern, and run
+    it directly on a DataFrame.  It should need no separate database or
+    cloud service.
 
-\item \textbf{An in-process engine with core SQL:2016 Feature~R010-style capabilities for Pandas DataFrames.}
+  \item \textbf{Support useful row-pattern semantics.}  The target is
+    the evaluated Feature~R010-style subset.  It includes the main
+    clauses, output modes, skip policies, navigation functions, and
+    pattern operators used in this thesis.  Automated and cross-system
+    tests should verify the supported behavior.
 
-Without a declarative option in Python, detecting even a three-step price drop means hand-written loops like Listing~\ref{lst:ch1-udf}. This thesis delivers an in-process \texttt{MATCH\_RECOGNIZE}-style engine for the evaluated Feature~R010 behavior. It runs alongside Pandas---no database server or cloud subscription---collapsing that loop into a single declarative call (Listing~\ref{lst:ch1-mr}).
-
-\item \textbf{Broad construct coverage and cross-engine correctness.}
-
-The engine handles quantifiers (\texttt{*}, \texttt{+}, \texttt{?}, \texttt{{n,m}}), alternation (\texttt{|}), grouping, anchors, exclusions (\texttt{{- -}}), and \texttt{PERMUTE}. A fraud analyst could, for instance, write a probe-and-drain sequence:
-
-\begin{lstlisting}[language=SQL]
-PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)
-\end{lstlisting}
-
-The engine reads, compiles, and runs the pattern directly on DataFrames. Correctness is checked with focused automated tests and against Oracle and Trino: across more than 500 queries spanning different pattern families, constructs, and output modes, the engine matched both references on every tested case---matches, order, measures, and output rows.
-
-\item \textbf{Empirical validation on real-world data.}
-
-Performance is measured on the Amazon UK Products~2023 catalog~\cite{asaniczka2023amazon}, an e-commerce dataset of about 2.2~million product records, using five pattern families and six sizes (100\,K rows up to the full 2{,}222{,}742, as nested prefixes). All 30 pattern--size cells for the engine (90 across the three systems) completed, with almost linear scaling and the lowest average time of the three under a shared one-core, 32\,GB budget; the two databases validated its output row for row. A separate scalability test then pushed all three on the larger Amazon Reviews~2023 corpus~\cite{hou2024amazonreviews}, up to 227.9~million rows---about 100$\times$ the main dataset---where the engine stayed near-linear and $6$--$11\times$ faster than both databases.
-
+  \item \textbf{Evaluate the system.}  The study should measure the five
+    criteria defined in Chapter~\ref{chap:evaluation}: correctness, SQL
+    feature coverage, usability, performance, and scalability.  It
+    should report execution time, throughput, memory, and
+    time-versus-size $R^2$ under controlled resources.  The main
+    benchmark uses Amazon UK Products~2023 up to 2.2~million
+    rows~\cite{asaniczka2023amazon}; the scalability test uses Amazon
+    Reviews~2023 up to 227.9~million
+    rows~\cite{hou2024amazonreviews}.  The main outputs agreed across
+    all three systems.  The engine recorded the lowest average time and
+    remained $6$--$11\times$ faster in the large-data test, while using
+    more per-query memory.
 \end{enumerate}
+
+\paragraph{Contributions.}
+These objectives produce an in-process Pandas engine, a
+general optimization layer, and a theoretical and empirical
+evaluation.  Section~\ref{sec:related-contribution} defines these three
+contributions and positions them against the related systems.
 
 % ----------------------------------------------------------------
 \section{Organization of the Thesis}

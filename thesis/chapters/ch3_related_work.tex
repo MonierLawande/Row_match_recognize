@@ -307,26 +307,25 @@ does not yet expose a native \texttt{MATCH\_RECOGNIZE} interface.
 \label{sec:related-contribution}
 % ----------------------------------------------------------------
 
-This thesis closes that gap with five contributions.
+The three objectives in Section~\ref{sec:intro-objectives} lead to
+three concrete contributions.  The objectives state the research aims;
+the items below state the delivered system, optimization, and evidence.
 
 \begin{enumerate}
-  \item A \textbf{Pandas-native engine} for core SQL:2016
-    \texttt{MATCH\_\allowbreak RECOGNIZE} (Feature~R010-style), running
-    in-process with no separate database server or cloud warehouse.
-  \item \textbf{Broad pattern-construct support}---quantifiers,
-    alternation, grouping, anchors, exclusions, and
-    \texttt{PERMUTE}---following the main SQL:2016
-    \texttt{MATCH\_RECOGNIZE} constructs.
-  \item An \textbf{optimization layer}: LRU pattern caching,
-    partition-wise memory management, and thread-safe access to shared
-    caches.
-  \item A \textbf{safe expression-evaluation pipeline} that parses
-    user predicates into a controlled representation instead of running
-    raw Python, cutting code-injection risk.
-  \item \textbf{Empirical validation} on the Amazon UK Products~2023
-    catalog (up to 2.2~million rows) and, for scalability, the larger
-    Amazon Reviews~2023 corpus (up to 227.9~million rows), with full
-    methodology and results in Chapter~\ref{chap:evaluation}.
+  \item A \textbf{Pandas-native engine} for the evaluated SQL:2016
+    Feature~R010-style subset.  It includes quantifiers, alternation,
+    grouping, anchors, exclusions, and \texttt{PERMUTE}.  It runs
+    in-process and needs no database server or cloud warehouse.
+  \item A \textbf{general optimization layer} with compiled fast paths,
+    vectorized predicate evaluation, compact output materialization,
+    cached pattern plans, and guarded semantic fallbacks.
+  \item \textbf{Theoretical and empirical evaluation}.  The theoretical
+    analysis gives time and space bounds for ordering, matching, output
+    construction, and pattern complexity.  The empirical analysis
+    evaluates correctness, coverage, usability, performance, memory,
+    and scalability.  It uses Amazon UK Products~2023 up to 2.2~million
+    rows and Amazon Reviews~2023 up to 227.9~million rows.
+    Chapter~\ref{chap:evaluation} gives the full method and results.
 \end{enumerate}
 
 % ----------------------------------------------------------------

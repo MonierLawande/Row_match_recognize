@@ -70,9 +70,11 @@ metrics---one instrument for all three systems---are defined in
 Section~\ref{subsec:eval-memory}.
 
 \paragraph{Scalability.}
-Mean execution time is regressed against row count across the six
-sizes; the $R^2$ per pattern family shows how close growth is to
-linear.
+Mean execution time is regressed against row count for each pattern
+family.  The reported $R^2$ shows how closely the measured points fit
+a straight line.  It is reported for both the six-size benchmark and
+the larger stress test.  A high $R^2$ describes the measured range; it
+does not prove the algorithm's asymptotic complexity.
 
 \paragraph{Usability (developer effort).}
 For each worked example, the line count of the idiomatic Pandas
@@ -241,7 +243,7 @@ Each worked example runs the same
 \texttt{MATCH\_\allowbreak{}RECOGNIZE} query through the proposed
 engine and both SQL references, and compares outputs, exercised
 clauses, and developer effort.  Beyond these examples, the engine is
-checked by the regression suite (369 test cases in 34
+checked by the regression suite (548 test cases in 34
 files~\cite{monierashraf2025rowmatch}) and by the 30 benchmark
 queries of Section~\ref{subsec:eval-cross-system}, where all three
 systems produce identical results.
@@ -994,9 +996,10 @@ This section compares the engine with Trino~473 and Oracle~XE~21c on
 the Amazon UK Products dataset: five pattern families, six sizes
 (100\,K to 2.22\,M rows), 30 cells per system.  Each cell is the
 IQR-filtered mean of twenty runs after five warmups.  All 90 cells
-completed.  The engine averaged nearly 5\,M\,rows/s and scaled almost
-exactly linearly ($R^2 \geq 0.99$ per family); complex nested patterns
-cost the most.  Section~\ref{subsec:eval-pattern-defs} defines the
+completed.  The engine averaged nearly 5\,M\,rows/s.  Its per-family
+time fits give $R^2=0.9996$--$0.9998$, so growth is close to linear
+over these six sizes.  Complex nested patterns cost the most.
+Section~\ref{subsec:eval-pattern-defs} defines the
 patterns, Section~\ref{subsec:eval-cross-system} the resource policy
 and results, Sections~\ref{subsec:eval-throughput}
 and~\ref{subsec:eval-memory} throughput and memory, and
@@ -1248,7 +1251,7 @@ high-water delta), which serve as cross-checks below.
   \label{fig:query_memory}
 \end{figure}
 
-The engine's and Oracle's peaks grow linearly with size---the engine
+The engine's and Oracle's peaks rise roughly with size---the engine
 5.7\,MB to 290\,MB at 2.22\,M rows, Oracle 2.4 to 58.7\,MB, with little
 pattern dependence.  The engine's per-query memory is the largest of
 the three (mean 89.7\,MB versus Oracle's 23.6\,MB, about $3.8\times$):
@@ -1352,26 +1355,6 @@ results are not presented as a claim that one system is universally
 better; they show the trade-off observed under the selected
 workload, data sizes, and resource configuration.
 
-\paragraph{Why the proposed engine is faster on this workload.}
-The advantage comes from specialization, not a superior execution
-model.  Four factors explain it.  \emph{First}, the engine is a
-single-purpose matcher: none of the planning, catalog, transaction,
-or coordination machinery the databases run on every query.
-\emph{Second}, execution is fully in-process over
-\texttt{pandas}/NumPy arrays: no client protocol, no serialization,
-no data movement.  \emph{Third}, each query compiles to a narrow
-vectorized fast path (Chapter~\ref{chap:implementation}): predicates
-become column operations, category checks become integer-code
-comparisons, the automaton walks precompiled decision tables that
-skip whole runs, and measures assemble with grouped NumPy reductions
----per-row Python work becomes amortized array work.
-\emph{Fourth}, the ordered input lets the engine skip sorting;
-Section~\ref{subsec:eval-ordering} shows the ranking survives
-without that shortcut.  The speedup holds only for the supported
-subset and single-node in-memory setting, and it costs more
-per-query memory than either database
-(Figure~\ref{fig:query_memory}).
-
 Figure~\ref{fig:relative_comparison} puts the two databases against the
 engine, drawn as a $1\times$ reference.
 
@@ -1445,9 +1428,10 @@ shortcut---it survives when everyone must sort
 
 Figure~\ref{fig:sort_cost_scaling} isolates the step: the two lines are
 the engine on ordered (no sort) and shuffled (forced sort) input.  Both
-grow linearly, and the shaded gap---the ordering cost---stays a small,
-roughly constant slice (0.49\,s versus 0.65\,s at 2.22\,M rows), so
-sorting never comes to dominate (Table~\ref{tab:sort_cost_by_size}).
+grow close to linearly over these six sizes.  The shaded gap---the
+ordering cost---stays a small, roughly constant slice (0.49\,s versus
+0.65\,s at 2.22\,M rows), so sorting never comes to dominate
+(Table~\ref{tab:sort_cost_by_size}).
 
 \paragraph{Worst case 2: a state-dependent predicate.}
 Sorting keeps the engine on its row-local fast path, where it still
@@ -1508,7 +1492,14 @@ Tables~\ref{tab:stress_volume}--\ref{tab:stress_mem}
 (Appendix~\ref{app:benchmark-tables}).
 
 \paragraph{Time and throughput.}
-All three systems scale linearly in $n$.
+Execution time is close to linear in $n$ over the measured range.
+The per-pattern regressions give $R^2=0.9980$--$0.9999$ for the
+engine, $0.9824$--$0.9992$ for Oracle, and
+$0.9912$--$0.9999$ for Trino.  Trino's
+\texttt{complex\_nested} fit uses its five completed sizes because the
+last two reached the time limit.  These values quantify the observed
+trend; they do not replace the theoretical bounds in
+Section~\ref{subsec:eval-complexity}.
 
 \begin{figure}[htbp]
   \centering
@@ -1541,8 +1532,8 @@ Figure~\ref{fig:stress_throughput} plots throughput, the mean over
 families.  The engine sustains
 3.7--5.2\,M\,rows/s across the whole range, against 0.5--2.8\,M for
 Oracle~EE and 0.3--1.5\,M for Trino; the databases drift down as their
-fixed budgets spread over more data.  The per-pattern curves stay
-linear for all three (Figure~\ref{fig:stress_time_grid}), and every
+fixed budgets spread over more data.  The per-pattern curves remain
+close to linear for all three (Figure~\ref{fig:stress_time_grid}), and every
 completed cell returned identical match counts
 (Tables~\ref{tab:stress_thr}, \ref{tab:stress_matches}).
 
@@ -1590,16 +1581,14 @@ cost---so the engine's memory is the price of residency, not matcher
 overhead (Tables~\ref{tab:stress_incmem}--\ref{tab:stress_native}).
 
 \paragraph{Why the engine is scalable.}
-Its time and memory are both linear in $n$ with no internal ceiling.
-The only limit is machine RAM, reached predictably near the 58\,GB
-budget, so the engine degrades gracefully rather than failing---and
-stays $6$ to $11\times$ faster than either database on one core all the
-way to 227.9\,M rows.  Oracle~EE completes the full range and is bounded
-only by time on the hardest patterns; Trino hits a practical time wall
-on \texttt{complex\_nested} from 160\,M.  None of this claims universal
-superiority: it maps where each system's usable region lies, and the
-engine wins decisively on speed at one core at the cost of being first
-to exhaust memory.
+Its time and memory grow close to linearly over the tested range, and
+no internal size ceiling was reached.  The practical limit is machine
+RAM, approached near the 58\,GB budget.  The engine remains $6$ to
+$11\times$ faster than either database on one core through 227.9\,M
+rows.  Oracle~EE completes the full range; Trino reaches the time limit
+on \texttt{complex\_nested} from 160\,M.  This maps the tested operating
+range, not universal superiority.  The engine gains speed but is the
+first system likely to exhaust memory.
 
 % ................................................................
 \subsection{Evaluation Validity}
@@ -1640,19 +1629,29 @@ expert tuning could narrow the gap.
 \label{subsec:eval-findings}
 % ................................................................
 
-Five findings stand out.
+The main findings are as follows.
 
 \emph{Speed.}  The engine was fastest on all 30 cross-system cells
 (0.20\,s mean versus Oracle 1.04\,s and warm Trino 1.98\,s) and stayed
 $6$--$11\times$ ahead on real data to 227.9\,M rows.
 
+\emph{Why it is faster on this workload.}  The engine is specialized
+for in-process DataFrame matching.  It avoids database planning,
+catalog, transaction, client-protocol, and data-transfer costs.  Its
+compiler turns supported predicates into column operations and
+integer-code comparisons, then uses decision tables and grouped NumPy
+reductions to reduce per-row Python work.  Ordered input also lets it
+skip sorting, although Section~\ref{subsec:eval-ordering} shows that
+it remains fastest when sorting is forced.  This advantage applies to
+the supported single-node workload, not to every pattern or deployment.
+
 \emph{Correctness.}  Every completed database cell matched the engine
 row for row, so the timings compare systems computing the same answer.
 
-\emph{Scalability.}  Its time and memory are both linear in $n$ with no
-internal limit; it finished the full 227.9\,M-row corpus, bounded only
-by RAM.  Oracle~EE reached it too; Trino's hardest pattern ran out of
-the time budget from 160\,M rows.
+\emph{Scalability.}  Time and memory were close to linear over the
+tested range, and the engine finished the full 227.9\,M-row corpus.
+Its practical boundary was RAM.  Oracle~EE also reached the full size;
+Trino's hardest pattern exceeded the time budget from 160\,M rows.
 
 \emph{The trade-off.}  Speed costs memory: the engine keeps data in
 RAM, so its per-query peak is the highest and grows with $n$---the
