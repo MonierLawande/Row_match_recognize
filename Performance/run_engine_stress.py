@@ -513,16 +513,6 @@ def make_cases() -> list[StressCase]:
                 validate=lambda result: isinstance(result, pd.DataFrame),
             ),
             StressCase(
-                family="output_pressure",
-                name="all_rows_per_match",
-                size=800_000,
-                input_order="ordered",
-                expected_path="row-local matching plus ALL ROWS materialization",
-                make_input=lambda: load_common(800_000),
-                query=ALL_ROWS_QUERY,
-                validate=lambda result: not result.empty,
-            ),
-            StressCase(
                 family="rejection_scan",
                 name="no_rows_satisfy_start",
                 size=2_222_742,
@@ -534,6 +524,25 @@ def make_cases() -> list[StressCase]:
             ),
         ]
     )
+    # Output construction has a different scaling envelope from ONE ROW
+    # matching.  Keep both the historical 800K point and the full common
+    # 2.22M dataset so result-volume regressions cannot hide behind the
+    # ordinary low-output matrix.
+    for size in (800_000, 2_222_742):
+        cases.append(
+            StressCase(
+                family="output_pressure",
+                name="all_rows_per_match",
+                size=size,
+                input_order="ordered",
+                expected_path=(
+                    "row-local matching plus compiled columnar ALL ROWS output"
+                ),
+                make_input=lambda size=size: load_common(size),
+                query=ALL_ROWS_QUERY,
+                validate=lambda result: not result.empty,
+            )
+        )
     return cases
 
 

@@ -690,6 +690,16 @@ def wait_for_trino(timeout_seconds: int) -> None:
     raise RuntimeError(f"Trino is not ready: {last_error}")
 
 
+# Server-side guard: Trino kills any query whose wall time exceeds this, so a
+# runaway MATCH_RECOGNIZE (e.g. a complex pattern that would drive the JVM heap
+# into a GC death spiral) is reported as a clean failure the harness records as
+# a practical-time wall, instead of leaving the client polling a wedged
+# coordinator forever.  A client-side hard timeout (see the stress driver's
+# bounded fetch) is the ultimate backstop should the coordinator get too
+# GC-starved to enforce even this.
+TRINO_QUERY_MAX_RUN_TIME = "600s"
+
+
 def connect_trino():
     import trino
 
@@ -699,7 +709,16 @@ def connect_trino():
         user="benchmark",
         catalog="memory",
         schema="default",
+        session_properties={"query_max_run_time": TRINO_QUERY_MAX_RUN_TIME},
     )
+
+
+# Hookable so a driver can bound each INSERT (the Trino memory connector is an
+# on-heap store; a load beyond what the JVM heap can hold drives it into a GC
+# death spiral in which the coordinator can no longer enforce even
+# query_max_run_time, so only a client-side per-batch wall can end the hang).
+def trino_execute(cur, sql: str) -> None:
+    cur.execute(sql)
 
 
 def load_trino_table(df: pd.DataFrame, chunk_size: int) -> None:
@@ -723,7 +742,9 @@ def load_trino_table(df: pd.DataFrame, chunk_size: int) -> None:
         values_sql = ", ".join(
             "(" + ", ".join(sql_literal(value) for value in row) + ")" for row in rows
         )
-        cur.execute(f"INSERT INTO {TABLE_NAME} ({', '.join(LOAD_COLUMNS)}) VALUES {values_sql}")
+        trino_execute(
+            cur,
+            f"INSERT INTO {TABLE_NAME} ({', '.join(LOAD_COLUMNS)}) VALUES {values_sql}")
         inserted += len(rows)
         print(f"    Trino load: {inserted:,}/{len(df):,}", end="\r")
     print()

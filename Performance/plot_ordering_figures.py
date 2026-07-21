@@ -75,40 +75,38 @@ def ordering_scenarios():
 
 
 def sort_cost_scaling():
-    inc = []  # incremental sort cost (s), avg over patterns, engine
-    for sz in SIZES:
-        a = o["Engine"][o["Engine"].dataset_size == sz].execution_time_seconds.mean()
-        b = u["Engine"][u["Engine"].dataset_size == sz].execution_time_seconds.mean()
-        inc.append(b - a)
-    inc = np.array(inc)
-    ns_row = inc / np.array(SIZES) * 1e9
-    ns_nlogn = inc / (np.array(SIZES) * np.log2(SIZES)) * 1e9
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.4, 4.0))
-    ax1.plot(range(len(SIZES)), ns_row, color="#2a78d6", marker="o", markersize=6,
-             linewidth=2, markeredgecolor="white", markeredgewidth=0.7, zorder=3)
-    ax1.set_title("Per-row sort cost stays in a narrow band", fontsize=9)
-    ax1.set_ylabel("Incremental sort cost (ns / row)")
-    ax1.set_ylim(0, max(ns_row) * 1.35)
-    for sx, sy in zip(range(len(SIZES)), ns_row):
-        ax1.annotate(f"{sy:.0f}", (sx, sy), textcoords="offset points",
-                     xytext=(0, 6), ha="center", fontsize=7, color="#2a78d6")
-
-    ax2.plot(range(len(SIZES)), ns_nlogn, color="#199e70", marker="^", markersize=6,
-             linewidth=2, markeredgecolor="white", markeredgewidth=0.7, zorder=3)
-    ax2.set_title("Cost / $(n\\log_2 n)$ flat $\\Rightarrow$ consistent with $O(n\\log n)$",
-                  fontsize=9)
-    ax2.set_ylabel("Incremental cost / $(n\\log_2 n)$  (ns)")
-    ax2.set_ylim(0, max(ns_nlogn) * 1.4)
-
-    for ax in (ax1, ax2):
-        ax.set_xticks(range(len(SIZES)))
-        ax.set_xticklabels(["100K", "200K", "400K", "800K", "1.6M", "2.2M"],
-                           fontsize=7.5)
-        ax.set_xlabel("Dataset size (rows)")
-        ax.set_xlim(-0.35, len(SIZES) - 0.65)
-        ax.grid(True, which="major", zorder=0)
-        ax.tick_params(labelsize=7.5)
+    # Intuitive view: the engine's execution time with ordered input (A, no
+    # sort) and with shuffled input (B, must sort), across sizes.  Both grow
+    # linearly; the shaded gap between them IS the ordering cost, and it stays a
+    # small, roughly constant slice of the total as data scales.
+    xlab = ["100K", "200K", "400K", "800K", "1.6M", "2.2M"]
+    A = np.array([o["Engine"][o["Engine"].dataset_size == sz]
+                  .execution_time_seconds.mean() for sz in SIZES])
+    B = np.array([u["Engine"][u["Engine"].dataset_size == sz]
+                  .execution_time_seconds.mean() for sz in SIZES])
+    fig, ax = plt.subplots(figsize=(7.6, 4.4))
+    xi = np.arange(len(SIZES))
+    ax.fill_between(xi, A, B, color="#e34948", alpha=0.15, zorder=1,
+                    label="ordering cost (the gap)")
+    ax.plot(xi, A, color="#2a78d6", marker="o", markersize=6, linewidth=2,
+            markeredgecolor="white", markeredgewidth=0.7, zorder=3,
+            label="A: ordered input (no sort needed)")
+    ax.plot(xi, B, color="#e34948", marker="s", markersize=6, linewidth=2,
+            markeredgecolor="white", markeredgewidth=0.7, zorder=3,
+            label="B: shuffled input (engine must sort)")
+    for xv, yv, c in ((xi[-1], A[-1], "#2a78d6"), (xi[-1], B[-1], "#e34948")):
+        ax.annotate(f"{yv:.2f}s", (xv, yv), textcoords="offset points",
+                    xytext=(6, 2), fontsize=8, color=c)
+    ax.set_xticks(xi)
+    ax.set_xticklabels(xlab, fontsize=8.5)
+    ax.set_xlim(-0.3, len(SIZES) - 0.7)
+    ax.set_ylim(0, max(B) * 1.2)
+    ax.set_xlabel("Dataset size (rows)")
+    ax.set_ylabel("Engine execution time (s)")
+    ax.set_title("Cost of sorting: engine on ordered vs shuffled input",
+                 fontsize=10)
+    ax.grid(True, zorder=0)
+    ax.legend(frameon=False, fontsize=8.5, loc="upper left")
     fig.tight_layout()
     fig.savefig(os.path.join(IMG, "viz_sort_cost_scaling.png"), bbox_inches="tight")
     plt.close(fig)
