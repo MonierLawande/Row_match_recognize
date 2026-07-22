@@ -93,25 +93,19 @@ Trade-surveillance systems watch for signs of market manipulation, like ``layeri
 The SQL:2016 standard introduced \texttt{MATCH\_RECOGNIZE}~\cite{ISO2016SQL,iso2016}, which brings pattern matching across rows into SQL. The feature finds ordered sequences of rows where each part of the pattern is defined by a row condition, not just a character, and allows complex event sequences to be described in a clear, declarative way~\cite{winand2017sqlnew}. While it does not add new capabilities to the relational model since similar queries can be written with joins, window functions, recursion, or procedural code, it offers a simpler and more maintainable way to express sequence-based logic.
   
 
-At the time of writing, \texttt{MATCH\_RECOGNIZE} is still absent from
-several widely used data systems, including
-PostgreSQL~\cite{howe2020matchrecognize} and
-DuckDB~\cite{findling2025bringing}. This thesis aims to help make declarative row-pattern matching possible in environments that do not have built-in support, especially in Pandas DataFrames and in-process Python analytics.
+At the time of writing, PostgreSQL~18 lists the SQL row-pattern features
+as unsupported, while DuckDB lists \texttt{MATCH\_RECOGNIZE} as planned
+work~\cite{postgresql18unsupported,duckdb2026roadmap,howe2020matchrecognize,findling2025bringing}.  This thesis aims
+to make declarative row-pattern matching possible in Pandas DataFrames
+and in-process Python analytics.
 
-The SQL standard distinguishes between different feature levels for
-row pattern matching, which can be used to classify
-implementations~\cite{winand_match_recognize}.
-\textbf{Feature~R010} provides the most basic support and serves
-as a basis for further features; it includes row pattern
-recognition inside the \texttt{FROM} clause and basic aggregate
-functions (\texttt{MIN}, \texttt{MAX}, \texttt{SUM},
-\texttt{COUNT}, \texttt{AVG}) inside the \texttt{MEASURES}
-clause.  \textbf{Feature~R020} extends the areas of application:
-\texttt{MATCH\_RECOGNIZE} can be used within the \texttt{WINDOW}
-and \texttt{OVER} clauses to describe windows more precisely.
-\textbf{Feature~R030} allows extended aggregate support inside the
-\texttt{MATCH\_RECOGNIZE}
-clause~\cite{ISO2021,michels2018new,melton2017sqlrpr}.
+The SQL standard distinguishes three optional features for row pattern
+recognition~\cite{winand_match_recognize}.  \textbf{Feature~R010}
+covers row pattern recognition in the \texttt{FROM} clause.
+\textbf{Feature~R020} covers row patterns in \texttt{WINDOW}
+specifications.  \textbf{Feature~R030} covers full aggregate support.
+They are distinct parts of the standard, not successive
+levels~\cite{ISO2021,michels2018new,melton2017sqlrpr}.
 
 This thesis uses the SQL:2016 terminology as the conceptual frame,
 but the implementation claims are intentionally scoped.  The proposed
@@ -271,4 +265,3 @@ The query groups rows by \texttt{customer\_id} and sorts them by \texttt{order\_
 This chapter explained sequential pattern matching as an analytical problem and showed why regular row-by-row predicates do not work well for many tasks involving ordered data. It also covered the main parts of SQL:2016 \texttt{MATCH\_RECOGNIZE}, such as partitioning, ordering, measures, output modes, skip policies, pattern definitions, and variable predicates.
 
 The stock-price V-pattern example demonstrated how these components fit together in a full query and explained why this abstraction works well with automata-based execution. Chapter~\ref{chap:related} looks more closely at existing implementations, comparing their features, deployment options, and real-world limitations.
-
