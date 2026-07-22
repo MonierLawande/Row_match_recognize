@@ -6,25 +6,57 @@
 % !TEX root = Thesis.tex
 \chapter{Introduction}
 \label{chap:intro}
-Pattern matching means looking at a series of data points, like those in a table, to find shapes such as V, W, and U, as well as trends and patterns in behavior. This approach helps analysts discover useful insights for analysis and prediction. Pattern matching is used in many fields, including finding money-laundering transaction chains~\cite{petkovic2022fraud}, spotting breakdowns in IoT sensor data, and following user journeys in e-commerce clickstreams. While standard SQL clauses look at each row separately, pattern matching pays attention to the order of events and how rows relate to each other. Patterns are set up using syntax that works like regular expressions, but at the row level. This lets analysts find and pull out meaningful sequences from ordered groups of data.
-
- 
+Row-pattern recognition searches an ordered series of table rows for
+relationships that span several events.  It can detect shapes such as V, W,
+and U, as well as trends and repeated behavior.  These patterns support
+analysis and prediction in many domains.  Examples include money-laundering
+transaction chains~\cite{petkovic2022fraud}, failures in IoT sensor data, and
+user journeys through e-commerce clickstreams.  Unlike an ordinary SQL
+filter, which evaluates one row at a time, a row pattern uses event order and
+relationships between rows.  Its syntax resembles a regular expression
+applied to rows rather than characters.  Analysts can therefore describe and
+extract meaningful sequences from ordered partitions.
 
 % ----------------------------------------------------------------
 \section{Problem Statement}
 \label{sec:intro-problem}
 % ----------------------------------------------------------------
-The\texttt{MATCH\_RECOGNIZE}(MR) clause was introduced in the SQL:2016 standard, enabling users to define and search for patterns within ordered sequences of rows directly in SQL queries. Although row pattern recognition was standardized in SQL:2016~\cite{iso2016,ISO2021}, Oracle Database had already introduced support for  \texttt{MATCH\_RECOGNIZE}  (in Oracle Database~12c, 2013) ~\cite{oracle2022,book}. However, only a limited number of database management systems have since adopted this functionality.
+SQL:2016 standardized row-pattern recognition through the
+\texttt{MATCH\_RECOGNIZE} clause~\cite{iso2016,ISO2021}.  The clause lets a
+query define and search patterns within ordered rows.  Oracle had already
+introduced it in Oracle Database~12c in 2013~\cite{OracleMR,
+oracle2021dwhsg,book}.
+Adoption nevertheless remains limited.
 
-Several modern analytical platforms have since emerged. Trino~\cite{trino2022,trino2021row},, Snowflake~\cite{snowflake2025match_recognize}, and Apache Flink ~\cite{flink} each offer their own implementations; however, conformance to the SQL:2016 feature levels (R010, R020, R030) varies with different restrictions. This limitation is also still under development in PostgreSQL and DuckDB, two widely used open-source systems that do not currently provide native support for  \texttt{MATCH\_RECOGNIZE} ~\cite{howe2020matchrecognize,findling2025bringing}.
+Trino~\cite{trino2022,trino2021row},
+Snowflake~\cite{snowflake2025match_recognize}, and Apache
+Flink~\cite{flink} provide their own implementations.  However, support for
+the optional SQL:2016 features R010, R020, and R030 varies, as do practical
+restrictions.  PostgreSQL~18 lists these features as unsupported, while
+DuckDB lists \texttt{MATCH\_RECOGNIZE} as planned work~\cite{
+postgresql18unsupported,duckdb2026roadmap}.
 
-This gap affects analytical workflows. Many analytical workflows begin in Python, where users prepare data, test hypotheses, and build models before transitioning to larger database or cloud platforms. For data that fits in memory, using a separate SQL engine to express row-pattern logic can add overhead for deployment and data movement. The focus of this thesis is therefore not to replace enterprise or Database systems, but to bring a practical subset of declarative row-pattern recognition into the Pandas environment, where many analytical workflows already begin.
+This gap matters because many analytical workflows begin in Python.  Users
+prepare data, test hypotheses, and build models before moving to a larger
+database or cloud platform.  For data that already fits in memory, a separate
+SQL engine adds deployment, integration, and data-transfer work.  This thesis
+does not aim to replace an enterprise database.  It brings a practical subset
+of declarative row-pattern recognition to the Pandas environment where these
+workflows often begin.
 
-Without this declarative clause, finding multi-row patterns means using complicated mixes of SQL window functions, self-joins, or even looping through rows outside the database. When the pattern has more than two or three steps, the code quickly grows into many lines with row number calculations, timestamp checks, and lots of \texttt{JOIN} conditions. This kind of code is hard to write, even harder to maintain, and often leads to multiple table scans that hurt performance~\cite{cao2012optimizationanalyticwindowfunctions}.
+Without this declarative primitive, SQL users must combine window functions,
+self-joins, or loops outside the database.  Beyond two or three steps, the
+logic accumulates row-number calculations, timestamp checks, and
+\texttt{JOIN} conditions.  It is difficult to maintain and may require
+repeated table scans~\cite{cao2012optimizationanalyticwindowfunctions}.
 
-This limitation stands out in Python’s data science tools. Pandas~\cite{McKinney2010}, a popular library for working with tables, does not have built-in support for sequential pattern matching. If analysts want to find multi-step patterns, they have to do it themselves by creating shifted copies of columns, such as \texttt{df['value'].shift(-1)}, \texttt{shift(-2)}, and so on, making Boolean masks, using \texttt{groupby().apply()} to piece together sequences, and then pivoting or renaming columns.
-Listing~\ref{lst:ch1-udf} illustrates this
-approach for a simple three-step decreasing-price pattern (\texttt{A~B~C}).
+The same limitation appears in Python.  Pandas~\cite{McKinney2010} is a
+popular tabular-data library, but it has no built-in SQL row-pattern
+primitive.  Analysts instead create shifted columns such as
+\texttt{df['value'].shift(-1)} and \texttt{shift(-2)}, combine Boolean masks,
+use \texttt{groupby().apply()}, and then pivot or rename intermediate
+columns.  Explicit loops are also common.  Listing~\ref{lst:ch1-udf} shows
+this approach for a three-row price decrease (\texttt{A~B~C}).
 
 \begin{lstlisting}[language=Python,
     caption={Detecting a three-step price-decrease pattern in
@@ -55,11 +87,15 @@ for _, grp in df.groupby('customer_id'):
 result_df = pd.DataFrame(all_matches)
 \end{lstlisting}
 
- It takes over 20 lines of code to make a simple three-step pattern. The Hand-Crafted Approach is also likely to have mistakes where things are not lined up correctly. The hand-crafted approach also does not scale well to longer patterns or to patterns that carry conditions.
+Even this fixed three-row pattern needs more than 20 source lines.  The
+hand-written logic is vulnerable to alignment errors and does not extend
+cleanly to longer patterns or patterns with more conditions.  Such cases also
+require custom indexing, overlap handling, and output logic.
 
 The same query expressed with \texttt{MATCH\_RECOGNIZE} is shown
 in Listing~\ref{lst:ch1-mr}: a single declarative statement that
-specifies the partition, ordering, pattern grammar, variable definitions, and output measures.
+specifies the partition, ordering, pattern grammar, variable definitions, and
+output measures.
 
 \begin{lstlisting}[language=Python,
     caption={The same pattern expressed with \texttt{MATCH\_RECOGNIZE}
@@ -92,122 +128,146 @@ MATCH_RECOGNIZE (
 output_df = match_recognize(query, df)
 \end{lstlisting}
 
-The declarative form is not just shorter in syntax: it separates what to find---the pattern---from how to find it. The patterns become composable, auditable, and easy to extend. A more complex pattern, such as four or five steps
-with conditional alternation, requires no change to the surrounding
-Python code, only an update to the \texttt{PATTERN} and
-\texttt{DEFINE} clauses~\cite{michels2018new,petkovic2022rpr}.
-It also allows the implementation to compile the row pattern into
-automata, cache repeated pattern structures, and process ordered
-partitions without exposing this execution logic to the user.
-
-The full structure and sub-clauses of \texttt{MATCH\_RECOGNIZE}
-are introduced in Chapter~\ref{chap:background}.  Chapter~\ref{chap:related}
-surveys the existing implementations and identifies the research
-gap.
-
+The declarative form is not only shorter.  It separates what to find from how
+the engine finds it.  The query is easier to audit, compose, and extend.  A
+four- or five-step sequence with conditional alternation normally changes the
+\texttt{PATTERN} and \texttt{DEFINE} clauses, not the surrounding Python
+traversal code~\cite{michels2018new,petkovic2022rpr}.  The implementation can
+then compile the pattern into automata, cache repeated pattern structures,
+and process ordered partitions without exposing those details to the user.
+The full structure and sub-clauses of \texttt{MATCH\_RECOGNIZE} are introduced in Chapter~\ref{chap:background}. 
 % ----------------------------------------------------------------
 \section{Research Objectives and Contributions}
 \label{sec:intro-objectives}
 % ----------------------------------------------------------------
-This thesis asks whether SQL:2016 row-pattern recognition can be
-brought into Pandas without a database server.  Three objectives guide
-the work.
+This thesis brings a practical R010-style subset of SQL:2016 row-pattern
+recognition into Pandas, joining relational pattern queries with
+in-memory analytics.  It asks whether this can be done without requiring a
+database server.  Three objectives guide the work.
 
 \paragraph{Research objectives.}
 
 \begin{enumerate}
-  \item \textbf{Build a Pandas-native engine.}  The engine should parse
-    a \texttt{MATCH\_RECOGNIZE} query, compile its row pattern, and run
-    it directly on a DataFrame.  It should need no separate database or
-    cloud service.
+  \item \textbf{Build a Pandas-native engine.}  The engine parses a
+    \texttt{MATCH\_RECOGNIZE} query, compiles its row pattern, and runs it
+    directly on a DataFrame.  It works alongside Pandas and needs no separate
+    database or cloud service.  It replaces procedural code such as
+    Listing~\ref{lst:ch1-udf} with the declarative call in
+    Listing~\ref{lst:ch1-mr}.
 
-  \item \textbf{Support useful row-pattern semantics.}  The target is
-    the evaluated Feature~R010-style subset.  It includes the main
-    clauses, output modes, skip policies, navigation functions, and
-    pattern operators used in this thesis.  Automated and cross-system
-    tests should verify the supported behavior.
+  \item \textbf{Support and verify useful row-pattern semantics.}  The
+    target is the evaluated R010-style subset.  It includes the main
+    clauses, output modes, skip policies, and navigation functions.  Its
+    pattern operators include quantifiers (\texttt{*}, \texttt{+},
+    \texttt{?}, and \texttt{\{n,m\}}), alternation (\texttt{|}), grouping,
+    anchors, exclusions (\texttt{\{-\ldots-\}}), and \texttt{PERMUTE}.
+    Automated and cross-system tests verify the supported behavior.
 
-  \item \textbf{Evaluate the system.}  The study should measure the five
-    criteria defined in Chapter~\ref{chap:evaluation}: correctness, SQL
-    feature coverage, usability, performance, and scalability.  It
-    should report execution time, throughput, memory, and
-    time-versus-size $R^2$ under controlled resources.  The main
-    benchmark uses Amazon UK Products~2023 up to 2.2~million
-    rows~\cite{asaniczka2023amazon}; the scalability test uses Amazon
-    Reviews~2023 up to 227.9~million
-    rows~\cite{hou2024amazonreviews}.  The main outputs agreed across
-    all three systems.  The engine recorded the lowest average time and
-    remained $6$--$11\times$ faster in the large-data test, while using
-    more per-query memory.
+    For example, a fraud analyst can express a probe-and-drain sequence as:
+\begin{lstlisting}[language=SQL]
+PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)
+\end{lstlisting}
+
+  \item \textbf{Evaluate the system.}  The study assesses the five criteria
+    defined in Chapter~\ref{chap:evaluation}: correctness, SQL feature
+    coverage, usability, performance, and scalability.  It measures output
+    agreement, developer effort, execution time, throughput,
+    memory, and time-versus-size $R^2$.  The main evaluation uses Amazon UK
+    Products~2023~\cite{asaniczka2023amazon}, which contains about
+    2.2~million e-commerce product records.  A separate scalability test uses
+    Amazon Reviews~2023 up to 227.9~million
+    rows~\cite{hou2024amazonreviews}.
 \end{enumerate}
 
 \paragraph{Contributions.}
-These objectives produce an in-process Pandas engine, a
-general optimization layer, and a theoretical and empirical
-evaluation.  Section~\ref{sec:related-contribution} defines these three
-contributions and positions them against the related systems.
+The thesis makes three contributions: an in-process Pandas engine, a general
+optimization layer, and a theoretical and empirical evaluation.
+Section~\ref{sec:related-contribution} defines them in detail and positions
+them against the related systems.
+
+\paragraph{Evidence at a glance.}
+The regression suite contains 548 automated test cases in 34
+files~\cite{monierashraf2025rowmatch}.  They cover pattern families,
+constructs, output modes, navigation, and aggregation behavior.  The
+controlled cross-system benchmark adds direct comparison with Trino~473 and
+Oracle~XE~21c.  It uses five pattern families and six nested prefixes of the
+Amazon UK Products dataset, from 100\,K rows to the full 2{,}222{,}742 rows.
+All 90 system--pattern--size cells completed.  For each of the 30
+pattern--size combinations, all three systems returned the same normalized
+result.  Under the shared one-core, 32\,GB budget, the engine recorded the
+lowest average time.  Its execution time grew almost linearly, with higher
+per-query memory than either database.
+
+The larger Amazon Reviews test extends the range to 227.9~million rows,
+about $100\times$ the main dataset.  This test uses one core, 58\,GB, and a
+600-second per-query limit.  Trino reads a disk-backed table, while Oracle
+runs as 21c Enterprise Edition.  The engine and Oracle completed the full
+range.  Trino exceeded the limit on \texttt{complex\_nested} from 160~million
+rows.  Across the five row-local pattern families and completed cells, the
+engine remained close to linear and kept a $6$--$11\times$ time advantage.
+Chapter~\ref{chap:evaluation} reports the complete method, trade-offs, and
+limits.
 
 % ----------------------------------------------------------------
 \section{Organization of the Thesis}
 \label{sec:thesis-organization}
 % ----------------------------------------------------------------
 
-The following section outlines the structure of the thesis.
+The rest of the thesis is organized as follows.
+
 \textbf{Chapter~\ref{chap:background} --- Background and Concepts}
-presents the theoretical and technical foundations on which this work is built.  It introduces sequential pattern matching and its
-real-world applications, explains the SQL:2016
-\texttt{MATCH\_RECOGNIZE} clause and its eight sub-clauses in
-detail, and introduces the SQL:2016 feature-level classification
-(R010, R020, R030)
-used throughout the thesis.
+presents the theoretical and technical foundations of the work.  It
+introduces sequential pattern matching and its applications, explains the
+eight \texttt{MATCH\_RECOGNIZE} sub-clauses, and presents the SQL:2016
+R010--R030 feature classification used in this thesis.
 
 \textbf{Chapter~\ref{chap:related} --- Related Work}
-surveys each major \texttt{MATCH\_RECOGNIZE} implementation in
-depth---Oracle, Trino, Snowflake, Apache Flink, and DuckDB---documenting
-their documented feature scope, execution strategies, deployment
-models, and practical
-restrictions.  It also examines the Python and Pandas ecosystem
-gap and formally positions the contribution of this thesis within
-the broader pattern-matching research landscape.
+reviews Oracle, Trino, Snowflake, Apache Flink, and DuckDB.  It compares
+their feature scope, execution strategies, deployment models, and practical
+restrictions.  It then examines the Python and Pandas gap and positions this
+work within the row-pattern literature.
 
-\textbf{Chapter~4 --- System Design and Methodology}
-describes the overall system architecture and methodology.  It
-covers the SQL parsing pipeline, grammar and AST design, semantic
-validation, logical plan construction, and the design choices that
-connect declarative \texttt{MATCH\_RECOGNIZE} queries to the
-execution layer.
+\textbf{Chapter~\ref{chap:methodology} --- System Design and Methodology}
+describes the architecture and methodology.  It covers the SQL grammar,
+parser, AST, semantic validation, logical plan, and the design that connects
+a declarative query to automata-based execution.
 
-\textbf{Chapter~5 --- Implementation and Optimization}
-This chapter explains how the engine is built. It looks at finite-automata compilation, how NFAs and DFAs are created, how Pandas is used to run processes, how outputs are produced, how measures are evaluated, and the performance layer: compiled per-query fast paths (vectorized condition evaluation, row-local DFA decision tables, a linear-pattern search, and a fused \texttt{ONE ROW PER MATCH} driver) together with pattern caching and memory management.
+\textbf{Chapter~\ref{chap:implementation} --- Implementation and Optimization}
+explains NFA and DFA construction, Pandas execution, output construction,
+and measure evaluation.  It also presents the performance layer: vectorized
+conditions, row-local decision tables, linear-pattern search, the fused
+\texttt{ONE ROW PER MATCH} driver, pattern caching, and memory management.
 
+\textbf{Chapter~\ref{chap:evaluation} --- Experimental Evaluation}
+presents the methodology, datasets, and results.  It evaluates correctness,
+feature and pattern coverage, usability, pattern complexity, performance,
+memory, and scalability.  The chapter compares five pattern families across
+six Amazon UK Products sizes and then presents a larger Amazon Reviews
+scalability test.  Trino and Oracle provide the cross-system references.
 
-\textbf{Chapter~6 --- Experimental Evaluation}
-presents the evaluation methodology, the benchmark datasets
-(Amazon UK Products~2023 for the cross-system comparison and the
-larger Amazon Reviews~2023 corpus for scalability), and experimental
-results covering functional correctness, performance across five
-pattern families and six input sizes, scalability to 227.9~million
-rows, pattern complexity, and comparison with existing systems.
-
-\textbf{Chapter~7 --- Conclusions and Future Work}
-This chapter summarizes the main contributions, discusses the limitations of the current implementation, and suggests directions for future research and further extensions.
+\textbf{Chapter~\ref{chap:conclusions} --- Conclusions and Future Work}
+summarizes the contributions and current limitations.  It also identifies
+directions for future research and extension.
 
 \section{Publications in the Course of this Thesis}
 
-This thesis has resulted in scientific outputs contributing to the
-area of data systems and sequence-based pattern recognition.  The
-following items summarize the published and submitted work produced
-during the course of this research.
+This thesis produced two scientific outputs in data systems and sequential
+pattern recognition: one published paper and one submitted manuscript.
 
 \begin{description}
 
 \item[First Publication.]
-The first paper has been published in the
+The first paper was published in the
 \textit{2026 IEEE 23rd Mediterranean Electrotechnical Conference
 (MELECON)}.  The paper, entitled ``Row Pattern Recognition for
 Pandas: Bringing MATCH\_\allowbreak RECOGNIZE to Python DataFrames''
-\cite{lawande2026rpr}, addresses the absence of native row pattern
-recognition (RPR) support in Python data analysis frameworks. This work introduces an SQL-in-Pandas engine that lets users run \texttt{MATCH\_RECOGNIZE}-style queries directly on \texttt{pandas} DataFrames. The system includes important SQL:2016 RPR features and uses an NFA-based method to match sequential patterns. Tests show that it simplifies implementation compared to standard \texttt{pandas} workflows, while still producing correct results in the cases studied.
+\cite{lawande2026rpr}, addresses the lack of native row-pattern recognition
+in Python data-analysis frameworks.  It presents an SQL-in-Pandas engine for
+running \texttt{MATCH\_RECOGNIZE}-style queries directly on DataFrames.  The
+paper describes its SQL:2016 row-pattern features, NFA-based matching method,
+and initial tests.  Those tests show that the declarative interface reduces
+procedural Pandas code while preserving the expected results in the studied
+cases.
 
 \item[Second Publication.]
 A second manuscript extending this work has been submitted to
@@ -220,13 +280,9 @@ A second manuscript extending this work has been submitted to
 \label{sec:intro-summary}
 % ----------------------------------------------------------------
 
-This chapter introduced the research problem addressed by the
-thesis: the absence of a native, declarative row-pattern recognition
-primitive in Pandas.  It explained why hand-written Pandas solutions
-for multi-row patterns are verbose and error-prone, and it stated
-the main objectives and contributions of the work.
-
-The chapter also outlined the structure of the thesis and listed the
-research outputs produced during the project.  The next chapter
-provides the background needed to understand SQL row-pattern
-recognition and the \texttt{MATCH\_RECOGNIZE} clause.
+This chapter introduced row-pattern recognition and the lack of a native,
+declarative equivalent in Pandas.  It explained why hand-written multi-row
+solutions become verbose, fragile, and difficult to extend.  It then stated
+the research objectives, summarized the contributions and evidence, outlined
+the thesis, and listed the research outputs.  Chapter~\ref{chap:background}
+next introduces the theory and SQL semantics used by the system.
