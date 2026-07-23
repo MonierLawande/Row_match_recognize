@@ -74,13 +74,11 @@ databricks2026matchrecognize}.
 \label{subsec:related-existing-overview}
 % ................................
 
-The SQL standard defines three optional features for row pattern
-recognition~\cite{ISO2021,michels2018new}.
-\textbf{Feature~R010} covers row pattern recognition in the
-\texttt{FROM} clause.  \textbf{Feature~R020} covers row patterns in
-\texttt{WINDOW} specifications, and \textbf{Feature~R030} covers full
-aggregate support.  These are separate optional features, not
-successive levels.  In practice, vendor documentation normally
+The SQL standard defines three optional row-pattern
+features---R010 (\texttt{FROM}-clause patterns), R020 (window
+patterns), and R030 (full aggregate
+support)---introduced in Section~\ref{sec:bg-match-recognize}.
+In practice, vendor documentation normally
 describes the supported syntax instead of declaring conformance by
 feature code.  Table~\ref{tab:engine-comparison} therefore describes
 the documented scope directly.  It does not claim that all systems
@@ -338,7 +336,7 @@ the items below state the delivered system, optimization, and evidence.
 \begin{enumerate}
   \item A \textbf{Pandas-native engine} for the evaluated SQL:2016
     R010-style subset.  It supports the main clauses, output modes,
-    skip policies, navigation functions, and aggregates.  Its pattern
+    skip modes, navigation functions, and aggregates.  Its pattern
     constructs include quantifiers, alternation, grouping, anchors,
     exclusions, and \texttt{PERMUTE}.  It runs in-process and needs no
     database server or cloud warehouse.

@@ -157,7 +157,7 @@ database server.  Three objectives guide the work.
 
   \item \textbf{Support and verify useful row-pattern semantics.}  The
     target is the evaluated R010-style subset.  It includes the main
-    clauses, output modes, skip policies, and navigation functions.  Its
+    clauses, output and skip modes, and navigation functions.  Its
     pattern operators include quantifiers (\texttt{*}, \texttt{+},
     \texttt{?}, and \texttt{\{n,m\}}), alternation (\texttt{|}), grouping,
     anchors, exclusions (\texttt{\{-\ldots-\}}), and \texttt{PERMUTE}.
@@ -182,8 +182,8 @@ PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)
 \paragraph{Contributions.}
 The thesis makes three contributions: an in-process Pandas engine, a general
 optimization layer, and a theoretical and empirical evaluation.
-Section~\ref{sec:related-contribution} defines them in detail and positions
-them against the related systems.
+Section~\ref{sec:related-contribution} breaks these into five concrete
+contributions and positions them against the related systems.
 
 \paragraph{Evidence at a glance.}
 The regression suite contains 548 automated test cases in 34
@@ -204,7 +204,8 @@ about $100\times$ the main dataset.  This test uses one core, 58\,GB, and a
 runs as 21c Enterprise Edition.  The engine and Oracle completed the full
 range.  Trino exceeded the limit on \texttt{complex\_nested} from 160~million
 rows.  Across the five row-local pattern families and completed cells, the
-engine remained close to linear and kept a $6$--$11\times$ time advantage.
+engine remained close to linear and kept a $3$--$5\times$ time advantage
+over Oracle~EE and $6$--$8\times$ over Trino.
 Chapter~\ref{chap:evaluation} reports the complete method, trade-offs, and
 limits.
 

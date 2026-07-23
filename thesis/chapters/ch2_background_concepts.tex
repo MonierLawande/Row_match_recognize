@@ -29,13 +29,6 @@ matching is therefore well suited to event-driven processes such as
 security monitoring, stock-price analysis, sensor-data analysis,
 fraud detection, and complex event processing~\cite{OracleMR}.
 
-Unlike traditional relational operations that focus on individual
-rows or aggregated values, pattern matching examines the temporal
-or logical ordering of data points to extract meaningful sequences.
-This capability is essential across many domains including financial
-market analysis, fraud detection, IoT sensor monitoring, and
-behavioral analytics.
-
 The important distinction is that the ``symbols'' in row-pattern
 recognition are not characters in a string.  They are data rows that
 become associated with pattern variables such as \texttt{A},
@@ -57,8 +50,7 @@ In the past, relational database systems were very good at set-based tasks like 
 % ................................
 
 \paragraph{Financial Market Analysis.}
-Detecting V-shaped price patterns---price decline followed by recovery---requires examining ordered sequences of price movements. For example, identifying stocks whose price troughs are successively higher, a ``higher-low'' pattern, signals a potential upward trend. The canonical example used throughout this thesis is the detection of such V-patterns in customer order data.
-~\cite{OracleMR}.
+Detecting V-shaped price patterns---price decline followed by recovery---requires examining ordered sequences of price movements. For example, identifying stocks whose price troughs are successively higher, a ``higher-low'' pattern, signals a potential upward trend. The canonical example used throughout this thesis is the detection of such V-patterns in customer order data~\cite{OracleMR}.
 
 \paragraph{Fraud Detection.}
 Credit card fraud can show up as certain patterns, like several small test charges before a big purchase, or transactions happening in places that are too far apart to be realistic. Writing these rules in SQL makes them easier to manage than using procedural code.~\cite{petkovic2022fraud}.
@@ -92,12 +84,6 @@ Trade-surveillance systems watch for signs of market manipulation, like ``layeri
 
 The SQL:2016 standard introduced \texttt{MATCH\_RECOGNIZE}~\cite{ISO2016SQL,iso2016}, which brings pattern matching across rows into SQL. The feature finds ordered sequences of rows where each part of the pattern is defined by a row condition, not just a character, and allows complex event sequences to be described in a clear, declarative way~\cite{winand2017sqlnew}. While it does not add new capabilities to the relational model since similar queries can be written with joins, window functions, recursion, or procedural code, it offers a simpler and more maintainable way to express sequence-based logic.
   
-
-At the time of writing, PostgreSQL~18 lists the SQL row-pattern features
-as unsupported, while DuckDB lists \texttt{MATCH\_RECOGNIZE} as planned
-work~\cite{postgresql18unsupported,duckdb2026roadmap,howe2020matchrecognize,findling2025bringing}.  This thesis aims
-to make declarative row-pattern matching possible in Pandas DataFrames
-and in-process Python analytics.
 
 The SQL standard distinguishes three optional features for row pattern
 recognition~\cite{winand_match_recognize}.  \textbf{Feature~R010}
@@ -262,6 +248,6 @@ The query groups rows by \texttt{customer\_id} and sorts them by \texttt{order\_
 \section{Chapter Summary}
 \label{sec:bg-summary}
 % ----------------------------------------------------------------
-This chapter explained sequential pattern matching as an analytical problem and showed why regular row-by-row predicates do not work well for many tasks involving ordered data. It also covered the main parts of SQL:2016 \texttt{MATCH\_RECOGNIZE}, such as partitioning, ordering, measures, output modes, skip policies, pattern definitions, and variable predicates.
+This chapter explained sequential pattern matching as an analytical problem and showed why regular row-by-row predicates do not work well for many tasks involving ordered data. It also covered the main parts of SQL:2016 \texttt{MATCH\_RECOGNIZE}, such as partitioning, ordering, measures, output modes, skip modes, pattern definitions, and variable predicates.
 
 The stock-price V-pattern example demonstrated how these components fit together in a full query and explained why this abstraction works well with automata-based execution. Chapter~\ref{chap:related} looks more closely at existing implementations, comparing their features, deployment options, and real-world limitations.

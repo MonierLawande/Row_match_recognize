@@ -504,9 +504,9 @@ only the sort cost is added.
 \textbf{System} & \textbf{A ordered (s)} & \textbf{B shuffled (s)}
   & \textbf{Slowdown} \\
 \midrule
-Proposed Pandas engine & 0.18 & 0.24 & $1.30\times$ \\
-Trino~473              & 1.94 & 2.19 & $1.13\times$ \\
-Oracle XE~21c          & 0.93 & 1.08 & $1.17\times$ \\
+Proposed Pandas engine & 0.20 & 0.27 & $1.34\times$ \\
+Trino~473              & 1.93 & 2.18 & $1.13\times$ \\
+Oracle XE~21c          & 0.94 & 1.09 & $1.16\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -518,7 +518,9 @@ Oracle XE~21c          & 0.93 & 1.08 & $1.17\times$ \\
 \caption{Average execution time by dataset size under ordered
   (Scenario~A, ``ord'') and shuffled (Scenario~B, ``shuf'') input, and
   the per-size slowdown, for each system (averaged over the five
-  pattern families).}
+  pattern families).  Cells near 0.1\,s are noisy; Oracle's 100\,K
+  reading ($0.87\times$) is run-to-run variance, not a real speedup
+  from shuffling.}
 \label{tab:ordering_by_size}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{rrrrrrrrrr}
@@ -531,12 +533,12 @@ Oracle XE~21c          & 0.93 & 1.08 & $1.17\times$ \\
 & \textbf{ord} & \textbf{shuf} & \textbf{slow}
 & \textbf{ord} & \textbf{shuf} & \textbf{slow} \\
 \midrule
-100{,}000 & 0.02 & 0.03 & 1.25$\times$ & 0.08 & 0.09 & 1.06$\times$ & 0.28 & 0.28 & 1.01$\times$ \\
-200{,}000 & 0.04 & 0.05 & 1.22$\times$ & 0.15 & 0.17 & 1.07$\times$ & 0.36 & 0.40 & 1.10$\times$ \\
-400{,}000 & 0.08 & 0.10 & 1.30$\times$ & 0.34 & 0.38 & 1.12$\times$ & 0.68 & 0.78 & 1.14$\times$ \\
-800{,}000 & 0.16 & 0.21 & 1.30$\times$ & 0.88 & 0.99 & 1.12$\times$ & 1.74 & 1.97 & 1.14$\times$ \\
-1{,}600{,}000 & 0.31 & 0.42 & 1.34$\times$ & 1.77 & 2.08 & 1.17$\times$ & 3.99 & 4.18 & 1.05$\times$ \\
-2{,}222{,}742 & 0.49 & 0.62 & 1.27$\times$ & 2.36 & 2.81 & 1.19$\times$ & 4.62 & 5.55 & 1.20$\times$ \\
+100{,}000 & 0.03 & 0.04 & 1.17$\times$ & 0.11 & 0.10 & 0.87$\times$ & 0.26 & 0.29 & 1.12$\times$ \\
+200{,}000 & 0.05 & 0.06 & 1.27$\times$ & 0.16 & 0.17 & 1.09$\times$ & 0.37 & 0.40 & 1.09$\times$ \\
+400{,}000 & 0.09 & 0.12 & 1.28$\times$ & 0.34 & 0.38 & 1.11$\times$ & 0.71 & 0.76 & 1.08$\times$ \\
+800{,}000 & 0.18 & 0.23 & 1.33$\times$ & 0.88 & 0.99 & 1.12$\times$ & 1.79 & 2.01 & 1.12$\times$ \\
+1{,}600{,}000 & 0.35 & 0.46 & 1.34$\times$ & 1.79 & 2.09 & 1.17$\times$ & 3.68 & 4.06 & 1.10$\times$ \\
+2{,}222{,}742 & 0.50 & 0.68 & 1.37$\times$ & 2.37 & 2.83 & 1.20$\times$ & 4.76 & 5.54 & 1.16$\times$ \\
 \bottomrule
 \end{tabular}}
 \end{table}
@@ -547,22 +549,22 @@ Oracle XE~21c          & 0.93 & 1.08 & $1.17\times$ \\
 \caption{Incremental sorting cost of the proposed engine by dataset
   size: Scenario~A (ordered) and~B (shuffled) times, their difference
   (the isolated sort cost), the same cost per row, and that cost
-  normalised by $n\log_2 n$.  Both the per-row cost and the
-  $n\log_2 n$-normalised cost stay within a narrow band across the
-  measured range, consistent with an $O(n\log n)$ ordering step whose
-  logarithmic factor changes little over these sizes.}
+  normalised by $n\log_2 n$.  The per-row cost drifts upward while the
+  $n\log_2 n$-normalised cost stays within a narrow band, consistent
+  with an $O(n\log n)$ ordering step whose logarithmic factor changes
+  little over these sizes.}
 \label{tab:sort_cost_by_size}
 \begin{tabular}{rrrrrr}
 \toprule
 \textbf{Size (rows)} & \textbf{A (s)} & \textbf{B (s)}
   & \textbf{Sort (ms)} & \textbf{ns/row} & \textbf{ns/$(n\log_2 n)$} \\
 \midrule
-100{,}000 & 0.023 & 0.029 & 5.8 & 58.4 & 3.52 \\
-200{,}000 & 0.041 & 0.049 & 8.8 & 44.2 & 2.51 \\
-400{,}000 & 0.077 & 0.100 & 23.0 & 57.4 & 3.09 \\
-800{,}000 & 0.157 & 0.205 & 47.9 & 59.8 & 3.05 \\
-1{,}600{,}000 & 0.314 & 0.421 & 107.1 & 67.0 & 3.25 \\
-2{,}222{,}742 & 0.489 & 0.623 & 134.3 & 60.4 & 2.87 \\
+100{,}000 & 0.031 & 0.036 & 5.3 & 53.2 & 3.20 \\
+200{,}000 & 0.050 & 0.064 & 13.4 & 67.2 & 3.82 \\
+400{,}000 & 0.092 & 0.118 & 25.5 & 63.9 & 3.43 \\
+800{,}000 & 0.176 & 0.233 & 57.6 & 72.0 & 3.67 \\
+1{,}600{,}000 & 0.347 & 0.463 & 116.3 & 72.7 & 3.53 \\
+2{,}222{,}742 & 0.497 & 0.682 & 184.6 & 83.1 & 3.94 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -708,7 +710,7 @@ cell was checked against the engine's output.
 
 \begin{table}[htbp]
 \centering
-\caption{Stress-test throughput (million rows per second, size/mean-time) for the three systems, same run as Table~\ref{tab:stress_volume}.  Higher is better; the engine sustains 3.7--5.2\,M\,rows/s throughout.}
+\caption{Stress-test throughput (million rows per second, size/mean-time) for the three systems, same run as Table~\ref{tab:stress_volume}.  Higher is better; the engine's size averages hold 4.0--4.6\,M\,rows/s throughout, spanning 1.8\,M (\texttt{complex\_nested}) to 7.8\,M (\texttt{alternation}) per pattern.}
 \label{tab:stress_thr}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}rccccc@{}}
