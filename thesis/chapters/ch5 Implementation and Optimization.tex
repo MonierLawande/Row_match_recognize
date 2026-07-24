@@ -72,7 +72,8 @@ textbook $2n$ bound.
 \end{figure}
 
 \paragraph{Tokenizing the pattern.}
-Construction starts from the raw pattern string, which a single
+Construction starts from the pattern string carried by the logical
+plan (Chapter~\ref{chap:methodology}), which a single
 left-to-right scan turns into a flat list of tokens: variables,
 alternation, grouping, anchors, exclusions, and \texttt{PERMUTE}.  Any
 trailing quantifier (\texttt{*}, \texttt{+}, \texttt{?}, or
@@ -231,8 +232,9 @@ searcher that performs a preference-ordered depth-first search over the
 parsed pattern: at each position it tentatively assigns the row to the
 highest-preference viable alternative, re-evaluates the affected
 conditions under that assignment, and backtracks when a later condition
-fails.  A step budget bounds the worst-case exponential search; within
-that budget the searcher reproduces Trino's tentative-label SQL:2016
+fails.  A fixed $200\,000$-search-step budget bounds the worst-case
+exponential search; within that budget the searcher reproduces Trino's
+tentative-label SQL:2016
 semantics exactly---verified on the set-partitioning and
 balancing-sums queries that cannot be matched greedily---while the
 common row-local patterns keep the fast greedy path.
@@ -282,15 +284,12 @@ prevents infinite loops.
 \end{table}
 
 The engine supports the two output-row multiplicities of SQL row-pattern
-recognition~\cite{trino2022}, summarised in
-Table~\ref{tab:rows-per-match}.  \texttt{ONE ROW PER MATCH} emits one
-row per match, evaluating each measure once with \textsc{Final}
-semantics (all bindings visible).  \texttt{ALL ROWS PER MATCH} emits
-one row per matched row, tagging each with its \texttt{CLASSIFIER}
-(the variable it matched) and evaluating measures under
-\textsc{Running} or \textsc{Final} semantics per function; a
-\textsc{With Unmatched Rows} variant additionally emits every input row,
-with \texttt{NULL} measures for unmatched ones.
+recognition~\cite{trino2022}: \texttt{ONE ROW PER MATCH} and
+\texttt{ALL ROWS PER MATCH}, the latter with a \textsc{With Unmatched
+Rows} variant.  Under \texttt{ALL ROWS PER MATCH} each output row is
+also tagged with its \texttt{CLASSIFIER}, the pattern variable it
+matched.  Table~\ref{tab:rows-per-match} gives the row counts and
+measure semantics for all three.
 
 \begin{table}[htbp]
   \centering
@@ -312,11 +311,14 @@ with \texttt{NULL} measures for unmatched ones.
       & 1 per matched row
       & Implementation default per function: \texttt{LAST} uses
         \textsc{Running}; \texttt{FIRST}/\texttt{PREV}/\texttt{NEXT}
-        use \textsc{Final}; \texttt{COUNT}, \texttt{SUM}, and
-        \texttt{ARRAY\_AGG} use \textsc{Running}; other aggregate
-        functions default to \textsc{Final}.
-        Explicit \texttt{RUNNING}/\texttt{FINAL} keywords override
-        the default. \\[6pt]
+        use \textsc{Final}; the supported running aggregates
+        (\texttt{COUNT}, \texttt{SUM}, \texttt{ARRAY\_AGG},
+        \texttt{MAX\_BY}, \texttt{MIN\_BY}, \texttt{STRING\_AGG},
+        \texttt{COUNT\_IF}, \texttt{SUM\_IF}, \texttt{AVG\_IF}) use
+        \textsc{Running}; other aggregate functions (e.g.\
+        \texttt{AVG}, \texttt{MIN}, \texttt{MAX}) default to
+        \textsc{Final}.  Explicit \texttt{RUNNING}/\texttt{FINAL}
+        keywords override the default. \\[6pt]
     \textsc{All Rows \ldots With Unmatched}
       & 1 per every input row
       & Matched rows carry measure values; unmatched rows emit
@@ -330,7 +332,10 @@ Navigation functions (\texttt{FIRST}, \texttt{LAST}, \texttt{PREV},
 \texttt{NEXT}) resolve to bounds-checked index lookups into the
 partition---an out-of-range reference returns \texttt{NULL} per
 SQL:2016---while aggregates (\texttt{COUNT}, \texttt{SUM}, \texttt{AVG},
-and the others) range over the bound row sets.  The
+and the others) range over the bound row sets.
+\texttt{MATCH\_NUMBER()} numbers matches sequentially within each
+partition, and \texttt{CLASSIFIER()} returns the variable the row
+matched.  The
 \textsc{Running}/\textsc{Final} distinction matters most under
 \texttt{ALL ROWS PER MATCH}: a running measure evaluated for output row
 $j$ sees only the rows up to $j$ (so a \texttt{SUM} builds up
@@ -385,7 +390,12 @@ that, when a query uses \texttt{ONE ROW PER MATCH} with
 matchers cover, a fused driver enumerates matches and emits each output
 row straight from its run segments through measure closures compiled
 once per query---never building the intermediate per-match dictionaries
-or row context of the general path.
+or row context of the general path.  A matching \texttt{ALL ROWS PER
+MATCH} pass exists too: when the measures need only the match
+boundaries plus \texttt{MATCH\_NUMBER()}/\texttt{CLASSIFIER()}, it
+reuses the same compiled matchers and publishes matches as compact row
+segments straight to the columnar output; any unsupported feature falls
+back to the general path.
 
 \paragraph{Compiled measure plans and prefix aggregation.}
 Measures follow the same compile-once idea: column arrays, null masks,
@@ -438,6 +448,12 @@ predicate paths on a sample of rows before the full scan.
         no anchors, compiled matchers cover the pattern
       & Emits output rows directly from run segments; skips all
         intermediate match structures \\[4pt]
+    Fused \texttt{ALL ROWS} segment pass
+      & \texttt{ALL ROWS PER MATCH}, \texttt{SKIP PAST LAST ROW},
+        measures need only boundaries plus
+        \texttt{MATCH\_NUMBER}/\allowbreak\texttt{CLASSIFIER}
+      & Publishes matches as compact row segments; skips per-row
+        assignment structures \\[4pt]
     Compiled measure plans / prefix aggregation
       & Measure expression recognized by a plan compiler
       & Per-pass instead of per-match setup; $O(n)$ running-aggregate

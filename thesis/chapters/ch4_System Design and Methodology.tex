@@ -23,14 +23,16 @@ from there into automata compilation, execution, and optimization.
 \label{sec:meth-overview}
 % ----------------------------------------------------------------
 
-The engine is organized as five stages, each producing a well-defined
+The engine takes two inputs---the query string and a \texttt{pandas}
+DataFrame---and returns a result DataFrame.  Between them it is
+organized as five stages, each producing a well-defined
 artifact that the next stage consumes
 (Figure~\ref{fig:system-architecture}).  \emph{Parsing} turns the SQL
 text into an abstract syntax tree (AST) that captures both the outer
 \texttt{SELECT}/\texttt{FROM} and the \texttt{MATCH\_RECOGNIZE}
 sub-clauses.  \emph{Semantic validation} checks that the query is
-actually meaningful---variables, predicates, output modes, and skip
-policies---before any work is committed.  \emph{Logical-plan
+actually meaningful---variables, predicates, output and skip
+modes---before any work is committed.  \emph{Logical-plan
 construction} flattens the validated AST into a single canonical
 structure.  \emph{Pattern compilation} turns the pattern into a finite
 automaton, and \emph{execution} runs that automaton over the ordered
@@ -55,12 +57,17 @@ data and returns a DataFrame.
     \node[phase, fill=blue!10, right=of plan] (compile) {Pattern\\Compilation};
     \node[phase, fill=blue!10, right=of compile] (execute) {Pandas\\Execution};
 
+    \node[artifact, above=0.55cm of parse] (sqlin) {SQL\\query};
+    \node[artifact, above=0.55cm of execute] (dfin) {Input\\DataFrame};
+
     \node[artifact, below=0.65cm of parse] (ast) {AST};
     \node[artifact, below=0.65cm of validate] (checked) {Validated\\AST};
     \node[artifact, below=0.65cm of plan] (logical) {Logical\\Plan};
     \node[artifact, below=0.65cm of compile] (automata) {NFA/DFA};
     \node[artifact, below=0.65cm of execute] (dfout) {Output\\DataFrame};
 
+    \draw[arrow] (sqlin) -- (parse);
+    \draw[arrow] (dfin) -- (execute);
     \draw[arrow] (parse) -- (validate);
     \draw[arrow] (validate) -- (plan);
     \draw[arrow] (plan) -- (compile);
@@ -77,15 +84,16 @@ data and returns a DataFrame.
   \label{fig:system-architecture}
 \end{figure}
 
-Behind these stages sit three main runtime components.  The
-\emph{parser} recognizes the query's parts---partitioning, ordering,
-the pattern, its conditions, and the output measures---and organizes
-them into the AST.  The \emph{automata compiler} converts the pattern
+The \emph{parser} recognizes the
+query's parts---partitioning, ordering, the pattern, its conditions,
+and the output measures---and organizes them into the AST, which the
+semantic validator and logical planner then check and normalise before
+anything is compiled.  The \emph{automata compiler} converts the pattern
 into a non-deterministic automaton and then a deterministic one, so
 that repetition, alternation, and sequencing are all handled
 uniformly~\cite{georgiou2025streaming}.  The \emph{execution engine}
 partitions and orders the DataFrame, scans it with the compiled
-automaton under the configured skip policy, computes each match's
+automaton under the configured skip mode, computes each match's
 measures, and assembles a result DataFrame that mirrors ordinary SQL
 output.  The rest of this chapter covers the first three stages;
 Sections~\ref{sec:meth-compiler}--\ref{sec:meth-logical} take them in
@@ -97,10 +105,11 @@ turn.
 % ----------------------------------------------------------------
 
 A \texttt{MATCH\_RECOGNIZE} query mixes ordinary SQL with an extended
-row-pattern sub-language---quantifiers, alternation, grouping,
-anchors, exclusions, \texttt{PERMUTE}, and eight sub-clauses---so the
-parser must understand both.  Listing~\ref{lst:mr-full-syntax}
-summarises the syntax the engine supports.
+row-pattern sub-language: eight sub-clauses, and, inside
+\texttt{PATTERN}, its own grammar of quantifiers, alternation,
+grouping, anchors, exclusions, and \texttt{PERMUTE}.  The parser must
+understand both.  Listing~\ref{lst:mr-full-syntax} summarises the
+syntax the engine supports.
 
 \begin{lstlisting}[
     language   = {},
@@ -165,7 +174,7 @@ visitors walks it and produces a compact, typed AST: a root node
 holding the outer \texttt{SELECT}/\texttt{FROM} and a single
 \texttt{MatchRecognizeClause}, with every sub-clause represented as its
 own typed dataclass (partitioning, ordering, measures, rows-per-match,
-skip policy, pattern, subset, and define).  Later stages then dispatch
+skip mode, pattern, subset, and define).  Later stages then dispatch
 on node type instead of re-inspecting raw strings.  The predicates in
 \texttt{DEFINE} and the expressions in \texttt{MEASURES} are kept as
 text at this stage and interpreted on demand, which keeps the grammar
@@ -206,9 +215,10 @@ The checks fall into three groups.
 \emph{References must resolve.}  Every column in \texttt{PARTITION BY},
 \texttt{ORDER BY}, \texttt{DEFINE}, or \texttt{MEASURES} must exist in
 the input, and every variable reference must name a \texttt{PATTERN}
-variable or a declared \texttt{SUBSET} alias.  A variable used in the
-pattern but never defined is legal---it becomes an implicit always-true
-variable---and subset aliases are resolved to their members.
+variable or a declared \texttt{SUBSET} alias---including a variable with
+no \texttt{DEFINE}, already legal by the rule in
+Section~\ref{sec:meth-compiler}.  Subset aliases are resolved to their
+members.
 
 \emph{Navigation must be consistently ordered.}  The validator builds a
 timeline of when each variable first appears and checks that
@@ -223,8 +233,9 @@ UNMATCHED ROWS} and is rejected; \texttt{AFTER MATCH SKIP TO
 FIRST/LAST~$V$} must target a real variable or alias; and a skip that
 would re-anchor at the previous match's start is caught, since it would
 loop forever.  When every check passes, the validator records the
-resolved configuration---output mode, skip mode, implicit-variable
-defaults, and measure semantics---ready for planning.
+resolved configuration---output mode, skip mode, and implicit-variable
+defaults---ready for planning; measure semantics are resolved next,
+during planning (Section~\ref{sec:meth-logical}).
 
 % ................................................................
 \section{Logical Plan Construction}
@@ -273,9 +284,11 @@ functions (Table~\ref{tab:logical-plan}).
   \end{tabular}
 \end{table}
 
-Two normalisations matter.  First, pattern variables with no
-\texttt{DEFINE} get the always-true predicate \texttt{"True"}, so
-downstream code treats every variable the same.  Second, each measure
+Two normalisations matter.  First, the always-true rule from
+Section~\ref{sec:meth-compiler} takes concrete form here: a pattern
+variable with no \texttt{DEFINE} gets the literal predicate
+\texttt{"True"}, so downstream code treats every variable the same.
+Second, each measure
 is tagged \textsc{Running} or \textsc{Final}---from an explicit prefix,
 or, when none is given, by the fixed precedence in
 Figure~\ref{fig:measure-sem-resolution}.  The engine scans the measures
