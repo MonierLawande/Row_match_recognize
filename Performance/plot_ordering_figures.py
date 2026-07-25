@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Figures for Section 6.5.6 (ordered vs shuffled input / sorting scenarios).
 
-Reads the ordered (canonical v3) and shuffled (unordered_scenario) result
-CSVs and renders:
+Reads the paired controlled comparison (comparison_ordered_vs_unordered.csv:
+Scenario A ordered and Scenario B shuffled measured together as one campaign,
+same engine version and procedure) and renders:
   * viz_ordering_scenarios.png -- avg time A(ordered) vs B(shuffled) per system.
-  * viz_sort_cost_scaling.png  -- engine incremental sort cost per row vs size,
-    raw (ns/row, super-linear) and normalised by n*log2(n) (flat -> O(n log n)).
+  * viz_sort_cost_scaling.png  -- engine time on ordered vs shuffled input
+    across sizes; the gap is the isolated ordering cost.
+NOTE: do not mix Scenario A from a different campaign (e.g. the v3 main
+matrix) with Scenario B -- the engine changed between campaigns, so
+cross-campaign ratios are contaminated (complex_nested would show B/A < 1).
 """
 import os
 import numpy as np
@@ -16,12 +20,12 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ORD = os.path.join(HERE, "cross_system_matrix", "results_1core_5w20_v3")
-UNO = os.path.join(HERE, "unordered_scenario")
+PAIR = os.path.join(HERE, "unordered_scenario",
+                    "comparison_ordered_vs_unordered.csv")
 IMG = os.path.abspath(os.path.join(HERE, "..", "thesis", "images"))
 
-FILES = {"Engine": "pandas_results.csv", "Oracle": "oracle_results.csv",
-         "Trino": "trino_results.csv"}
+SYSKEY = {"Engine": "proposed_pandas_engine", "Oracle": "oracle_xe_21c",
+          "Trino": "trino_473"}
 SYS_COLOR = {"Engine": "#2a78d6", "Oracle": "#199e70", "Trino": "#e3942f"}
 ORDER = ["Engine", "Oracle", "Trino"]
 SIZES = [100000, 200000, 400000, 800000, 1600000, 2222742]
@@ -35,8 +39,13 @@ plt.rcParams.update({
 })
 size_fmt = FuncFormatter(lambda v, _: f"{v/1e6:.1f}M" if v >= 1e6 else f"{int(v/1e3)}K")
 
-o = {k: pd.read_csv(os.path.join(ORD, v)) for k, v in FILES.items()}
-u = {k: pd.read_csv(os.path.join(UNO, v)) for k, v in FILES.items()}
+pair = pd.read_csv(PAIR)
+o = {k: pair[pair.system == v].rename(
+        columns={"ordered_time_s": "execution_time_seconds"})
+     for k, v in SYSKEY.items()}
+u = {k: pair[pair.system == v].rename(
+        columns={"unordered_time_s": "execution_time_seconds"})
+     for k, v in SYSKEY.items()}
 
 
 def ordering_scenarios():
