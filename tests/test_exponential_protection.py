@@ -10,6 +10,9 @@ import pandas as pd
 import time
 import sys
 import os
+from dataclasses import FrozenInstanceError
+import importlib
+from types import SimpleNamespace
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.executor.match_recognize import match_recognize
@@ -20,13 +23,29 @@ from src.matcher.automata import (
 )
 from src.matcher.dfa import (
     DFA_COMPILER_SCHEMA_VERSION,
+    DFAAdaptiveMemoryPolicy,
+    DFAConstructionError,
     DFAConstructionLimitError,
     DFAConstructionLimits,
     DFABuilder,
+    EffectiveMemorySnapshot,
+    SystemMemoryProbe,
 )
-from src.matcher.matcher import PatternSearchLimitError
+from src.matcher.matcher import (
+    BacktrackingSearchBudget,
+    EnhancedMatcher,
+    MatchConfig,
+    PatternSearchLimitError,
+    RowsPerMatch,
+    SkipMode,
+)
 from src.matcher.pattern_tokenizer import tokenize_pattern
+from src.matcher.row_context import RowContext
 from src.utils.performance_optimizer import PatternCompilationCache
+from src.utils.resource_profile import (
+    AdaptiveResourceProfile,
+    EffectiveCPUSnapshot,
+)
 
 class TestExponentialProtection:
     """Test protection against exponential pattern matching complexity."""
@@ -883,8 +902,20 @@ class TestExponentialProtection:
             'b_count': 4,
         }]
 
-    def test_nonlinear_budget_never_changes_leftmost_match(self):
+    def test_nonlinear_budget_never_changes_leftmost_match(
+        self,
+        monkeypatch,
+    ):
         """Resource protection must fail explicitly, not skip start row 0."""
+        constrained_profile = self._search_resource_profile(1)
+        executor_module = importlib.import_module(
+            "src.executor.match_recognize"
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "get_adaptive_resource_profile",
+            lambda refresh=False: constrained_profile,
+        )
         label_rows = 24
         df = pd.DataFrame({
             'seq_id': range(label_rows + 1),
@@ -910,7 +941,282 @@ class TestExponentialProtection:
         ) as error:
             match_recognize(query, df)
         assert error.value.start_idx == 0
-        assert error.value.explored_steps == error.value.step_budget == 200_000
+        assert error.value.explored_steps == error.value.step_budget
+        assert error.value.step_budget > 0
+
+    @staticmethod
+    def _search_resource_profile(query_budget_mib):
+        gib = 1024 ** 3
+        return AdaptiveResourceProfile(
+            memory=EffectiveMemorySnapshot(
+                host_total_bytes=gib,
+                host_available_bytes=gib,
+                effective_limit_bytes=gib,
+                effective_available_bytes=gib,
+            ),
+            cpu=EffectiveCPUSnapshot(1, 1, 1),
+            reserve_fraction=0.0,
+            reserve_floor_bytes=0,
+            cache_available_fraction=0.0,
+            cache_limit_fraction=0.0,
+            query_available_fraction=1.0,
+            query_limit_fraction=1.0,
+            query_hard_max_bytes=query_budget_mib * 1024 ** 2,
+        )
+
+    @staticmethod
+    def _cache_resource_profile(cache_budget_mib):
+        gib = 1024 ** 3
+        return AdaptiveResourceProfile(
+            memory=EffectiveMemorySnapshot(
+                host_total_bytes=gib,
+                host_available_bytes=gib,
+                effective_limit_bytes=gib,
+                effective_available_bytes=gib,
+            ),
+            cpu=EffectiveCPUSnapshot(1, 1, 1),
+            reserve_fraction=0.0,
+            reserve_floor_bytes=0,
+            cache_available_fraction=1.0,
+            cache_limit_fraction=1.0,
+            cache_hard_max_bytes=cache_budget_mib * 1024 ** 2,
+            query_available_fraction=1.0,
+            query_limit_fraction=1.0,
+            query_hard_max_bytes=128 * 1024 ** 2,
+        )
+
+    def test_nfa_optional_resources_follow_shared_profile(self):
+        """NFA caches and pools disable at zero and grow with safe capacity."""
+        disabled_profile = self._cache_resource_profile(0)
+        disabled_builder = NFABuilder(
+            resource_profile=disabled_profile,
+        )
+        disabled_nfa = disabled_builder.build(
+            tokenize_pattern("A B"),
+            {},
+            {},
+        )
+
+        assert disabled_nfa._epsilon_cache_limit == 0
+        assert disabled_builder._state_pool._capacity_limit == 0
+        assert disabled_builder._transition_pool._capacity_limit == 0
+        disabled_nfa.epsilon_closure([disabled_nfa.start])
+        assert disabled_nfa._epsilon_cache == {}
+
+        larger_profile = self._cache_resource_profile(64)
+        larger_builder = NFABuilder(resource_profile=larger_profile)
+        larger_nfa = larger_builder.build(
+            tokenize_pattern("A B"),
+            {},
+            {},
+        )
+
+        assert larger_nfa._epsilon_cache_limit > 0
+        assert larger_builder._state_pool._capacity_limit > 0
+        assert larger_builder._transition_pool._capacity_limit > 0
+
+    def test_resource_profile_flows_through_all_automata_layers(self):
+        """Low-level callers inherit one profile without re-probing the host."""
+        profile = self._cache_resource_profile(16)
+        nfa = NFABuilder(resource_profile=profile).build(
+            tokenize_pattern("A B"),
+            {},
+            {},
+        )
+        dfa = DFABuilder(nfa).build()
+        matcher = EnhancedMatcher(
+            dfa,
+            original_pattern="A B",
+            defined_variables=["A", "B"],
+            define_conditions={},
+        )
+
+        assert nfa._resource_profile is profile
+        assert dfa._resource_profile is profile
+        assert matcher._resource_profile is profile
+
+    @staticmethod
+    def _build_limit_test_matcher(
+        pattern,
+        variables,
+        resource_profile=None,
+    ):
+        nfa = NFABuilder().build(tokenize_pattern(pattern), {}, {})
+        dfa = DFABuilder(
+            nfa,
+            resource_profile=resource_profile,
+        ).build()
+        return EnhancedMatcher(
+            dfa,
+            original_pattern=pattern,
+            defined_variables=variables,
+            define_conditions={},
+            resource_profile=resource_profile,
+        )
+
+    def test_backtracking_budget_is_frozen_and_resource_adaptive(self):
+        """The same rows/DFA receive more search work under a larger profile."""
+        small_matcher = self._build_limit_test_matcher(
+            "(A | B)+ C",
+            ["A", "B", "C"],
+            self._search_resource_profile(1),
+        )
+        large_matcher = self._build_limit_test_matcher(
+            "(A | B)+ C",
+            ["A", "B", "C"],
+            self._search_resource_profile(64),
+        )
+
+        small = small_matcher._build_partition_backtracking_budget(8)
+        large = large_matcher._build_partition_backtracking_budget(8)
+
+        assert isinstance(small, BacktrackingSearchBudget)
+        assert small.max_depth == large.max_depth == 8
+        assert small.dfa_states == large.dfa_states
+        assert small.dfa_transitions == large.dfa_transitions
+        assert small.memory_budget_bytes < large.memory_budget_bytes
+        assert (
+            small.exact_condition_step_budget
+            < large.exact_condition_step_budget
+        )
+        assert (
+            small.full_search_step_budget
+            < large.full_search_step_budget
+        )
+        with pytest.raises(FrozenInstanceError):
+            small.max_depth = 9
+
+    def test_backtracking_depth_uses_actual_partition_bound(self):
+        """Depth follows input consumption instead of a default-size guess."""
+        matcher = self._build_limit_test_matcher(
+            "A+",
+            ["A"],
+            self._search_resource_profile(8),
+        )
+
+        small = matcher._partition_backtracking_budget_for(7)
+        large = matcher._partition_backtracking_budget_for(700)
+
+        assert small.max_depth == 7
+        assert large.max_depth == 700
+        assert small is not large
+        assert matcher._partition_backtracking_budget is large
+
+    def test_greedy_dfa_budget_never_returns_best_so_far(self):
+        """An incomplete greedy search cannot publish an early candidate."""
+        matcher = self._build_limit_test_matcher(
+            "(A | B)+",
+            ["A", "B"],
+        )
+        rows = [{"value": 1} for _ in range(16)]
+        context = RowContext(
+            rows=rows,
+            defined_variables=["A", "B"],
+        )
+
+        with pytest.raises(PatternSearchLimitError) as error:
+            matcher._find_single_match_greedy_dfa_search(
+                rows,
+                0,
+                context,
+            )
+
+        assert error.value.reason == "greedy_dfa_state_limit"
+        assert error.value.start_idx == 0
+        assert error.value.explored_steps == error.value.step_budget
+
+    @pytest.mark.parametrize(
+        ("max_iterations", "max_depth", "expected_reason"),
+        [
+            (1, 100, "full_backtracking_iteration_limit"),
+            (100, 0, "full_backtracking_depth_limit"),
+        ],
+    )
+    def test_full_backtracking_limits_never_become_no_match(
+        self,
+        max_iterations,
+        max_depth,
+        expected_reason,
+    ):
+        """Both full-search guards fail closed instead of returning ``None``."""
+        matcher = self._build_limit_test_matcher("A+", ["A"])
+        backtracker = matcher.FullBacktrackingMatcher(matcher)
+        backtracker.max_iterations = max_iterations
+        backtracker.max_depth = max_depth
+        rows = [{"value": 1}, {"value": 1}]
+        context = RowContext(rows=rows, defined_variables=["A"])
+
+        with pytest.raises(PatternSearchLimitError) as error:
+            backtracker.find_match_with_backtracking(
+                rows,
+                0,
+                context,
+            )
+
+        assert error.value.reason == expected_reason
+        assert error.value.start_idx == 0
+
+    def test_partition_stagnation_never_advances_and_returns_partial_rows(
+        self,
+        monkeypatch,
+    ):
+        """A non-progressing skip path raises before partial output is returned."""
+        matcher = self._build_limit_test_matcher("A", ["A"])
+        rows = [{"value": 1}]
+        config = MatchConfig(
+            rows_per_match=RowsPerMatch.ONE_ROW,
+            skip_mode=SkipMode.TO_FIRST,
+            skip_var="A",
+            show_empty=False,
+            include_unmatched=False,
+        )
+        fixed_match = {
+            "start": 0,
+            "end": 0,
+            "variables": {"A": [0]},
+            "state": matcher.start_state,
+            "is_empty": False,
+            "excluded_vars": set(),
+            "excluded_rows": [],
+            "has_empty_alternation": False,
+        }
+
+        monkeypatch.setattr(
+            matcher,
+            "_smart_condition_preprocessing",
+            lambda _rows: None,
+        )
+        monkeypatch.setattr(
+            matcher,
+            "_can_use_linear_quantifier_plan",
+            lambda _config: False,
+        )
+        monkeypatch.setattr(
+            matcher,
+            "_can_use_row_local_dfa_fast_path",
+            lambda _config: False,
+        )
+        monkeypatch.setattr(
+            matcher,
+            "_should_use_condition_backtracking",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            matcher,
+            "_find_single_match",
+            lambda *_args, **_kwargs: fixed_match.copy(),
+        )
+        monkeypatch.setattr(
+            matcher,
+            "_get_skip_position",
+            lambda *_args, **_kwargs: 0,
+        )
+
+        with pytest.raises(PatternSearchLimitError) as error:
+            matcher.find_matches(rows, config=config, measures={})
+
+        assert error.value.reason == "enumeration_stagnation"
+        assert error.value.start_idx == 0
 
     def test_memory_usage_protection(self):
         """Test that memory usage doesn't explode with exponential patterns."""
@@ -1048,6 +1354,222 @@ class TestExponentialProtection:
         assert dfa.states[dfa.start].nfa_states == exact_start_closure
         assert dfa.metadata['construction_complete'] is True
 
+    def test_adaptive_dfa_limit_scales_continuously_with_memory(self):
+        """Automatic sizing is continuous rather than a few fixed RAM bands."""
+        policy = DFAAdaptiveMemoryPolicy(
+            reserve_fraction=0.0,
+            reserve_floor_bytes=0,
+            available_fraction=1.0,
+            total_fraction=1.0,
+            estimated_bytes_per_state=1 * 1024 * 1024,
+            hard_max_states=2_000_000,
+            minimum_states=1,
+        )
+
+        def resolved_states(memory_mib):
+            memory_bytes = memory_mib * 1024 * 1024
+            snapshot = EffectiveMemorySnapshot(
+                host_total_bytes=memory_bytes,
+                host_available_bytes=memory_bytes,
+                effective_limit_bytes=memory_bytes,
+                effective_available_bytes=memory_bytes,
+            )
+            return policy.resolve(snapshot).max_states
+
+        assert resolved_states(64) == 64
+        assert resolved_states(65) == 65
+        assert resolved_states(96) == 96
+        assert resolved_states(128) == 128
+
+    def test_default_adaptive_limit_scales_to_large_memory_hosts(self):
+        """The default policy grows on 256 GiB and 1 TiB hosts."""
+        policy = DFAAdaptiveMemoryPolicy()
+
+        def resolved_states(memory_gib):
+            memory_bytes = memory_gib * 1024 ** 3
+            snapshot = EffectiveMemorySnapshot(
+                host_total_bytes=memory_bytes,
+                host_available_bytes=memory_bytes,
+                effective_limit_bytes=memory_bytes,
+                effective_available_bytes=memory_bytes,
+            )
+            return policy.resolve(snapshot).max_states
+
+        states_32_gib = resolved_states(32)
+        states_256_gib = resolved_states(256)
+        states_1_tib = resolved_states(1024)
+        states_8_tib = resolved_states(8 * 1024)
+
+        assert (
+            states_32_gib
+            < states_256_gib
+            < states_1_tib
+            < states_8_tib
+        )
+        assert policy.hard_max_states is None
+
+    def test_administrator_can_add_a_dfa_state_ceiling(self):
+        """An optional deployment ceiling intersects the memory-derived cap."""
+        gib = 1024 ** 3
+        snapshot = EffectiveMemorySnapshot(
+            host_total_bytes=1024 * gib,
+            host_available_bytes=1024 * gib,
+            effective_limit_bytes=1024 * gib,
+            effective_available_bytes=1024 * gib,
+        )
+        policy = DFAAdaptiveMemoryPolicy(hard_max_states=123_456)
+
+        assert policy.resolve(snapshot).max_states == 123_456
+
+    def test_effective_memory_uses_cgroup_v2_remaining_allowance(self):
+        """A container cap wins when psutil exposes the larger host."""
+        gib = 1024 ** 3
+        files = {
+            '/proc/self/cgroup': '0::/test.slice',
+            '/sys/fs/cgroup/test.slice/memory.max': str(2 * gib),
+            '/sys/fs/cgroup/test.slice/memory.current': str(gib // 2),
+        }
+
+        def read_text(path):
+            if path not in files:
+                raise FileNotFoundError(path)
+            return files[path]
+
+        probe = SystemMemoryProbe(
+            host_provider=lambda: SimpleNamespace(
+                total=64 * gib,
+                available=48 * gib,
+            ),
+            text_reader=read_text,
+        )
+        snapshot = probe.snapshot()
+
+        assert snapshot.cgroup_limit_bytes == 2 * gib
+        assert snapshot.cgroup_remaining_bytes == 3 * gib // 2
+        assert snapshot.effective_limit_bytes == 2 * gib
+        assert snapshot.effective_available_bytes == 3 * gib // 2
+        assert snapshot.source == 'host+cgroup'
+
+    def test_unlimited_cgroup_uses_host_memory(self):
+        """The cgroup-v2 ``max`` token does not create a false small limit."""
+        gib = 1024 ** 3
+        files = {
+            '/proc/self/cgroup': '0::/test.slice',
+            '/sys/fs/cgroup/test.slice/memory.max': 'max',
+            '/sys/fs/cgroup/test.slice/memory.current': str(gib),
+        }
+
+        def read_text(path):
+            if path not in files:
+                raise FileNotFoundError(path)
+            return files[path]
+
+        probe = SystemMemoryProbe(
+            host_provider=lambda: SimpleNamespace(
+                total=16 * gib,
+                available=12 * gib,
+            ),
+            text_reader=read_text,
+        )
+        snapshot = probe.snapshot()
+
+        assert snapshot.cgroup_limit_bytes is None
+        assert snapshot.effective_limit_bytes == 16 * gib
+        assert snapshot.effective_available_bytes == 12 * gib
+        assert snapshot.source == 'host'
+
+    def test_effective_memory_supports_cgroup_v1(self):
+        """Legacy cgroup-v1 limits are included in the effective allowance."""
+        gib = 1024 ** 3
+        files = {
+            '/proc/self/cgroup': '5:memory:/docker/test',
+            (
+                '/sys/fs/cgroup/memory/docker/test/'
+                'memory.limit_in_bytes'
+            ): str(4 * gib),
+            (
+                '/sys/fs/cgroup/memory/docker/test/'
+                'memory.usage_in_bytes'
+            ): str(gib),
+        }
+
+        def read_text(path):
+            if path not in files:
+                raise FileNotFoundError(path)
+            return files[path]
+
+        probe = SystemMemoryProbe(
+            host_provider=lambda: SimpleNamespace(
+                total=64 * gib,
+                available=48 * gib,
+            ),
+            text_reader=read_text,
+        )
+        snapshot = probe.snapshot()
+
+        assert snapshot.cgroup_limit_bytes == 4 * gib
+        assert snapshot.cgroup_remaining_bytes == 3 * gib
+        assert snapshot.effective_limit_bytes == 4 * gib
+        assert snapshot.effective_available_bytes == 3 * gib
+
+    def test_explicit_dfa_limits_bypass_memory_detection(self):
+        """A caller-supplied deterministic limit has highest precedence."""
+        nfa = NFABuilder().build(tokenize_pattern("A B"), {}, {})
+
+        class FailingProbe:
+            @staticmethod
+            def snapshot():
+                raise AssertionError("explicit limits must bypass the probe")
+
+        builder = DFABuilder(
+            nfa,
+            limits=DFAConstructionLimits(max_states=17),
+            memory_probe=FailingProbe(),
+        )
+
+        assert builder.MAX_DFA_STATES == 17
+        assert builder.metadata['construction_limits']['mode'] == 'explicit'
+
+    def test_failed_dfa_resource_detection_is_explicit(self):
+        """An unknown environment cannot select an arbitrary fixed state cap."""
+        nfa = NFABuilder().build(tokenize_pattern("A B"), {}, {})
+        # Remove the inherited profile so this exercises the low-level probe
+        # contract used by embedders.
+        nfa._resource_profile = None
+
+        class FailingProbe:
+            @staticmethod
+            def snapshot():
+                raise OSError("resource files unavailable")
+
+        with pytest.raises(
+            DFAConstructionError,
+            match="Unable to resolve a safe DFA memory budget",
+        ):
+            DFABuilder(nfa, memory_probe=FailingProbe())
+
+    def test_adaptive_iteration_limit_scales_with_state_budget(self):
+        """Large-memory state budgets are not blocked by the old 100K guard."""
+        nfa = NFABuilder().build(tokenize_pattern("A B"), {}, {})
+        gib = 1024 ** 3
+        probe = SystemMemoryProbe(
+            host_provider=lambda: SimpleNamespace(
+                total=256 * gib,
+                available=256 * gib,
+            ),
+            text_reader=lambda path: (_ for _ in ()).throw(
+                FileNotFoundError(path)
+            ),
+        )
+        builder = DFABuilder(nfa, memory_probe=probe)
+
+        assert builder.MAX_DFA_STATES > 100_000
+        assert builder.MAX_ITERATIONS >= builder.MAX_DFA_STATES
+        assert (
+            builder.metadata['construction_limits']['mode']
+            == 'adaptive_memory'
+        )
+
     def test_match_recognize_propagates_dfa_limit_as_compilation_error(
         self,
         monkeypatch,
@@ -1095,3 +1617,55 @@ class TestExponentialProtection:
         assert error.value.reason == 'state_limit'
         assert error.value.states_created == 2
         assert cache_writes == []
+
+    def test_structurally_invalid_cached_dfa_is_recompiled(
+        self,
+        monkeypatch,
+    ):
+        """A complete marker alone cannot make a corrupted DFA executable."""
+        stale_nfa = NFABuilder().build(tokenize_pattern("A B"), {}, {})
+        stale_dfa = DFABuilder(stale_nfa).build()
+        stale_dfa.start = len(stale_dfa.states)
+        cache_writes = []
+
+        monkeypatch.setattr(
+            PatternCompilationCache,
+            'get_compiled_pattern',
+            staticmethod(
+                lambda *args, **kwargs: (
+                    stale_dfa,
+                    stale_nfa,
+                    {'compilation_time': 0.1},
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            PatternCompilationCache,
+            'cache_compiled_pattern',
+            staticmethod(
+                lambda *args, **kwargs: cache_writes.append((args, kwargs))
+            ),
+        )
+
+        result = match_recognize(
+            """
+            SELECT *
+            FROM data
+            MATCH_RECOGNIZE (
+                ORDER BY seq_id
+                MEASURES COUNT(*) AS match_length
+                ONE ROW PER MATCH
+                PATTERN (A B)
+                DEFINE
+                    A AS category = 'A',
+                    B AS category = 'B'
+            )
+            """,
+            pd.DataFrame({
+                'seq_id': [1, 2],
+                'category': ['A', 'B'],
+            }),
+        )
+
+        assert result['match_length'].tolist() == [2]
+        assert len(cache_writes) == 1

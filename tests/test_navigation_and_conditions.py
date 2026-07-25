@@ -2,6 +2,7 @@
 Tests for the navigation functions and condition evaluation in match_recognize.
 """
 
+import ast
 import pytest
 import pandas as pd
 import numpy as np
@@ -14,8 +15,111 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import the match_recognize implementation and condition evaluator
 from src.executor.match_recognize import match_recognize
-from src.matcher.condition_evaluator import compile_condition, validate_navigation_conditions
+from src.matcher.condition_evaluator import (
+    ConditionEvaluator,
+    compile_condition,
+    evaluate_nested_navigation,
+    validate_navigation_conditions,
+)
+from src.matcher.evaluation_utils import ExpressionValidationError
+from src.matcher.measure_evaluator import MeasureEvaluator
 from src.matcher.row_context import RowContext
+from src.utils.resource_profile import (
+    AdaptiveResourceProfile,
+    EffectiveCPUSnapshot,
+    EffectiveMemorySnapshot,
+)
+
+
+def _profile_with_optional_caches_disabled():
+    mib = 1024 ** 2
+    return AdaptiveResourceProfile(
+        memory=EffectiveMemorySnapshot(
+            host_total_bytes=64 * mib,
+            host_available_bytes=64 * mib,
+            effective_limit_bytes=64 * mib,
+            effective_available_bytes=64 * mib,
+        ),
+        cpu=EffectiveCPUSnapshot(
+            host_logical_cpus=1,
+            affinity_cpus=1,
+            effective_cpus=1,
+        ),
+        cache_hard_max_bytes=0,
+        cache_entry_hard_max=0,
+    )
+
+
+def test_row_context_public_caches_share_adaptive_bounded_storage():
+    mib = 1024 ** 2
+    profile = AdaptiveResourceProfile(
+        memory=EffectiveMemorySnapshot(
+            host_total_bytes=64 * mib,
+            host_available_bytes=64 * mib,
+            effective_limit_bytes=64 * mib,
+            effective_available_bytes=64 * mib,
+        ),
+        cpu=EffectiveCPUSnapshot(
+            host_logical_cpus=1,
+            affinity_cpus=1,
+            effective_cpus=1,
+        ),
+        cache_entry_hard_max=2,
+    )
+    context = RowContext(
+        rows=[{'value': 1}],
+        resource_profile=profile,
+    )
+
+    assert context.navigation_cache is context._navigation_cache
+    assert context.variable_cache is context._variable_cache
+
+    context.navigation_cache['first'] = 1
+    context.navigation_cache['second'] = 2
+    context.navigation_cache['third'] = 3
+
+    assert len(context.navigation_cache) == 2
+    assert 'first' not in context.navigation_cache
+
+
+def test_measure_evaluator_does_not_invent_capacity_when_cache_is_disabled():
+    context = RowContext(
+        rows=[{'value': 10}, {'value': 20}],
+        variables={'A': [0, 1]},
+        current_idx=1,
+        pattern_variables=['A'],
+        resource_profile=_profile_with_optional_caches_disabled(),
+    )
+    evaluator = MeasureEvaluator(context)
+
+    assert evaluator._cache_size_limit == 0
+    assert evaluator.evaluate_classifier('A', running=False) == 'A'
+    assert evaluator.evaluate('FIRST(A.value)') == 10
+    assert evaluator._classifier_cache == {}
+    assert evaluator._var_ref_cache == {}
+
+
+def test_define_aggregate_cache_is_ignored_when_cache_is_disabled():
+    rows = [{'value': value} for value in range(1, 21)]
+    context = RowContext(
+        rows=rows,
+        variables={'A': list(range(20))},
+        current_idx=19,
+        current_var='B',
+        resource_profile=_profile_with_optional_caches_disabled(),
+    )
+    context._define_assignment_versions = {'A': 1}
+    aggregate_node = ast.parse('SUM(A.value)', mode='eval').body
+    stale_key = (id(aggregate_node), 'SUM', (('A', 1),))
+    context._define_aggregate_cache = {stale_key: -1}
+
+    evaluator = ConditionEvaluator(context)
+    result = evaluator._handle_define_aggregate(aggregate_node, 'SUM')
+
+    assert evaluator._aggregate_cache_size == 0
+    assert result == sum(range(1, 21))
+    assert context._define_aggregate_cache == {stale_key: -1}
+
 
 class TestNavigationFunctions:
     """Test suite for the navigation functions in match_recognize."""
@@ -199,21 +303,65 @@ class TestConditionEvaluator:
         condition = "A.value > PREV(A.value)"
         compiled = compile_condition(condition)
         assert compiled is not None
-        
+
         # NEXT
         condition = "A.value > NEXT(A.value)"
         compiled = compile_condition(condition)
         assert compiled is not None
-        
+
         # FIRST
         condition = "A.value > FIRST(A.value)"
         compiled = compile_condition(condition)
         assert compiled is not None
-        
+
         # LAST
         condition = "A.value > LAST(A.value)"
         compiled = compile_condition(condition)
         assert compiled is not None
+
+    def test_nested_navigation_beyond_old_depth_cap_keeps_semantics(self):
+        context = RowContext(
+            rows=[{"value": 10}, {"value": 20}],
+            variables={"A": [0, 1]},
+            current_idx=1,
+        )
+
+        assert evaluate_nested_navigation(
+            "PREV(value)",
+            context,
+            current_idx=1,
+            recursion_depth=15,
+        ) == 10
+
+    def test_navigation_depth_exhaustion_is_explicit_not_sql_null(self):
+        context = RowContext(
+            rows=[{"value": 10}],
+            variables={"A": [0]},
+            current_idx=0,
+        )
+
+        with pytest.raises(ExpressionValidationError):
+            evaluate_nested_navigation(
+                "PREV(value)",
+                context,
+                current_idx=0,
+                recursion_depth=51,
+            )
+
+        with pytest.raises(ExpressionValidationError):
+            ConditionEvaluator(
+                context,
+                evaluation_mode="MEASURES",
+                recursion_depth=51,
+            )
+
+        evaluator = ConditionEvaluator(context, evaluation_mode="MEASURES")
+        with pytest.raises(ExpressionValidationError):
+            evaluator.reset(
+                context,
+                evaluation_mode="MEASURES",
+                recursion_depth=51,
+            )
         
     def test_classifier_in_conditions(self):
         """Test compilation of conditions with CLASSIFIER function."""

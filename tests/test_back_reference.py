@@ -22,6 +22,57 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 class TestBackReference:
     """Test suite for back reference functionality in match_recognize."""
 
+    @pytest.mark.parametrize("pattern", ["A* B+", "A{1,25} B+"])
+    def test_long_quantified_cross_reference_uses_exact_greedy_semantics(
+        self, pattern
+    ):
+        """A later DEFINE must backtrack across the complete greedy A range.
+
+        The valid match needs 25 A rows.  This is intentionally beyond the
+        former 10/20-row split windows used by the retired generalized
+        quantifier prototype.
+        """
+        df = pd.DataFrame({"value": list(range(1, 27))})
+        query = f"""
+        SELECT value, classy
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY value
+            MEASURES CLASSIFIER() AS classy
+            ALL ROWS PER MATCH
+            PATTERN ({pattern})
+            DEFINE
+                A AS A.value < 26,
+                B AS B.value = LAST(A.value) + 1
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result["value"].tolist() == list(range(1, 27))
+        assert result["classy"].tolist() == ["A"] * 25 + ["B"]
+
+    def test_complex_back_reference_searches_beyond_ten_rows(self):
+        """Alternation preference is preserved across the full candidate match."""
+        df = pd.DataFrame({"value": list(range(1, 14))})
+        query = """
+        SELECT value, classy
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY value
+            MEASURES CLASSIFIER() AS classy
+            ALL ROWS PER MATCH
+            PATTERN ((A | B)* X)
+            DEFINE
+                X AS X.value = FIRST(A.value) + FIRST(B.value)
+        )
+        """
+
+        result = match_recognize(query, df)
+
+        assert result["value"].tolist() == list(range(1, 14))
+        assert result["classy"].tolist() == ["A"] * 11 + ["B", "X"]
+
     def test_simple_back_reference(self):
         """Test defining condition of X refers to input values at matched label A."""
         df = pd.DataFrame({

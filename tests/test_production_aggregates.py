@@ -15,11 +15,17 @@ This test suite covers all aggregate function scenarios including:
 """
 
 import pandas as pd
+import pytest
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.executor.match_recognize import match_recognize
+from src.matcher.production_aggregates import (
+    AggregateExpressionConversionError,
+    ProductionAggregateEvaluator,
+)
+from src.matcher.row_context import RowContext
 from src.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -618,6 +624,61 @@ class AggregateTestSuite:
                     print(f"  - {result['test']}: {result['error']}")
         
         print("\n✅ Test suite completed!")
+
+
+class TestAggregateExpressionConversionSafety:
+    """CASE conversion must be complete or fail explicitly."""
+
+    @staticmethod
+    def _evaluator():
+        return ProductionAggregateEvaluator(
+            RowContext(
+                rows=[{"value": 20, "category": "CASE WHEN"}],
+                variables={"A": [0]},
+                current_idx=0,
+            )
+        )
+
+    def test_case_conversion_has_no_fixed_nesting_cutoff(self):
+        expression = "value"
+        for threshold in range(12):
+            expression = (
+                f"CASE WHEN value > {threshold} "
+                f"THEN {expression} ELSE {threshold} END"
+            )
+
+        converted = self._evaluator()._convert_case_when_to_python(
+            expression
+        )
+
+        assert "CASE" not in converted.upper()
+        assert eval(converted, {}, {"value": 20}) == 20
+        assert eval(converted, {}, {"value": -1}) == 11
+
+    def test_case_keywords_inside_literals_are_not_rewritten(self):
+        converted = self._evaluator()._convert_case_when_to_python(
+            "CASE WHEN category = 'CASE WHEN' THEN 1 ELSE 0 END"
+        )
+
+        assert eval(converted, {}, {"category": "CASE WHEN"}) == 1
+        assert eval(converted, {}, {"category": "other"}) == 0
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "CASE WHEN value > 0 THEN 1",
+            "CASE value WHEN 1 THEN 2 ELSE 3 END",
+            "CASE WHEN value > 0 ELSE 1 END",
+        ],
+    )
+    def test_malformed_or_unsupported_case_fails_explicitly(
+        self,
+        expression,
+    ):
+        with pytest.raises(AggregateExpressionConversionError) as error:
+            self._evaluator()._convert_case_when_to_python(expression)
+
+        assert error.value.error_code == "AGG_EXPR_CONVERSION"
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import the match_recognize implementation
 from src.executor.match_recognize import match_recognize
+from src.pattern import permute_handler
+from src.pattern.permute_handler import LRUCache
 
 class TestPermutePatterns:
     """Test suite for PERMUTE pattern functionality."""
@@ -312,6 +314,32 @@ class TestPermutePatterns:
             'row_count': [1, 2]     # RUNNING count
         })
         pd.testing.assert_frame_equal(result.reset_index(drop=True), expected, check_dtype=False)
+
+
+def test_permute_lru_cache_supports_an_explicit_zero_limit():
+    cache = LRUCache(max_size=0)
+
+    cache.put(('A', 'B'), [['A', 'B'], ['B', 'A']])
+
+    assert cache.get(('A', 'B')) is None
+    assert cache.get_stats()['size'] == 0
+
+
+def test_memory_efficient_permute_factory_preserves_zero_capacity(monkeypatch):
+    monkeypatch.setattr(
+        permute_handler,
+        '_adaptive_permute_cache_size',
+        lambda: 0,
+    )
+
+    handler = permute_handler.create_permute_handler('memory_efficient')
+    assert handler.expand_permutation(['A', 'B']) == [
+        ['A', 'B'],
+        ['B', 'A'],
+    ]
+    assert handler._cache.max_size == 0
+    assert handler.get_cache_stats()['size'] == 0
+
 
 if __name__ == "__main__":
     pytest.main([__file__])
