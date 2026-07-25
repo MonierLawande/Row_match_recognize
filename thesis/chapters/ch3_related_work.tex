@@ -248,10 +248,9 @@ Existing row-pattern implementations each carry their own
 restrictions~\cite{oracle2021dwhsg,trino2022,flink,
 snowflake2025match_recognize,petkovic2022rpr}.  The supported context
 differs: some allow row patterns only in the \texttt{FROM} clause,
-while others also support a window.  The availability of row-pattern
-functions such as \texttt{CLASSIFIER()} and \texttt{MATCH\_NUMBER()}
-varies by system and may be restricted to specific clauses or output
-modes.  Aggregate support varies too, including limits on
+while others also support a window.  Row-pattern function availability
+and clause restrictions vary across systems.  Aggregate support varies
+too, including limits on
 \texttt{DISTINCT} aggregates and aggregate arguments.  And features
 such as empty matches, exclusions, reluctant quantifiers, and skip
 modes are not handled uniformly.
