@@ -977,8 +977,8 @@ constructs are expensive in the pattern size~$m$ rather than in the
 number of rows~$n$, and each is either paid once or held in check by an
 explicit guard, so none of them appears as a growth curve in the data
 size.  The NFA-to-DFA conversion is $O(2^{m})$ states in the worst
-case, but it is a one-time, cached compile step capped at a configured
-state limit.  A \texttt{PERMUTE} of $m$ variables expands to $O(m!)$
+case, but it is a one-time, cached compile step capped at a
+memory-adaptive state limit of roughly 10{,}000--50{,}000 states.  A \texttt{PERMUTE} of $m$ variables expands to $O(m!)$
 branches, rejected above eight variables (or an estimated fifty
 thousand branches).  And a \texttt{DEFINE} predicate that depends on
 the match built so far---a running aggregate or \texttt{CLASSIFIER()},
