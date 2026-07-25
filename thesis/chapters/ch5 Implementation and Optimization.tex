@@ -107,7 +107,10 @@ states.  This removes $\varepsilon$-transitions and leaves at most one
 successor per symbol, so a partition can be scanned row by row with no
 backtracking.  Subset construction is exponential in the worst case,
 but \texttt{MATCH\_RECOGNIZE} patterns are structurally constrained and
-yield small DFAs in practice.  Crucially, the transition priorities are
+yield small DFAs in practice.  A memory-adaptive state limit bounds the
+build; if it is ever reached, construction stops and keeps the states
+already produced rather than switching to another matcher.  The
+evaluated patterns never approached this limit.  Crucially, the transition priorities are
 propagated through the construction, so the DFA inherits the
 \emph{greedy, leftmost-first} preference that SQL:2016 requires;
 unreachable states are then removed and compatible states merged,

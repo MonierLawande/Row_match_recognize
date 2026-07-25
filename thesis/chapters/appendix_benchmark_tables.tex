@@ -613,10 +613,13 @@ cell was checked against the engine's output.
   \centering
   \includegraphics[width=\textwidth]{images/viz_stress_time_grid.png}
   \caption[Per-pattern execution-time scaling]{Per-pattern
-    execution-time scaling on real data (1~CPU, 58\,GB), one panel per
-    family.  All three systems are linear in $n$; the engine (blue) is
-    lowest in every panel, and Trino's \texttt{complex\_nested}
-    time-walls at 160\,M and 227.9\,M rows (red $\times$).}
+    execution-time scaling on real data under a one-CPU and 58\,GB
+    resource budget, with one panel per pattern family.  Completed runs
+    remain close to linear over the evaluated sizes, although Oracle
+    shows some super-linear drift.  The engine records the lowest
+    execution time in every completed comparison.  Trino's
+    \texttt{complex\_nested} runs reach the 600-second time limit at
+    160~million and 227.9~million rows, shown by red $\times$ symbols.}
   \label{fig:stress_time_grid}
 \end{figure}
 
