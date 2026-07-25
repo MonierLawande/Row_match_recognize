@@ -246,19 +246,15 @@ automaton scan without changing the query result.
 
 Existing row-pattern implementations each carry their own
 restrictions~\cite{oracle2021dwhsg,trino2022,flink,
-snowflake2025match_recognize,petkovic2022rpr}:
-
-\begin{itemize}
-  \item supported contexts differ---some allow row patterns only in
-    the \texttt{FROM} clause, while others also support a window;
-  \item functions such as \texttt{CLASSIFIER()} and
-    \texttt{MATCH\_NUMBER()} are not equally available across
-    \texttt{MEASURES}, \texttt{DEFINE}, and output modes;
-  \item aggregate support varies, including limits on
-    \texttt{DISTINCT} aggregates and aggregate arguments;
-  \item empty matches, exclusions, reluctant quantifiers, and skip
-    modes are not handled uniformly.
-\end{itemize}
+snowflake2025match_recognize,petkovic2022rpr}.  The supported context
+differs: some allow row patterns only in the \texttt{FROM} clause,
+while others also support a window.  The availability of row-pattern
+functions such as \texttt{CLASSIFIER()} and \texttt{MATCH\_NUMBER()}
+varies by system and may be restricted to specific clauses or output
+modes.  Aggregate support varies too, including limits on
+\texttt{DISTINCT} aggregates and aggregate arguments.  And features
+such as empty matches, exclusions, reluctant quantifiers, and skip
+modes are not handled uniformly.
 
 For users with limited or occasional needs, standing up Oracle, Trino,
 Snowflake, or Flink is heavy.  Installing and managing these systems,
@@ -339,7 +335,10 @@ the items below state the delivered system, optimization, and evidence.
     skip modes, navigation functions, and aggregates.  Its pattern
     constructs include quantifiers, alternation, grouping, anchors,
     exclusions, and \texttt{PERMUTE}.  It runs in-process and needs no
-    database server or cloud warehouse.
+    database server or cloud warehouse.  Internally it is organised as
+    five core stages---parsing, semantic validation, logical-plan
+    construction, pattern compilation, and execution
+    (Chapter~\ref{chap:methodology}).
 
   \item A \textbf{general optimization layer} with compiled fast paths,
     vectorized predicate evaluation, compact output construction, an
