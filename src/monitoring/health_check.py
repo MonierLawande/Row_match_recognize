@@ -14,6 +14,7 @@ from dataclasses import asdict
 
 from ..config.production_config import get_config
 from ..monitoring.production_logging import get_system_health, get_performance_tracker
+from ..utils.resource_profile import get_adaptive_resource_profile
 
 
 class HealthChecker:
@@ -107,21 +108,35 @@ class HealthChecker:
         try:
             process = psutil.Process()
             memory_info = process.memory_info()
+            profile = get_adaptive_resource_profile(refresh=True)
+            effective_limit = max(
+                1,
+                profile.memory.effective_limit_bytes,
+            )
             
             return {
                 'memory_usage': {
                     'rss_mb': memory_info.rss / 1024 / 1024,
                     'vms_mb': memory_info.vms / 1024 / 1024,
-                    'percent': process.memory_percent(),
+                    'percent': memory_info.rss / effective_limit * 100.0,
                 },
                 'cpu_usage': {
                     'percent': process.cpu_percent(),
                     'num_threads': process.num_threads(),
                 },
                 'system': {
-                    'cpu_count': psutil.cpu_count(),
-                    'memory_total_gb': psutil.virtual_memory().total / 1024 / 1024 / 1024,
-                    'memory_available_gb': psutil.virtual_memory().available / 1024 / 1024 / 1024,
+                    'host_cpu_count': profile.cpu.host_logical_cpus,
+                    'effective_cpu_count': profile.cpu.effective_cpus,
+                    'effective_memory_limit_gb':
+                        profile.memory.effective_limit_bytes
+                        / 1024 ** 3,
+                    'effective_memory_available_gb':
+                        profile.memory.effective_available_bytes
+                        / 1024 ** 3,
+                    'memory_pressure_percent':
+                        profile.memory.pressure_ratio * 100.0,
+                    'memory_source': profile.memory.source,
+                    'cpu_source': profile.cpu.source,
                 },
             }
         except ImportError:

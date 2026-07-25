@@ -571,23 +571,9 @@ def get_pattern_cache():
     """Get enhanced pattern cache instance."""
     global _PATTERN_CACHE
     if _PATTERN_CACHE is None:
-        # Configure for pattern-specific optimizations
-        config = SmartCacheConfig(
-            max_size_mb=200.0,
-            max_entries=10000,
-            eviction_policy=CacheEvictionPolicy.SMART_MULTILEVEL,
-            enable_l1_cache=True,
-            enable_l2_cache=True,
-            enable_l3_cache=True,
-            l1_cache_size_mb=20.0,
-            l2_cache_size_mb=80.0,
-            l3_cache_size_mb=300.0,
-            enable_predictive_loading=True,
-            enable_navigation_optimization=True,
-            enable_partition_optimization=True,
-            enable_dynamic_sizing=True,
-            enable_background_optimization=True
-        )
+        # The global smart cache owns the adaptive byte/entry profile.  The
+        # previous local fixed-size configuration was never passed to it and
+        # only made the effective policy misleading.
         _PATTERN_CACHE = get_smart_cache()
     return _PATTERN_CACHE
 

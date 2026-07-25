@@ -18,6 +18,10 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 import multiprocessing as mp
 from enum import Enum
 from src.utils.logging_config import get_logger
+from src.utils.resource_profile import (
+    AdaptiveResourceProfile,
+    get_adaptive_resource_profile,
+)
 
 logger = get_logger(__name__)
 
@@ -82,6 +86,88 @@ class SmartCacheConfig:
     # Partition-aware caching
     enable_partition_optimization: bool = True
     partition_sharing_threshold: float = 0.7
+
+    @classmethod
+    def adaptive(cls, resource_profile=None) -> 'SmartCacheConfig':
+        """Build byte-consistent cache levels from the shared resource pool."""
+        profile = resource_profile or get_adaptive_resource_profile()
+        total_mb = profile.cache_budget_bytes / (1024 ** 2)
+        l1_mb = total_mb * 0.10
+        l2_mb = total_mb * 0.30
+        l3_mb = total_mb * 0.60
+        l1_entries = profile.cache_entry_limit(
+            16 * 1024,
+            budget_share=0.10,
+            minimum=32,
+            maximum=50_000,
+        )
+        l2_entries = profile.cache_entry_limit(
+            64 * 1024,
+            budget_share=0.30,
+            minimum=64,
+            maximum=100_000,
+        )
+        l3_entries = profile.cache_entry_limit(
+            16 * 1024,
+            budget_share=0.60,
+            minimum=128,
+            maximum=500_000,
+        )
+        entry_ceiling = profile.cache_entry_hard_max
+        if (
+            entry_ceiling is not None
+            and l1_entries + l2_entries + l3_entries > entry_ceiling
+        ):
+            # ``MR_CACHE_SIZE_LIMIT`` is a ceiling for the whole cache, not
+            # for each level independently.  Allocate that shared allowance
+            # using the same 10/30/60 hierarchy while never exceeding what
+            # each level's byte share can afford.
+            capacities = [l1_entries, l2_entries, l3_entries]
+            weights = [1, 3, 6]
+            allocations = [0, 0, 0]
+            remaining = min(entry_ceiling, sum(capacities))
+            while remaining > 0:
+                active = [
+                    index
+                    for index, capacity in enumerate(capacities)
+                    if allocations[index] < capacity
+                ]
+                if not active:
+                    break
+                active_weight = sum(weights[index] for index in active)
+                progress = 0
+                for index in active:
+                    grant = max(
+                        1,
+                        remaining * weights[index] // active_weight,
+                    )
+                    grant = min(
+                        grant,
+                        remaining,
+                        capacities[index] - allocations[index],
+                    )
+                    allocations[index] += grant
+                    remaining -= grant
+                    progress += grant
+                    if remaining == 0:
+                        break
+                if progress == 0:
+                    break
+            l1_entries, l2_entries, l3_entries = allocations
+        return cls(
+            max_size_mb=total_mb,
+            max_entries=l1_entries + l2_entries + l3_entries,
+            l1_cache_size_mb=l1_mb,
+            l2_cache_size_mb=l2_mb,
+            l3_cache_size_mb=l3_mb,
+            l1_max_entries=l1_entries,
+            l2_max_entries=l2_entries,
+            l3_max_entries=l3_entries,
+            max_predictive_entries=min(
+                50_000,
+                l1_entries + l2_entries,
+            ),
+        )
 
 @dataclass
 class CacheEntry:
@@ -194,8 +280,24 @@ class SmartCache:
     - Adaptive eviction policies based on usage patterns and system state
     """
     
-    def __init__(self, config: Optional[SmartCacheConfig] = None):
-        self.config = config or SmartCacheConfig()
+    def __init__(
+        self,
+        config: Optional[SmartCacheConfig] = None,
+        resource_profile: Optional[AdaptiveResourceProfile] = None,
+    ):
+        if config is not None and resource_profile is not None:
+            raise ValueError(
+                "Specify either config or resource_profile, not both"
+            )
+        if config is None:
+            profile = (
+                resource_profile or get_adaptive_resource_profile()
+            )
+            config = SmartCacheConfig.adaptive(profile)
+            self._resource_signature = self._profile_signature(profile)
+        else:
+            self._resource_signature = None
+        self.config = config
         self.lock = threading.RLock()
         
         # Multi-level cache storage with enhanced features
@@ -258,6 +360,90 @@ class SmartCache:
         self.optimization_thread = None
         self.health_monitor_thread = None
         self.last_health_check = time.time()
+
+    @staticmethod
+    def _profile_signature(
+        profile: AdaptiveResourceProfile,
+    ) -> Tuple[int, Optional[int]]:
+        return (
+            profile.cache_budget_bytes,
+            profile.cache_entry_hard_max,
+        )
+
+    def apply_resource_profile(
+        self,
+        profile: AdaptiveResourceProfile,
+    ) -> None:
+        """Rebind global cache capacity after an environment change.
+
+        Cache contents are reusable across queries, but their retained memory
+        must fit the environment in which the current query runs.  Rebinding is
+        skipped for an unchanged profile so a pressure-driven shrink is not
+        immediately undone by ordinary cache access.
+        """
+        signature = self._profile_signature(profile)
+        with self.lock:
+            if signature == self._resource_signature:
+                return
+            adaptive = SmartCacheConfig.adaptive(profile)
+            for field_name in (
+                'max_size_mb',
+                'max_entries',
+                'l1_cache_size_mb',
+                'l2_cache_size_mb',
+                'l3_cache_size_mb',
+                'l1_max_entries',
+                'l2_max_entries',
+                'l3_max_entries',
+                'max_predictive_entries',
+            ):
+                setattr(
+                    self.config,
+                    field_name,
+                    getattr(adaptive, field_name),
+                )
+            self.access_history = deque(
+                self.access_history,
+                maxlen=adaptive.max_predictive_entries,
+            )
+            self._resource_signature = signature
+            self._trim_to_configured_capacity()
+
+    def _trim_to_configured_capacity(self) -> None:
+        """Evict retained entries until current byte and count caps hold."""
+        max_entries = max(0, self.config.max_entries)
+        max_size_bytes = max(
+            0,
+            int(self.config.max_size_mb * 1024 * 1024),
+        )
+        while True:
+            total_entries = (
+                len(self.l1_cache)
+                + len(self.l2_cache)
+                + len(self.l3_cache)
+            )
+            total_size_bytes = int(
+                (
+                    self.stats.get('l1_size_mb', 0.0)
+                    + self.stats.get('l2_size_mb', 0.0)
+                    + self.stats.get('l3_size_mb', 0.0)
+                )
+                * 1024
+                * 1024
+            )
+            if (
+                total_entries <= max_entries
+                and total_size_bytes <= max_size_bytes
+            ):
+                return
+            if self.l3_cache:
+                self._evict_from_level('L3')
+            elif self.l2_cache:
+                self._evict_from_level('L2')
+            elif self.l1_cache:
+                self._evict_from_level('L1')
+            else:
+                return
         
     def _start_health_monitoring(self):
         """Start health monitoring thread for cache system integrity."""
@@ -337,7 +523,10 @@ class SmartCache:
             
             # Check memory pressure
             try:
-                memory_percent = psutil.virtual_memory().percent / 100.0
+                memory_percent = (
+                    get_adaptive_resource_profile(refresh=True)
+                    .memory.pressure_ratio
+                )
                 if memory_percent > self.config.memory_pressure_threshold:
                     self._adaptive_resize_down()
                     self.stats['memory_pressure_events'] += 1
@@ -1433,8 +1622,11 @@ class SmartCache:
             if size_hint:
                 entry.size_bytes = int(size_hint * 1024 * 1024)
             
-            # Check if we need to evict entries
-            self._ensure_capacity(entry.size_bytes)
+            # A cache miss is semantically neutral.  If this entry cannot fit
+            # inside the configured byte/entry ceiling, leave the cache
+            # unchanged instead of admitting an oversized first entry.
+            if not self._ensure_capacity(entry.size_bytes):
+                return False
             
             # Determine which cache level to use
             target_level = self._determine_cache_level(key, entry)
@@ -1488,8 +1680,11 @@ class SmartCache:
         # Default to L3 for general patterns
         return 'L3'
     
-    def _ensure_capacity(self, new_entry_size: int):
-        """Ensure cache has capacity for new entry."""
+    def _ensure_capacity(self, new_entry_size: int) -> bool:
+        """Make room without ever exceeding the active cache ceiling."""
+        if new_entry_size < 0:
+            raise ValueError("new_entry_size cannot be negative")
+
         # Check memory pressure
         if self._check_memory_pressure():
             self.stats['memory_pressure_events'] += 1
@@ -1501,7 +1696,16 @@ class SmartCache:
                            self.stats.get('l2_size_mb', 0) + 
                            self.stats.get('l3_size_mb', 0)) * 1024 * 1024
         
-        max_size_bytes = self.config.max_size_mb * 1024 * 1024
+        max_size_bytes = max(
+            0,
+            int(self.config.max_size_mb * 1024 * 1024),
+        )
+
+        if (
+            self.config.max_entries <= 0
+            or new_entry_size > max_size_bytes
+        ):
+            return False
         
         # Evict from L3 first, then L2, then L1 if needed
         while (total_entries >= self.config.max_entries or 
@@ -1521,6 +1725,11 @@ class SmartCache:
             total_size_bytes = (self.stats.get('l1_size_mb', 0) + 
                                self.stats.get('l2_size_mb', 0) + 
                                self.stats.get('l3_size_mb', 0)) * 1024 * 1024
+
+        return (
+            total_entries < self.config.max_entries
+            and total_size_bytes + new_entry_size <= max_size_bytes
+        )
     
     def _evict_from_level(self, level: str):
         """Evict one entry from specified cache level."""
@@ -1647,16 +1856,21 @@ class SmartCache:
         self.last_memory_check = current_time
         
         try:
-            memory_percent = psutil.virtual_memory().percent / 100.0
+            memory_percent = (
+                get_adaptive_resource_profile(refresh=True)
+                .memory.pressure_ratio
+            )
             return memory_percent > self.config.memory_pressure_threshold
-        except:
-            return False
+        except Exception:
+            return True
     
     def _adaptive_resize(self):
         """Adaptively resize cache based on memory pressure."""
-        # Reduce cache size under memory pressure
-        new_max_size = max(10.0, self.config.max_size_mb * 0.8)
-        new_max_entries = max(100, self.config.max_entries // 2)
+        # Resource pressure may only lower the active ceiling.  In particular,
+        # do not apply fixed 10-MiB/100-entry floors that expand caches in
+        # small containers.
+        new_max_size = max(0.0, self.config.max_size_mb * 0.8)
+        new_max_entries = max(0, self.config.max_entries // 2)
         
         if new_max_size != self.config.max_size_mb:
             logger.info(f"Reducing cache size due to memory pressure: "
@@ -1753,13 +1967,19 @@ class SmartCache:
 _global_smart_cache: Optional[SmartCache] = None
 _cache_lock = threading.Lock()
 
-def get_smart_cache() -> SmartCache:
+def get_smart_cache(
+    resource_profile: Optional[AdaptiveResourceProfile] = None,
+) -> SmartCache:
     """Get global smart cache instance."""
     global _global_smart_cache
     if _global_smart_cache is None:
         with _cache_lock:
             if _global_smart_cache is None:
-                _global_smart_cache = SmartCache()
+                _global_smart_cache = SmartCache(
+                    resource_profile=resource_profile,
+                )
+    if resource_profile is not None:
+        _global_smart_cache.apply_resource_profile(resource_profile)
     return _global_smart_cache
 
 def clear_smart_cache():
@@ -1799,6 +2019,14 @@ class PerformanceMetrics:
 class ParallelExecutionConfig:
     """Configuration for parallel execution optimization."""
     enabled: bool = True
+    # The generic manager has no semantics-preserving MATCH_RECOGNIZE
+    # partition executor yet.  The SQL executor must not advertise its
+    # sequential partition loop as parallel work.
+    match_recognize_partition_executor_available: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+    )
     max_workers: Optional[int] = None  # Default: CPU cores - 1
     min_data_size_for_parallel: int = 1000  # Minimum rows to enable parallel processing
     chunk_size_strategy: str = "adaptive"  # "fixed", "adaptive", "data_dependent"
@@ -1806,6 +2034,60 @@ class ParallelExecutionConfig:
     load_balancing: bool = True
     memory_threshold_mb: float = 500.0  # Switch to sequential if memory usage exceeds this
     cpu_threshold_percent: float = 80.0  # Monitor CPU usage for dynamic adjustment
+    thread_timeout_seconds: Optional[float] = 30.0
+    process_timeout_seconds: Optional[float] = 60.0
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "thread_timeout_seconds",
+            "process_timeout_seconds",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{field_name} must be positive or None")
+
+
+class ParallelExecutionError(RuntimeError):
+    """Base error for parallel execution that did not produce valid results."""
+
+
+class ParallelExecutionTimeoutError(ParallelExecutionError):
+    """A work item exceeded an explicit parallel execution timeout."""
+
+    def __init__(
+        self,
+        partition_id: str,
+        timeout_seconds: Optional[float],
+        execution_mode: str,
+    ) -> None:
+        self.partition_id = partition_id
+        self.timeout_seconds = timeout_seconds
+        self.execution_mode = execution_mode
+        super().__init__(
+            f"{execution_mode} work item {partition_id!r} exceeded "
+            f"its {timeout_seconds}-second timeout; no empty-match result "
+            "was produced"
+        )
+
+
+class ParallelWorkItemExecutionError(ParallelExecutionError):
+    """A work item failed before it could produce a valid result."""
+
+    def __init__(
+        self,
+        partition_id: str,
+        execution_mode: str,
+        message: str,
+    ) -> None:
+        self.partition_id = partition_id
+        self.execution_mode = execution_mode
+        super().__init__(
+            f"{execution_mode} work item {partition_id!r} failed: {message}"
+        )
+
+
+class ParallelExecutionUnavailableError(ParallelExecutionError):
+    """The generic work-item manager has no semantics-preserving executor."""
 
 @dataclass 
 class ParallelWorkItem:
@@ -1938,22 +2220,13 @@ class ParallelExecutionManager:
         logger.info(f"ParallelExecutionManager initialized with {self.max_workers} workers")
     
     def _determine_optimal_workers(self) -> int:
-        """Determine optimal number of worker threads/processes."""
-        if self.config.max_workers:
-            return min(self.config.max_workers, mp.cpu_count())
-        
-        # Default: CPU cores - 1 (leave one core for system)
-        cpu_count = mp.cpu_count()
-        optimal_workers = max(1, cpu_count - 1)
-        
-        # Adjust based on available memory
-        available_memory_gb = psutil.virtual_memory().available / (1024**3)
-        if available_memory_gb < 2:  # Less than 2GB available
-            optimal_workers = max(1, optimal_workers // 2)
-        elif available_memory_gb > 8:  # More than 8GB available
-            optimal_workers = min(optimal_workers + 2, cpu_count * 2)
-        
-        return optimal_workers
+        """Resolve workers from CPU quota, affinity, and memory per worker."""
+        profile = get_adaptive_resource_profile()
+        return profile.worker_count(
+            requested=self.config.max_workers,
+            estimated_bytes_per_worker=256 * 1024 ** 2,
+            reserve_one_cpu=False,
+        )
     
     def execute_parallel_patterns(self, work_items: List[ParallelWorkItem]) -> List[Dict[str, Any]]:
         """
@@ -2020,6 +2293,10 @@ class ParallelExecutionManager:
             
             return results
             
+        except ParallelExecutionError:
+            # A timeout or work-item failure is not an empty match and cannot
+            # be hidden by rerunning the same incomplete placeholder path.
+            raise
         except Exception as e:
             logger.error(f"Parallel execution failed: {e}, falling back to sequential")
             return self._execute_sequential(work_items)
@@ -2040,12 +2317,35 @@ class ParallelExecutionManager:
         results = []
         for partition_id, future in futures:
             try:
-                result = future.result(timeout=30)  # 30 second timeout per item
+                result = future.result(
+                    timeout=self.config.thread_timeout_seconds
+                )
                 result['partition_id'] = partition_id
                 results.append(result)
-            except Exception as e:
-                logger.error(f"Work item {partition_id} failed: {e}")
-                results.append({'partition_id': partition_id, 'error': str(e), 'matches': []})
+            except concurrent.futures.TimeoutError as error:
+                for _, pending in futures:
+                    pending.cancel()
+                pool = self.thread_pool
+                self.thread_pool = None
+                if pool is not None:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                raise ParallelExecutionTimeoutError(
+                    partition_id,
+                    self.config.thread_timeout_seconds,
+                    "thread",
+                ) from error
+            except ParallelExecutionError:
+                for _, pending in futures:
+                    pending.cancel()
+                raise
+            except Exception as error:
+                for _, pending in futures:
+                    pending.cancel()
+                raise ParallelWorkItemExecutionError(
+                    partition_id,
+                    "thread",
+                    str(error),
+                ) from error
         
         return results
     
@@ -2062,12 +2362,35 @@ class ParallelExecutionManager:
         results = []
         for partition_id, future in futures:
             try:
-                result = future.result(timeout=60)  # Longer timeout for processes
+                result = future.result(
+                    timeout=self.config.process_timeout_seconds
+                )
                 result['partition_id'] = partition_id
                 results.append(result)
-            except Exception as e:
-                logger.error(f"Process work item {partition_id} failed: {e}")
-                results.append({'partition_id': partition_id, 'error': str(e), 'matches': []})
+            except concurrent.futures.TimeoutError as error:
+                for _, pending in futures:
+                    pending.cancel()
+                pool = self.process_pool
+                self.process_pool = None
+                if pool is not None:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                raise ParallelExecutionTimeoutError(
+                    partition_id,
+                    self.config.process_timeout_seconds,
+                    "process",
+                ) from error
+            except ParallelExecutionError:
+                for _, pending in futures:
+                    pending.cancel()
+                raise
+            except Exception as error:
+                for _, pending in futures:
+                    pending.cancel()
+                raise ParallelWorkItemExecutionError(
+                    partition_id,
+                    "process",
+                    str(error),
+                ) from error
         
         return results
     
@@ -2082,28 +2405,24 @@ class ParallelExecutionManager:
                 result = self._execute_work_item(item)
                 result['partition_id'] = item.partition_id
                 results.append(result)
-            except Exception as e:
-                logger.error(f"Sequential execution of {item.partition_id} failed: {e}")
-                results.append({'partition_id': item.partition_id, 'error': str(e), 'matches': []})
+            except ParallelExecutionError:
+                raise
+            except Exception as error:
+                raise ParallelWorkItemExecutionError(
+                    item.partition_id,
+                    "sequential",
+                    str(error),
+                ) from error
         
         return results
     
     def _execute_work_item(self, item: ParallelWorkItem) -> Dict[str, Any]:
         """Execute a single work item (pattern matching on data subset)."""
-        # This method will be called by the matcher to execute pattern matching
-        # For now, return a placeholder result structure
-        start_time = time.time()
-        
-        # Placeholder for actual pattern matching execution
-        # This will be integrated with the existing matcher
-        result = {
-            'matches': [],
-            'execution_time': time.time() - start_time,
-            'row_count': self._estimate_data_size(item.data_subset),
-            'pattern_complexity': item.estimated_complexity
-        }
-        
-        return result
+        raise ParallelExecutionUnavailableError(
+            "ParallelExecutionManager has no generic MATCH_RECOGNIZE "
+            "work-item executor. Install a semantics-preserving executor "
+            "before submitting work; an empty match list is not a fallback."
+        )
     
     def _execute_work_item_process_safe(self, item: ParallelWorkItem) -> Dict[str, Any]:
         """Process-safe version of work item execution."""
@@ -2122,9 +2441,10 @@ class ParallelExecutionManager:
     
     def _check_resource_availability(self) -> bool:
         """Check if system resources allow parallel execution."""
-        # Check memory
-        memory = psutil.virtual_memory()
-        if memory.percent > 85:  # More than 85% memory used
+        profile = get_adaptive_resource_profile(refresh=True)
+        if profile.cpu.effective_cpus <= 1:
+            return False
+        if profile.memory.pressure_ratio >= 0.85:
             with self.lock:
                 self.execution_stats['memory_pressure_switches'] += 1
             return False
@@ -2206,14 +2526,19 @@ class ResourceMonitor:
         """Background thread to monitor resource usage."""
         while self.monitoring:
             try:
-                memory = psutil.virtual_memory()
+                profile = get_adaptive_resource_profile(refresh=True)
                 cpu = psutil.cpu_percent(interval=1)
                 
                 resource_snapshot = {
                     'timestamp': time.time(),
-                    'memory_percent': memory.percent,
+                    'memory_percent':
+                        profile.memory.pressure_ratio * 100.0,
                     'cpu_percent': cpu,
-                    'available_memory_gb': memory.available / (1024**3)
+                    'available_memory_gb': (
+                        profile.memory.effective_available_bytes
+                        / (1024 ** 3)
+                    ),
+                    'effective_cpus': profile.cpu.effective_cpus,
                 }
                 
                 with self.lock:
@@ -2690,6 +3015,43 @@ def finalize_performance_context(context: Dict[str, Any], operation_name: str):
 # Smart caching utility functions for pattern compilation and data processing
 class PatternCompilationCache:
     """Specialized cache for pattern compilation results."""
+
+    @staticmethod
+    def _estimate_compiled_size_mb(
+        pattern: str,
+        compiled_result: Any,
+    ) -> float:
+        """Conservatively account for automaton objects held by the cache.
+
+        ``sys.getsizeof`` on the outer tuple misses states, transitions,
+        closures, and metadata.  Use the same order-of-magnitude state cost as
+        the DFA construction policy so cache admission is governed by bytes,
+        not only by entry count.
+        """
+        estimated_bytes = max(4096, len(pattern.encode('utf-8')) * 4)
+        try:
+            dfa = compiled_result[0]
+            nfa = compiled_result[1]
+            dfa_states = list(getattr(dfa, 'states', ()) or ())
+            nfa_states = list(getattr(nfa, 'states', ()) or ())
+            dfa_transitions = sum(
+                len(getattr(state, 'transitions', ()) or ())
+                for state in dfa_states
+            )
+            nfa_transitions = sum(
+                len(getattr(state, 'transitions', ()) or ())
+                for state in nfa_states
+            )
+            estimated_bytes += len(dfa_states) * 64 * 1024
+            estimated_bytes += len(nfa_states) * 16 * 1024
+            estimated_bytes += (
+                dfa_transitions + nfa_transitions
+            ) * 4 * 1024
+        except (AttributeError, IndexError, TypeError):
+            # The cache remains usable for compatibility objects, with a
+            # conservative non-zero admission cost.
+            estimated_bytes += 64 * 1024
+        return estimated_bytes / (1024 ** 2)
     
     @staticmethod
     def generate_pattern_key(pattern: str, define_conditions: Dict[str, str], 
@@ -2710,8 +3072,10 @@ class PatternCompilationCache:
         cache = get_smart_cache()
         key = PatternCompilationCache.generate_pattern_key(pattern, define_conditions, options)
         
-        # Estimate size for large compiled objects
-        size_hint = len(pattern) * 0.001  # Rough estimate in MB
+        size_hint = PatternCompilationCache._estimate_compiled_size_mb(
+            pattern,
+            compiled_result,
+        )
 
         # The executor stores compilation metadata as the third tuple item.
         # Pass it through to the cache entry so monitoring can report the
@@ -2878,7 +3242,11 @@ def get_smart_cache_stats():
 
 def is_smart_caching_enabled():
     """Check if smart caching is enabled."""
-    return True  # Smart caching is always enabled
+    cache = get_smart_cache()
+    return bool(
+        cache.config.max_entries > 0
+        and cache.config.max_size_mb > 0
+    )
 
 def get_cache_stats():
     """Compatibility function that returns smart cache stats."""

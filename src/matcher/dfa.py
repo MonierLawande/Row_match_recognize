@@ -25,8 +25,6 @@ from typing import (
 from dataclasses import dataclass, field
 import time
 import threading
-import math
-import psutil
 from collections import defaultdict, deque
 from abc import ABC, abstractmethod
 from functools import lru_cache
@@ -36,6 +34,13 @@ from src.matcher.pattern_tokenizer import PatternTokenType, PermuteHandler
 from src.utils.logging_config import get_logger, PerformanceTimer
 from src.utils.memory_management import get_resource_manager, MemoryMonitor
 from src.utils.pattern_cache import get_pattern_cache
+from src.utils.resource_profile import (
+    AdaptiveResourceProfile,
+    MIB,
+    EffectiveMemorySnapshot,
+    SystemMemoryProbe,
+    get_adaptive_resource_profile,
+)
 
 # Module logger
 logger = get_logger(__name__)
@@ -44,6 +49,107 @@ logger = get_logger(__name__)
 FAIL_STATE = -1
 MAX_OPTIMIZATION_ITERATIONS = 100
 DFA_COMPILER_SCHEMA_VERSION = 2
+
+@dataclass(frozen=True)
+class DFAAdaptiveMemoryPolicy:
+    """Continuously derive a safe DFA state ceiling from effective memory.
+
+    The byte budget is intentionally conservative because a DFA state owns
+    Python objects, an NFA subset, transitions, map entries, and queue entries.
+    The defaults reserve host/container headroom, give compilation at most ten
+    percent of effective memory, and assume 64 KiB per reachable DFA state.
+    Deployments may provide a different policy after measuring their patterns.
+    """
+
+    reserve_fraction: float = 0.10
+    reserve_floor_bytes: int = 512 * MIB
+    available_fraction: float = 0.25
+    total_fraction: float = 0.10
+    estimated_bytes_per_state: int = 64 * 1024
+    # An administrator may set a ceiling for multi-tenant deployments.  The
+    # default is deliberately uncapped: effective memory is the physical
+    # ceiling, so larger containers continue to receive a larger budget.
+    hard_max_states: Optional[int] = None
+    minimum_states: int = 1_000
+    iteration_multiplier: int = 2
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            'reserve_fraction',
+            'available_fraction',
+            'total_fraction',
+        ):
+            value = getattr(self, field_name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be between 0 and 1")
+        for field_name in (
+            'estimated_bytes_per_state',
+            'minimum_states',
+            'iteration_multiplier',
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name} must be at least 1")
+        if self.hard_max_states is not None and self.hard_max_states < 1:
+            raise ValueError("hard_max_states must be at least 1 when set")
+        if self.reserve_floor_bytes < 0:
+            raise ValueError("reserve_floor_bytes cannot be negative")
+
+    def resolve(
+        self,
+        memory: EffectiveMemorySnapshot,
+    ) -> 'ResolvedDFAStateBudget':
+        available = memory.effective_available_bytes
+        effective_limit = memory.effective_limit_bytes
+
+        requested_reserve = max(
+            self.reserve_floor_bytes,
+            int(effective_limit * self.reserve_fraction),
+        )
+        # Under heavy pressure, retain at least half the current availability
+        # for the application and other Python allocations.
+        reserve = min(requested_reserve, available // 2)
+        post_reserve = max(0, available - reserve)
+
+        budget = min(
+            int(post_reserve * self.available_fraction),
+            int(effective_limit * self.total_fraction),
+        )
+
+        memory_bound_states = budget // self.estimated_bytes_per_state
+        if (
+            memory_bound_states < self.minimum_states
+            and post_reserve
+            >= self.minimum_states * self.estimated_bytes_per_state
+        ):
+            memory_bound_states = self.minimum_states
+
+        max_states = max(1, memory_bound_states)
+        if self.hard_max_states is not None:
+            max_states = min(max_states, self.hard_max_states)
+        max_iterations = max(
+            100_000,
+            max_states * self.iteration_multiplier,
+        )
+        return ResolvedDFAStateBudget(
+            max_states=max_states,
+            max_iterations=max_iterations,
+            memory_budget_bytes=budget,
+            reserved_headroom_bytes=reserve,
+            estimated_bytes_per_state=self.estimated_bytes_per_state,
+            memory=memory,
+        )
+
+
+@dataclass(frozen=True)
+class ResolvedDFAStateBudget:
+    """A frozen adaptive budget used for one complete DFA compilation."""
+
+    max_states: int
+    max_iterations: int
+    memory_budget_bytes: int
+    reserved_headroom_bytes: int
+    estimated_bytes_per_state: int
+    memory: EffectiveMemorySnapshot
 
 
 @dataclass(frozen=True)
@@ -267,9 +373,14 @@ class DFA:
     quantifiers, anchors, and exclusions with comprehensive optimization.
     """
     
-    def __init__(self, states: List[DFAState], start: int = 0, 
-                 exclusion_ranges: Optional[Dict[str, Set[str]]] = None,
-                 metadata: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        states: List[DFAState],
+        start: int = 0,
+        exclusion_ranges: Optional[Dict[str, Set[str]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        resource_profile: Optional[AdaptiveResourceProfile] = None,
+    ):
         """
         Initialize DFA with comprehensive validation.
         
@@ -289,6 +400,7 @@ class DFA:
         self.start = start
         self.exclusion_ranges = exclusion_ranges or {}
         self.metadata = metadata or {}
+        self._resource_profile = resource_profile
         
         # Performance tracking
         self._match_count = 0
@@ -539,6 +651,9 @@ class DFABuilder:
         self,
         nfa: NFA,
         limits: Optional[DFAConstructionLimits] = None,
+        memory_policy: Optional[DFAAdaptiveMemoryPolicy] = None,
+        memory_probe: Optional[SystemMemoryProbe] = None,
+        resource_profile: Optional[AdaptiveResourceProfile] = None,
     ):
         """Initialize DFA builder with validation."""
         if not isinstance(nfa, NFA):
@@ -548,12 +663,60 @@ class DFABuilder:
             raise ValueError("Source NFA validation failed")
         
         self.nfa = nfa
-        
-        # The state cap is memory-adaptive by default.  These are hard
-        # fail-closed compilation limits, not truncation controls.
-        self.limits = limits or DFAConstructionLimits(
-            max_states=self._calculate_max_states()
-        )
+        self._resource_profile = resource_profile
+        if self._resource_profile is None and memory_probe is None:
+            self._resource_profile = (
+                getattr(nfa, '_resource_profile', None)
+                or get_adaptive_resource_profile()
+            )
+        if memory_policy is not None:
+            self._memory_policy = memory_policy
+        else:
+            # The DFA remains a fraction of effective host/cgroup memory, and
+            # also respects the same query ceiling used by the matcher.  An
+            # injected probe is kept deterministic for low-level tests and
+            # embedders; callers may pass an explicit resource profile when
+            # they want both controls.
+            profile = self._resource_profile
+            if profile is not None:
+                profile.require_query_capacity()
+            hard_max_states = (
+                None
+                if profile is None
+                else max(
+                    1,
+                    profile.query_budget_bytes // (64 * 1024),
+                )
+            )
+            self._memory_policy = DFAAdaptiveMemoryPolicy(
+                hard_max_states=hard_max_states,
+            )
+        self._memory_probe = memory_probe or SystemMemoryProbe()
+        self._resolved_memory_budget: Optional[ResolvedDFAStateBudget] = None
+
+        # Explicit limits always win.  Otherwise sample one continuous,
+        # container-aware memory budget and freeze it for this compilation.
+        if limits is not None:
+            self.limits = limits
+            limit_metadata = {
+                'mode': 'explicit',
+                'max_states': limits.max_states,
+                'max_iterations': limits.max_iterations,
+            }
+        else:
+            max_states = self._calculate_max_states()
+            resolved = self._resolved_memory_budget
+            max_iterations = (
+                resolved.max_iterations
+                if resolved is not None
+                else max(100_000, max_states * 2)
+            )
+            self.limits = DFAConstructionLimits(
+                max_states=max_states,
+                max_iterations=max_iterations,
+            )
+            limit_metadata = self._adaptive_limit_metadata()
+
         # Keep the historical attributes for callers that inspect builder
         # statistics.  MAX_SUBSET_SIZE is now a warning threshold only.
         self.MAX_DFA_STATES = self.limits.max_states
@@ -588,6 +751,7 @@ class DFABuilder:
             'construction_method': 'subset_construction_with_priorities',
             'exponential_protection': True,
             'construction_complete': False,
+            'construction_limits': limit_metadata,
         })
         
         # Threading support
@@ -596,18 +760,47 @@ class DFABuilder:
         logger.debug(f"DFABuilder initialized for NFA with {len(nfa.states)} states")
 
     def _calculate_max_states(self) -> int:
-        """Calculate max states based on available memory"""
+        """Resolve a continuous state budget from effective available memory."""
+        if self._resource_profile is not None:
+            self._resolved_memory_budget = self._memory_policy.resolve(
+                self._resource_profile.memory
+            )
+            return self._resolved_memory_budget.max_states
         try:
-            memory = psutil.virtual_memory()
-            available_gb = memory.available / (1024**3)
-            if available_gb > 8:
-                return 50000
-            elif available_gb > 4:
-                return 25000
-            else:
-                return 10000
-        except Exception:
-            return 10000  # Safe fallback
+            memory = self._memory_probe.snapshot()
+            self._resolved_memory_budget = self._memory_policy.resolve(memory)
+            return self._resolved_memory_budget.max_states
+        except Exception as error:
+            raise DFAConstructionError(
+                "Unable to resolve a safe DFA memory budget. Supply an "
+                "explicit DFAConstructionLimits value when resource discovery "
+                "is unavailable."
+            ) from error
+
+    def _adaptive_limit_metadata(self) -> Dict[str, Any]:
+        resolved = self._resolved_memory_budget
+        if resolved is None:
+            return {
+                'mode': 'unresolved',
+            }
+
+        memory = resolved.memory
+        return {
+            'mode': 'adaptive_memory',
+            'policy_version': 1,
+            'max_states': resolved.max_states,
+            'max_iterations': resolved.max_iterations,
+            'memory_budget_bytes': resolved.memory_budget_bytes,
+            'reserved_headroom_bytes': resolved.reserved_headroom_bytes,
+            'estimated_bytes_per_state':
+                resolved.estimated_bytes_per_state,
+            'effective_memory_limit_bytes':
+                memory.effective_limit_bytes,
+            'effective_memory_available_bytes':
+                memory.effective_available_bytes,
+            'memory_source': memory.source,
+            'hard_max_states': self._memory_policy.hard_max_states,
+        }
 
     def __del__(self):
         """Cleanup builder resources to prevent memory leaks"""
@@ -751,7 +944,8 @@ class DFABuilder:
                     states=dfa_states,
                     start=0,
                     exclusion_ranges=self.nfa.exclusion_ranges.copy(),
-                    metadata=final_metadata
+                    metadata=final_metadata,
+                    resource_profile=self._resource_profile,
                 )
                 
                 # Validate resulting DFA

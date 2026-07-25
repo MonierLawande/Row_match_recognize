@@ -11,29 +11,40 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
 from pathlib import Path
 import json
+from src.utils.resource_profile import (
+    AdaptiveResourceProfile,
+    get_adaptive_resource_profile,
+)
 
 
 @dataclass
 class PerformanceConfig:
     """Performance-related configuration settings."""
-    max_partition_size: int = -1  # Unlimited partition size for production (handle any data size)
-    execution_timeout_seconds: float = 300.0  # Increased timeout for large datasets
-    max_memory_mb: int = 8192  # Increased memory limit for large datasets
+    # ``-1`` means that there is no arbitrary row-count limit.  Execution is
+    # still bounded by the adaptive memory budget and by explicit structural
+    # safety policies.
+    max_partition_size: int = -1
+    execution_timeout_seconds: float = 300.0
+    # Compatibility defaults for directly constructed configurations.
+    # Normal engine execution uses MatchRecognizeConfig.from_env(), which
+    # replaces these values with one container-aware resource snapshot.
+    max_memory_mb: int = 8192
     enable_caching: bool = True
-    cache_size_limit: int = 50_000  # Increased cache size for large datasets
-    cache_memory_limit_mb: int = 2048  # Increased cache memory
+    cache_size_limit: int = 50_000
+    cache_memory_limit_mb: int = 2048
     cache_ttl_seconds: int = 3600
-    cache_clear_threshold_mb: int = 1600  # Higher threshold before clearing
+    cache_clear_threshold_mb: int = 1600
     cache_monitoring_interval_seconds: int = 300
-    parallel_processing: bool = True  # Enable parallel processing
+    parallel_processing: bool = False
     max_workers: int = 4
-    # Core algorithm optimizations for unlimited data sizes
-    enable_streaming_processing: bool = True  # Stream data instead of loading all at once
-    enable_early_termination: bool = True  # Stop patterns that won't match
-    enable_pattern_optimization: bool = True  # Optimize pattern compilation
-    enable_memory_mapping: bool = True  # Use memory mapping for very large datasets
-    progress_reporting: bool = True  # Report progress for long-running operations
-    optimize_for_unlimited_size: bool = True  # Enable unlimited size optimizations
+    # Core algorithm controls.  Disabled capabilities are not advertised as
+    # active until their execution paths provide the corresponding behavior.
+    enable_streaming_processing: bool = False
+    enable_early_termination: bool = True
+    enable_pattern_optimization: bool = True
+    enable_memory_mapping: bool = False
+    progress_reporting: bool = True
+    optimize_for_unlimited_size: bool = False
 
 
 @dataclass
@@ -63,11 +74,15 @@ class SecurityConfig:
 class MonitoringConfig:
     """Monitoring and observability configuration."""
     enable_metrics: bool = True
+    metrics_endpoint: str = "/metrics"
     metrics_interval_seconds: int = 60
     enable_health_checks: bool = True
+    health_check_endpoint: str = "/health"
     health_check_interval_seconds: int = 30
     enable_profiling: bool = False
     profiling_sample_rate: float = 0.01
+    enable_tracing: bool = False
+    sample_rate: float = 0.1
     alert_on_high_memory: bool = True
     alert_memory_threshold_mb: int = 800
     alert_on_slow_queries: bool = True
@@ -85,16 +100,6 @@ class ResourceConfig:
     disk_usage_threshold: float = 90.0
     enable_graceful_degradation: bool = True
     emergency_cache_clear_threshold: float = 95.0
-
-
-@dataclass
-class MonitoringConfig:
-    """Monitoring and observability configuration."""
-    enable_metrics: bool = True
-    metrics_endpoint: str = "/metrics"
-    health_check_endpoint: str = "/health"
-    enable_tracing: bool = False
-    sample_rate: float = 0.1
 
 
 @dataclass
@@ -120,31 +125,183 @@ class MatchRecognizeConfig:
     enable_production_mode: bool = False
 
     @classmethod
-    def from_env(cls) -> 'MatchRecognizeConfig':
+    def from_env(
+        cls,
+        resource_profile: Optional[AdaptiveResourceProfile] = None,
+    ) -> 'MatchRecognizeConfig':
         """Create configuration from environment variables."""
         config = cls()
-        
-        # Performance settings
-        config.performance.max_partition_size = int(
-            os.getenv('MR_MAX_PARTITION_SIZE', config.performance.max_partition_size)
-        )
-        config.performance.execution_timeout_seconds = float(
-            os.getenv('MR_EXECUTION_TIMEOUT', config.performance.execution_timeout_seconds)
-        )
-        config.performance.enable_caching = os.getenv('MR_ENABLE_CACHING', 'true').lower() == 'true'
-        config.performance.cache_size_limit = int(
-            os.getenv('MR_CACHE_SIZE_LIMIT', config.performance.cache_size_limit)
+        profile = resource_profile or get_adaptive_resource_profile()
+
+        # Resource defaults come from the effective process/container profile.
+        # Environment values remain explicit administrator ceilings.
+        config.performance.max_memory_mb = int(
+            profile.query_budget_bytes / (1024 ** 2)
         )
         config.performance.cache_memory_limit_mb = int(
-            os.getenv('MR_CACHE_MEMORY_LIMIT_MB', config.performance.cache_memory_limit_mb)
+            profile.cache_budget_bytes / (1024 ** 2)
         )
-        config.performance.cache_ttl_seconds = int(
-            os.getenv('MR_CACHE_TTL_SECONDS', config.performance.cache_ttl_seconds)
+        config.performance.cache_clear_threshold_mb = int(
+            config.performance.cache_memory_limit_mb * 0.8
         )
-        config.performance.parallel_processing = os.getenv('MR_PARALLEL_PROCESSING', 'false').lower() == 'true'
-        config.performance.max_workers = int(
-            os.getenv('MR_MAX_WORKERS', config.performance.max_workers)
+        config.performance.cache_size_limit = profile.cache_entry_limit(
+            estimated_entry_bytes=64 * 1024,
+            budget_share=1.0,
+            minimum=128,
+            maximum=500_000,
         )
+        config.performance.max_workers = profile.worker_count()
+        # The cache and active queries share usable memory.  Reserve the
+        # optional cache pool before calculating how many full per-query
+        # budgets fit; otherwise two individually safe budgets can
+        # collectively overcommit a small container.
+        if profile.query_budget_bytes == 0:
+            config.resources.max_concurrent_queries = 0
+        else:
+            concurrent_query_bytes = max(
+                0,
+                profile.usable_available_bytes - profile.cache_budget_bytes,
+            )
+            concurrent_by_memory = (
+                concurrent_query_bytes // profile.query_budget_bytes
+            )
+            config.resources.max_concurrent_queries = max(
+                1,
+                min(profile.cpu.effective_cpus, concurrent_by_memory),
+            )
+        config.resources.query_queue_size = max(
+            8,
+            config.resources.max_concurrent_queries * 8,
+        )
+
+        def positive_int(name: str, current: int) -> int:
+            raw = os.getenv(name)
+            if raw is None:
+                return current
+            value = int(raw)
+            if value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+            return value
+
+        def positive_float(name: str, current: float) -> float:
+            raw = os.getenv(name)
+            if raw is None:
+                return current
+            value = float(raw)
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
+            return value
+
+        def nonnegative_int(name: str, current: int) -> int:
+            raw = os.getenv(name)
+            if raw is None:
+                return current
+            value = int(raw)
+            if value < 0:
+                raise ValueError(
+                    f"{name} must be a non-negative integer"
+                )
+            return value
+
+        # Performance settings
+        partition_size = int(os.getenv(
+            'MR_MAX_PARTITION_SIZE',
+            config.performance.max_partition_size,
+        ))
+        if partition_size != -1 and partition_size < 1:
+            raise ValueError(
+                "MR_MAX_PARTITION_SIZE must be -1 or a positive integer"
+            )
+        config.performance.max_partition_size = partition_size
+        config.performance.execution_timeout_seconds = positive_float(
+            'MR_EXECUTION_TIMEOUT',
+            config.performance.execution_timeout_seconds,
+        )
+        max_memory_override = os.getenv('MR_MAX_MEMORY_MB')
+        if max_memory_override is not None:
+            config.performance.max_memory_mb = min(
+                config.performance.max_memory_mb,
+                positive_int(
+                    'MR_MAX_MEMORY_MB',
+                    config.performance.max_memory_mb,
+                ),
+            )
+        cache_requested = (
+            os.getenv('MR_ENABLE_CACHING', 'true').lower() == 'true'
+        )
+        cache_size_override = os.getenv('MR_CACHE_SIZE_LIMIT')
+        if cache_size_override is not None:
+            config.performance.cache_size_limit = min(
+                config.performance.cache_size_limit,
+                nonnegative_int(
+                    'MR_CACHE_SIZE_LIMIT',
+                    config.performance.cache_size_limit,
+                ),
+            )
+        cache_memory_override = os.getenv('MR_CACHE_MEMORY_LIMIT_MB')
+        if cache_memory_override is not None:
+            config.performance.cache_memory_limit_mb = min(
+                config.performance.cache_memory_limit_mb,
+                nonnegative_int(
+                    'MR_CACHE_MEMORY_LIMIT_MB',
+                    config.performance.cache_memory_limit_mb,
+                ),
+            )
+        cache_clear_override = os.getenv('MR_CACHE_CLEAR_THRESHOLD_MB')
+        if cache_clear_override is not None:
+            config.performance.cache_clear_threshold_mb = min(
+                config.performance.cache_memory_limit_mb,
+                nonnegative_int(
+                    'MR_CACHE_CLEAR_THRESHOLD_MB',
+                    config.performance.cache_clear_threshold_mb,
+                ),
+            )
+        else:
+            config.performance.cache_clear_threshold_mb = min(
+                config.performance.cache_clear_threshold_mb,
+                config.performance.cache_memory_limit_mb,
+            )
+        config.performance.enable_caching = bool(
+            cache_requested
+            and profile.cache_budget_bytes > 0
+            and config.performance.cache_memory_limit_mb > 0
+            and config.performance.cache_size_limit > 0
+        )
+        config.performance.cache_ttl_seconds = positive_int(
+            'MR_CACHE_TTL_SECONDS',
+            config.performance.cache_ttl_seconds,
+        )
+        config.performance.parallel_processing = os.getenv(
+            'MR_PARALLEL_PROCESSING',
+            str(config.performance.parallel_processing).lower(),
+        ).lower() == 'true'
+        max_workers_override = os.getenv('MR_MAX_WORKERS')
+        if max_workers_override is not None:
+            config.performance.max_workers = min(
+                config.performance.max_workers,
+                positive_int(
+                    'MR_MAX_WORKERS',
+                    config.performance.max_workers,
+                ),
+            )
+        concurrent_override = os.getenv('MR_MAX_CONCURRENT_QUERIES')
+        if concurrent_override is not None:
+            config.resources.max_concurrent_queries = min(
+                config.resources.max_concurrent_queries,
+                positive_int(
+                    'MR_MAX_CONCURRENT_QUERIES',
+                    config.resources.max_concurrent_queries,
+                ),
+            )
+        queue_override = os.getenv('MR_QUERY_QUEUE_SIZE')
+        if queue_override is not None:
+            config.resources.query_queue_size = min(
+                config.resources.query_queue_size,
+                positive_int(
+                    'MR_QUERY_QUEUE_SIZE',
+                    config.resources.query_queue_size,
+                ),
+            )
         
         # Logging settings
         config.logging.level = os.getenv('MR_LOG_LEVEL', config.logging.level)
@@ -192,10 +349,20 @@ class MatchRecognizeConfig:
         if 'monitoring' in data:
             mon_data = data['monitoring']
             config.monitoring = MonitoringConfig(**mon_data)
+
+        if 'resources' in data:
+            resource_data = data['resources']
+            config.resources = ResourceConfig(**resource_data)
         
         # Main config
         for key, value in data.items():
-            if key not in ['performance', 'logging', 'security', 'monitoring']:
+            if key not in [
+                'performance',
+                'logging',
+                'security',
+                'monitoring',
+                'resources',
+            ]:
                 if hasattr(config, key):
                     setattr(config, key, value)
         
@@ -234,6 +401,23 @@ class MatchRecognizeConfig:
                 'enable_tracing': self.monitoring.enable_tracing,
                 'sample_rate': self.monitoring.sample_rate,
             },
+            'resources': {
+                'max_concurrent_queries':
+                    self.resources.max_concurrent_queries,
+                'query_queue_size': self.resources.query_queue_size,
+                'enable_resource_limits':
+                    self.resources.enable_resource_limits,
+                'cpu_usage_threshold':
+                    self.resources.cpu_usage_threshold,
+                'memory_usage_threshold':
+                    self.resources.memory_usage_threshold,
+                'disk_usage_threshold':
+                    self.resources.disk_usage_threshold,
+                'enable_graceful_degradation':
+                    self.resources.enable_graceful_degradation,
+                'emergency_cache_clear_threshold':
+                    self.resources.emergency_cache_clear_threshold,
+            },
             'environment': self.environment,
             'debug': self.debug,
             'version': self.version,
@@ -255,11 +439,26 @@ class MatchRecognizeConfig:
         errors = []
         
         # Performance validation
-        if self.performance.max_partition_size <= 0 and self.performance.max_partition_size != float('inf'):
-            errors.append("max_partition_size must be positive or unlimited")
+        if (
+            self.performance.max_partition_size != -1
+            and self.performance.max_partition_size <= 0
+        ):
+            errors.append("max_partition_size must be -1 or positive")
         
         if self.performance.execution_timeout_seconds <= 0:
             errors.append("execution_timeout_seconds must be positive")
+
+        if self.performance.max_memory_mb < 0:
+            errors.append("max_memory_mb cannot be negative")
+
+        if self.performance.max_workers <= 0:
+            errors.append("max_workers must be positive")
+
+        if self.resources.max_concurrent_queries < 0:
+            errors.append("max_concurrent_queries cannot be negative")
+
+        if self.resources.query_queue_size <= 0:
+            errors.append("query_queue_size must be positive")
         
         # Logging validation
         valid_log_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
@@ -345,10 +544,10 @@ PRODUCTION_CONFIG = MatchRecognizeConfig(
     environment="production",
     debug=False,
     performance=PerformanceConfig(
-        max_partition_size=100_000,
-        execution_timeout_seconds=30.0,
+        max_partition_size=-1,
+        execution_timeout_seconds=300.0,
         enable_caching=True,
-        parallel_processing=True,
+        parallel_processing=False,
     ),
     logging=LoggingConfig(
         level="INFO",

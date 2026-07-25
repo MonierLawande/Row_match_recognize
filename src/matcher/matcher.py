@@ -69,6 +69,10 @@ from src.matcher.pattern_tokenizer import PatternTokenType
 from src.utils.logging_config import get_logger, PerformanceTimer
 from src.utils.memory_management import get_resource_manager, MemoryMonitor
 from src.utils.pattern_cache import get_pattern_cache
+from src.utils.resource_profile import (
+    AdaptiveResourceProfile,
+    get_adaptive_resource_profile,
+)
 
 # Module logger
 logger = get_logger(__name__)
@@ -120,17 +124,81 @@ class PatternSearchLimitError(RuntimeError):
 
     error_code = MatcherErrorCodes.PATTERN_COMPLEXITY
 
-    def __init__(self, explored_steps: int, step_budget: int, start_idx: int):
+    def __init__(
+        self,
+        explored_steps: int,
+        step_budget: int,
+        start_idx: int,
+        *,
+        reason: str = "step_budget",
+    ):
         self.explored_steps = int(explored_steps)
         self.step_budget = int(step_budget)
         self.start_idx = int(start_idx)
+        self.reason = str(reason)
+        limit_description = {
+            "step_budget": "step safety budget",
+            "greedy_dfa_state_limit": "greedy DFA exploration budget",
+            "full_backtracking_iteration_limit":
+                "full-backtracking exploration budget",
+            "full_backtracking_depth_limit":
+                "full-backtracking depth limit",
+            "enumeration_stagnation":
+                "per-start progress budget",
+            "enumeration_no_progress":
+                "partition no-progress budget",
+            "skip_progress":
+                "after-match skip progress budget",
+            "partition_iteration_limit":
+                "partition iteration budget",
+        }.get(self.reason, "search resource budget")
         super().__init__(
             f"{self.error_code}: exact row-pattern search exhausted its "
-            f"{self.step_budget:,}-step safety budget after "
-            f"{self.explored_steps:,} steps at candidate start row "
+            f"{self.step_budget:,}-{limit_description} after observing "
+            f"{self.explored_steps:,} work units at candidate start row "
             f"{self.start_idx}; the engine stopped "
             "instead of advancing and changing leftmost-match semantics"
         )
+
+
+@dataclass(frozen=True)
+class BacktrackingSearchBudget:
+    """Frozen safety limits for one partition's exact search paths.
+
+    The limits are derived once from the query's immutable resource profile,
+    the partition length, and the compiled DFA.  They bound exploration only:
+    reaching a limit raises :class:`PatternSearchLimitError` and never becomes
+    a false "no match" result.
+    """
+
+    partition_rows: int
+    dfa_states: int
+    dfa_transitions: int
+    max_out_degree: int
+    memory_budget_bytes: int
+    max_depth: int
+    full_search_step_budget: int
+    exact_condition_step_budget: int
+    greedy_dfa_step_budget: int
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "partition_rows",
+            "dfa_states",
+            "dfa_transitions",
+            "max_out_degree",
+            "memory_budget_bytes",
+            "max_depth",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name} cannot be negative")
+        for field_name in (
+            "full_search_step_budget",
+            "exact_condition_step_budget",
+            "greedy_dfa_step_budget",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name} must be at least 1")
 
 
 def _append_condition_linear_range(
@@ -270,12 +338,30 @@ class RowsPerMatch(Enum):
 class ProductionConfig:
     """Production-ready configuration for enterprise deployment."""
     max_memory_mb: int = 1024  # Maximum memory usage
-    timeout_seconds: int = 3600  # Increased timeout for unlimited data processing (1 hour)
-    max_pattern_complexity: int = 1000  # Increased pattern complexity limit for unlimited processing
+    timeout_seconds: int = 3600  # Explicit one-hour execution ceiling
+    max_pattern_complexity: int = 1000  # Explicit structural safety ceiling
     enable_monitoring: bool = True  # Performance monitoring
     enable_circuit_breaker: bool = True  # Error resilience
     cache_size_limit: int = 10000  # Cache size limit
     thread_pool_size: int = 4  # Thread pool for parallel processing
+
+    @classmethod
+    def adaptive(cls) -> 'ProductionConfig':
+        """Create compatibility settings from effective process resources."""
+        profile = get_adaptive_resource_profile()
+        return cls(
+            max_memory_mb=max(
+                1,
+                profile.query_budget_bytes // (1024 ** 2),
+            ),
+            cache_size_limit=profile.cache_entry_limit(
+                estimated_entry_bytes=512,
+                budget_share=0.05,
+                minimum=128,
+                maximum=500_000,
+            ),
+            thread_pool_size=profile.worker_count(),
+        )
 
 @dataclass
 class MatchConfig:
@@ -896,7 +982,7 @@ class PatternExclusionHandler:
                         return (False, pattern_node_idx, current_seq_idx)
                     
                     # No artificial search limits - process all possible matches
-                    search_limit = max_possible  # Process all possible matches for unlimited sizes
+                    search_limit = max_possible  # Inspect every legal split
                     best_match_count = 0
                     
                     # Start from maximum and work down to find a valid match
@@ -1076,8 +1162,9 @@ class EnhancedMatcher:
     - Subset variables and complex combinations
     
     Thread Safety:
-        This class is thread-safe for read operations. Matching operations
-        can be performed concurrently on different data sets.
+        Compiled automata are read-only during matching, but an
+        ``EnhancedMatcher`` instance owns mutable per-query state.  Do not
+        share one instance between concurrent matching operations.
     """
 
     def __init__(self, dfa: DFA, measures: Optional[Dict[str, str]] = None,
@@ -1089,7 +1176,8 @@ class EnhancedMatcher:
                  defined_variables: Optional[Set[str]] = None,
                  define_conditions: Optional[Dict[str, str]] = None,
                  partition_columns: Optional[List[str]] = None,
-                 order_columns: Optional[List[str]] = None):
+                 order_columns: Optional[List[str]] = None,
+                 resource_profile: Optional[AdaptiveResourceProfile] = None):
         """
         Initialize the enhanced matcher with comprehensive validation and configuration.
         
@@ -1112,6 +1200,12 @@ class EnhancedMatcher:
         """
         # Validate DFA
         self._validate_dfa(dfa)
+        self._resource_profile = (
+            resource_profile
+            or getattr(dfa, '_resource_profile', None)
+            or get_adaptive_resource_profile()
+        )
+        self._resource_profile.require_query_capacity()
         
         # Core configuration
         self._setup_core_configuration(
@@ -1207,6 +1301,7 @@ class EnhancedMatcher:
         self._variable_prerequisite_flags = None
         self._row_local_transition_index = None
         self._row_local_transition_index_cache_key = None
+        self._partition_backtracking_budget = None
         
         logger.info(f"EnhancedMatcher initialized: "
                    f"states={len(dfa.states)}, "
@@ -3019,6 +3114,148 @@ class EnhancedMatcher:
         # Lower priority_score should win, so negate it.
         return (length, assigned_count, -priority_score)
 
+    def _build_partition_backtracking_budget(
+        self,
+        row_count: int,
+    ) -> BacktrackingSearchBudget:
+        """Resolve one immutable exact-search budget for a partition.
+
+        A complete input-consuming path cannot be deeper than the partition.
+        Exploration can be wider because alternation and quantified groups
+        create choice points.  The allowance therefore combines deterministic
+        work implied by the rows and DFA, a bounded share of the query memory
+        budget, and a structural ceiling.  A large host consequently cannot
+        turn an exponential search into an effectively unbounded one.
+
+        The byte allowance is accounting capacity, not a pre-allocation.
+        Search implementations remain fail-closed when a limit is met.
+        """
+        if not isinstance(row_count, int) or isinstance(row_count, bool):
+            raise TypeError("row_count must be an integer")
+        if row_count < 0:
+            raise ValueError("row_count cannot be negative")
+
+        states = tuple(getattr(self.dfa, "states", ()) or ())
+        state_count = max(1, len(states))
+        transition_counts = tuple(
+            len(getattr(state, "transitions", ()) or ())
+            for state in states
+        )
+        transition_count = sum(transition_counts)
+        max_out_degree = max(transition_counts, default=0)
+        structural_width = max(1, state_count + transition_count)
+
+        # Exact search is only one query consumer.  Keep its accounting
+        # allowance to 1/64 of the already constrained query budget.
+        memory_budget_bytes = max(
+            1,
+            self._resource_profile.query_budget_bytes // 64,
+        )
+
+        # Full states own assignment/path containers and are heavier than the
+        # tuple tasks used by the condition-aware exact interpreter.
+        estimated_full_state_bytes = (
+            1_024 + 128 * max(1, max_out_degree)
+            + 32 * structural_width
+        )
+        estimated_exact_task_bytes = (
+            256 + 48 * max(1, max_out_degree)
+            + 16 * structural_width
+        )
+        full_memory_capacity = max(
+            1,
+            memory_budget_bytes // estimated_full_state_bytes,
+        )
+        exact_memory_capacity = max(
+            1,
+            memory_budget_bytes // estimated_exact_task_bytes,
+        )
+
+        rows_with_terminal = row_count + 1
+        full_linear_work = max(
+            1,
+            rows_with_terminal * max(1, max_out_degree),
+        )
+        exact_linear_work = max(
+            1,
+            rows_with_terminal * (structural_width + 1),
+        )
+        greedy_linear_work = max(
+            1,
+            rows_with_terminal * max(1, transition_count),
+        )
+
+        def bounded_allowance(
+            deterministic_floor: int,
+            memory_capacity: int,
+            structural_multiplier: int,
+        ) -> int:
+            structural_ceiling = (
+                deterministic_floor * structural_multiplier
+            )
+            return max(
+                deterministic_floor,
+                min(memory_capacity, structural_ceiling),
+            )
+
+        return BacktrackingSearchBudget(
+            partition_rows=row_count,
+            dfa_states=state_count,
+            dfa_transitions=transition_count,
+            max_out_degree=max_out_degree,
+            memory_budget_bytes=memory_budget_bytes,
+            # Every successor consumes one input row.  This is a semantic
+            # bound, rather than an arbitrary recursion-depth setting.
+            max_depth=row_count,
+            full_search_step_budget=bounded_allowance(
+                full_linear_work,
+                full_memory_capacity,
+                256,
+            ),
+            exact_condition_step_budget=bounded_allowance(
+                exact_linear_work,
+                exact_memory_capacity,
+                1_024,
+            ),
+            greedy_dfa_step_budget=bounded_allowance(
+                greedy_linear_work,
+                exact_memory_capacity,
+                64,
+            ),
+        )
+
+    def _partition_backtracking_budget_for(
+        self,
+        row_count: int,
+    ) -> BacktrackingSearchBudget:
+        """Return the frozen budget for the active partition."""
+        budget = self._partition_backtracking_budget
+        if budget is None or budget.partition_rows != row_count:
+            budget = self._build_partition_backtracking_budget(row_count)
+            self._partition_backtracking_budget = budget
+        return budget
+
+    def _condition_search_step_budget(
+        self,
+        row_count: int,
+        linear_plan=None,
+    ) -> int:
+        """Return the centralized exact-condition exploration allowance."""
+        budget = self._partition_backtracking_budget_for(row_count)
+        if linear_plan is None:
+            return budget.exact_condition_step_budget
+
+        # A compact variable-only sequence needs one full pass per token.
+        # This is deterministic semantic work, not exponential exploration.
+        token_count = max(1, len(linear_plan or ()))
+        deterministic_work = (
+            (int(row_count) + 1) * (token_count + 1)
+        )
+        return max(
+            budget.exact_condition_step_budget,
+            deterministic_work,
+        )
+
     def _find_single_match_greedy_dfa_search(
         self,
         rows: List[Dict[str, Any]],
@@ -3039,15 +3276,23 @@ class EnhancedMatcher:
         best_match: Optional[Dict[str, Any]] = None
         best_score: Optional[Tuple[int, int, int]] = None
 
-        max_depth = len(rows) - start_idx
-        max_states = max(10_000, min(250_000, max_depth * max(1, len(self.transition_index)) * 4))
+        search_budget = self._partition_backtracking_budget_for(len(rows))
+        max_states = search_budget.greedy_dfa_step_budget
         explored = 0
 
         stack: List[Tuple[int, int, Dict[str, List[int]], Set[int], List[int]]] = [
             (self.start_state, start_idx, {}, set(), [])
         ]
 
-        while stack and explored < max_states:
+        while stack:
+            if explored >= max_states:
+                raise PatternSearchLimitError(
+                    explored,
+                    max_states,
+                    start_idx,
+                    reason="greedy_dfa_state_limit",
+                )
+
             state, row_idx, assignments, assigned_row_indices, excluded_rows = stack.pop()
             explored += 1
 
@@ -3114,6 +3359,8 @@ class EnhancedMatcher:
                     next_assigned_row_indices.add(row_idx)
                     next_excluded_rows = excluded_rows[:] + ([row_idx] if is_excluded else [])
                     successors.append((target, row_idx + 1, next_assignments, next_assigned_row_indices, next_excluded_rows, var))
+                except PatternSearchLimitError:
+                    raise
                 except Exception as exc:
                     logger.debug(f"Greedy DFA transition evaluation failed for {var}: {exc}")
                     continue
@@ -3134,21 +3381,21 @@ class EnhancedMatcher:
             stack.extend((target, next_row, next_assignments, next_assigned_row_indices, next_excluded_rows)
                          for target, next_row, next_assignments, next_assigned_row_indices, next_excluded_rows, _ in successors)
 
-        if explored >= max_states:
-            logger.warning(
-                "Greedy DFA search reached exploration limit at start_idx=%s; "
-                "using best candidate found so far.",
-                start_idx,
-            )
-
         return best_match
     
     def _find_single_match_generalized_quantifiers(self, rows: List[Dict[str, Any]], start_idx: int, 
                                                   context: RowContext, config: Any) -> Optional[Dict[str, Any]]:
         """
-        PRODUCTION-READY: Generalized quantifier matching for all SQL:2016 patterns.
+        Deprecated prototype retained only for compatibility with older callers.
+
+        Production matching no longer routes through this method.  Its
+        sequence-specific split heuristics do not prove complete row-pattern
+        acceptance, so using it as a fallback could change greedy preference or
+        report a match after the authoritative matcher had rejected the same
+        candidate start.  Supported patterns are now routed to the exact AST
+        searcher instead.
         
-        This method replaces the hardcoded A+ B+ logic with a flexible system that handles:
+        Historically this helper attempted:
         - A+ B+ (greedy plus quantifiers)  
         - A* B+ (star then plus)
         - A{2,3} B+ (bounded quantifiers)
@@ -3709,27 +3956,13 @@ class EnhancedMatcher:
         self._cached_cross_variable_references = False
         return self._cached_cross_variable_references
 
-    def _needs_generalized_quantifier_matching(self) -> bool:
+    def _needs_exact_quantifier_search(self) -> bool:
         """
-        ULTRA-CONSERVATIVE: Only use generalized matching for very specific cases.
+        Route legacy star-plus and bounded-plus cases to exact AST search.
         
-        The generalized quantifier system should ONLY be used for patterns that
-        the existing system absolutely cannot handle. Most patterns work fine
-        with the existing logic.
-        
-        REQUIRES GENERALIZED MATCHING (proven problematic cases):
-        - A* B+ (star-plus combinations that existing system fails on)
-        - A{n,m} B+ where n,m are specific bounds (bounded quantifiers with following quantifiers)
-        
-        DOES NOT REQUIRE (uses existing logic):
-        - A+ B+ (works fine with existing cross-reference logic)
-        - A B+ C+ D? (works fine with existing logic)
-        - Single quantifier patterns: A B+, A+ B, etc.
-        - A{2,} X (simple bounded pattern with single following variable)
-        - Most multi-quantifier patterns that existing logic handles
-        
-        Returns:
-            True only for specific patterns that are proven to fail with existing logic
+        Older versions sent these forms to a bounded, A/B/C-specific prototype.
+        The predicate is retained as a narrow routing decision, but the selected
+        executor is now the complete preference-ordered AST matcher.
         """
         if self._cached_generalized_quantifier_needed is not None:
             return self._cached_generalized_quantifier_needed
@@ -3741,41 +3974,24 @@ class EnhancedMatcher:
             
         pattern = self.original_pattern
 
-        # The generalized quantifier helper below is intentionally a narrow
-        # sequence-oriented fallback.  It does not fully model grouped
-        # alternation, PERMUTE, exclusions, or anchors.  Let those constructs
-        # use the main DFA/backtracking machinery, which preserves their
-        # SQL row-pattern semantics and avoids repeated failed helper attempts
-        # on every candidate start position.
+        # Richer constructs are already routed through their complete handlers.
         upper_pattern = pattern.upper()
         if any(marker in upper_pattern for marker in ("|", "PERMUTE", "{-", "-}", "^", "$")):
-            logger.debug(
-                "Pattern '%s' uses complex row-pattern constructs; "
-                "skipping simplified generalized quantifier helper",
-                pattern,
-            )
             self._cached_generalized_quantifier_needed = False
             return False
         
-        # ONLY these specific problematic patterns need generalized matching:
-        
-        # 1. Star-plus combinations (A* B+) - existing system doesn't handle these well
+        # Star-plus and bounded-then-quantified sequences previously entered the
+        # incomplete generalized helper.
         star_plus_pattern = r'\w+\*\s+\w+\+'
         if re.search(star_plus_pattern, pattern):
-            logger.debug(f"Detected star-plus pattern requiring generalized matching: {pattern}")
             self._cached_generalized_quantifier_needed = True
             return True
             
-        # 2. Complex bounded quantifiers with following quantifiers (A{n,m} B+) 
-        #    but NOT simple cases like A{2,} X (single variable following)
         bounded_with_quantifier = r'\w+\{\d+,?\d*\}\s+\w+[\+\*]'
         if re.search(bounded_with_quantifier, pattern):
-            logger.debug(f"Detected complex bounded quantifier pattern requiring generalized matching: {pattern}")
             self._cached_generalized_quantifier_needed = True
             return True
         
-        # All other patterns use existing logic (including A+ B+, A B+ C+, A{2,} X, etc.)
-        logger.debug(f"Pattern '{pattern}' uses existing matcher logic (no generalized matching needed)")
         self._cached_generalized_quantifier_needed = False
         return False
 
@@ -3854,15 +4070,12 @@ class EnhancedMatcher:
             self.exclusion_handler = parent_matcher.exclusion_handler
             self.transition_index = parent_matcher.transition_index
             
-            # Backtracking configuration
-            self.max_depth = 1000
-            # UNLIMITED PROCESSING: Remove iteration constraints for backtracking
-            # Intelligent backtracking limits based on dataset complexity
-            dataset_size = getattr(self, '_current_dataset_size', 1000)
-            self.max_iterations = max(
-                dataset_size * 1000,      # Scale with data size
-                1_000_000                 # Minimum for complex patterns
-            )
+            # The active immutable budget is resolved from the actual
+            # partition at search time.  These optional attributes remain as
+            # explicit low-level overrides for embedders and limit tests.
+            self.search_budget = None
+            self.max_depth = None
+            self.max_iterations = None
             
             # Performance tracking
             self.stats = {
@@ -3873,9 +4086,6 @@ class EnhancedMatcher:
                 'max_depth_reached': 0
             }
             
-            # Keep reasonable depth limit to prevent stack overflow
-            self.max_depth = min(100, max(50, dataset_size // 100))  # Adaptive depth limit
-                
             # Caching
             self._condition_eval_cache = {}
             self._condition_cache_size = 0  # Track size for performance
@@ -3908,7 +4118,16 @@ class EnhancedMatcher:
             )
             
             # Perform backtracking search
-            result = self._backtrack_search(rows, initial_state, context, config)
+            self.search_budget = (
+                self.parent._partition_backtracking_budget_for(len(rows))
+            )
+            result = self._backtrack_search(
+                rows,
+                initial_state,
+                context,
+                config,
+                self.search_budget,
+            )
             
             if result.success:
                 self.stats['successful_matches'] += 1
@@ -3923,16 +4142,55 @@ class EnhancedMatcher:
             logger.debug(f"Backtracking search failed after exploring {result.explored_states} states")
             return None
         
-        def _backtrack_search(self, rows: List[Dict[str, Any]], state: BacktrackingState, 
-                             context: RowContext, config=None) -> BacktrackingResult:
-            """Recursive backtracking search implementation."""
+        def _backtrack_search(
+            self,
+            rows: List[Dict[str, Any]],
+            state: BacktrackingState,
+            context: RowContext,
+            config=None,
+            search_budget: Optional[BacktrackingSearchBudget] = None,
+        ) -> BacktrackingResult:
+            """Iterative full search under the frozen partition budget."""
             explored_states = 0
             backtrack_count = 0
             stack = [state]
+
+            resolved_budget = (
+                search_budget
+                or self.parent._partition_backtracking_budget_for(len(rows))
+            )
+            search_start_idx = state.row_index
+            max_iterations = (
+                resolved_budget.full_search_step_budget
+                if self.max_iterations is None
+                else int(self.max_iterations)
+            )
+            max_depth = (
+                min(
+                    resolved_budget.max_depth,
+                    max(0, len(rows) - search_start_idx),
+                )
+                if self.max_depth is None
+                else int(self.max_depth)
+            )
             
-            logger.debug(f"Starting backtracking search with {len(rows)} rows, max_iterations={self.max_iterations}")
+            logger.debug(
+                "Starting backtracking search with %s rows, "
+                "max_iterations=%s, max_depth=%s",
+                len(rows),
+                max_iterations,
+                max_depth,
+            )
             
-            while stack and explored_states < self.max_iterations:
+            while stack:
+                if explored_states >= max_iterations:
+                    raise PatternSearchLimitError(
+                        explored_states,
+                        max_iterations,
+                        search_start_idx,
+                        reason="full_backtracking_iteration_limit",
+                    )
+
                 current_state = stack.pop()
                 explored_states += 1
                 
@@ -3940,8 +4198,13 @@ class EnhancedMatcher:
                     logger.debug(f"Explored {explored_states} states, stack size: {len(stack)}")
                 
                 # Check depth limit
-                if current_state.depth > self.max_depth:
-                    continue
+                if current_state.depth > max_depth:
+                    raise PatternSearchLimitError(
+                        current_state.depth,
+                        max_depth,
+                        search_start_idx,
+                        reason="full_backtracking_depth_limit",
+                    )
                 
                 # Check if we've reached an accepting state
                 if self.dfa.states[current_state.state_id].is_accept:
@@ -3966,7 +4229,13 @@ class EnhancedMatcher:
                 
                 # Add successors to stack (reverse order for DFS)
                 for successor in reversed(successors):
-                    if not self._should_prune(successor, rows, context):
+                    if not self._should_prune(
+                        successor,
+                        rows,
+                        context,
+                        search_start_idx,
+                        max_depth,
+                    ):
                         stack.append(successor)
             
             return BacktrackingResult(False, None, explored_states, backtrack_count)
@@ -4046,6 +4315,8 @@ class EnhancedMatcher:
                         else:
                             # Skip this transition if row doesn't satisfy the variable's condition
                             continue
+                    except PatternSearchLimitError:
+                        raise
                     except Exception as e:
                         continue
                     
@@ -4062,6 +4333,8 @@ class EnhancedMatcher:
                     if self._validate_constraints(new_state, rows, context):
                         successors.append(new_state)
                         
+                except PatternSearchLimitError:
+                    raise
                 except Exception as e:
                     logger.debug(f"Error evaluating transition {var}: {e}")
                     continue
@@ -4228,7 +4501,8 @@ class EnhancedMatcher:
                                 variables=state.variable_assignments.copy(),
                                 subsets=context.subsets.copy() if hasattr(context, 'subsets') else {},
                                 defined_variables=context.defined_variables.copy() if hasattr(context, 'defined_variables') else set(),
-                                pattern_variables=context.pattern_variables.copy() if hasattr(context, 'pattern_variables') else []
+                                pattern_variables=context.pattern_variables.copy() if hasattr(context, 'pattern_variables') else [],
+                                resource_profile=self.parent._resource_profile,
                             )
                             validation_context.current_idx = row_idx
                             validation_context.current_var = var
@@ -4346,11 +4620,34 @@ class EnhancedMatcher:
             logger.debug(f"Final referenced variables: {referenced_vars}")
             return referenced_vars
         
-        def _should_prune(self, state: BacktrackingState, rows: List[Dict[str, Any]], 
-                         context: RowContext) -> bool:
+        def _should_prune(
+            self,
+            state: BacktrackingState,
+            rows: List[Dict[str, Any]],
+            context: RowContext,
+            start_idx: Optional[int] = None,
+            max_depth: Optional[int] = None,
+        ) -> bool:
             """Determine if a state should be pruned."""
-            if state.depth > self.max_depth:
-                return True
+            resolved_max_depth = (
+                self.parent._partition_backtracking_budget_for(
+                    len(rows)
+                ).max_depth
+                if max_depth is None and self.max_depth is None
+                else (
+                    int(self.max_depth)
+                    if max_depth is None
+                    else int(max_depth)
+                )
+            )
+            if state.depth > resolved_max_depth:
+                raise PatternSearchLimitError(
+                    state.depth,
+                    resolved_max_depth,
+                    state.row_index - state.depth
+                    if start_idx is None else start_idx,
+                    reason="full_backtracking_depth_limit",
+                )
             if (state.row_index >= len(rows) and 
                 not self.dfa.states[state.state_id].is_accept):
                 return True
@@ -4502,8 +4799,8 @@ class EnhancedMatcher:
         uses_state = bool(re.search(
             r"\b(?:SUM|AVG|MIN|MAX|COUNT|ARBITRARY|ARRAY_AGG|CLASSIFIER)\s*\(", define_text))
         # Navigation-bearing conditions (FIRST/LAST/PREV/NEXT, including over
-        # CLASSIFIER) are handled by the existing matchers with deferred
-        # validation; keep them there.
+        # CLASSIFIER) are handled by the established full-backtracking matcher
+        # with deferred validation.
         if re.search(r"\b(?:FIRST|LAST|PREV|NEXT)\s*\(", define_text):
             uses_state = False
         pattern_text = self.original_pattern or ""
@@ -4511,7 +4808,8 @@ class EnhancedMatcher:
         if has_choice and not self.has_exclusions and not self.is_permute_pattern:
             ast_root = self._parse_pattern_ast(pattern_text)
             if ast_root is not None and (
-                uses_state or self._ast_needs_exact_search(ast_root)
+                uses_state
+                or self._ast_needs_exact_search(ast_root)
             ):
                 self._condition_backtracking_ast = ast_root
                 result = True
@@ -4819,22 +5117,6 @@ class EnhancedMatcher:
             has_start_anchor,
             has_end_anchor,
         )
-
-    @staticmethod
-    def _condition_linear_step_budget(row_count, linear_plan):
-        """Safety budget for the compact linear exact executor.
-
-        A variable-only sequence has no recursive alternation tree.  Its
-        unavoidable deterministic work is proportional to the input length
-        and the number of pattern tokens, so a fixed 200,000 limit incorrectly
-        rejects large but non-combinatorial matches.  Keep the historical
-        floor for small inputs while allowing one full linear pass per token
-        plus continuation work.  If overlapping quantifiers still create more
-        work than this linear allowance, the executor raises an explicit
-        complexity error rather than changing match semantics.
-        """
-        token_count = max(1, len(linear_plan or ()))
-        return max(200000, (int(row_count) + 1) * (token_count + 1))
 
     def _condition_linear_feasible_start_mask(
         self,
@@ -5381,10 +5663,11 @@ class EnhancedMatcher:
         self, rows, start_idx, context, config=None,
     ) -> Optional[Dict[str, Any]]:
         """Exact preference-ordered backtracking search for patterns whose
-        DEFINE conditions depend on the accumulated match (aggregates,
-        CLASSIFIER).  Explores alternation branches in declaration order and
-        quantifiers greedily (or reluctantly), re-evaluating conditions with
-        tentative assignments, exactly like the SQL:2016 matching model.
+        DEFINE conditions depend on tentative assignments (aggregates,
+        navigation, cross-variable references, or CLASSIFIER).  Explores
+        alternation branches in declaration order and quantifiers greedily (or
+        reluctantly), re-evaluating conditions with tentative assignments,
+        exactly like the SQL:2016 matching model.
         An explicit DFS stack avoids dependence on Python's recursion limit;
         a step budget guards against pathological exponential inputs."""
         ast_root = getattr(self, "_condition_backtracking_ast", None)
@@ -5424,7 +5707,7 @@ class EnhancedMatcher:
         assignment_versions = None
         context._define_assignment_versions = None
         context._define_aggregate_cache = None
-        step_budget = 200000
+        step_budget = self._condition_search_step_budget(row_count)
         condition_matrix = getattr(self, "_condition_matrix", None) or {}
         condition_prefilters = (
             getattr(self, "_condition_prefilter_matrix", None) or {}
@@ -5442,7 +5725,7 @@ class EnhancedMatcher:
                 has_start_anchor,
                 has_end_anchor,
             ) = linear_execution
-            linear_step_budget = self._condition_linear_step_budget(
+            linear_step_budget = self._condition_search_step_budget(
                 row_count, linear_plan
             )
             return self._find_single_match_condition_linear(
@@ -5799,14 +6082,25 @@ class EnhancedMatcher:
             if match:
                 return self._record_timing_and_return("find_match", match_start_time, match)
 
-        # PRODUCTION ENHANCEMENT: Generalized quantifier matching system
-        # Replaces hardcoded A+ B+ logic with comprehensive SQL:2016 quantifier support
-        if self._needs_generalized_quantifier_matching():
-            if debug_enabled:
-                logger.debug("Using generalized quantifier matching for complex pattern")
-            match = self._find_single_match_generalized_quantifiers(rows, start_idx, context, config)
-            if match:
-                return self._record_timing_and_return("find_match", match_start_time, match)
+        # The retired generalized quantifier prototype used bounded split
+        # windows and did not validate the complete automaton.  If the faster
+        # proven paths above cannot decide one of its former pattern forms, use
+        # the authoritative preference-ordered AST search and return its answer,
+        # including a definitive no-match.
+        if self._needs_exact_quantifier_search():
+            ast_root = self._parse_pattern_ast(self.original_pattern or "")
+            if ast_root is None:
+                raise ValueError(
+                    "Unable to build an exact execution plan for quantified "
+                    f"pattern {self.original_pattern!r}"
+                )
+            self._condition_backtracking_ast = ast_root
+            match = self._find_single_match_condition_backtracking(
+                rows, start_idx, context, config
+            )
+            return self._record_timing_and_return(
+                "find_match", match_start_time, match
+            )
 
         if self._should_use_constraint_dfa_search(config):
             match = self._find_single_match_greedy_dfa_search(
@@ -5851,19 +6145,6 @@ class EnhancedMatcher:
             # handling can produce the SQL empty match for this position.
             if result is not None or not self.has_empty_alternation:
                 return self._record_timing_and_return("find_match", match_start_time, result)
-
-        # PRODUCTION FIX: Special handling for complex back-reference patterns
-        # These patterns require constraint satisfaction and backtracking
-        has_complex_back_refs = self._has_complex_back_references()
-        if debug_enabled:
-            logger.debug(f"has_complex_back_references: {has_complex_back_refs}")
-        
-        if has_complex_back_refs:
-            if debug_enabled:
-                logger.debug("Complex back-reference pattern detected - using constraint-based handler")
-            match = self._handle_complex_back_references(rows, start_idx, context, config)
-            if match:
-                return self._record_timing_and_return("find_match", match_start_time, match)
 
         state = self.start_state
         current_idx = start_idx
@@ -6054,11 +6335,16 @@ class EnhancedMatcher:
                             self._condition_eval_cache[cache_key] = result_obj
                             self._condition_cache_size += 1
                         
-                        # Efficient cache eviction - only check occasionally
                         cache_size = self._condition_cache_size
-                        if cache_size > 1000 and cache_size % 100 == 0:  # Check every 100 additions
-                            # Fast eviction - remove oldest 10%
-                            keys_to_remove = list(self._condition_eval_cache.keys())[:cache_size // 10]
+                        if cache_size > self._condition_cache_limit:
+                            target_size = max(
+                                1,
+                                int(self._condition_cache_limit * 0.9),
+                            )
+                            remove_count = max(1, cache_size - target_size)
+                            keys_to_remove = list(
+                                self._condition_eval_cache.keys()
+                            )[:remove_count]
                             for key_to_remove in keys_to_remove:
                                 removed_obj = self._condition_eval_cache.pop(key_to_remove, None)
                                 self._condition_cache_size -= 1
@@ -6915,19 +7201,27 @@ class EnhancedMatcher:
                 # Minimize memory usage
                 self.clear_performance_caches()
                 # Set smaller cache limits
-                self._cache_size_limit = 500
+                self._cache_size_limit = max(
+                    128,
+                    self._condition_cache_limit // 4,
+                )
                 actions.append('reduced_cache_limits_for_memory_intensive')
                 
             elif workload_type == "cpu_intensive":
                 # Maximize caching to reduce CPU load
                 memory_info = self._resource_manager.get_memory_pressure_info()
                 if not memory_info.is_under_pressure:
-                    self._cache_size_limit = 10000
+                    self._cache_size_limit = (
+                        self._condition_cache_limit
+                    )
                     actions.append('increased_cache_limits_for_cpu_intensive')
                 
             elif workload_type == "high_throughput":
                 # Balance between memory and CPU with emphasis on speed
-                self._cache_size_limit = 5000
+                self._cache_size_limit = max(
+                    128,
+                    self._condition_cache_limit * 3 // 4,
+                )
                 # Pre-warm commonly used patterns
                 actions.append('optimized_for_high_throughput')
                 
@@ -7097,6 +7391,21 @@ class EnhancedMatcher:
 
     def _setup_caching_and_optimization(self) -> None:
         """Setup caching structures with minimal overhead for production speed."""
+        resource_profile = self._resource_profile
+        self._condition_cache_limit = resource_profile.cache_entry_limit(
+            estimated_entry_bytes=512,
+            budget_share=0.01,
+            minimum=512,
+            maximum=100_000,
+        )
+        self._enhanced_condition_cache_limit = (
+            resource_profile.cache_entry_limit(
+                estimated_entry_bytes=256,
+                budget_share=0.02,
+                minimum=1_024,
+                maximum=500_000,
+            )
+        )
         
         # Fast caching setup - avoid expensive imports and initialization
         try:
@@ -7795,11 +8104,13 @@ class EnhancedMatcher:
     
     def _enable_enhanced_condition_caching(self):
         """Enable enhanced caching strategies for large datasets."""
-        # Increase cache size for large datasets
+        # Use the larger resource-derived cache budget for repeated predicates.
         if hasattr(self, '_condition_eval_cache'):
-            # Use larger cache for big datasets
-            self._cache_size_limit = 50000
-            logger.debug("Enhanced condition caching enabled with larger cache size")
+            self._cache_size_limit = self._enhanced_condition_cache_limit
+            logger.debug(
+                "Enhanced condition caching enabled with adaptive limit %s",
+                self._cache_size_limit,
+            )
     
     def _analyze_pattern_complexity(self):
         """Analyze pattern to determine optimization strategies."""
@@ -7831,7 +8142,11 @@ class EnhancedMatcher:
         logger.debug(f"Pre-warming condition evaluation with {len(sample_rows)} sample rows")
         
         # Create a temporary context for pre-warming
-        context = RowContext(rows=sample_rows, defined_variables=self.defined_variables)
+        context = RowContext(
+            rows=sample_rows,
+            defined_variables=self.defined_variables,
+            resource_profile=self._resource_profile,
+        )
         context.define_conditions = self.define_conditions
         
         # Evaluate each condition on sample rows to warm up any internal caches
@@ -7881,7 +8196,10 @@ class EnhancedMatcher:
             result = bool(condition_func(row, context))
             
             # Cache result with size management
-            if len(self._enhanced_condition_cache) < 500000:  # Much larger cache for big datasets
+            if (
+                len(self._enhanced_condition_cache)
+                < self._enhanced_condition_cache_limit
+            ):
                 self._enhanced_condition_cache[cache_key] = result
             
             return result
@@ -7928,7 +8246,11 @@ class EnhancedMatcher:
             return {}
         
         condition_matrix = {}
-        context = RowContext(rows=rows, defined_variables=self.defined_variables)
+        context = RowContext(
+            rows=rows,
+            defined_variables=self.defined_variables,
+            resource_profile=self._resource_profile,
+        )
         # Add define_conditions to context for condition evaluation access
         context.define_conditions = self.define_conditions
         
@@ -8078,8 +8400,11 @@ class EnhancedMatcher:
         """Find all matches with optimized processing and enterprise validation."""
         logger.debug(f"EnhancedMatcher.find_matches called with {len(rows)} rows")
         
-        # UNLIMITED SCALE: Track dataset size for intelligent limit management
-        self._current_dataset_size = len(rows)
+        # Freeze one resource- and structure-aware exact-search policy for
+        # this partition.  Every backtracking path in the run shares it.
+        self._partition_backtracking_budget = (
+            self._build_partition_backtracking_budget(len(rows))
+        )
         
         # PRODUCTION ENHANCEMENT: Input validation
         if not hasattr(rows, "__len__") or not hasattr(rows, "__getitem__"):
@@ -8275,9 +8600,8 @@ class EnhancedMatcher:
                 "count": 0,
             }
 
-        # UNLIMITED SCALE PROCESSING: Intelligent iteration management without hard limits
-        # Remove all artificial iteration constraints for true unlimited dataset processing
-        # Implement smart infinite loop detection instead of arbitrary iteration limits
+        # Partition enumeration has separate progress guards.  Exact
+        # candidate search uses the frozen backtracking budget above.
         
         # Dynamic iteration management based on progress tracking
         progress_window = max(1000, len(rows) // 100)  # Adaptive progress check window
@@ -8287,8 +8611,8 @@ class EnhancedMatcher:
         stagnant_iterations = 0
         max_stagnant_iterations = progress_window * 5  # Allow some stagnation for complex patterns
         
-        # For unlimited processing, use dynamic limits based on dataset size
-        # The real protection comes from progress tracking and stagnation detection
+        # Bound enumeration relative to partition size.  Progress tracking and
+        # stagnation detection provide the earlier non-progress guard.
         if len(rows) <= 1000:
             # For small datasets (up to 1K rows), use conservative limits
             max_iterations = len(rows) * 100
@@ -8296,7 +8620,7 @@ class EnhancedMatcher:
             # For medium datasets (1K-50K rows), scale more aggressively
             max_iterations = len(rows) * 1000
         else:
-            # For very large datasets (50K+ rows), use unlimited scale approach
+            # Large partitions receive a proportionally larger enumeration cap.
             max_iterations = max(
                 len(rows) * 10000,    # Scale dramatically with dataset size
                 500_000_000           # Very high absolute limit for massive datasets
@@ -8324,7 +8648,11 @@ class EnhancedMatcher:
             self._can_reuse_row_context_for_matching(condition_matrix)
             or condition_backtracking_available
         ):
-            reusable_context = RowContext(rows=rows, defined_variables=self.defined_variables)
+            reusable_context = RowContext(
+                rows=rows,
+                defined_variables=self.defined_variables,
+                resource_profile=self._resource_profile,
+            )
         condition_linear_execution = (
             self._prepare_condition_linear_execution(reusable_context)
             if direct_condition_backtracking and reusable_context is not None
@@ -8361,7 +8689,7 @@ class EnhancedMatcher:
                 exact_start_anchor,
                 exact_end_anchor,
             ) = condition_linear_execution
-            condition_linear_step_budget = self._condition_linear_step_budget(
+            condition_linear_step_budget = self._condition_search_step_budget(
                 len(rows), exact_plan
             )
             feasible_starts = self._condition_linear_feasible_start_mask(
@@ -8422,17 +8750,19 @@ class EnhancedMatcher:
                 logger.debug(f"Iteration {iteration_count}, start_idx={start_idx}")
 
             if needs_progress_guards:
-                # UNLIMITED SCALE: Intelligent progress tracking and stagnation detection
+                # Detect repeated work at one candidate start.
                 # Track progress to detect infinite loops without arbitrary iteration limits
                 if start_idx == progress_tracking['last_start_idx']:
                     progress_tracking['iterations_at_same_start'] += 1
-                    # If we're stuck at the same start position for too long, advance
+                    # Exhaustion is not equivalent to "no match".  Advancing
+                    # would silently change leftmost-match semantics.
                     if progress_tracking['iterations_at_same_start'] > progress_tracking['max_iterations_per_start']:
-                        logger.warning(f"Advancing from stagnant start_idx {start_idx} after {progress_tracking['iterations_at_same_start']} iterations")
-                        start_idx += 1
-                        progress_tracking['last_start_idx'] = start_idx
-                        progress_tracking['iterations_at_same_start'] = 0
-                        continue
+                        raise PatternSearchLimitError(
+                            progress_tracking['iterations_at_same_start'],
+                            progress_tracking['max_iterations_per_start'],
+                            start_idx,
+                            reason="enumeration_stagnation",
+                        )
                 else:
                     progress_tracking['last_start_idx'] = start_idx
                     progress_tracking['iterations_at_same_start'] = 0
@@ -8447,8 +8777,12 @@ class EnhancedMatcher:
                     if not made_progress:
                         stagnant_iterations += progress_window
                         if stagnant_iterations >= max_stagnant_iterations:
-                            logger.info(f"No progress in {stagnant_iterations} iterations, likely completed processing")
-                            break
+                            raise PatternSearchLimitError(
+                                stagnant_iterations,
+                                max_stagnant_iterations,
+                                start_idx,
+                                reason="enumeration_no_progress",
+                            )
                     else:
                         stagnant_iterations = 0  # Reset stagnation counter
 
@@ -8463,10 +8797,15 @@ class EnhancedMatcher:
             # Additional safety for TO_NEXT_ROW to prevent infinite loops
             if is_to_next_row:
                 recent_starts.append(start_idx)
-                # If we've seen this start position too many times recently, break
+                # A repeated skip position is a failed progress invariant, not
+                # successful completion of the partition.
                 if recent_starts.count(start_idx) > 3:
-                    logger.warning(f"Breaking TO_NEXT_ROW infinite loop at position {start_idx}")
-                    break
+                    raise PatternSearchLimitError(
+                        recent_starts.count(start_idx),
+                        3,
+                        start_idx,
+                        reason="skip_progress",
+                    )
                 # Keep recent_starts manageable
                 if len(recent_starts) > 20:
                     recent_starts = recent_starts[-10:]
@@ -8624,7 +8963,11 @@ class EnhancedMatcher:
                             reuse_variables=condition_backtracking_available,
                         )
                 else:
-                    context = RowContext(rows=rows, defined_variables=self.defined_variables)
+                    context = RowContext(
+                        rows=rows,
+                        defined_variables=self.defined_variables,
+                        resource_profile=self._resource_profile,
+                    )
                     context.subsets = self.subsets.copy() if self.subsets else {}
                 # MATCH_NUMBER() is usable inside DEFINE conditions; the
                 # candidate being attempted has the next match number.
@@ -8789,13 +9132,15 @@ class EnhancedMatcher:
             if DEBUG_ENABLED:
                 logger.debug(f"End of iteration {iteration_count}, match_number={match_number}")
 
-        # Check for theoretical iteration limit (should never happen with unlimited processing)
-        if iteration_count >= max_iterations:
-            logger.warning(f"Theoretical maximum iteration count ({max_iterations:,}) reached after processing {len(results)} matches. "
-                        f"This indicates an extremely large dataset or complex pattern. "
-                        f"Processing completed successfully with {len(results)} matches found.")
-            # For unlimited processing, this is informational only - not an error
-            logger.info(f"UNLIMITED SCALE: Processed {iteration_count:,} iterations successfully with {len(results)} matches found")
+        # Returning the rows accumulated before this guard would expose a
+        # partial partition result.  Fail explicitly while work remains.
+        if start_idx < len(rows) and iteration_count >= max_iterations:
+            raise PatternSearchLimitError(
+                iteration_count,
+                max_iterations,
+                start_idx,
+                reason="partition_iteration_limit",
+            )
 
         # Add unmatched rows only when explicitly requested via WITH UNMATCHED ROWS
         if include_unmatched and unmatched_indices is not None:
@@ -9088,7 +9433,10 @@ class EnhancedMatcher:
         result = rows[start_idx].copy()
         
         # Create context for empty match (no variables assigned)
-        context = RowContext(defined_variables=self.defined_variables)
+        context = RowContext(
+            defined_variables=self.defined_variables,
+            resource_profile=self._resource_profile,
+        )
         context.rows = rows
         context.variables = {}  # Empty for empty match
         context.match_number = match_number
@@ -9899,7 +10247,8 @@ class EnhancedMatcher:
                 # SQL casing once rather than abandoning a semantically valid
                 # row-local plan.
                 classifier_context = RowContext(
-                    defined_variables=self.defined_variables
+                    defined_variables=self.defined_variables,
+                    resource_profile=self._resource_profile,
                 )
                 classifier = classifier_context._apply_case_sensitivity_rule(
                     variable
@@ -10579,6 +10928,7 @@ class EnhancedMatcher:
         context = RowContext(
             rows=rows,
             defined_variables=self.defined_variables,
+            resource_profile=self._resource_profile,
         )
         linear_execution = self._prepare_condition_linear_execution(context)
         if linear_execution is None:
@@ -10609,7 +10959,7 @@ class EnhancedMatcher:
         start_positions = (
             np.flatnonzero(start_mask) if start_mask is not None else None
         )
-        step_budget = self._condition_linear_step_budget(
+        step_budget = self._condition_search_step_budget(
             row_count, linear_plan
         )
 
@@ -11581,7 +11931,10 @@ class EnhancedMatcher:
 
     def _create_one_row_measure_evaluator(self, match, rows, var_assignments, match_number) -> MeasureEvaluator:
         """Build the general measure evaluator for one ONE-ROW match output."""
-        context = RowContext(defined_variables=self.defined_variables)
+        context = RowContext(
+            defined_variables=self.defined_variables,
+            resource_profile=self._resource_profile,
+        )
         context.rows = rows
         context.variables = var_assignments
         context.match_number = match_number
@@ -12001,7 +12354,8 @@ class EnhancedMatcher:
         classifier_names = {}
         if has_classifier:
             classifier_context = RowContext(
-                defined_variables=self.defined_variables
+                defined_variables=self.defined_variables,
+                resource_profile=self._resource_profile,
             )
             classifier_names = {
                 variable: classifier_context._apply_case_sensitivity_rule(
@@ -12127,7 +12481,8 @@ class EnhancedMatcher:
                         # Direct/custom matcher calls may provide a variable
                         # absent from compiled pattern metadata.
                         context = RowContext(
-                            defined_variables=self.defined_variables
+                            defined_variables=self.defined_variables,
+                            resource_profile=self._resource_profile,
                         )
                         classifier = context._apply_case_sensitivity_rule(
                             variable
@@ -12261,7 +12616,8 @@ class EnhancedMatcher:
                     classifier = prepared.classifier_names.get(variable)
                     if classifier is None:
                         context = RowContext(
-                            defined_variables=self.defined_variables
+                            defined_variables=self.defined_variables,
+                            resource_profile=self._resource_profile,
                         )
                         classifier = context._apply_case_sensitivity_rule(
                             variable
@@ -12578,7 +12934,10 @@ class EnhancedMatcher:
         # plans need neither the navigation indexes nor validation structures.
         context = None
         if has_classifier_measure or needs_final_fallback_context:
-            context = RowContext(defined_variables=self.defined_variables)
+            context = RowContext(
+                defined_variables=self.defined_variables,
+                resource_profile=self._resource_profile,
+            )
             context.rows = rows
             context.variables = match["variables"]
             context.match_number = match_number
@@ -12656,7 +13015,10 @@ class EnhancedMatcher:
                     # Complex expressions with nested navigation or arithmetic should use temporal context
                     if semantics == "RUNNING" or has_complex_navigation:
                         # Create running context with variables up to current row
-                        running_context = RowContext(defined_variables=self.defined_variables)
+                        running_context = RowContext(
+                            defined_variables=self.defined_variables,
+                            resource_profile=self._resource_profile,
+                        )
                         running_context.rows = rows
                         running_context.match_number = match_number
                         running_context.current_idx = idx
@@ -13511,10 +13873,11 @@ class EnhancedMatcher:
     def _handle_complex_back_references(self, rows: List[Dict[str, Any]], start_idx: int, 
                                       context: RowContext, config=None) -> Optional[Dict[str, Any]]:
         """
-        Handle complex back-reference patterns using enhanced constraint satisfaction.
+        Deprecated approximate constraint solver retained for compatibility.
         
-        This method systematically tries different variable assignment patterns 
-        to find assignments that satisfy all back-reference constraints.
+        Production routing never calls this method.  Complex back-references use
+        the exact preference-ordered AST searcher; this prototype considers only
+        a bounded prefix and cannot be a semantic fallback.
         
         Args:
             rows: Input rows to match
@@ -13629,7 +13992,11 @@ class EnhancedMatcher:
         logger.debug(f"Testing assignment: {var_assignment}")
         
         # Update context with the proposed assignment
-        test_context = RowContext(rows, start_idx)
+        test_context = RowContext(
+            rows,
+            start_idx,
+            resource_profile=self._resource_profile,
+        )
         test_context.variables.update(var_assignment)
         
         # Test each DEFINE condition that references these variables
@@ -14269,7 +14636,10 @@ class EnhancedMatcher:
                 assignments_dict = {}
             
             # Create a temporary context with current assignments for condition evaluation
-            temp_context = RowContext(rows)
+            temp_context = RowContext(
+                rows,
+                resource_profile=self._resource_profile,
+            )
             temp_context.variables = assignments_dict
             temp_context.current_idx = row_index
             temp_context.partition_boundaries = getattr(self, 'partition_boundaries', None)

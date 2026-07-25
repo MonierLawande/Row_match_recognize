@@ -40,6 +40,7 @@ from src.matcher.condition_evaluator import compile_condition, validate_navigati
 from src.matcher.measure_evaluator import MeasureEvaluator
 from src.utils.logging_config import get_logger, PerformanceTimer
 from src.config.production_config import MatchRecognizeConfig
+from src.utils.resource_profile import get_adaptive_resource_profile
 
 # Phase 1: Parallel execution optimization imports
 from src.utils.performance_optimizer import (
@@ -1212,6 +1213,12 @@ def _should_use_parallel_execution(partitions, df, parallel_config) -> bool:
     """Determine if parallel execution should be used."""
     if not parallel_config.enabled:
         return False
+    if not getattr(
+        parallel_config,
+        'match_recognize_partition_executor_available',
+        False,
+    ):
+        return False
     
     # Need multiple partitions to benefit from parallelization
     if len(partitions) <= 1:
@@ -1221,10 +1228,10 @@ def _should_use_parallel_execution(partitions, df, parallel_config) -> bool:
     if len(df) < parallel_config.min_data_size_for_parallel:
         return False
     
-    # Check system resources
-    import psutil
-    memory = psutil.virtual_memory()
-    if memory.percent > 85:  # High memory usage
+    profile = get_adaptive_resource_profile(refresh=True)
+    if profile.cpu.effective_cpus <= 1:
+        return False
+    if profile.memory.pressure_ratio >= 0.85:
         return False
     
     return True
@@ -1327,7 +1334,17 @@ def _collect_partition_matches(
 def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher, match_config, 
                                    measures, all_rows, all_matches, all_matched_indices, 
                                    metrics, parallel_manager, results):
-    """Process partitions in parallel for improved performance."""
+    """Reserved for a semantics-preserving independent-session executor."""
+    if not getattr(
+        parallel_manager.config,
+        'match_recognize_partition_executor_available',
+        False,
+    ):
+        raise RuntimeError(
+            "MATCH_RECOGNIZE partition parallelism is unavailable: "
+            "the current matcher owns mutable per-query state"
+        )
+
     # Create work items for parallel execution
     work_items = []
     partition_data = []  # Store partition data for processing results
@@ -1548,12 +1565,19 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     }
     start_time = time.time()
     
-    # Initialize caching configuration early to avoid UnboundLocalError
-    try:
-        app_config = MatchRecognizeConfig.from_env()
-        caching_enabled = app_config.performance.enable_caching
-    except Exception:
-        caching_enabled = is_smart_caching_enabled()
+    # Freeze one effective resource view for the query.  Every component
+    # created below inherits this snapshot, so a cache, automaton, and matcher
+    # cannot make contradictory decisions from different host/cgroup samples.
+    execution_profile = get_adaptive_resource_profile(refresh=True)
+    execution_profile.require_query_capacity()
+    app_config = MatchRecognizeConfig.from_env(execution_profile)
+    # Reuse compiled entries only after the process-wide cache has adopted the
+    # current query's effective cgroup/administrator ceiling.
+    get_smart_cache(execution_profile)
+    caching_enabled = (
+        app_config.performance.enable_caching
+        and is_smart_caching_enabled()
+    )
     
     try:
         # --- PARSE QUERY ---
@@ -1770,6 +1794,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         is True
                         and cached_nfa_metadata.get('compiler_schema_version')
                         == NFA_COMPILER_SCHEMA_VERSION
+                        and cached_dfa.validate_pattern()
+                        and cached_nfa.validate()
                     )
                 except (AttributeError, IndexError, KeyError, TypeError):
                     cache_is_complete = False
@@ -1805,7 +1831,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     defined_variables=list(define.keys()),
                     define_conditions=define,
                     partition_columns=partition_by,
-                    order_columns=order_by
+                    order_columns=order_by,
+                    resource_profile=execution_profile,
                 )
             else:
                 # Cache miss - compile pattern and cache the result
@@ -1850,9 +1877,14 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     
                     return empty_df
                 
-                nfa_builder = NFABuilder()
+                nfa_builder = NFABuilder(
+                    resource_profile=execution_profile,
+                )
                 nfa = nfa_builder.build(pattern_tokens, define, subset_dict)
-                dfa_builder = DFABuilder(nfa)
+                dfa_builder = DFABuilder(
+                    nfa,
+                    resource_profile=execution_profile,
+                )
                 dfa = dfa_builder.build()
 
                 if dfa.metadata.get('construction_complete') is not True:
@@ -1894,7 +1926,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     defined_variables=list(define.keys()),
                     define_conditions=define,
                     partition_columns=partition_by,
-                    order_columns=order_by
+                    order_columns=order_by,
+                    resource_profile=execution_profile,
                 )
                 
         except (NFAConstructionError, DFAConstructionError):
@@ -1986,7 +2019,15 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             )
             if should_check_preprocessing_cache:
                 data_size_mb = df.memory_usage(deep=True).sum() / (1024 * 1024) if not df.empty else 0
-            should_cache_preprocessing = should_check_preprocessing_cache and data_size_mb < 50
+            preprocessing_cache_limit_mb = (
+                execution_profile.cache_budget_bytes
+                / 8
+                / (1024 ** 2)
+            )
+            should_cache_preprocessing = (
+                should_check_preprocessing_cache
+                and data_size_mb <= preprocessing_cache_limit_mb
+            )
             if should_cache_preprocessing:
                 data_hash = hashlib.sha256(df.to_csv(index=False).encode("utf-8")).hexdigest()[:16]
                 cached_partitions = DataSubsetCache.get_preprocessed_data(

@@ -38,6 +38,7 @@ from typing import (
     Callable, FrozenSet, NamedTuple
 )
 from contextlib import contextmanager
+from src.utils.resource_profile import get_adaptive_resource_profile
 
 # Import logging and performance utilities
 try:
@@ -49,11 +50,23 @@ except ImportError:
 
 # Constants for production-ready behavior
 MAX_PERMUTE_VARIABLES = 12        # Practical limit to prevent factorial explosion
-MAX_CACHE_SIZE = 10000           # Maximum cached permutation sets
 CACHE_TTL_SECONDS = 3600         # Cache entry time-to-live
 MAX_PATTERN_DEPTH = 10           # Maximum nesting depth for nested PERMUTE
 PERFORMANCE_LOG_THRESHOLD = 0.1   # Log slow operations (100ms)
 MEMORY_WARNING_THRESHOLD = 100    # Warn when result exceeds MB
+
+
+def _adaptive_permute_cache_size() -> int:
+    return get_adaptive_resource_profile().cache_entry_limit(
+        estimated_entry_bytes=64 * 1024,
+        budget_share=0.02,
+        minimum=32,
+        maximum=100_000,
+    )
+
+
+# Compatibility value for callers that import the historical constant.
+MAX_CACHE_SIZE = _adaptive_permute_cache_size()
 
 class PermuteValidationLevel(Enum):
     """Validation levels for PERMUTE pattern processing."""
@@ -123,8 +136,22 @@ def _reset_permute_metrics() -> None:
 class LRUCache:
     """Thread-safe LRU cache with TTL support for PERMUTE results."""
     
-    def __init__(self, max_size: int = MAX_CACHE_SIZE, ttl_seconds: int = CACHE_TTL_SECONDS):
-        self.max_size = max_size
+    def __init__(
+        self,
+        max_size: Optional[int] = None,
+        ttl_seconds: int = CACHE_TTL_SECONDS,
+    ):
+        self.max_size = (
+            _adaptive_permute_cache_size()
+            if max_size is None
+            else max_size
+        )
+        if (
+            isinstance(self.max_size, bool)
+            or not isinstance(self.max_size, int)
+            or self.max_size < 0
+        ):
+            raise ValueError("max_size must be a non-negative integer")
         self.ttl_seconds = ttl_seconds
         self._cache = OrderedDict()
         self._timestamps = {}
@@ -139,6 +166,13 @@ class LRUCache:
     def get(self, key: Tuple) -> Optional[List[List[str]]]:
         """Get value from cache if not expired."""
         with self._lock:
+            if self.max_size == 0:
+                self._cache.clear()
+                self._timestamps.clear()
+                self._stats['size'] = 0
+                self._stats['misses'] += 1
+                return None
+
             current_time = time.time()
             
             # Check if key exists and not expired
@@ -162,6 +196,12 @@ class LRUCache:
     def put(self, key: Tuple, value: List[List[str]]) -> None:
         """Put value in cache with current timestamp."""
         with self._lock:
+            if self.max_size == 0:
+                self._cache.clear()
+                self._timestamps.clear()
+                self._stats['size'] = 0
+                return
+
             current_time = time.time()
             
             # Remove if already exists
@@ -235,7 +275,7 @@ class ProductionPermuteHandler:
     
     def __init__(self, 
                  max_variables: int = MAX_PERMUTE_VARIABLES,
-                 cache_size: int = MAX_CACHE_SIZE,
+                 cache_size: Optional[int] = None,
                  validation_level: PermuteValidationLevel = PermuteValidationLevel.NORMAL):
         """
         Initialize the PERMUTE handler with production configuration.
@@ -697,22 +737,27 @@ def create_permute_handler(performance_mode: str = "balanced") -> ProductionPerm
     Returns:
         Configured ProductionPermuteHandler instance
     """
+    base_cache_size = _adaptive_permute_cache_size()
     if performance_mode == "fast":
         return ProductionPermuteHandler(
             max_variables=8,
-            cache_size=20000,
+            cache_size=min(100_000, base_cache_size * 2),
             validation_level=PermuteValidationLevel.LENIENT
         )
     elif performance_mode == "memory_efficient":
         return ProductionPermuteHandler(
             max_variables=6,
-            cache_size=1000,
+            cache_size=(
+                0
+                if base_cache_size == 0
+                else max(1, base_cache_size // 4)
+            ),
             validation_level=PermuteValidationLevel.STRICT
         )
     else:  # balanced
         return ProductionPermuteHandler(
             max_variables=MAX_PERMUTE_VARIABLES,
-            cache_size=MAX_CACHE_SIZE,
+            cache_size=base_cache_size,
             validation_level=PermuteValidationLevel.NORMAL
         )
 
@@ -728,4 +773,4 @@ __all__ = [
     'PermuteComplexity',
     'PermuteMetrics',
     'create_permute_handler'
-] 
+]

@@ -32,6 +32,7 @@ from src.matcher.evaluation_utils import (
     evaluate_math_function, get_evaluation_metrics
 )
 from src.utils.logging_config import get_logger, PerformanceTimer
+from src.utils.resource_profile import get_adaptive_resource_profile
 
 # Module logger
 logger = get_logger(__name__)
@@ -77,12 +78,25 @@ class ConditionEvaluator(ast.NodeVisitor):
         # Input validation
         if not isinstance(context, RowContext):
             raise ValueError(f"Expected RowContext, got {type(context)}")
+        validate_recursion_depth(recursion_depth)
         
         self.context = context
         self.current_row = None
         self.evaluation_mode = evaluation_mode
         self.recursion_depth = recursion_depth
         self.max_recursion_depth = 20  # Increased for complex patterns
+        resource_profile = (
+            context.resource_profile
+            or get_adaptive_resource_profile()
+        )
+        self._aggregate_cache_size = (
+            resource_profile.cache_entry_limit(
+                estimated_entry_bytes=512,
+                budget_share=0.002,
+                minimum=128,
+                maximum=50_000,
+            )
+        )
         
         # Thread safety
         self._lock = threading.RLock()
@@ -123,6 +137,7 @@ class ConditionEvaluator(ast.NodeVisitor):
         """
         if not isinstance(context, RowContext):
             raise ValueError(f"Expected RowContext, got {type(context)}")
+        validate_recursion_depth(recursion_depth)
 
         self.context = context
         self.current_row = None
@@ -619,14 +634,20 @@ class ConditionEvaluator(ast.NodeVisitor):
                         for member in sorted(relevant_members)
                     )
                 aggregate_cache_key = (id(node), func_name, revision_key)
-                if aggregate_cache_key in aggregate_cache:
+                if (
+                    self._aggregate_cache_size > 0
+                    and aggregate_cache_key in aggregate_cache
+                ):
                     return aggregate_cache[aggregate_cache_key]
 
         def finish(value):
-            if aggregate_cache_key is not None:
+            if (
+                aggregate_cache_key is not None
+                and self._aggregate_cache_size > 0
+            ):
                 # Bound pathological ambiguous searches.  Clearing affects
                 # performance only; revision keys preserve correctness.
-                if len(aggregate_cache) >= 4096:
+                if len(aggregate_cache) >= self._aggregate_cache_size:
                     aggregate_cache.clear()
                 aggregate_cache[aggregate_cache_key] = value
             return value
@@ -4018,15 +4039,14 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
         The evaluated result or None if evaluation fails
     """
     
+    # Exhausting the evaluator stack is a resource failure, not SQL NULL.
+    # Validate outside the recovery block so the typed error reaches callers.
+    validate_recursion_depth(recursion_depth)
+    original_evaluator = getattr(context, '_active_evaluator', None)
+
     try:
         import re
         import ast
-        
-        # Enhanced recursion protection
-        max_recursion_depth = 15
-        if recursion_depth >= max_recursion_depth:
-            logger.warning(f"[NESTED_NAV] Maximum recursion depth {max_recursion_depth} reached for: '{expr}'")
-            return None
         
         # Enhanced expression validation and cleanup
         if not expr or not isinstance(expr, str):
@@ -4036,9 +4056,6 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
         processed_expr = expr.strip()
         if not processed_expr:
             return None
-        
-        # Set up evaluation context with recursion protection
-        original_evaluator = getattr(context, '_active_evaluator', None)
         
         logger.debug(f"[NESTED_NAV] Evaluating: '{processed_expr}' at depth {recursion_depth}")
         
@@ -4082,10 +4099,14 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
         # Fallback: Try AST evaluation with enhanced error handling
         try:
             return _evaluate_ast_navigation(processed_expr, context, current_idx, current_var, recursion_depth)
+        except ExpressionValidationError:
+            raise
         except Exception as e:
             logger.debug(f"[NESTED_NAV] AST evaluation failed: {e}")
             return None
-            
+
+    except ExpressionValidationError:
+        raise
     except Exception as e:
         logger.error(f"[NESTED_NAV] Evaluation error for '{expr}': {e}")
         return None
@@ -4093,6 +4114,8 @@ def evaluate_nested_navigation(expr: str, context: RowContext, current_idx: int,
         # Restore original evaluator context
         if original_evaluator is not None:
             context._active_evaluator = original_evaluator
+        elif hasattr(context, '_active_evaluator'):
+            delattr(context, '_active_evaluator')
 
 
 def _evaluate_complex_arithmetic_navigation(expr: str, context: RowContext, current_idx: int, current_var: Optional[str], recursion_depth: int) -> Any:
@@ -4116,6 +4139,8 @@ def _evaluate_complex_arithmetic_navigation(expr: str, context: RowContext, curr
         logger.debug(f"[NESTED_NAV] Complex arithmetic result: {result}")
         return result
         
+    except ExpressionValidationError:
+        raise
     except Exception as e:
         logger.debug(f"[NESTED_NAV] Complex arithmetic evaluation failed: {e}")
         return None
@@ -4423,6 +4448,8 @@ def _evaluate_enhanced_function_call(match, context: RowContext, current_idx: in
         logger.debug(f"[NESTED_NAV] Enhanced function result: {result}")
         return result
         
+    except ExpressionValidationError:
+        raise
     except Exception as e:
         logger.debug(f"[NESTED_NAV] Enhanced function call failed: {e}")
         return None
@@ -4553,6 +4580,8 @@ def _evaluate_ast_navigation(expr: str, context: RowContext, current_idx: int, c
         finally:
             context._active_evaluator = original_evaluator
         
+    except ExpressionValidationError:
+        raise
     except Exception as e:
         logger.debug(f"[NESTED_NAV] AST evaluation failed: {e}")
         return None

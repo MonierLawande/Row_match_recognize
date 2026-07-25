@@ -19,7 +19,6 @@ Version: 2.0.0
 
 import math
 import psutil
-import functools
 import copy
 from typing import (
     Callable, List, Optional, Dict, Any, Set, Tuple, Union, 
@@ -49,6 +48,10 @@ from src.utils.pattern_cache import (
     cache_tokenization, get_all_cache_stats
 )
 from src.utils.performance_optimizer import get_define_optimizer
+from src.utils.resource_profile import (
+    AdaptiveResourceProfile,
+    get_adaptive_resource_profile,
+)
 
 # Module logger with enhanced configuration
 logger = get_logger(__name__)
@@ -227,6 +230,11 @@ class NFAState:
         self.subset_parent: Optional[str] = None
         self.priority: int = 0
         self.epsilon_priorities: Dict[int, int] = {}
+        # Epsilon targets normally change only while the NFA is built.  A
+        # single-entry instance cache avoids the process-wide ``lru_cache``
+        # retaining NFAState instances and is naturally bounded on every host.
+        self._epsilon_targets_cache_key: Optional[Tuple[Any, ...]] = None
+        self._epsilon_targets_cache_value: Tuple[int, ...] = ()
         
         # Validation flags
         self._validated: bool = False
@@ -397,15 +405,6 @@ class NFAState:
         """
         return self.variable is not None and self.variable.strip() != ""
         
-    @functools.lru_cache(maxsize=128)
-    def _cached_epsilon_targets(self, epsilon_tuple: tuple, priorities_tuple: tuple) -> tuple:
-        """Cached computation of epsilon targets with priorities."""
-        # Convert back to lists and compute sorted targets
-        epsilon_list = list(epsilon_tuple)
-        priorities_dict = dict(priorities_tuple) if priorities_tuple else {}
-        
-        return tuple(sorted(epsilon_list, key=lambda t: (priorities_dict.get(t, 0), t)))
-
     def get_epsilon_targets(self) -> List[int]:
         """
         Get sorted list of epsilon transition targets by priority with caching.
@@ -418,8 +417,20 @@ class NFAState:
             try:
                 epsilon_tuple = tuple(self.epsilon)
                 priorities_tuple = tuple(self.epsilon_priorities.items()) if self.epsilon_priorities else ()
-                cached_result = self._cached_epsilon_targets(epsilon_tuple, priorities_tuple)
-                return list(cached_result)
+                cache_key = (epsilon_tuple, priorities_tuple)
+                if cache_key != self._epsilon_targets_cache_key:
+                    priorities = dict(priorities_tuple)
+                    self._epsilon_targets_cache_value = tuple(
+                        sorted(
+                            epsilon_tuple,
+                            key=lambda target: (
+                                priorities.get(target, 0),
+                                target,
+                            ),
+                        )
+                    )
+                    self._epsilon_targets_cache_key = cache_key
+                return list(self._epsilon_targets_cache_value)
             except Exception as e:
                 logger.warning(f"Cache failed for epsilon targets, falling back to direct computation: {e}")
                 # Fallback to direct computation
@@ -616,9 +627,15 @@ class NFA:
         should be synchronized externally if used across multiple threads.
     """
     
-    def __init__(self, start: int, accept: int, states: List[NFAState], 
-                 exclusion_ranges: Optional[List[Tuple[int, int]]] = None,
-                 metadata: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        start: int,
+        accept: int,
+        states: List[NFAState],
+        exclusion_ranges: Optional[List[Tuple[int, int]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        resource_profile: Optional[AdaptiveResourceProfile] = None,
+    ):
         """
         Initialize NFA with comprehensive validation.
         
@@ -661,6 +678,17 @@ class NFA:
         self._lock = threading.RLock()
         self._epsilon_cache: Dict[Tuple[int, ...], List[int]] = {}
         self._epsilon_cache_stats = {'hits': 0, 'misses': 0}
+        self._resource_profile = (
+            resource_profile or get_adaptive_resource_profile()
+        )
+        self._epsilon_cache_limit = (
+            self._resource_profile.cache_entry_limit(
+                estimated_entry_bytes=4 * 1024,
+                budget_share=0.01,
+                minimum=32,
+                maximum=100_000,
+            )
+        )
         
         # Validate structure
         if not self.validate():
@@ -831,12 +859,13 @@ class NFA:
         
         # Create cache key for memoization.
         cache_key = tuple(sorted(state_indices))
-        with self._lock:
-            cached = self._epsilon_cache.get(cache_key)
-            if cached is not None:
-                self._epsilon_cache_stats['hits'] += 1
-                return list(cached)
-            self._epsilon_cache_stats['misses'] += 1
+        if self._epsilon_cache_limit > 0:
+            with self._lock:
+                cached = self._epsilon_cache.get(cache_key)
+                if cached is not None:
+                    self._epsilon_cache_stats['hits'] += 1
+                    return list(cached)
+                self._epsilon_cache_stats['misses'] += 1
         
         closure = set(state_indices)
         queue = deque(state_indices)
@@ -877,12 +906,11 @@ class NFA:
 
         # Bound only the memoization table.  Eviction may recompute a closure
         # later, but it never changes the closure itself.
-        with self._lock:
-            if len(self._epsilon_cache) >= 1000:
-                oldest_keys = list(self._epsilon_cache)[:100]
-                for old_key in oldest_keys:
-                    self._epsilon_cache.pop(old_key, None)
-            self._epsilon_cache[cache_key] = result.copy()
+        if self._epsilon_cache_limit > 0:
+            with self._lock:
+                while len(self._epsilon_cache) >= self._epsilon_cache_limit:
+                    self._epsilon_cache.pop(next(iter(self._epsilon_cache)))
+                self._epsilon_cache[cache_key] = result.copy()
 
         logger.debug(
             "Epsilon closure of %s = %s%s (size: %s, iterations: %s)",
@@ -1384,11 +1412,11 @@ class NFA:
             if state and len(state.epsilon) > 2:  # States with multiple epsilon transitions
                 complex_epsilon_states.append(i)
         
-        # Pre-compute and cache closures for complex states
+        # Pre-compute closures for complex states.  ``epsilon_closure`` admits
+        # them to its cache only when the shared adaptive budget allows it.
         if complex_epsilon_states:
             for state_idx in complex_epsilon_states:
-                closure = self.epsilon_closure([state_idx])
-                self._epsilon_cache[frozenset([state_idx])] = frozenset(closure)
+                self.epsilon_closure([state_idx])
             
             logger.debug(f"Pre-computed epsilon closures for {len(complex_epsilon_states)} complex states")
         
@@ -1835,13 +1863,20 @@ class NFABuilder:
     - Subset variables
     - Empty pattern matching
     """
-    def __init__(self):
+    def __init__(
+        self,
+        resource_profile: Optional[AdaptiveResourceProfile] = None,
+    ):
         self.states: List[NFAState] = []
         self.current_exclusion = False
         self.exclusion_ranges: List[Tuple[int, int]] = []
         self.metadata: Dict[str, Any] = {}
         self.subset_vars: Dict[str, List[str]] = {}
         
+        self._resource_profile = (
+            resource_profile or get_adaptive_resource_profile()
+        )
+
         # Phase 3: Memory management and optimization
         self._resource_manager = get_resource_manager()
         
@@ -1850,14 +1885,24 @@ class NFABuilder:
             "nfa_states", 
             factory=lambda: NFAState(),
             reset_func=self._reset_nfa_state,
-            max_size=200
+            max_size=self._resource_profile.cache_entry_limit(
+                estimated_entry_bytes=4 * 1024,
+                budget_share=0.005,
+                minimum=16,
+                maximum=100_000,
+            ),
         )
         
         self._transition_pool = self._resource_manager.get_pool(
             "transitions",
             factory=lambda: None,  # Will create Transition objects
             reset_func=None,
-            max_size=500
+            max_size=self._resource_profile.cache_entry_limit(
+                estimated_entry_bytes=2 * 1024,
+                budget_share=0.005,
+                minimum=32,
+                maximum=200_000,
+            ),
         )
         
         # Pattern compilation cache from Phase 2
@@ -1890,6 +1935,8 @@ class NFABuilder:
         state.subset_parent = None
         state.priority = 0
         state.epsilon_priorities.clear()
+        state._epsilon_targets_cache_key = None
+        state._epsilon_targets_cache_value = ()
         state._validated = False
     
     def new_state(self) -> int:
@@ -2339,7 +2386,8 @@ class NFABuilder:
             new_states, 
             copy.deepcopy(nfa.exclusion_ranges)
             if hasattr(nfa, 'exclusion_ranges') else [],
-            copy.deepcopy(nfa.metadata) if hasattr(nfa, 'metadata') else {}
+            copy.deepcopy(nfa.metadata) if hasattr(nfa, 'metadata') else {},
+            resource_profile=self._resource_profile,
         )
         
         return cloned_nfa
@@ -2386,7 +2434,14 @@ class NFABuilder:
         # Handle empty pattern - SQL:2016 treats this as a match
         if not tokens:
             self.add_epsilon(start, accept)
-            return NFA(start, accept, self.states, [], {"empty_pattern": True})
+            return NFA(
+                start,
+                accept,
+                self.states,
+                [],
+                {"empty_pattern": True},
+                resource_profile=self._resource_profile,
+            )
         
         # Validate anchor semantics first - critical for SQL:2016 compliance
         if not self._validate_anchor_semantics(tokens):
@@ -2394,7 +2449,14 @@ class NFABuilder:
             # Connect start directly to a dead-end state (not accept)
             dead_state = self.new_state()
             self.add_epsilon(start, dead_state)
-            return NFA(start, accept, self.states, [], self.metadata)
+            return NFA(
+                start,
+                accept,
+                self.states,
+                [],
+                self.metadata,
+                resource_profile=self._resource_profile,
+            )
         
         # Process pattern with full SQL:2016 compliance
         idx = [0]  # Use mutable list for position tracking
@@ -2447,7 +2509,14 @@ class NFABuilder:
             self._analyze_pattern_structure(tokens)
             
             # Create the NFA with all metadata
-            nfa = NFA(start, accept, self.states, self.exclusion_ranges, self.metadata)
+            nfa = NFA(
+                start,
+                accept,
+                self.states,
+                self.exclusion_ranges,
+                self.metadata,
+                resource_profile=self._resource_profile,
+            )
             
             # Apply optimizations
             nfa.optimize()

@@ -32,12 +32,15 @@ from functools import lru_cache
 from enum import Enum
 
 from src.utils.logging_config import get_logger, PerformanceTimer
+from src.utils.resource_profile import (
+    AdaptiveResourceProfile,
+    get_adaptive_resource_profile,
+)
 
 # Module logger with enhanced configuration
 logger = get_logger(__name__)
 
 # Constants for production-ready behavior
-MAX_CACHE_SIZE = 1000           # Maximum cache entries per context
 MAX_PARTITION_SIZE = float('inf')  # No row limit for production use
 MAX_VARIABLES = 100             # Maximum pattern variables
 CACHE_STATS_INTERVAL = 1000     # Log cache stats every N operations
@@ -46,6 +49,26 @@ class NavigationMode(Enum):
     """Navigation function execution modes."""
     RUNNING = "RUNNING"     # Only consider rows up to current position
     FINAL = "FINAL"         # Consider all rows in the match
+
+
+class _BoundedCacheDict(dict):
+    """Dictionary-compatible FIFO cache with a strict entry ceiling."""
+
+    def __init__(self, max_entries: int = 0, initial=None):
+        super().__init__()
+        self.max_entries = max(0, int(max_entries))
+        if initial:
+            for key, value in dict(initial).items():
+                self[key] = value
+
+    def __setitem__(self, key, value):
+        if self.max_entries == 0:
+            return
+        if key not in self and len(self) >= self.max_entries:
+            oldest_key = next(iter(self))
+            super().pop(oldest_key, None)
+        super().__setitem__(key, value)
+
 
 class ContextValidationError(Exception):
     """Error in context validation or operation."""
@@ -118,6 +141,11 @@ class RowContext:
     pattern_variables: List[str] = field(default_factory=list)
     navigation_mode: NavigationMode = NavigationMode.RUNNING
     current_match: Optional[List[Dict[str, Any]]] = field(default_factory=lambda: None)
+    resource_profile: Optional[AdaptiveResourceProfile] = field(
+        default=None,
+        repr=False,
+        kw_only=True,
+    )
     
     # Private fields for optimization and caching
     _timeline: List[Tuple[int, str]] = field(default_factory=list, repr=False)
@@ -127,20 +155,69 @@ class RowContext:
     _context_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     
     # Production-ready cache structures
-    _navigation_cache: Dict[Any, Any] = field(default_factory=dict, repr=False)
-    _variable_cache: Dict[str, Any] = field(default_factory=dict, repr=False)
-    _position_cache: Dict[Any, Any] = field(default_factory=dict, repr=False)
-    _row_value_cache: Dict[Tuple[int, str], Any] = field(default_factory=dict, repr=False)
-    _partition_cache: Dict[int, Optional[Tuple[int, int]]] = field(default_factory=dict, repr=False)
-    _input_column_cache: Dict[str, Any] = field(default_factory=dict, repr=False)
+    _navigation_cache: Dict[Any, Any] = field(
+        default_factory=_BoundedCacheDict,
+        repr=False,
+    )
+    _variable_cache: Dict[str, Any] = field(
+        default_factory=_BoundedCacheDict,
+        repr=False,
+    )
+    _position_cache: Dict[Any, Any] = field(
+        default_factory=_BoundedCacheDict,
+        repr=False,
+    )
+    _row_value_cache: Dict[Tuple[int, str], Any] = field(
+        default_factory=_BoundedCacheDict,
+        repr=False,
+    )
+    _partition_cache: Dict[int, Optional[Tuple[int, int]]] = field(
+        default_factory=_BoundedCacheDict,
+        repr=False,
+    )
+    _input_column_cache: Dict[str, Any] = field(
+        default_factory=_BoundedCacheDict,
+        repr=False,
+    )
     
     # Performance and diagnostic metrics
     _metrics: Dict[str, Union[int, float]] = field(default_factory=dict, repr=False)
     _cache_stats: Dict[str, int] = field(default_factory=dict, repr=False)
     _operation_count: int = field(default=0, repr=False)
+    _cache_size_limit: int = field(default=1, init=False, repr=False)
     
     def __post_init__(self):
         """Initialize optimized lookup structures and production-ready metrics."""
+        if self.resource_profile is None:
+            self.resource_profile = get_adaptive_resource_profile()
+        self._cache_size_limit = (
+            self.resource_profile.cache_entry_limit(
+                estimated_entry_bytes=256,
+                budget_share=0.001,
+                minimum=128,
+                maximum=10_000,
+            )
+        )
+        # Keep the historical public and underscored cache APIs backed by the
+        # same bounded mappings.  Direct writes from navigation evaluators are
+        # therefore subject to the same adaptive limit as RowContext writes.
+        for cache_name in (
+            '_navigation_cache',
+            '_variable_cache',
+            '_position_cache',
+            '_row_value_cache',
+            '_partition_cache',
+            '_input_column_cache',
+        ):
+            cache = getattr(self, cache_name)
+            if isinstance(cache, _BoundedCacheDict):
+                cache.max_entries = self._cache_size_limit
+            else:
+                setattr(
+                    self,
+                    cache_name,
+                    _BoundedCacheDict(self._cache_size_limit, cache),
+                )
         # Initialize metrics and stats
         self._metrics = {
             "creation_time": time.time(),
@@ -170,6 +247,30 @@ class RowContext:
         
         # Validate initial state
         self._validate_context()
+
+    @property
+    def navigation_cache(self) -> Dict[Any, Any]:
+        return self._navigation_cache
+
+    @property
+    def variable_cache(self) -> Dict[Any, Any]:
+        return self._variable_cache
+
+    @property
+    def position_cache(self) -> Dict[Any, Any]:
+        return self._position_cache
+
+    @property
+    def row_value_cache(self) -> Dict[Any, Any]:
+        return self._row_value_cache
+
+    @property
+    def partition_cache(self) -> Dict[Any, Any]:
+        return self._partition_cache
+
+    @property
+    def input_column_cache(self) -> Dict[Any, Any]:
+        return self._input_column_cache
     
     def _validate_context(self) -> None:
         """
@@ -533,7 +634,7 @@ class RowContext:
         filtered_indices = [idx for idx in all_indices if idx <= current_idx]
         
         # Cache the result (with size limit)
-        if len(self._variable_cache) < MAX_CACHE_SIZE:
+        if len(self._variable_cache) < self._cache_size_limit:
             self._variable_cache[cache_key] = filtered_indices
         
         # Update metrics
@@ -588,7 +689,7 @@ class RowContext:
                 result = self._binary_search_partition(row_idx)
             
             # Cache the result (with size limit)
-            if len(self._partition_cache) < MAX_CACHE_SIZE:
+            if len(self._partition_cache) < self._cache_size_limit:
                 self._partition_cache[row_idx] = result
             
             # Update metrics
@@ -723,9 +824,11 @@ class RowContext:
                 ("row_value", self._row_value_cache),
                 ("partition", self._partition_cache)
             ]:
-                if len(cache) > MAX_CACHE_SIZE * 0.8:  # 80% threshold
+                if len(cache) > self._cache_size_limit * 0.8:
                     # Simple LRU: remove oldest entries (basic implementation)
-                    items_to_remove = len(cache) - int(MAX_CACHE_SIZE * 0.6)  # Remove to 60%
+                    items_to_remove = len(cache) - int(
+                        self._cache_size_limit * 0.6
+                    )
                     if items_to_remove > 0:
                         # Remove first N items (approximates LRU for dict in Python 3.7+)
                         keys_to_remove = list(cache.keys())[:items_to_remove]

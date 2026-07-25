@@ -45,6 +45,7 @@ from src.matcher.evaluation_utils import (
     inline_scalar_subqueries
 )
 from src.utils.logging_config import get_logger, PerformanceTimer
+from src.utils.resource_profile import get_adaptive_resource_profile
 
 # Module logger with enhanced configuration
 logger = get_logger(__name__)
@@ -52,7 +53,6 @@ logger = get_logger(__name__)
 # Constants for production-ready behavior
 MAX_EXPRESSION_LENGTH = 10000  # Prevent extremely long expressions
 MAX_RECURSION_DEPTH = 50      # Prevent infinite recursion
-CACHE_SIZE_LIMIT = 1000       # LRU cache limit for expression evaluation
 
 class EvaluationMode(Enum):
     """Enumeration of evaluation modes for measure expressions."""
@@ -283,6 +283,18 @@ class MeasureEvaluator:
         self.context = context
         self.final = final
         self.original_expr = None
+        resource_profile = (
+            context.resource_profile
+            or get_adaptive_resource_profile()
+        )
+        self._cache_size_limit = (
+            resource_profile.cache_entry_limit(
+                estimated_entry_bytes=512,
+                budget_share=0.001,
+                minimum=128,
+                maximum=20_000,
+            )
+        )
         
         # Production-ready caching with LRU policy
         self._classifier_cache = {}
@@ -310,6 +322,16 @@ class MeasureEvaluator:
         except Exception as e:
             logger.error(f"Failed to build evaluation indices: {e}")
             # Continue with basic functionality
+
+    def _cache_put(self, cache: Dict[Any, Any], key: Any, value: Any) -> bool:
+        """Store one value without exceeding the adaptive entry ceiling."""
+        if self._cache_size_limit <= 0:
+            return False
+        with self._lock:
+            if key not in cache and len(cache) >= self._cache_size_limit:
+                return False
+            cache[key] = value
+        return True
     
     def _build_row_variable_index(self) -> None:
         """Build optimized index for row-to-variable lookups."""
@@ -732,7 +754,10 @@ class MeasureEvaluator:
             
             # Check cache first
             cache_key = f"{expr}:{semantics}:{self.context.current_idx}:{self.final}"
-            if cache_key in self._var_ref_cache:
+            if (
+                self._cache_size_limit > 0
+                and cache_key in self._var_ref_cache
+            ):
                 with self._lock:
                     self.stats["cache_hits"] += 1
                 return self._var_ref_cache[cache_key]
@@ -784,8 +809,7 @@ class MeasureEvaluator:
                 
                 # Cache successful result
                 with self._lock:
-                    if len(self._var_ref_cache) < CACHE_SIZE_LIMIT:
-                        self._var_ref_cache[cache_key] = result
+                    self._cache_put(self._var_ref_cache, cache_key, result)
                     self.stats["cache_misses"] += 1
                 
                 return result
@@ -1132,7 +1156,10 @@ class MeasureEvaluator:
             cache_key = (current_idx, var_name, running)
             
             # Check cache first
-            if cache_key in self._classifier_cache:
+            if (
+                self._cache_size_limit > 0
+                and cache_key in self._classifier_cache
+            ):
                 self.stats["cache_hits"] += 1
                 return self._classifier_cache[cache_key]
                 
@@ -1155,7 +1182,7 @@ class MeasureEvaluator:
                 # If the actual classifier is in the subset, return it with case correction (standard SQL:2016)
                 if actual_classifier_raw and actual_classifier_raw in subset_components:
                     result = self.context._apply_case_sensitivity_rule(actual_classifier_raw)
-                    self._classifier_cache[cache_key] = result
+                    self._cache_put(self._classifier_cache, cache_key, result)
                     return result
                 
                 # Compatibility behavior: Only use fallback for alternation patterns where
@@ -1180,11 +1207,15 @@ class MeasureEvaluator:
                             component_rows = self.context.variables[component]
                             if component_rows:  # If this component has any matched rows in the match
                                 result = self.context._apply_case_sensitivity_rule(component)
-                                self._classifier_cache[cache_key] = result
+                                self._cache_put(
+                                    self._classifier_cache,
+                                    cache_key,
+                                    result,
+                                )
                                 return result
                 
                 # Standard behavior: If not in subset and not alternation context, return None
-                self._classifier_cache[cache_key] = None
+                self._cache_put(self._classifier_cache, cache_key, None)
                 return None
             
             # Special handling for CLASSIFIER(var) in ONE ROW PER MATCH mode
@@ -1192,18 +1223,18 @@ class MeasureEvaluator:
                 # For ONE ROW PER MATCH, return var if it exists in the pattern
                 if var_name in self.context.variables:
                     result = self.context._apply_case_sensitivity_rule(var_name)
-                    self._classifier_cache[cache_key] = result
+                    self._cache_put(self._classifier_cache, cache_key, result)
                     return result
                     
                 # No match found
-                self._classifier_cache[cache_key] = None
+                self._cache_put(self._classifier_cache, cache_key, None)
                 return None
             
             # Standard classifier evaluation for ALL ROWS PER MATCH or CLASSIFIER() without arguments
             result = self._evaluate_classifier_impl(var_name, running)
             
             # Cache the result
-            self._classifier_cache[cache_key] = result
+            self._cache_put(self._classifier_cache, cache_key, result)
             return result
             
         finally:
@@ -1670,7 +1701,11 @@ class MeasureEvaluator:
         
         # Cache key for memoization - include running semantics in the key
         cache_key = (expr, is_running, self.context.current_idx)
-        if hasattr(self, '_var_ref_cache') and cache_key in self._var_ref_cache:
+        if (
+            self._cache_size_limit > 0
+            and hasattr(self, '_var_ref_cache')
+            and cache_key in self._var_ref_cache
+        ):
             return self._var_ref_cache[cache_key]
         
         # Extract function name and arguments for simple navigation
@@ -1976,7 +2011,7 @@ class MeasureEvaluator:
         
         # Cache the result
         if hasattr(self, '_var_ref_cache'):
-            self._var_ref_cache[cache_key] = result
+            self._cache_put(self._var_ref_cache, cache_key, result)
         return result
 
 

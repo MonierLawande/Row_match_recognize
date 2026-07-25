@@ -42,13 +42,13 @@ from dataclasses import dataclass
 from src.matcher.row_context import RowContext
 from src.matcher.evaluation_utils import inline_scalar_subqueries
 from src.utils.logging_config import get_logger, PerformanceTimer
+from src.utils.resource_profile import get_adaptive_resource_profile
 
 # Module logger with enhanced configuration
 logger = get_logger(__name__)
 
 # Constants for production-ready behavior
 MAX_EXPRESSION_LENGTH = 5000    # Prevent extremely long expressions
-MAX_CACHE_SIZE = 1000          # LRU cache limit for aggregate results
 MAX_ARRAY_SIZE = 100000        # Maximum array aggregation size
 PERFORMANCE_LOG_THRESHOLD = 0.1  # Log slow operations (100ms)
 
@@ -129,6 +129,27 @@ class AggregateArgumentError(AggregateValidationError):
 class AggregateTypeError(AggregateValidationError):
     """Error in aggregate function type handling."""
     pass
+
+
+class AggregateExpressionConversionError(AggregateValidationError):
+    """Raised when a SQL aggregate expression cannot be converted exactly.
+
+    Conversion failures must not return a partly rewritten expression.  A
+    partial CASE rewrite can still be valid Python while representing a
+    different SQL expression, which makes a resource/parser limit look like a
+    legitimate NULL aggregate result.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(
+            message,
+            suggestion=(
+                "Use a searched CASE expression of the form "
+                "CASE WHEN condition THEN value [ELSE value] END"
+            ),
+            error_code="AGG_EXPR_CONVERSION",
+        )
+
 
 # Thread-local storage for aggregate metrics
 _aggregate_metrics = threading.local()
@@ -228,6 +249,18 @@ class ProductionAggregateEvaluator:
             )
         
         self.context = context
+        resource_profile = (
+            context.resource_profile
+            or get_adaptive_resource_profile()
+        )
+        self._cache_size_limit = (
+            resource_profile.cache_entry_limit(
+                estimated_entry_bytes=1024,
+                budget_share=0.002,
+                minimum=128,
+                maximum=20_000,
+            )
+        )
         
         # Thread-safe operation lock
         self._lock = threading.RLock()
@@ -346,7 +379,7 @@ class ProductionAggregateEvaluator:
                     clean_expr, semantics
                 )
                 if handled:
-                    if len(self._result_cache) < MAX_CACHE_SIZE:
+                    if len(self._result_cache) < self._cache_size_limit:
                         self._result_cache[cache_key] = scalar_result
                     return scalar_result
 
@@ -363,7 +396,7 @@ class ProductionAggregateEvaluator:
                     result = self._evaluate_parsed_aggregate(
                         func_name, arguments, filter_condition, window_frame, semantics
                     )
-                    if len(self._result_cache) < MAX_CACHE_SIZE:
+                    if len(self._result_cache) < self._cache_size_limit:
                         self._result_cache[cache_key] = result
                     logger.debug(f"PROD_AGG_FINAL: evaluate_aggregate returning: {result} (type: {type(result)})")
                     return result
@@ -372,7 +405,7 @@ class ProductionAggregateEvaluator:
                 arithmetic_result = self._evaluate_arithmetic_expression(clean_expr, semantics)
                 if arithmetic_result is not None:
                     logger.debug(f"PROD_AGG_FINAL: arithmetic expression '{clean_expr}' evaluated to: {arithmetic_result}")
-                    if len(self._result_cache) < MAX_CACHE_SIZE:
+                    if len(self._result_cache) < self._cache_size_limit:
                         self._result_cache[cache_key] = arithmetic_result
                     return arithmetic_result
                 
@@ -439,7 +472,7 @@ class ProductionAggregateEvaluator:
                         )
                     
                     # Cache the result (with size limit)
-                    if len(self._result_cache) < MAX_CACHE_SIZE:
+                    if len(self._result_cache) < self._cache_size_limit:
                         self._result_cache[cache_key] = result
                     
                     logger.debug(f"PROD_AGG_FINAL: evaluate_aggregate returning: {result} (type: {type(result)})")
@@ -531,6 +564,8 @@ class ProductionAggregateEvaluator:
             tree = ast.parse(converted, mode="eval")
             evaluator = ConditionEvaluator(self.context, evaluation_mode="MEASURES")
             return True, evaluator.visit(tree.body)
+        except AggregateExpressionConversionError:
+            raise
         except Exception as exc:
             logger.debug(
                 "Scalar-over-aggregate evaluation did not handle %r: %s",
@@ -595,17 +630,21 @@ class ProductionAggregateEvaluator:
     def _optimize_caches(self) -> None:
         """Optimize cache structures to prevent memory bloat."""
         # Simple LRU implementation: remove oldest entries when cache is full
-        if len(self._result_cache) > MAX_CACHE_SIZE:
+        if len(self._result_cache) > self._cache_size_limit:
             # Remove oldest 20% of entries
-            items_to_remove = len(self._result_cache) - int(MAX_CACHE_SIZE * 0.8)
+            items_to_remove = len(self._result_cache) - int(
+                self._cache_size_limit * 0.8
+            )
             keys_to_remove = list(self._result_cache.keys())[:items_to_remove]
             for key in keys_to_remove:
                 self._result_cache.pop(key, None)
         
         # Optimize other caches similarly
         for cache in [self._validation_cache, self._expression_cache, self._variable_data_cache]:
-            if len(cache) > MAX_CACHE_SIZE // 2:
-                items_to_remove = len(cache) - int(MAX_CACHE_SIZE * 0.3)
+            if len(cache) > self._cache_size_limit // 2:
+                items_to_remove = len(cache) - int(
+                    self._cache_size_limit * 0.3
+                )
                 keys_to_remove = list(cache.keys())[:items_to_remove]
                 for key in keys_to_remove:
                     cache.pop(key, None)
@@ -703,7 +742,7 @@ class ProductionAggregateEvaluator:
         logger.debug(f"Parsed aggregate function {func_name} with args: {arguments}" + 
                     (f", filter: {filter_condition}" if filter_condition else ""))
 
-        if len(self._expression_cache) < MAX_CACHE_SIZE:
+        if len(self._expression_cache) < self._cache_size_limit:
             self._expression_cache[cache_key] = copy.deepcopy(result)
 
         return copy.deepcopy(result)
@@ -1823,6 +1862,8 @@ class ProductionAggregateEvaluator:
                 result = evaluator.visit(tree.body)
                 logger.debug(f"Converted expression '{converted_expr}' evaluated to: {result}")
                 return result
+        except AggregateExpressionConversionError:
+            raise
         except Exception as e:
             logger.warning(f"Failed to evaluate expression '{expr}': {e}")
             # Try simpler evaluation approach for arithmetic expressions
@@ -2133,75 +2174,224 @@ class ProductionAggregateEvaluator:
         - Multiple WHEN: CASE WHEN cond1 THEN val1 WHEN cond2 THEN val2 ELSE default END
         - Nested CASE expressions
         - NULL handling
+
+        The conversion is driven by the expression structure, not by a fixed
+        iteration budget.  Each pass replaces one lexically innermost CASE and
+        therefore strictly reduces the number of remaining CASE tokens.  An
+        unsupported or malformed expression raises a typed error rather than
+        returning partially converted text.
         """
-        import re
-        
         if 'CASE' not in expr.upper():
             return expr
-        
+
         logger.debug(f"Converting CASE expression: {expr}")
-        
-        # Handle nested CASE expressions by processing from inside out
+
         result = expr
-        max_iterations = 10  # Prevent infinite loops
-        iteration = 0
-        
-        while 'CASE' in result.upper() and iteration < max_iterations:
-            iteration += 1
-            
-            # Find the innermost CASE expression (no nested CASE inside)
-            # Pattern to match a complete CASE expression
-            case_pattern = r'CASE\s+((?:WHEN\s+.+?\s+THEN\s+.+?(?=\s+(?:WHEN|ELSE|END))\s*)+)(?:ELSE\s+(.+?))?\s+END'
-            
-            matches = list(re.finditer(case_pattern, result, re.IGNORECASE | re.DOTALL))
-            if not matches:
+
+        while True:
+            case_span = self._find_innermost_case_span(result)
+            if case_span is None:
                 break
-                
-            # Process the first match
-            match = matches[0]
-            full_case = match.group(0)
-            when_clauses = match.group(1)
-            else_clause = match.group(2) if match.group(2) else "None"
-            
-            # Parse individual WHEN clauses
-            when_pattern = r'WHEN\s+(.+?)\s+THEN\s+(.+?)(?=\s+(?:WHEN|ELSE|$)|$)'
-            when_matches = list(re.finditer(when_pattern, when_clauses, re.IGNORECASE | re.DOTALL))
-            
-            if not when_matches:
-                logger.warning(f"No valid WHEN clauses found in: {when_clauses}")
-                break
-            
-            # Build Python conditional expression from right to left
-            python_expr = else_clause.strip()
-            
-            # Handle NULL in else clause
-            if python_expr.upper() == "NULL":
-                python_expr = "None"
-            
-            # Process WHEN clauses in reverse order
-            for when_match in reversed(when_matches):
-                condition = when_match.group(1).strip()
-                value = when_match.group(2).strip()
-                
-                # Handle NULL values
-                if value.upper() == "NULL":
-                    value = "None"
-                
-                # Convert SQL operators in condition to Python
-                condition = self._convert_sql_operators_to_python(condition)
-                
-                # Build conditional expression
-                python_expr = f"({value} if {condition} else {python_expr})"
-            
-            # Replace the CASE expression with the Python conditional
-            result = result.replace(full_case, python_expr)
-            logger.debug(f"CASE iteration {iteration}: {full_case} -> {python_expr}")
-        
-        if iteration >= max_iterations:
-            logger.warning(f"Maximum CASE conversion iterations reached for: {expr}")
-        
+
+            start, stop = case_span
+            full_case = result[start:stop]
+            python_expr = self._convert_single_searched_case(full_case)
+            updated = result[:start] + python_expr + result[stop:]
+            if updated == result:
+                raise AggregateExpressionConversionError(
+                    f"CASE conversion made no progress for: {full_case}"
+                )
+            result = updated
+            logger.debug(f"CASE conversion: {full_case} -> {python_expr}")
+
         logger.debug(f"Final CASE conversion: {expr} -> {result}")
         return result
+
+    @staticmethod
+    def _case_keyword_tokens(
+        expr: str,
+        *,
+        top_level_only: bool = False,
+    ) -> List[Tuple[str, int, int]]:
+        """Return CASE grammar keywords outside quoted SQL literals.
+
+        SQL escapes quote characters by doubling them.  Scanning the expression
+        directly avoids treating words such as ``'CASE WHEN'`` as syntax and
+        gives the CASE rewriter deterministic progress information.
+        """
+        keywords = {"CASE", "WHEN", "THEN", "ELSE", "END"}
+        tokens: List[Tuple[str, int, int]] = []
+        quote = None
+        parenthesis_depth = 0
+        index = 0
+
+        while index < len(expr):
+            char = expr[index]
+            if quote is not None:
+                if char == quote:
+                    if index + 1 < len(expr) and expr[index + 1] == quote:
+                        index += 2
+                        continue
+                    quote = None
+                index += 1
+                continue
+
+            if char in ("'", '"'):
+                quote = char
+                index += 1
+                continue
+
+            if char == '(':
+                parenthesis_depth += 1
+                index += 1
+                continue
+            if char == ')':
+                parenthesis_depth = max(0, parenthesis_depth - 1)
+                index += 1
+                continue
+
+            if char.isalpha() or char == '_':
+                stop = index + 1
+                while (
+                    stop < len(expr)
+                    and (expr[stop].isalnum() or expr[stop] == '_')
+                ):
+                    stop += 1
+                word = expr[index:stop].upper()
+                if (
+                    word in keywords
+                    and (not top_level_only or parenthesis_depth == 0)
+                ):
+                    tokens.append((word, index, stop))
+                index = stop
+                continue
+
+            index += 1
+
+        if quote is not None:
+            raise AggregateExpressionConversionError(
+                "Unterminated quoted literal in CASE expression"
+            )
+        return tokens
+
+    def _find_innermost_case_span(
+        self,
+        expr: str,
+    ) -> Optional[Tuple[int, int]]:
+        """Find one complete lexically innermost CASE expression."""
+        stack: List[int] = []
+        saw_case = False
+
+        for keyword, start, stop in self._case_keyword_tokens(expr):
+            if keyword == "CASE":
+                stack.append(start)
+                saw_case = True
+            elif keyword == "END":
+                if not stack:
+                    continue
+                return stack.pop(), stop
+
+        if saw_case or stack:
+            raise AggregateExpressionConversionError(
+                f"CASE expression has no matching END: {expr}"
+            )
+        return None
+
+    def _convert_single_searched_case(self, case_expr: str) -> str:
+        """Convert one CASE that contains no nested CASE expression."""
+        tokens = self._case_keyword_tokens(
+            case_expr,
+            top_level_only=True,
+        )
+        if (
+            len(tokens) < 3
+            or tokens[0][0] != "CASE"
+            or tokens[-1][0] != "END"
+        ):
+            raise AggregateExpressionConversionError(
+                f"Malformed CASE expression: {case_expr}"
+            )
+
+        body_start = tokens[0][2]
+        body_stop = tokens[-1][1]
+        body = case_expr[body_start:body_stop]
+        body_tokens = self._case_keyword_tokens(
+            body,
+            top_level_only=True,
+        )
+
+        if body_tokens and body[:body_tokens[0][1]].strip():
+            raise AggregateExpressionConversionError(
+                "Only searched CASE expressions are supported; "
+                f"unexpected text before WHEN in: {case_expr}"
+            )
+
+        clauses: List[Tuple[str, str]] = []
+        else_value = "None"
+        token_index = 0
+
+        while token_index < len(body_tokens):
+            keyword, when_start, when_stop = body_tokens[token_index]
+            if keyword == "ELSE":
+                if token_index != len(body_tokens) - 1:
+                    raise AggregateExpressionConversionError(
+                        f"ELSE must be the final CASE clause: {case_expr}"
+                    )
+                else_value = body[when_stop:].strip()
+                if not else_value:
+                    raise AggregateExpressionConversionError(
+                        f"CASE ELSE clause has no value: {case_expr}"
+                    )
+                token_index += 1
+                break
+
+            if keyword != "WHEN":
+                raise AggregateExpressionConversionError(
+                    "Only searched CASE expressions are supported; "
+                    f"expected WHEN in: {case_expr}"
+                )
+            if token_index + 1 >= len(body_tokens):
+                raise AggregateExpressionConversionError(
+                    f"CASE WHEN clause has no THEN: {case_expr}"
+                )
+
+            then_keyword, then_start, then_stop = body_tokens[token_index + 1]
+            if then_keyword != "THEN":
+                raise AggregateExpressionConversionError(
+                    f"CASE WHEN clause has no THEN: {case_expr}"
+                )
+
+            next_boundary = (
+                body_tokens[token_index + 2][1]
+                if token_index + 2 < len(body_tokens)
+                else len(body)
+            )
+            condition = body[when_stop:then_start].strip()
+            value = body[then_stop:next_boundary].strip()
+            if not condition or not value:
+                raise AggregateExpressionConversionError(
+                    f"CASE clause has an empty condition or value: {case_expr}"
+                )
+            clauses.append((condition, value))
+            token_index += 2
+
+        if token_index != len(body_tokens):
+            raise AggregateExpressionConversionError(
+                f"Malformed CASE clause order: {case_expr}"
+            )
+        if not clauses:
+            raise AggregateExpressionConversionError(
+                f"CASE expression has no WHEN clauses: {case_expr}"
+            )
+
+        python_expr = (
+            "None" if else_value.upper() == "NULL" else else_value
+        )
+        for condition, value in reversed(clauses):
+            condition = self._convert_sql_operators_to_python(condition)
+            value = "None" if value.upper() == "NULL" else value
+            python_expr = f"({value} if {condition} else {python_expr})"
+        return python_expr
     
     def _convert_sql_operators_to_python(self, condition: str) -> str:
         """Convert SQL operators to Python equivalents."""
@@ -2957,6 +3147,8 @@ def enhance_measure_evaluator_with_production_aggregates():
                     arg_text = arg_text.strip()
                     try:
                         value = float(arg_text) if re.fullmatch(r'-?\d+(?:\.\d+)?', arg_text) else enhanced_evaluate(self, arg_text, semantics)
+                    except AggregateExpressionConversionError:
+                        raise
                     except Exception:
                         value = None
                     if value is not None and value == value:
@@ -2981,6 +3173,8 @@ def enhance_measure_evaluator_with_production_aggregates():
                     f"{result} (type: {type(result)})"
                 )
                 return result
+            except AggregateExpressionConversionError:
+                raise
             except (AggregateValidationError, AggregateArgumentError) as e:
                 logger.warning(f"ENHANCED_EVAL: Aggregate validation error for {expr}: {e}")
                 logger.warning("ENHANCED_EVAL: Falling back to original evaluator")
