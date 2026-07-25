@@ -20,6 +20,7 @@ Version: 2.0.0
 import math
 import psutil
 import functools
+import copy
 from typing import (
     Callable, List, Optional, Dict, Any, Set, Tuple, Union, 
     FrozenSet, Iterator, Protocol
@@ -60,6 +61,36 @@ EpsilonMap = Dict[StateIndex, List[StateIndex]]
 
 # A condition function: given a row and current match context, return True if the row qualifies.
 ConditionFn = ConditionFunction
+NFA_COMPILER_SCHEMA_VERSION = 2
+
+
+class NFAConstructionError(ValueError):
+    """Raised when an exact NFA cannot be constructed for a pattern."""
+
+
+class NFAConstructionLimitError(NFAConstructionError):
+    """Raised when exact NFA construction exceeds a configured guard."""
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        limit: Union[int, float],
+        observed: Union[int, float],
+        details: str = "",
+    ) -> None:
+        self.reason = reason
+        self.limit = limit
+        self.observed = observed
+        self.details = details
+        message = (
+            f"Exact NFA construction exceeded {reason}: "
+            f"observed={observed}, limit={limit}."
+        )
+        if details:
+            message += f" {details}"
+        message += " No approximate or no-match automaton was returned."
+        super().__init__(message)
 
 @dataclass(frozen=True)
 class Transition:
@@ -628,6 +659,8 @@ class NFA:
         self._validated = False
         self._optimized = False
         self._lock = threading.RLock()
+        self._epsilon_cache: Dict[Tuple[int, ...], List[int]] = {}
+        self._epsilon_cache_stats = {'hits': 0, 'misses': 0}
         
         # Validate structure
         if not self.validate():
@@ -769,11 +802,12 @@ class NFA:
     
     def epsilon_closure(self, state_indices: List[int]) -> List[int]:
         """
-        Compute epsilon closure for given states with robust cycle detection and priority handling.
+        Compute the complete epsilon closure for the given states.
         
-        This method efficiently computes the set of states reachable from the given states
-        through epsilon transitions, with proper cycle detection and priority-based ordering.
-        Enhanced with caching for significant performance improvement and infinite loop protection.
+        The NFA is a finite graph, so a visited-state set is sufficient to
+        guarantee termination.  The closure is never trimmed and failures are
+        never converted into the seed states: either the exact closure is
+        returned or compilation receives an explicit exception.
         
         Args:
             state_indices: List of state indices to compute closure for
@@ -783,7 +817,7 @@ class NFA:
             
         Raises:
             ValueError: If any state index is invalid
-            RuntimeError: If infinite loop or resource limits are hit
+            RuntimeError: If an NFA state cannot provide its epsilon targets
         """
         # Input validation with bounds checking
         if not state_indices:
@@ -795,122 +829,70 @@ class NFA:
             if not (0 <= idx < len(self.states)):
                 raise ValueError(f"Invalid state index {idx}, must be in range [0, {len(self.states)})")
         
-        # Create cache key for memoization
+        # Create cache key for memoization.
         cache_key = tuple(sorted(state_indices))
-        if not hasattr(self, '_epsilon_cache'):
-            self._epsilon_cache = {}
-            self._epsilon_cache_stats = {'hits': 0, 'misses': 0}
-        
-        # Check cache first (thread-safe)
-        if cache_key in self._epsilon_cache:
-            self._epsilon_cache_stats['hits'] += 1
-            return self._epsilon_cache[cache_key].copy()
-        
-        self._epsilon_cache_stats['misses'] += 1
-        
-        # Enhanced protection limits
-        max_closure_size = min(1000, len(self.states) * 2)  # Prevent memory explosion
-        max_iterations = min(10000, len(self.states) ** 2)  # Conservative upper bound
-        max_queue_size = min(500, len(self.states))  # Prevent queue bloat
+        with self._lock:
+            cached = self._epsilon_cache.get(cache_key)
+            if cached is not None:
+                self._epsilon_cache_stats['hits'] += 1
+                return list(cached)
+            self._epsilon_cache_stats['misses'] += 1
         
         closure = set(state_indices)
         queue = deque(state_indices)
-        visited_transitions = set()  # Track (source, target) pairs to detect cycles
         iterations = 0
-        start_time = time.time()
-        max_computation_time = 5.0  # 5 second timeout
-        
-        try:
-            with PerformanceTimer("epsilon_closure"):
-                while queue and iterations < max_iterations:
-                    iterations += 1
-                    
-                    # Check time limit to prevent hanging
-                    if time.time() - start_time > max_computation_time:
-                        logger.error(f"Epsilon closure computation timeout after {max_computation_time}s")
-                        raise RuntimeError("Epsilon closure computation timeout")
-                    
-                    # Check closure size limit
-                    if len(closure) > max_closure_size:
-                        logger.error(f"Epsilon closure size exceeded limit: {len(closure)} > {max_closure_size}")
-                        raise RuntimeError("Epsilon closure size limit exceeded")
-                    
-                    # Check queue size to prevent memory issues
-                    if len(queue) > max_queue_size:
-                        logger.warning(f"Large epsilon closure queue: {len(queue)}, trimming")
-                        # Keep only unique states in queue
-                        queue = deque(list(set(queue))[:max_queue_size])
-                    
-                    current_state = queue.popleft()
-                    
-                    # Validate current state
-                    if not (0 <= current_state < len(self.states)):
-                        logger.warning(f"Invalid state in closure: {current_state}")
-                        continue
-                    
-                    # Get epsilon targets with error handling
-                    try:
-                        state_obj = self.states[current_state]
-                        if hasattr(state_obj, 'get_epsilon_targets'):
-                            epsilon_targets = state_obj.get_epsilon_targets()
-                        else:
-                            # Fallback to manual epsilon transition search
-                            epsilon_targets = []
-                            for transition in state_obj.transitions:
-                                if (hasattr(transition, 'symbol') and 
-                                    transition.symbol == 'ε'):
-                                    epsilon_targets.append(transition.target)
-                    except Exception as e:
-                        logger.warning(f"Error getting epsilon targets for state {current_state}: {e}")
-                        continue
-                    
-                    for target in epsilon_targets:
-                        # Validate target state
-                        if not isinstance(target, int) or not (0 <= target < len(self.states)):
-                            logger.warning(f"Invalid epsilon target: {target}")
-                            continue
-                        
-                        transition_key = (current_state, target)
-                        
-                        # Skip if we've already processed this transition (cycle detection)
-                        if transition_key in visited_transitions:
-                            continue
-                        
-                        visited_transitions.add(transition_key)
-                        
-                        if target not in closure:
-                            closure.add(target)
-                            queue.append(target)
-                
-                if iterations >= max_iterations:
-                    logger.error(f"Epsilon closure computation hit iteration limit: {max_iterations}")
-                    raise RuntimeError(f"Epsilon closure infinite loop detected after {max_iterations} iterations")
-            
-            # Sort result by state priority, then by index for deterministic behavior
-            result = sorted(closure, key=lambda idx: (
-                self.states[idx].priority if idx < len(self.states) else float('inf'),
-                idx
-            ))
-            
-            # Cache the result to avoid recomputation (with size limits)
-            if len(self._epsilon_cache) < 1000:  # Prevent unbounded cache growth
-                self._epsilon_cache[cache_key] = result.copy()
-            elif len(self._epsilon_cache) > 1500:  # Emergency cleanup
-                # Keep only recent 500 entries
-                cache_items = list(self._epsilon_cache.items())
-                self._epsilon_cache.clear()
-                for key, value in cache_items[-500:]:
-                    self._epsilon_cache[key] = value
-                self._epsilon_cache[cache_key] = result.copy()
-            
-            logger.debug(f"Epsilon closure of {state_indices} = {result[:10]}{'...' if len(result) > 10 else ''} "
-                        f"(size: {len(result)}, iterations: {iterations})")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error in epsilon closure computation: {e}")
-            # Return minimal closure on error
-            return sorted(list(set(state_indices)))
+
+        with PerformanceTimer("epsilon_closure"):
+            while queue:
+                iterations += 1
+                current_state = queue.popleft()
+                state_obj = self.states[current_state]
+
+                try:
+                    epsilon_targets = state_obj.get_epsilon_targets()
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to read epsilon transitions from NFA state "
+                        f"{current_state}"
+                    ) from exc
+
+                for target in epsilon_targets:
+                    if not isinstance(target, int) or not (
+                        0 <= target < len(self.states)
+                    ):
+                        raise ValueError(
+                            f"Invalid epsilon target {target!r} from NFA state "
+                            f"{current_state}; expected an index in "
+                            f"[0, {len(self.states)})"
+                        )
+                    if target not in closure:
+                        closure.add(target)
+                        queue.append(target)
+
+        # Sort by priority and then index to preserve deterministic traversal.
+        result = sorted(
+            closure,
+            key=lambda idx: (self.states[idx].priority, idx),
+        )
+
+        # Bound only the memoization table.  Eviction may recompute a closure
+        # later, but it never changes the closure itself.
+        with self._lock:
+            if len(self._epsilon_cache) >= 1000:
+                oldest_keys = list(self._epsilon_cache)[:100]
+                for old_key in oldest_keys:
+                    self._epsilon_cache.pop(old_key, None)
+            self._epsilon_cache[cache_key] = result.copy()
+
+        logger.debug(
+            "Epsilon closure of %s = %s%s (size: %s, iterations: %s)",
+            state_indices,
+            result[:10],
+            '...' if len(result) > 10 else '',
+            len(result),
+            iterations,
+        )
+        return result
     
     def get_variable_states(self) -> Dict[str, List[int]]:
         """
@@ -2178,13 +2160,21 @@ class NFABuilder:
         
         # Create comprehensive cache key including all compilation context
         pattern_signature = self._generate_pattern_signature(tokens, optimized_define, subset_vars)
-        cache_key = f"nfa_build:{pattern_signature}"
-        
+        cache_key = (
+            f"nfa_build:v{NFA_COMPILER_SCHEMA_VERSION}:{pattern_signature}"
+        )
+
         cached_result = get_cached_pattern(cache_key)
         if cached_result is not None:
             # Extract NFA from cached result (second element)
             cached_nfa = cached_result[1] if len(cached_result) > 1 else cached_result[0]
-            if cached_nfa:
+            cached_metadata = getattr(cached_nfa, 'metadata', {})
+            if (
+                cached_nfa
+                and cached_metadata.get('construction_complete') is True
+                and cached_metadata.get('compiler_schema_version')
+                == NFA_COMPILER_SCHEMA_VERSION
+            ):
                 # Clone cached NFA to avoid state sharing
                 cloned_nfa = self._clone_cached_nfa(cached_nfa)
                 # Add DEFINE optimization metadata
@@ -2197,9 +2187,13 @@ class NFABuilder:
             nfa = self._build_nfa_internal(tokens, optimized_define, subset_vars)
             
             # Add Phase 2 metadata
-            nfa.metadata['define_optimizations'] = define_analysis
-            nfa.metadata['phase2_cache_hit'] = False
-            nfa.metadata['phase2_optimized'] = True
+            nfa.metadata.update({
+                'compiler_schema_version': NFA_COMPILER_SCHEMA_VERSION,
+                'construction_complete': True,
+                'define_optimizations': define_analysis,
+                'phase2_cache_hit': False,
+                'phase2_optimized': True,
+            })
             
             # Cache successful compilation results
             cache_pattern(cache_key, None, nfa, timer.elapsed)
@@ -2296,7 +2290,7 @@ class NFABuilder:
         return hashlib.md5(signature_str.encode()).hexdigest()
 
     def _clone_cached_nfa(self, nfa) -> 'NFA':
-        """Create a deep clone of a cached NFA to avoid state sharing."""
+        """Clone every semantic NFA field for safe cache reuse."""
         # Create new states with same structure
         new_states = []
         for state in nfa.states:
@@ -2304,11 +2298,20 @@ class NFABuilder:
                 new_states.append(None)
                 continue
                 
-            new_state = NFAState()
+            new_state = NFAState(state_id=state.state_id)
             new_state.is_accept = state.is_accept
             new_state.is_excluded = getattr(state, 'is_excluded', False)
             new_state.variable = getattr(state, 'variable', None)
             new_state.subset_vars = getattr(state, 'subset_vars', set()).copy()
+            new_state.is_anchor = getattr(state, 'is_anchor', False)
+            new_state.anchor_type = getattr(state, 'anchor_type', None)
+            new_state.permute_data = copy.deepcopy(
+                getattr(state, 'permute_data', {})
+            )
+            new_state.is_empty_match = getattr(state, 'is_empty_match', False)
+            new_state.can_accept = getattr(state, 'can_accept', False)
+            new_state.subset_parent = getattr(state, 'subset_parent', None)
+            new_state.priority = getattr(state, 'priority', 0)
             
             # Clone transitions
             for transition in state.transitions:
@@ -2316,11 +2319,17 @@ class NFABuilder:
                     transition.condition, 
                     transition.target, 
                     transition.variable,
-                    transition.priority
+                    transition.priority,
+                    copy.deepcopy(transition.metadata),
                 )
             
             # Clone epsilon transitions
             new_state.epsilon = state.epsilon.copy()
+            new_state.epsilon_priorities = getattr(
+                state,
+                'epsilon_priorities',
+                {},
+            ).copy()
             new_states.append(new_state)
         
         # Create cloned NFA
@@ -2328,8 +2337,9 @@ class NFABuilder:
             nfa.start, 
             nfa.accept, 
             new_states, 
-            nfa.exclusion_ranges.copy() if hasattr(nfa, 'exclusion_ranges') else [],
-            nfa.metadata.copy() if hasattr(nfa, 'metadata') else {}
+            copy.deepcopy(nfa.exclusion_ranges)
+            if hasattr(nfa, 'exclusion_ranges') else [],
+            copy.deepcopy(nfa.metadata) if hasattr(nfa, 'metadata') else {}
         )
         
         return cloned_nfa
@@ -2362,6 +2372,9 @@ class NFABuilder:
         self.current_exclusion = False
         self.exclusion_ranges = []
         self.metadata = {}
+        if hasattr(self, '_variable_state_cache'):
+            self._variable_state_cache.clear()
+        self._alternation_depth = 0
         
         # Create start and accept states
         start = self.new_state()
@@ -2439,33 +2452,30 @@ class NFABuilder:
             # Apply optimizations
             nfa.optimize()
             
-            # Validate NFA structure
+            # Optimizers mutate the graph, so cached validation flags are no
+            # longer evidence about the resulting structure.
+            nfa._validated = False
+            for state in nfa.states:
+                state._validated = False
+
+            # A failed validation is a compilation failure.  Returning and
+            # caching a valid-looking no-match automaton would create silent
+            # false negatives.
             if not nfa.validate():
-                # Add warning to metadata if validation fails
-                nfa.metadata["validation_warning"] = "NFA validation failed, structure may be problematic"
+                raise NFAConstructionError(
+                    "NFA validation failed after construction; no automaton "
+                    "was returned or cached."
+                )
             
             return nfa
             
-        except Exception as e:
-            # Debug: Print the actual error that's being caught
-            print(f"ERROR in NFABuilder.build: {e}")
-            print(f"ERROR type: {type(e).__name__}")
-            import traceback
-            traceback.print_exc()
-            
-            # Create a minimal valid NFA in case of error
-            error_state = self.new_state()
-            error_accept = self.new_state()
-            
-            # Add metadata about the error
-            error_metadata = {
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "tokens": str(tokens)
-            }
-            
-            # Return a minimal NFA that won't match anything - FIX the indices
-            return NFA(0, 1, [NFAState(), NFAState()], [], error_metadata)
+        except NFAConstructionError:
+            raise
+        except Exception as exc:
+            raise NFAConstructionError(
+                "Exact NFA construction failed; no approximate or no-match "
+                "automaton was returned or cached."
+            ) from exc
 
     def _analyze_pattern_structure(self, tokens: List[PatternToken]):
         """
@@ -3052,7 +3062,7 @@ class NFABuilder:
             Tuple of (start_state, end_state)
             
         Raises:
-            RuntimeError: If pattern complexity exceeds safety limits
+            NFAConstructionLimitError: If exact construction exceeds a guard
         """
         # Extract permute variables
         variables = token.metadata.get("variables", [])
@@ -3064,8 +3074,12 @@ class NFABuilder:
         max_computation_time = 10.0  # 10 second timeout
         
         if len(variables) > max_permute_variables:
-            logger.error(f"PERMUTE pattern exceeds variable limit: {len(variables)} > {max_permute_variables}")
-            raise RuntimeError(f"PERMUTE pattern too complex: {len(variables)} variables exceeds limit of {max_permute_variables}")
+            raise NFAConstructionLimitError(
+                reason='PERMUTE variable limit',
+                limit=max_permute_variables,
+                observed=len(variables),
+                details=f"Pattern: {original_pattern}",
+            )
         
         # Estimate total combinations for exponential protection
         estimated_combinations = 1
@@ -3083,9 +3097,12 @@ class NFABuilder:
             estimated_combinations = math.factorial(len(variables))
         
         if estimated_combinations > max_permute_combinations:
-            logger.error(f"PERMUTE pattern estimated complexity: {estimated_combinations} > {max_permute_combinations}")
-            # Fallback to limited processing
-            return self._process_permute_limited(token, define)
+            raise NFAConstructionLimitError(
+                reason='PERMUTE branch estimate',
+                limit=max_permute_combinations,
+                observed=estimated_combinations,
+                details=f"Pattern: {original_pattern}",
+            )
         
         start_time = time.time()
         
@@ -3118,8 +3135,12 @@ class NFABuilder:
             
             # Check time limit
             if time.time() - start_time > max_computation_time:
-                logger.error("PERMUTE processing timeout")
-                raise RuntimeError("PERMUTE pattern processing timeout")
+                raise NFAConstructionLimitError(
+                    reason='PERMUTE construction time',
+                    limit=max_computation_time,
+                    observed=time.time() - start_time,
+                    details=f"Pattern: {original_pattern}",
+                )
             
             # Create inner permute without quantifier
             inner_token = PatternToken(
@@ -3476,10 +3497,13 @@ class NFABuilder:
                 self._add_prioritized_epsilon(alt_start, var_start, priority)
                 self.add_epsilon(var_end, alt_end)
                 
-            except Exception as e:
-                logger.error(f"[ALT_ENHANCED] Error processing alternative {priority}: {e}")
-                # Continue with other alternatives rather than failing completely
-                continue
+            except NFAConstructionError:
+                raise
+            except Exception as exc:
+                raise NFAConstructionError(
+                    "Failed to construct alternation branch "
+                    f"{priority}; no branch was omitted."
+                ) from exc
         
         # Apply post-processing optimizations
         self._optimize_alternation_structure(alt_start, alt_end)
@@ -3624,17 +3648,18 @@ class NFABuilder:
     def _process_alternative_token(self, alternative, define, priority):
         """Process a PatternToken alternative with exponential protection."""
         if alternative.type == PatternTokenType.PERMUTE:
-            # Nested PERMUTE within alternation - use limited processing
-            return self._process_permute_limited(alternative, define)
+            # Preserve the complete PERMUTE semantics or fail its normal
+            # complexity guard explicitly.
+            return self._process_permute(alternative, define)
         elif alternative.type == PatternTokenType.ALTERNATION:
-            # Nested alternation - limit depth
+            # Do not replace a deep branch with epsilon: that changes the
+            # language and can create false matches.
             if getattr(self, '_alternation_depth', 0) > 3:
-                logger.warning(f"[ALT_ENHANCED] Limiting nested alternation depth")
-                # Create simple pass-through
-                start = self.new_state()
-                end = self.new_state()
-                self.add_epsilon(start, end)
-                return start, end
+                raise NFAConstructionLimitError(
+                    reason='nested alternation depth',
+                    limit=3,
+                    observed=self._alternation_depth,
+                )
             else:
                 # Process with depth tracking
                 self._alternation_depth = getattr(self, '_alternation_depth', 0) + 1
@@ -3663,7 +3688,7 @@ class NFABuilder:
         end = self.new_state()
         
         # Set variable
-        start.variable = variable
+        self.states[start].variable = variable
         
         # Create condition
         if variable in define:
@@ -3672,7 +3697,12 @@ class NFABuilder:
             condition = lambda row, ctx: True  # Default to always match
         
         # Add transition with priority
-        start.add_transition(condition, end, variable, priority)
+        self.states[start].add_transition(
+            condition,
+            end,
+            variable,
+            priority,
+        )
         
         # Cache for reuse
         if not hasattr(self, '_variable_state_cache'):
@@ -3721,20 +3751,11 @@ class NFABuilder:
                 start_state.epsilon_priorities = new_priorities
 
     def _apply_quantifier_safe(self, quantifier_token, define):
-        """Apply quantifier with exponential protection."""
+        """Apply a quantifier without changing its repetition bounds."""
         # Extract quantifier details
         min_rep = quantifier_token.metadata.get('min_rep', 1)
         max_rep = quantifier_token.metadata.get('max_rep', 1)
         greedy = quantifier_token.metadata.get('greedy', True)
-        
-        # Limit excessive repetitions to prevent exponential blowup
-        if max_rep == float('inf') or max_rep > 100:
-            logger.warning(f"[ALT_ENHANCED] Limiting quantifier max_rep from {max_rep} to 100")
-            max_rep = 100
-        
-        if min_rep > 50:
-            logger.warning(f"[ALT_ENHANCED] Limiting quantifier min_rep from {min_rep} to 50")
-            min_rep = 50
         
         # Get the pattern to quantify
         pattern = quantifier_token.value
@@ -3744,30 +3765,6 @@ class NFABuilder:
         
         # Apply quantifier logic
         return self._apply_quantifier(pattern_start, pattern_end, min_rep, max_rep, greedy)
-
-    def _process_permute_limited(self, permute_token, define):
-        """Process PERMUTE with limited complexity to prevent exponential blowup."""
-        logger.warning(f"[ALT_ENHANCED] Processing PERMUTE with limited complexity")
-        
-        # Extract variables from PERMUTE
-        variables = permute_token.metadata.get('variables', [])
-        
-        # Limit the number of variables in PERMUTE
-        if len(variables) > 5:
-            logger.warning(f"[ALT_ENHANCED] Limiting PERMUTE variables from {len(variables)} to 5")
-            variables = variables[:5]
-        
-        # Create simplified PERMUTE structure
-        start = self.new_state()
-        end = self.new_state()
-        
-        # Create simple alternation of variables instead of full permutation
-        for i, var in enumerate(variables):
-            var_start, var_end = self._create_enhanced_variable_states(var, define, i)
-            self._add_prioritized_epsilon(start, var_start, i)
-            self.add_epsilon(var_end, end)
-        
-        return start, end
 
     def _apply_quantifier(self, start: int, end: int, min_rep: int, max_rep: Union[int, float], greedy: bool) -> Tuple[int, int]:
         """

@@ -43,6 +43,71 @@ logger = get_logger(__name__)
 # Constants
 FAIL_STATE = -1
 MAX_OPTIMIZATION_ITERATIONS = 100
+DFA_COMPILER_SCHEMA_VERSION = 2
+
+
+@dataclass(frozen=True)
+class DFAConstructionLimits:
+    """Resource limits for complete NFA-to-DFA subset construction.
+
+    ``max_states`` and ``max_iterations`` are fail-closed limits.  Reaching
+    either limit raises :class:`DFAConstructionLimitError`; the builder never
+    returns the states constructed so far.  ``subset_warning_threshold`` is
+    diagnostic only.  NFA-state subsets and epsilon closures are never
+    truncated because doing so changes the language recognized by the DFA.
+    """
+
+    max_states: int
+    max_iterations: int = 100_000
+    subset_warning_threshold: int = 50
+
+    def __post_init__(self) -> None:
+        if self.max_states < 1:
+            raise ValueError("max_states must be at least 1")
+        if self.max_iterations < 1:
+            raise ValueError("max_iterations must be at least 1")
+        if self.subset_warning_threshold < 1:
+            raise ValueError("subset_warning_threshold must be at least 1")
+
+
+class DFAConstructionError(ValueError):
+    """Base error for DFA compilation failures.
+
+    This is a ``ValueError`` because the requested pattern cannot be compiled
+    under the configured engine resources.  Keeping a dedicated type lets API
+    callers distinguish compilation failure from an empty match result.
+    """
+
+
+class DFAConstructionLimitError(DFAConstructionError):
+    """Raised when complete determinization would exceed a configured limit."""
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        limit: int,
+        observed: int,
+        states_created: int,
+        iterations: int,
+        pending_subsets: int,
+        nfa_state_count: int,
+    ) -> None:
+        self.reason = reason
+        self.limit = limit
+        self.observed = observed
+        self.states_created = states_created
+        self.iterations = iterations
+        self.pending_subsets = pending_subsets
+        self.nfa_state_count = nfa_state_count
+        super().__init__(
+            "Complete DFA construction exceeded the "
+            f"{reason} ({observed} > {limit}); "
+            f"states_created={states_created}, iterations={iterations}, "
+            f"pending_subsets={pending_subsets}, "
+            f"source_nfa_states={nfa_state_count}. "
+            "No partial automaton was returned or cached."
+        )
 
 
 @dataclass
@@ -256,6 +321,13 @@ class DFA:
     def validate_pattern(self) -> bool:
         """Comprehensive DFA validation."""
         try:
+            # Builder-produced automata explicitly mark an in-progress build
+            # as incomplete.  Such an object must never become executable.
+            # Metadata-free hand-built DFAs remain valid for low-level tests.
+            if self.metadata.get('construction_complete') is False:
+                logger.error("DFA construction is marked incomplete")
+                return False
+
             # Basic structure validation
             if not self.states or self.start < 0 or self.start >= len(self.states):
                 return False
@@ -463,7 +535,11 @@ class DFABuilder:
     - Comprehensive error handling
     """
 
-    def __init__(self, nfa: NFA):
+    def __init__(
+        self,
+        nfa: NFA,
+        limits: Optional[DFAConstructionLimits] = None,
+    ):
         """Initialize DFA builder with validation."""
         if not isinstance(nfa, NFA):
             raise TypeError(f"Expected NFA instance, got {type(nfa)}")
@@ -473,10 +549,16 @@ class DFABuilder:
         
         self.nfa = nfa
         
-        # Enhanced limits with memory awareness
-        self.MAX_DFA_STATES = self._calculate_max_states()
-        self.MAX_SUBSET_SIZE = 50
-        self.MAX_ITERATIONS = 100000
+        # The state cap is memory-adaptive by default.  These are hard
+        # fail-closed compilation limits, not truncation controls.
+        self.limits = limits or DFAConstructionLimits(
+            max_states=self._calculate_max_states()
+        )
+        # Keep the historical attributes for callers that inspect builder
+        # statistics.  MAX_SUBSET_SIZE is now a warning threshold only.
+        self.MAX_DFA_STATES = self.limits.max_states
+        self.MAX_SUBSET_SIZE = self.limits.subset_warning_threshold
+        self.MAX_ITERATIONS = self.limits.max_iterations
         
         # Caching and optimization with thread safety using existing utilities
         self._cache_lock = threading.RLock()
@@ -501,9 +583,11 @@ class DFABuilder:
         self.metadata = self.nfa.metadata.copy() if self.nfa.metadata else {}
         self.metadata.update({
             'builder_version': '3.0.0',
+            'compiler_schema_version': DFA_COMPILER_SCHEMA_VERSION,
             'source_nfa_states': len(nfa.states),
             'construction_method': 'subset_construction_with_priorities',
-            'exponential_protection': True
+            'exponential_protection': True,
+            'construction_complete': False,
         })
         
         # Threading support
@@ -539,19 +623,36 @@ class DFABuilder:
 
     def build(self) -> DFA:
         """
-        Build optimized DFA from NFA with comprehensive error handling.
+        Build a complete optimized DFA from the source NFA.
+
+        Construction is transactional from the caller's perspective.  The
+        method returns only after every reachable DFA subset has been
+        expanded.  Resource limits and internal compilation failures raise a
+        typed error instead of returning a partial automaton.
         
         Returns:
             DFA: Optimized deterministic finite automaton
             
         Raises:
-            RuntimeError: If DFA construction fails
-            ValueError: If resulting DFA is invalid
+            DFAConstructionLimitError: If complete construction exceeds a
+                configured resource limit
+            DFAConstructionError: If construction cannot preserve semantics
+            ValueError: If the resulting complete DFA is invalid
         """
         self._build_start_time = time.time()
         
         try:
             with self._lock:
+                # A builder may be retried after a failed resource check.
+                # Reset per-build counters so diagnostics and limits describe
+                # only the current transactional construction attempt.
+                self._iteration_count = 0
+                self._cache_hits = 0
+                self._cache_misses = 0
+                self._states_created = 0
+                self._states_merged = 0
+                self.metadata['construction_complete'] = False
+
                 logger.info(f"Starting DFA construction from NFA with {len(self.nfa.states)} states")
                 
                 # Initialize data structures
@@ -573,20 +674,31 @@ class DFABuilder:
                 
                 self._states_created += 1
                 
-                # Process queue with exponential protection
-                while queue and self._iteration_count < self.MAX_ITERATIONS:
+                # Process every reachable subset.  A limit failure aborts the
+                # build; it never converts the current prefix into a DFA.
+                while queue:
+                    if self._iteration_count >= self.MAX_ITERATIONS:
+                        raise self._limit_error(
+                            reason='iteration_limit',
+                            limit=self.MAX_ITERATIONS,
+                            observed=self._iteration_count + 1,
+                            states_created=len(dfa_states),
+                            pending_subsets=len(queue),
+                        )
+
                     self._iteration_count += 1
-                    
-                    if len(dfa_states) >= self.MAX_DFA_STATES:
-                        logger.warning(f"Reached maximum DFA states limit: {self.MAX_DFA_STATES}")
-                        break
-                    
+
                     nfa_states, dfa_state_idx = queue.popleft()
                     
-                    # Check subset size limit
+                    # A large subset is valid and must remain intact.  The
+                    # threshold is diagnostic only.
                     if len(nfa_states) > self.MAX_SUBSET_SIZE:
-                        logger.warning(f"Large subset size: {len(nfa_states)}, applying reduction")
-                        nfa_states = self._reduce_subset_size(nfa_states)
+                        logger.warning(
+                            "Large DFA subset contains %s NFA states "
+                            "(warning threshold: %s); preserving all states",
+                            len(nfa_states),
+                            self.MAX_SUBSET_SIZE,
+                        )
                     
                     # Group transitions by variable for optimization
                     transition_groups = self._group_transitions(nfa_states)
@@ -609,9 +721,6 @@ class DFABuilder:
                                 target_closure, state_map, dfa_states, queue
                             )
                             
-                            if target_dfa_idx is None:
-                                continue  # Skip if creation failed
-                            
                             # Create optimized transition
                             combined_condition = self._create_combined_condition(transitions)
                             combined_priority = self._compute_combined_priority(transitions, nfa_states)
@@ -626,11 +735,16 @@ class DFABuilder:
                                 metadata=combined_metadata
                             )
                             
+                        except DFAConstructionError:
+                            raise
                         except Exception as e:
-                            logger.warning(f"Error processing transition group {variable}: {e}")
-                            continue  # Skip this transition group
+                            raise DFAConstructionError(
+                                "Failed to compile transition group "
+                                f"{variable!r} from DFA state {dfa_state_idx}; "
+                                "no partial automaton was returned."
+                            ) from e
                 
-                # Create final DFA with enhanced metadata
+                # Reaching this point proves every queued subset was expanded.
                 final_metadata = self._create_final_metadata()
                 
                 dfa = DFA(
@@ -654,9 +768,35 @@ class DFABuilder:
                 
                 return dfa
                 
+        except DFAConstructionLimitError as exc:
+            logger.error("DFA construction limit reached: %s", exc)
+            raise
+        except DFAConstructionError:
+            logger.exception("DFA construction stopped before completion")
+            raise
         except Exception as e:
             logger.error(f"DFA construction failed: {e}")
-            raise RuntimeError(f"DFA build failed: {e}") from e
+            raise DFAConstructionError(f"DFA build failed: {e}") from e
+
+    def _limit_error(
+        self,
+        *,
+        reason: str,
+        limit: int,
+        observed: int,
+        states_created: int,
+        pending_subsets: int,
+    ) -> DFAConstructionLimitError:
+        """Create a diagnostic-rich fail-closed determinization error."""
+        return DFAConstructionLimitError(
+            reason=reason,
+            limit=limit,
+            observed=observed,
+            states_created=states_created,
+            iterations=self._iteration_count,
+            pending_subsets=pending_subsets,
+            nfa_state_count=len(self.nfa.states),
+        )
 
     def _create_dfa_state(self, nfa_states: FrozenSet[int]) -> DFAState:
         """
@@ -830,24 +970,21 @@ class DFABuilder:
         return target_set
 
     def _safe_epsilon_closure(self, state_set: Set[int]) -> List[int]:
-        """Compute epsilon closure with safety limits."""
-        try:
-            result = self.nfa.epsilon_closure(list(state_set))
-            
-            if len(result) > self.MAX_SUBSET_SIZE:
-                logger.warning(f"Large epsilon closure: {len(result)}, reducing")
-                result = result[:self.MAX_SUBSET_SIZE]
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error in epsilon closure: {e}")
-            return list(state_set)
+        """Compute the complete epsilon closure or propagate compilation failure."""
+        result = self.nfa.epsilon_closure(list(state_set))
+        if len(result) > self.MAX_SUBSET_SIZE:
+            logger.warning(
+                "Large epsilon closure contains %s states "
+                "(warning threshold: %s); preserving the complete closure",
+                len(result),
+                self.MAX_SUBSET_SIZE,
+            )
+        return result
 
     def _get_or_create_target_state(self, target_closure: FrozenSet[int], 
                                   state_map: Dict[FrozenSet[int], int],
                                   dfa_states: List[DFAState], 
-                                  queue: deque) -> Optional[int]:
+                                  queue: deque) -> int:
         """Get existing DFA state or create new one."""
         # Check if state already exists
         if target_closure in state_map:
@@ -856,8 +993,13 @@ class DFABuilder:
         
         # Check limits
         if len(dfa_states) >= self.MAX_DFA_STATES:
-            logger.warning(f"Cannot create new state: limit reached")
-            return None
+            raise self._limit_error(
+                reason='state_limit',
+                limit=self.MAX_DFA_STATES,
+                observed=len(dfa_states) + 1,
+                states_created=len(dfa_states),
+                pending_subsets=len(queue),
+            )
         
         # Create new state
         try:
@@ -874,39 +1016,25 @@ class DFABuilder:
             return new_state_idx
             
         except Exception as e:
-            logger.error(f"Error creating new state: {e}")
-            return None
+            raise DFAConstructionError(
+                "Failed to create a DFA state for NFA subset "
+                f"{sorted(target_closure)}; no partial automaton was returned."
+            ) from e
 
     def _reduce_subset_size(self, nfa_states: FrozenSet[int]) -> FrozenSet[int]:
-        """Reduce subset size by removing less important states."""
-        if len(nfa_states) <= self.MAX_SUBSET_SIZE:
-            return nfa_states
-        
-        states_list = list(nfa_states)
-        
-        # Sort by importance
-        def state_importance(state_idx):
-            if state_idx >= len(self.nfa.states):
-                return 0
-                
-            state = self.nfa.states[state_idx]
-            importance = 0
-            
-            if state.is_accept:
-                importance += 1000
-            if hasattr(state, 'variable') and state.variable:
-                importance += 100
-            if state.transitions:
-                importance += len(state.transitions)
-                
-            return importance
-        
-        states_list.sort(key=state_importance, reverse=True)
-        reduced_states = states_list[:self.MAX_SUBSET_SIZE]
-        
-        logger.debug(f"Reduced subset from {len(nfa_states)} to {len(reduced_states)} states")
-        
-        return frozenset(reduced_states)
+        """Compatibility helper that deliberately preserves the full subset.
+
+        Older versions dropped lower-ranked NFA states here, which could lose
+        valid matches.  The method remains for private-call compatibility but
+        no longer performs a semantic reduction.
+        """
+        if len(nfa_states) > self.MAX_SUBSET_SIZE:
+            logger.warning(
+                "DFA subset reduction requested for %s states; preserving the "
+                "complete subset to maintain matching semantics",
+                len(nfa_states),
+            )
+        return nfa_states
 
     def _create_combined_condition(self, transitions: List[Transition]) -> Callable:
         """Create combined condition with optimization."""
@@ -1005,6 +1133,9 @@ class DFABuilder:
         build_time = time.time() - self._build_start_time
         
         return {
+            **self.metadata,  # Include source metadata first.
+            'construction_complete': True,
+            'compiler_schema_version': DFA_COMPILER_SCHEMA_VERSION,
             'construction_time': build_time,
             'iterations': self._iteration_count,
             'states_created': self._states_created,
@@ -1013,9 +1144,9 @@ class DFABuilder:
             'cache_misses': self._cache_misses,
             'cache_hit_rate': self._cache_hits / max(self._cache_hits + self._cache_misses, 1),
             'max_states_limit': self.MAX_DFA_STATES,
-            'max_subset_limit': self.MAX_SUBSET_SIZE,
+            'subset_warning_threshold': self.MAX_SUBSET_SIZE,
+            'pending_subsets': 0,
             'optimized': True,
-            **self.metadata  # Include original metadata
         }
 
     def _can_reach_accept_via_optional_only(self, nfa_states: FrozenSet[int]) -> bool:
@@ -1135,11 +1266,13 @@ def build_dfa(nfa: NFA) -> DFA:
         DFA: Constructed DFA
         
     Raises:
-        RuntimeError: If construction fails
+        DFAConstructionError: If complete construction fails
     """
     try:
         builder = DFABuilder(nfa)
         return builder.build()
+    except DFAConstructionError:
+        raise
     except Exception as e:
         logger.error(f"DFA construction failed: {e}")
-        raise RuntimeError(f"Failed to build DFA: {e}") from e
+        raise DFAConstructionError(f"Failed to build DFA: {e}") from e

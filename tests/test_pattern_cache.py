@@ -17,6 +17,8 @@ from src.utils.pattern_cache import (
 )
 from src.monitoring.cache_monitor import start_cache_monitoring, stop_cache_monitoring
 from src.executor.match_recognize import match_recognize
+from src.matcher.automata import NFABuilder
+from src.matcher.pattern_tokenizer import tokenize_pattern
 
 class MockDFA:
     """Mock DFA for testing."""
@@ -258,6 +260,65 @@ class PatternCacheTests(unittest.TestCase):
         
         # Verify cache was used
         self.assertGreater(hits, 0)
+
+    def test_nfa_cache_clone_preserves_matching_semantics(self):
+        """Cold and cached NFAs keep anchors, priorities, and exclusions."""
+        for pattern in ("^ A $", "{- A -} B", "PERMUTE(A, B)"):
+            cold = NFABuilder().build(tokenize_pattern(pattern), {}, {})
+            cached = NFABuilder().build(tokenize_pattern(pattern), {}, {})
+
+            self.assertTrue(cached.metadata['phase2_cache_hit'])
+            self.assertEqual(cold.start, cached.start)
+            self.assertEqual(cold.accept, cached.accept)
+            self.assertEqual(cold.exclusion_ranges, cached.exclusion_ranges)
+            self.assertEqual(len(cold.states), len(cached.states))
+
+            for cold_state, cached_state in zip(cold.states, cached.states):
+                self.assertEqual(cold_state.variable, cached_state.variable)
+                self.assertEqual(
+                    cold_state.is_excluded,
+                    cached_state.is_excluded,
+                )
+                self.assertEqual(cold_state.is_anchor, cached_state.is_anchor)
+                self.assertEqual(cold_state.anchor_type, cached_state.anchor_type)
+                self.assertEqual(cold_state.subset_vars, cached_state.subset_vars)
+                self.assertEqual(cold_state.permute_data, cached_state.permute_data)
+                self.assertEqual(
+                    cold_state.is_empty_match,
+                    cached_state.is_empty_match,
+                )
+                self.assertEqual(cold_state.can_accept, cached_state.can_accept)
+                self.assertEqual(cold_state.is_accept, cached_state.is_accept)
+                self.assertEqual(
+                    cold_state.subset_parent,
+                    cached_state.subset_parent,
+                )
+                self.assertEqual(cold_state.priority, cached_state.priority)
+                self.assertEqual(cold_state.epsilon, cached_state.epsilon)
+                self.assertEqual(
+                    cold_state.epsilon_priorities,
+                    cached_state.epsilon_priorities,
+                )
+                self.assertEqual(
+                    [
+                        (
+                            transition.target,
+                            transition.variable,
+                            transition.priority,
+                            transition.metadata,
+                        )
+                        for transition in cold_state.transitions
+                    ],
+                    [
+                        (
+                            transition.target,
+                            transition.variable,
+                            transition.priority,
+                            transition.metadata,
+                        )
+                        for transition in cached_state.transitions
+                    ],
+                )
 
 if __name__ == '__main__':
     unittest.main()

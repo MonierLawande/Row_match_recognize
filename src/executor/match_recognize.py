@@ -18,8 +18,16 @@ except ImportError:
     POLARS_AVAILABLE = False
 from src.parser.match_recognize_extractor import parse_full_query
 from src.matcher.pattern_tokenizer import tokenize_pattern, PermuteHandler
-from src.matcher.automata import NFABuilder
-from src.matcher.dfa import DFABuilder
+from src.matcher.automata import (
+    NFA_COMPILER_SCHEMA_VERSION,
+    NFAConstructionError,
+    NFABuilder,
+)
+from src.matcher.dfa import (
+    DFA_COMPILER_SCHEMA_VERSION,
+    DFAConstructionError,
+    DFABuilder,
+)
 from src.matcher.matcher import (
     EnhancedMatcher,
     MatchConfig,
@@ -1726,6 +1734,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         # Phase 2: Enhanced pattern compilation caching with smart cache
         compilation_options = {
+            'automata_compiler_schema': DFA_COMPILER_SCHEMA_VERSION,
+            'nfa_compiler_schema': NFA_COMPILER_SCHEMA_VERSION,
             'rows_per_match': rows_per_match,
             'skip_mode': skip_mode.value if hasattr(skip_mode, 'value') else str(skip_mode),
             'show_empty': show_empty,
@@ -1741,6 +1751,36 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 cached_pattern = PatternCompilationCache.get_compiled_pattern(
                     pattern_text, define, compilation_options
                 )
+
+            # A cache entry is executable only when it was produced by the
+            # current compiler and records a completed subset construction.
+            # This also protects long-running processes from entries created
+            # by versions that could cache a partial DFA.
+            if cached_pattern is not None:
+                try:
+                    cached_dfa = cached_pattern[0]
+                    cached_nfa = cached_pattern[1]
+                    cached_dfa_metadata = cached_dfa.metadata
+                    cached_nfa_metadata = cached_nfa.metadata
+                    cache_is_complete = (
+                        cached_dfa_metadata.get('construction_complete') is True
+                        and cached_dfa_metadata.get('compiler_schema_version')
+                        == DFA_COMPILER_SCHEMA_VERSION
+                        and cached_nfa_metadata.get('construction_complete')
+                        is True
+                        and cached_nfa_metadata.get('compiler_schema_version')
+                        == NFA_COMPILER_SCHEMA_VERSION
+                    )
+                except (AttributeError, IndexError, KeyError, TypeError):
+                    cache_is_complete = False
+
+                if not cache_is_complete:
+                    logger.warning(
+                        "Ignoring incomplete or incompatible cached automaton "
+                        "for pattern: %s",
+                        pattern_text,
+                    )
+                    cached_pattern = None
             
             if cached_pattern:
                 # Cache hit - use cached DFA and NFA
@@ -1814,6 +1854,12 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 nfa = nfa_builder.build(pattern_tokens, define, subset_dict)
                 dfa_builder = DFABuilder(nfa)
                 dfa = dfa_builder.build()
+
+                if dfa.metadata.get('construction_complete') is not True:
+                    raise DFAConstructionError(
+                        "DFA builder returned an automaton without a complete "
+                        "construction marker; refusing to execute or cache it."
+                    )
                 
                 compilation_time = time.time() - compilation_start
                 
@@ -1851,6 +1897,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     order_columns=order_by
                 )
                 
+        except (NFAConstructionError, DFAConstructionError):
+            raise
         except Exception as e:
             raise ValueError(f"Failed to build pattern matching automata: {str(e)}")
         metrics["automata_build_time"] = time.time() - automata_start

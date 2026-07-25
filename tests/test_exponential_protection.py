@@ -13,7 +13,20 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.executor.match_recognize import match_recognize
+from src.matcher.automata import (
+    NFAConstructionError,
+    NFAConstructionLimitError,
+    NFABuilder,
+)
+from src.matcher.dfa import (
+    DFA_COMPILER_SCHEMA_VERSION,
+    DFAConstructionLimitError,
+    DFAConstructionLimits,
+    DFABuilder,
+)
 from src.matcher.matcher import PatternSearchLimitError
+from src.matcher.pattern_tokenizer import tokenize_pattern
+from src.utils.performance_optimizer import PatternCompilationCache
 
 class TestExponentialProtection:
     """Test protection against exponential pattern matching complexity."""
@@ -939,3 +952,146 @@ class TestExponentialProtection:
         if result is not None and not result.empty:
             assert len(result) == 1
             assert result.iloc[0]['count'] == 16  # All rows matched
+
+    def test_dfa_state_limit_fails_instead_of_returning_partial_automaton(self):
+        """A state cap is an explicit compilation failure, not a smaller DFA."""
+        nfa = NFABuilder().build(tokenize_pattern("A B"), {}, {})
+
+        with pytest.raises(DFAConstructionLimitError) as error:
+            DFABuilder(
+                nfa,
+                DFAConstructionLimits(max_states=2),
+            ).build()
+
+        assert error.value.reason == 'state_limit'
+        assert error.value.limit == 2
+        assert error.value.observed == 3
+        assert error.value.states_created == 2
+        assert error.value.nfa_state_count == len(nfa.states)
+
+        complete = DFABuilder(
+            nfa,
+            DFAConstructionLimits(max_states=3),
+        ).build()
+        assert len(complete.states) == 3
+        assert complete.metadata['construction_complete'] is True
+        assert (
+            complete.metadata['compiler_schema_version']
+            == DFA_COMPILER_SCHEMA_VERSION
+        )
+
+    def test_nfa_failure_never_becomes_a_no_match_automaton(
+        self,
+        monkeypatch,
+    ):
+        """An internal compiler failure is explicit and cannot be cached."""
+        builder = NFABuilder()
+
+        def fail_sequence(*args, **kwargs):
+            raise RuntimeError("forced NFA construction failure")
+
+        monkeypatch.setattr(builder, '_process_sequence', fail_sequence)
+
+        with pytest.raises(NFAConstructionError) as error:
+            builder.build(
+                tokenize_pattern("FORCEDNFAA FORCEDNFAB"),
+                {},
+                {},
+            )
+
+        assert isinstance(error.value.__cause__, RuntimeError)
+        assert "no approximate or no-match automaton" in str(error.value)
+
+    def test_permute_complexity_guard_never_rewrites_the_pattern(self):
+        """An oversized PERMUTE is rejected instead of reduced to five labels."""
+        pattern = "PERMUTE(A?, B?, C?, D?, E?, F?, G?, H?)"
+
+        with pytest.raises(NFAConstructionLimitError) as error:
+            NFABuilder().build(tokenize_pattern(pattern), {}, {})
+
+        assert error.value.reason == 'PERMUTE branch estimate'
+        assert error.value.observed > error.value.limit
+
+    def test_dfa_iteration_limit_fails_instead_of_returning_partial_automaton(self):
+        """The work limit has the same fail-closed contract as the state cap."""
+        nfa = NFABuilder().build(tokenize_pattern("A B"), {}, {})
+
+        with pytest.raises(DFAConstructionLimitError) as error:
+            DFABuilder(
+                nfa,
+                DFAConstructionLimits(max_states=10, max_iterations=1),
+            ).build()
+
+        assert error.value.reason == 'iteration_limit'
+        assert error.value.limit == 1
+        assert error.value.observed == 2
+        assert error.value.pending_subsets > 0
+
+    def test_dfa_subset_warning_never_truncates_epsilon_closure(self):
+        """Diagnostic thresholds must not change the recognized language."""
+        nfa = NFABuilder().build(
+            tokenize_pattern("(A? B?)? C"),
+            {},
+            {},
+        )
+        exact_start_closure = frozenset(nfa.epsilon_closure([nfa.start]))
+        assert len(exact_start_closure) > 1
+
+        dfa = DFABuilder(
+            nfa,
+            DFAConstructionLimits(
+                max_states=100,
+                subset_warning_threshold=1,
+            ),
+        ).build()
+
+        assert dfa.states[dfa.start].nfa_states == exact_start_closure
+        assert dfa.metadata['construction_complete'] is True
+
+    def test_match_recognize_propagates_dfa_limit_as_compilation_error(
+        self,
+        monkeypatch,
+    ):
+        """A compiler limit cannot be mistaken for a valid empty result."""
+        cache_writes = []
+        monkeypatch.setattr(
+            PatternCompilationCache,
+            'get_compiled_pattern',
+            staticmethod(lambda *args, **kwargs: None),
+        )
+        monkeypatch.setattr(
+            PatternCompilationCache,
+            'cache_compiled_pattern',
+            staticmethod(
+                lambda *args, **kwargs: cache_writes.append((args, kwargs))
+            ),
+        )
+        monkeypatch.setattr(
+            DFABuilder,
+            '_calculate_max_states',
+            lambda self: 2,
+        )
+        df = pd.DataFrame({
+            'seq_id': [1, 2],
+            'category': ['A', 'B'],
+        })
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY seq_id
+            MEASURES COUNT(*) AS match_length
+            ONE ROW PER MATCH
+            PATTERN (LIMITA LIMITB)
+            DEFINE
+                LIMITA AS category = 'A',
+                LIMITB AS category = 'B'
+        )
+        """
+
+        with pytest.raises(DFAConstructionLimitError) as error:
+            match_recognize(query, df)
+
+        assert error.value.reason == 'state_limit'
+        assert error.value.states_created == 2
+        assert cache_writes == []
