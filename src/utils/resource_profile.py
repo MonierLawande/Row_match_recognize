@@ -125,6 +125,16 @@ class SystemResourceProbe:
         self._cgroup_root = cgroup_root
         self._proc_cgroup_path = proc_cgroup_path
         self._proc_mountinfo_path = proc_mountinfo_path
+        # Structural discovery cache (mount table only).  The cgroup mount
+        # layout is fixed for the life of a process unless the process is
+        # migrated into a different cgroup, which changes /proc/self/cgroup.
+        # Limits and usage values are NEVER cached here: every probe still
+        # re-reads memory.max/memory.current/cpu.max, so a tightened container
+        # limit or a change in memory pressure is always observed.
+        self._mounts_cache: Optional[List[_CgroupMount]] = None
+        self._mounts_cache_key: Optional[str] = None
+        self._dirs_cache: Dict[Tuple[str, str, Optional[str]], List[str]] = {}
+        self._dirs_cache_key: Optional[str] = None
 
     @staticmethod
     def _read_text(path: str) -> str:
@@ -161,8 +171,19 @@ class SystemResourceProbe:
             return None
         return value
 
-    def _process_cgroup_entries(self) -> List[Tuple[str, str]]:
-        raw_entries = self._safe_read(self._proc_cgroup_path)
+    def _process_cgroup_entries(
+        self,
+        raw_entries: Optional[str] = None,
+    ) -> List[Tuple[str, str]]:
+        """Parse /proc/self/cgroup.
+
+        ``raw_entries`` lets one caller read the file once and share the text
+        across the memory and CPU probes of a single detection, so both halves
+        describe the *same* cgroup identity instead of two independent reads.
+        Nothing is cached across detections: every detection re-reads the file.
+        """
+        if raw_entries is None:
+            raw_entries = self._safe_read(self._proc_cgroup_path)
         if not raw_entries:
             return []
 
@@ -202,9 +223,26 @@ class SystemResourceProbe:
         mountinfo.  Joining it directly to ``/sys/fs/cgroup`` works for the
         common root-mounted case but fails in cgroup namespaces and for
         non-standard v1 mount points.
+
+        Parsing mountinfo is the single most expensive step of resource
+        detection and it is required twice per detect() (once for memory, once
+        for CPU).  The parsed table is therefore memoised per probe instance
+        and re-validated against /proc/self/cgroup, which is two orders of
+        magnitude cheaper to read.  A process moved into a different cgroup
+        changes that file and invalidates the cache; the limit and usage values
+        themselves are always re-read by the callers.
         """
+        cache_key = self._safe_read(self._proc_cgroup_path) or ''
+        if (
+            self._mounts_cache is not None
+            and self._mounts_cache_key == cache_key
+        ):
+            return self._mounts_cache
+
         raw_mountinfo = self._safe_read(self._proc_mountinfo_path)
         if not raw_mountinfo:
+            self._mounts_cache = []
+            self._mounts_cache_key = cache_key
             return []
 
         mounts: List[_CgroupMount] = []
@@ -251,6 +289,8 @@ class SystemResourceProbe:
                     controllers=frozenset(controllers),
                 )
             )
+        self._mounts_cache = mounts
+        self._mounts_cache_key = cache_key
         return mounts
 
     @staticmethod
@@ -288,7 +328,26 @@ class SystemResourceProbe:
         relative_path: str,
         controller: Optional[str] = None,
     ) -> List[str]:
-        """Resolve leaf-to-root directories for one cgroup hierarchy."""
+        """Resolve leaf-to-root directories for one cgroup hierarchy.
+
+        Purely structural path arithmetic over the (already memoised) mount
+        table.  Memoised under the same /proc/self/cgroup validity key: the
+        directory *list* is cached, never the limit or usage values read from
+        those directories.
+        """
+        cache_key = (
+            self._mounts_cache_key
+            if self._mounts_cache is not None
+            else None
+        )
+        memo_key = (version, relative_path, controller)
+        if (
+            cache_key is not None
+            and self._dirs_cache_key == cache_key
+            and memo_key in self._dirs_cache
+        ):
+            return self._dirs_cache[memo_key]
+
         directories: List[str] = []
         for mount in self._cgroup_mounts():
             if mount.version != version:
@@ -308,7 +367,14 @@ class SystemResourceProbe:
                     path_is_leaf=True,
                 )
             )
-        return list(dict.fromkeys(directories))
+        resolved = list(dict.fromkeys(directories))
+        current_key = self._mounts_cache_key
+        if current_key is not None:
+            if self._dirs_cache_key != current_key:
+                self._dirs_cache = {}
+                self._dirs_cache_key = current_key
+            self._dirs_cache[memo_key] = resolved
+        return resolved
 
     @staticmethod
     def _ancestor_directories(
@@ -345,9 +411,10 @@ class SystemResourceProbe:
 
     def _cgroup_memory_constraints(
         self,
+        raw_entries: Optional[str] = None,
     ) -> Tuple[Optional[int], Optional[int]]:
         candidates: List[Tuple[str, str, bool]] = []
-        for version, relative_path in self._process_cgroup_entries():
+        for version, relative_path in self._process_cgroup_entries(raw_entries):
             if version == 'v2':
                 roots = self._mounted_directories(
                     'v2',
@@ -393,26 +460,34 @@ class SystemResourceProbe:
                     for directory in roots
                 )
 
-        candidates.extend([
-            (
-                os.path.join(self._cgroup_root, 'memory.max'),
-                os.path.join(self._cgroup_root, 'memory.current'),
-                False,
-            ),
-            (
-                os.path.join(
-                    self._cgroup_root,
-                    'memory',
-                    'memory.limit_in_bytes',
+        # Root-level fallbacks.  These exist for the case where the process
+        # hierarchy could not be resolved at all (no /proc, unparsable
+        # mountinfo, unknown layout).  When resolution succeeded the ancestor
+        # walk already includes the hierarchy root, so probing these again only
+        # repeats reads that cannot contribute a new minimum.  Keeping them
+        # conditional preserves the safety net exactly while removing the
+        # redundant syscalls from the common path.
+        if not candidates:
+            candidates.extend([
+                (
+                    os.path.join(self._cgroup_root, 'memory.max'),
+                    os.path.join(self._cgroup_root, 'memory.current'),
+                    False,
                 ),
-                os.path.join(
-                    self._cgroup_root,
-                    'memory',
-                    'memory.usage_in_bytes',
+                (
+                    os.path.join(
+                        self._cgroup_root,
+                        'memory',
+                        'memory.limit_in_bytes',
+                    ),
+                    os.path.join(
+                        self._cgroup_root,
+                        'memory',
+                        'memory.usage_in_bytes',
+                    ),
+                    True,
                 ),
-                True,
-            ),
-        ])
+            ])
 
         limits: List[int] = []
         remaining_values: List[int] = []
@@ -440,12 +515,15 @@ class SystemResourceProbe:
             min(remaining_values) if remaining_values else None,
         )
 
-    def memory_snapshot(self) -> EffectiveMemorySnapshot:
+    def memory_snapshot(
+        self,
+        raw_entries: Optional[str] = None,
+    ) -> EffectiveMemorySnapshot:
         host = self._host_memory_provider()
         host_total = max(0, int(host.total))
         host_available = max(0, int(host.available))
         cgroup_limit, cgroup_remaining = (
-            self._cgroup_memory_constraints()
+            self._cgroup_memory_constraints(raw_entries)
         )
 
         effective_limit = host_total
@@ -492,11 +570,14 @@ class SystemResourceProbe:
             return None
         return quota / period
 
-    def _cgroup_cpu_quota(self) -> Optional[float]:
+    def _cgroup_cpu_quota(
+        self,
+        raw_entries: Optional[str] = None,
+    ) -> Optional[float]:
         quotas: List[float] = []
         v2_directories: List[str] = []
         v1_directories: List[str] = []
-        for version, relative_path in self._process_cgroup_entries():
+        for version, relative_path in self._process_cgroup_entries(raw_entries):
             if version == 'v2':
                 resolved = self._mounted_directories(
                     'v2',
@@ -529,11 +610,16 @@ class SystemResourceProbe:
                             )
                         )
 
-        v2_directories.append(self._cgroup_root)
-        v1_directories.extend([
-            os.path.join(self._cgroup_root, 'cpu'),
-            os.path.join(self._cgroup_root, 'cpu,cpuacct'),
-        ])
+        # Same rule as the memory probe: the root-level fallbacks are only a
+        # net for an unresolvable hierarchy.  When the process hierarchy did
+        # resolve, its ancestor walk already reaches the mount root, so these
+        # extra probes cannot lower the quota and are pure syscall cost.
+        if not v2_directories and not v1_directories:
+            v2_directories.append(self._cgroup_root)
+            v1_directories.extend([
+                os.path.join(self._cgroup_root, 'cpu'),
+                os.path.join(self._cgroup_root, 'cpu,cpuacct'),
+            ])
         for directory in dict.fromkeys(v2_directories):
             quota = self._parse_cpu_max(
                 self._safe_read(os.path.join(directory, 'cpu.max'))
@@ -560,7 +646,10 @@ class SystemResourceProbe:
 
         return min(quotas) if quotas else None
 
-    def cpu_snapshot(self) -> EffectiveCPUSnapshot:
+    def cpu_snapshot(
+        self,
+        raw_entries: Optional[str] = None,
+    ) -> EffectiveCPUSnapshot:
         host_cpus = max(1, int(self._host_cpu_provider() or 1))
         affinity_applied = False
         try:
@@ -578,7 +667,7 @@ class SystemResourceProbe:
             affinity_cpus = host_cpus
         affinity_cpus = max(1, min(host_cpus, int(affinity_cpus)))
 
-        quota = self._cgroup_cpu_quota()
+        quota = self._cgroup_cpu_quota(raw_entries)
         effective = affinity_cpus
         source_parts = ['host']
         if affinity_applied:
@@ -601,6 +690,29 @@ class SystemResourceProbe:
 
 # Compatibility name retained for the DFA builder and existing callers.
 SystemMemoryProbe = SystemResourceProbe
+
+
+_default_probe_lock = threading.Lock()
+_default_probe_instance: Optional[SystemResourceProbe] = None
+
+
+def _default_probe() -> SystemResourceProbe:
+    """Process-wide probe holding only the structural cgroup caches."""
+    global _default_probe_instance
+    probe = _default_probe_instance
+    if probe is None:
+        with _default_probe_lock:
+            if _default_probe_instance is None:
+                _default_probe_instance = SystemResourceProbe()
+            probe = _default_probe_instance
+    return probe
+
+
+def reset_default_probe() -> None:
+    """Drop the shared probe (and its structural caches); for tests."""
+    global _default_probe_instance
+    with _default_probe_lock:
+        _default_probe_instance = None
 
 
 @dataclass(frozen=True)
@@ -658,10 +770,23 @@ class AdaptiveResourceProfile:
         cls,
         probe: Optional[SystemResourceProbe] = None,
     ) -> 'AdaptiveResourceProfile':
-        resolved_probe = probe or SystemResourceProbe()
+        # A fresh probe would discard the memoised cgroup mount/dir tables on
+        # every call, so the default path reuses one process-wide probe.  The
+        # probe caches *structure* only (mount table and resolved directory
+        # lists, both validated against /proc/self/cgroup); every limit, usage
+        # and affinity value is still read live on each detect().  Callers that
+        # pass an explicit probe -- tests and mocked platforms -- are unaffected.
+        resolved_probe = probe or _default_probe()
+        # Read the process cgroup identity once and share it with both halves
+        # of this detection: one file read instead of two, and a coherent
+        # snapshot (memory and CPU describe the same cgroup).  This is a
+        # per-detection read, never a cross-detection cache.
+        shared_entries = resolved_probe._safe_read(
+            resolved_probe._proc_cgroup_path
+        )
         profile = cls(
-            memory=resolved_probe.memory_snapshot(),
-            cpu=resolved_probe.cpu_snapshot(),
+            memory=resolved_probe.memory_snapshot(shared_entries),
+            cpu=resolved_probe.cpu_snapshot(shared_entries),
         )
         return profile.with_environment_ceilings()
 
