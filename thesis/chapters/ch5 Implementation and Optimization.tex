@@ -94,11 +94,11 @@ edge, so the $\varepsilon$-closure extends the match before ending it.
 \texttt{PERMUTE}$(v_1,\ldots,v_n)$ expands to the union of all $n!$
 orderings, protected by a complexity guard---patterns with more than
 eight variables, or an estimated fifty thousand branches, are rejected
-or routed to a conservative fallback.  An exclusion \texttt{\{-\ \ldots
+with an explicit complexity error.  An exclusion \texttt{\{-\ \ldots
 \ -\}} builds its sub-pattern normally but marks the states so the
-matcher later drops those rows from the output.  Compiled NFAs are
-cached, checked for accept-state reachability, and guarded for
-thread-safe reuse.
+matcher later drops those rows from the output.  Only successfully
+constructed and validated NFAs are cached.  Cache reuse preserves
+anchors, priorities, exclusions, and transition metadata.
 
 \paragraph{From NFA to DFA.}
 The NFA is finally converted to a \emph{deterministic} finite automaton
@@ -107,10 +107,12 @@ states.  This removes $\varepsilon$-transitions and leaves at most one
 successor per symbol, so a partition can be scanned row by row with no
 backtracking.  Subset construction is exponential in the worst case,
 but \texttt{MATCH\_RECOGNIZE} patterns are structurally constrained and
-yield small DFAs in practice.  A memory-adaptive state limit bounds the
-build; if it is ever reached, construction stops and keeps the states
-already produced rather than switching to another matcher.  The
-evaluated patterns never approached this limit.  Crucially, the transition priorities are
+yield small DFAs in practice.  A memory-adaptive state limit and an
+iteration bound guard the build.  If either would be exceeded,
+compilation raises an explicit construction-limit error.  No partial DFA is executed or
+cached.  NFA subsets and epsilon closures are also kept complete rather
+than truncated.  The evaluated patterns never approached this limit.
+Crucially, the transition priorities are
 propagated through the construction, so the DFA inherits the
 \emph{greedy, leftmost-first} preference that SQL:2016 requires;
 unreachable states are then removed and compatible states merged,

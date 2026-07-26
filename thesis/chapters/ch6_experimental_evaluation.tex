@@ -244,8 +244,8 @@ Each worked example runs the same
 \texttt{MATCH\_\allowbreak{}RECOGNIZE} query through the proposed
 engine and both SQL references, and compares outputs, exercised
 clauses, and developer effort.  Beyond these examples, the engine is
-checked by the regression suite (546 passing test cases across 33
-files~\cite{monierashraf2025rowmatch}) and by the 30 benchmark
+checked by the regression suite (553 passing test
+cases~\cite{monierashraf2025rowmatch}) and by the 30 benchmark
 queries of Section~\ref{subsec:eval-cross-system}, where all three
 systems produce identical results.
 
@@ -978,7 +978,10 @@ number of rows~$n$, and each is either paid once or held in check by an
 explicit guard, so none of them appears as a growth curve in the data
 size.  The NFA-to-DFA conversion is $O(2^{m})$ states in the worst
 case, but it is a one-time, cached compile step capped at a
-memory-adaptive state limit of roughly 10{,}000--50{,}000 states.  A \texttt{PERMUTE} of $m$ variables expands to $O(m!)$
+memory-adaptive state limit of roughly 10{,}000--50{,}000 states.
+Reaching this limit now raises an explicit compilation error; the
+engine does not execute or cache a partial DFA.  None of the evaluated
+patterns reached the limit.  A \texttt{PERMUTE} of $m$ variables expands to $O(m!)$
 branches, rejected above eight variables (or an estimated fifty
 thousand branches).  And a \texttt{DEFINE} predicate that depends on
 the match built so far---a running aggregate or \texttt{CLASSIFIER()},

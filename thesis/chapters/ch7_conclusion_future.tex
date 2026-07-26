@@ -218,8 +218,15 @@ The automata design handles ordinary sequences, alternation, grouping,
 bounded repetition, and common quantifiers.  Deeply nested expressions
 with several greedy or unbounded quantifiers can blow up the state and
 transition count, and \texttt{PERMUTE} is especially costly because its
-semantics are factorial---so the engine leans on complexity guards and
-conservative fallback for large cases.  A state-dependent
+semantics are factorial---so the engine uses explicit complexity
+guards.  If a determinized automaton would exceed the configured state
+limit, compilation fails explicitly.  The engine does not execute or
+cache an incomplete DFA.  NFA construction failures are also reported
+instead of being converted to a no-match automaton.  These rules prevent
+silent missed matches, but they remain an availability boundary for very
+large patterns.  A future lazy
+determinizer or complete NFA backend could extend the boundary while
+preserving the supported matching semantics.  A state-dependent
 \texttt{DEFINE} takes the exact-search fallback, the engine's slowest
 path---there both databases are faster
 (Section~\ref{subsec:eval-worst-cases}).
