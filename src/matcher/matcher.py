@@ -10603,20 +10603,32 @@ class EnhancedMatcher:
                     advance = be[np.clip(advance, 0, row_count)]
                 starts_list: List[int] = []
                 starts_append = starts_list.append
-                sp = start_positions
-                sp_len = len(sp) if sp is not None else 0
+                # This scan is pure integer work, but every ``sp[cursor]`` and
+                # ``advance[pos]`` boxes a NumPy scalar, which dominates the
+                # loop.  Reading the (much smaller) candidate-start array as a
+                # Python list and taking ``advance`` through ``.item()`` removes
+                # that boxing.  ``advance`` itself is left as an array: it has
+                # one entry per row, so materialising it would cost more than
+                # the scan saves.  Values and visit order are unchanged.
+                sp_list = (
+                    start_positions.tolist()
+                    if start_positions is not None
+                    else None
+                )
+                sp_len = len(sp_list) if sp_list is not None else 0
+                advance_item = advance.item
                 cursor = 0
                 pos = 0
                 while pos < row_count:
-                    if sp is not None:
-                        while cursor < sp_len and sp[cursor] < pos:
+                    if sp_list is not None:
+                        while cursor < sp_len and sp_list[cursor] < pos:
                             cursor += 1
                         if cursor >= sp_len:
                             break
-                        pos = int(sp[cursor])
+                        pos = sp_list[cursor]
                         cursor += 1
                     starts_append(pos)
-                    pos = int(advance[pos])
+                    pos = advance_item(pos)
                 starts = np.asarray(starts_list, dtype=np.int64)
                 count = len(starts)
                 boundaries = [starts]
@@ -10655,16 +10667,21 @@ class EnhancedMatcher:
         if mode in ("linear", "linear_dp"):
             search = self._linear_search_iterative
             dp_token_ends = linear_dp_ctx[5] if linear_dp_ctx is not None else None
-            sp = start_positions
-            sp_len = len(sp) if sp is not None else 0
+            # Read the candidate starts as a Python list: the cursor walks the
+            # whole array once and NumPy scalar boxing dominates that walk.
+            # Same values, same visit order.
+            sp_list = (
+                start_positions.tolist() if start_positions is not None else None
+            )
+            sp_len = len(sp_list) if sp_list is not None else 0
             cursor = 0
             while start < row_count:
-                if sp is not None:
-                    while cursor < sp_len and sp[cursor] < start:
+                if sp_list is not None:
+                    while cursor < sp_len and sp_list[cursor] < start:
                         cursor += 1
                     if cursor >= sp_len:
                         break
-                    start = int(sp[cursor])
+                    start = sp_list[cursor]
                     cursor += 1
                 if dp_token_ends is not None:
                     segments = self._linear_dp_segments(dp_token_ends, start)
@@ -10716,16 +10733,21 @@ class EnhancedMatcher:
             # Candidate starts are visited through a monotone cursor: the
             # scan position only moves forward, so advancing an index into
             # the sorted candidate array replaces one binary search per gap.
-            sp = start_positions
-            sp_len = len(sp) if sp is not None else 0
+            # Read the candidate starts as a Python list: the cursor walks the
+            # whole array once and NumPy scalar boxing dominates that walk.
+            # Same values, same visit order.
+            sp_list = (
+                start_positions.tolist() if start_positions is not None else None
+            )
+            sp_len = len(sp_list) if sp_list is not None else 0
             cursor = 0
             while start < row_count:
-                if sp is not None:
-                    while cursor < sp_len and sp[cursor] < start:
+                if sp_list is not None:
+                    while cursor < sp_len and sp_list[cursor] < start:
                         cursor += 1
                     if cursor >= sp_len:
                         break
-                    start = int(sp[cursor])
+                    start = sp_list[cursor]
                     cursor += 1
                 state = start_state
                 state_plan = decisions[state]
