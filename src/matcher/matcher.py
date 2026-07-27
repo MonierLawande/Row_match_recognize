@@ -107,29 +107,6 @@ def _row_index_dtype(row_count: int, headroom: int = 0):
     return np.int32 if widest <= _INT32_MAX else np.int64
 
 
-# Sentinels the factorized-comparison path stores alongside real codes: -1 for
-# NULL (pandas' own) and -2 for "literal not present in this column".
-_CODE_SENTINEL_MIN = -2
-
-
-def _narrow_codes(codes, n_uniques: int):
-    """Return ``codes`` in the narrowest integer dtype that still holds it.
-
-    Factorized category codes span ``[-2, n_uniques - 1]``.  Most string columns
-    have a handful of distinct values, so a per-row int64 is 8x wider than it
-    needs to be, and this array is cached for the lifetime of the query.
-    """
-    try:
-        top = int(n_uniques) - 1
-    except (TypeError, ValueError):
-        return codes
-    for dtype in (np.int32,):
-        info = np.iinfo(dtype)
-        if _CODE_SENTINEL_MIN >= info.min and top <= info.max:
-            return codes.astype(dtype, copy=False) if codes.dtype != dtype else codes
-    return codes
-
-
 # Type aliases for better readability
 MatchResult = Dict[str, Any]
 VariableAssignments = Dict[str, List[int]]
@@ -8106,12 +8083,6 @@ class EnhancedMatcher:
             entry = cache.get(col)
             if entry is None or entry[0] is not series:
                 codes, uniques = pd.factorize(series.to_numpy(), use_na_sentinel=True)
-                # ``codes`` is one int64 per row but only ever holds a value in
-                # [-2, len(uniques)-1]: -1 for NULL, -2 for a literal that is
-                # absent from the column.  A category column has a handful of
-                # distinct values, so the codes fit in a byte and this array is
-                # cached for the whole query - 1.8 GB saved at 227.9 M rows.
-                codes = _narrow_codes(codes, len(uniques))
                 positions = {value: idx for idx, value in enumerate(uniques)}
                 entry = (series, codes, positions)
                 cache[col] = entry
