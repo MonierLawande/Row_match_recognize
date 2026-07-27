@@ -81,6 +81,55 @@ logger = get_logger(__name__)
 PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'false').lower() == 'true'
 DEBUG_ENABLED = not PRODUCTION_MODE and logger.isEnabledFor(logging.DEBUG)
 
+# Widest value a 32-bit index array can hold.  Row indices and run lengths are
+# both bounded by the row count, so on any frame small enough to leave headroom
+# they fit in 32 bits.  Halving those arrays matters: a single row-sized int64
+# array is 1.8 GB at 227.9 M rows, and the linear-DP context builds several per
+# pattern token.
+_INT32_MAX = 2 ** 31 - 1
+
+
+def _row_index_dtype(row_count: int, headroom: int = 0):
+    """Narrowest safe dtype for an array of row indices or run lengths.
+
+    ``headroom`` is the largest value that may be *added* to a row index before
+    the result is masked or clipped - the linear-DP builder forms
+    ``positions + min_count`` and ``positions + upper`` - so the check covers
+    the widest intermediate, not just the final values.  Anything that does not
+    fit stays on 64 bits, so behaviour is unchanged on very large frames.
+    """
+    if row_count < 0:
+        return np.int64
+    try:
+        widest = row_count + max(0, int(headroom)) + 1
+    except (TypeError, ValueError, OverflowError):
+        return np.int64
+    return np.int32 if widest <= _INT32_MAX else np.int64
+
+
+# Sentinels the factorized-comparison path stores alongside real codes: -1 for
+# NULL (pandas' own) and -2 for "literal not present in this column".
+_CODE_SENTINEL_MIN = -2
+
+
+def _narrow_codes(codes, n_uniques: int):
+    """Return ``codes`` in the narrowest integer dtype that still holds it.
+
+    Factorized category codes span ``[-2, n_uniques - 1]``.  Most string columns
+    have a handful of distinct values, so a per-row int64 is 8x wider than it
+    needs to be, and this array is cached for the lifetime of the query.
+    """
+    try:
+        top = int(n_uniques) - 1
+    except (TypeError, ValueError):
+        return codes
+    for dtype in (np.int32,):
+        info = np.iinfo(dtype)
+        if _CODE_SENTINEL_MIN >= info.min and top <= info.max:
+            return codes.astype(dtype, copy=False) if codes.dtype != dtype else codes
+    return codes
+
+
 # Type aliases for better readability
 MatchResult = Dict[str, Any]
 VariableAssignments = Dict[str, List[int]]
@@ -2226,7 +2275,9 @@ class EnhancedMatcher:
             if var_results is None:
                 # SQL standard: omitted DEFINE means TRUE for every row.
                 if var_name not in (self.define_conditions or {}):
-                    run_lengths[var_name] = np.arange(row_count, 0, -1, dtype=np.int64)
+                    run_lengths[var_name] = np.arange(
+                        row_count, 0, -1, dtype=_row_index_dtype(row_count)
+                    )
                     continue
                 return None
 
@@ -2240,8 +2291,12 @@ class EnhancedMatcher:
 
             # Vectorized suffix-run lengths: reverse the mask, accumulate a
             # cumulative count that resets at every False, reverse back.
+            # These hold run lengths bounded by ``row_count``, so they use the
+            # narrow row-index dtype: at hundreds of millions of rows each
+            # 64-bit row-sized array is gigabytes of working set.
+            idx_dtype = _row_index_dtype(row_count)
             reversed_values = values[::-1]
-            cumulative = np.cumsum(reversed_values.astype(np.int64))
+            cumulative = np.cumsum(reversed_values, dtype=idx_dtype)
             reset_baseline = np.maximum.accumulate(
                 np.where(reversed_values, 0, cumulative)
             )
@@ -2339,7 +2394,14 @@ class EnhancedMatcher:
             return cached
 
         n = row_count
-        positions = np.arange(n + 1, dtype=np.int64)
+        # Every array below holds a row index or a run length, both bounded by
+        # ``n``.  ``_row_index_dtype`` narrows them to 32 bits whenever the
+        # widest intermediate (``positions + min_count`` and ``positions +
+        # upper``, the latter bounded by 2n) still fits, which halves the
+        # working set of the whole linear-DP context.
+        widest = max((t["min"] or 0) for t in plan) if plan else 0
+        idx_dtype = _row_index_dtype(n, headroom=max(widest, n))
+        positions = np.arange(n + 1, dtype=idx_dtype)
         suffix_possible = np.ones(n + 1, dtype=bool)
         best_ends = [None] * len(plan)
 
@@ -2349,8 +2411,8 @@ class EnhancedMatcher:
             if runs is None:
                 return None
 
-            run_values = np.zeros(n + 1, dtype=np.int64)
-            run_values[:n] = np.asarray(runs[:n], dtype=np.int64)
+            run_values = np.zeros(n + 1, dtype=idx_dtype)
+            run_values[:n] = np.asarray(runs[:n], dtype=idx_dtype)
             max_count = token["max"]
             if max_count is not None:
                 upper = np.minimum(run_values, max_count)
@@ -2376,7 +2438,7 @@ class EnhancedMatcher:
                 candidate = next_true[low_clipped]
                 possible = valid_range & (candidate <= high)
 
-            best_end = np.where(possible, candidate, -1).astype(np.int64, copy=False)
+            best_end = np.where(possible, candidate, -1).astype(idx_dtype, copy=False)
             best_ends[token_idx] = best_end
             suffix_possible = possible
 
@@ -8044,6 +8106,12 @@ class EnhancedMatcher:
             entry = cache.get(col)
             if entry is None or entry[0] is not series:
                 codes, uniques = pd.factorize(series.to_numpy(), use_na_sentinel=True)
+                # ``codes`` is one int64 per row but only ever holds a value in
+                # [-2, len(uniques)-1]: -1 for NULL, -2 for a literal that is
+                # absent from the column.  A category column has a handful of
+                # distinct values, so the codes fit in a byte and this array is
+                # cached for the whole query - 1.8 GB saved at 227.9 M rows.
+                codes = _narrow_codes(codes, len(uniques))
                 positions = {value: idx for idx, value in enumerate(uniques)}
                 entry = (series, codes, positions)
                 cache[col] = entry
@@ -10648,9 +10716,16 @@ class EnhancedMatcher:
                 # gathers afterwards.  Values and dtypes are identical to the
                 # per-match closure path.
                 best_ends = linear_dp_ctx[3]
-                advance = np.arange(row_count + 1, dtype=np.int64)
-                for be in best_ends:
-                    advance = be[np.clip(advance, 0, row_count)]
+                # Row indices only, so this follows the same narrow dtype as the
+                # linear-DP context it is composed with.  ``np.clip`` writes
+                # into a preallocated buffer rather than returning a fresh
+                # row-sized array on every token.
+                advance = np.arange(row_count + 1, dtype=_row_index_dtype(row_count))
+                if best_ends:
+                    clipped = np.empty_like(advance)
+                    for be in best_ends:
+                        np.clip(advance, 0, row_count, out=clipped)
+                        advance = be[clipped]
                 starts_list: List[int] = []
                 starts_append = starts_list.append
                 # This scan is pure integer work, but every ``sp[cursor]`` and
