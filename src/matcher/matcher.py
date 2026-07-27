@@ -10451,6 +10451,56 @@ class EnhancedMatcher:
         self._match_count = match_count
         return []
 
+    # --- candidate-start scan sizing --------------------------------------
+    # Materialising the sorted candidate-start array as a Python list removes
+    # NumPy scalar boxing from the scan loops, but the transient is
+    # proportional to the number of *candidates*, not to the number of
+    # matches.  A high-density pattern makes candidates of ~78% of the rows,
+    # so at the largest stress sizes the list alone would claim tens of
+    # percent of the query's memory budget.
+    #
+    # The cursor only ever moves forward, so the list does not have to exist
+    # in one piece: a sliding window over the same array yields identical
+    # values in identical order while bounding the transient.  Windowing is
+    # chosen only when the full list would not comfortably fit the frozen
+    # budget; otherwise the scan runs the unchanged full-materialisation
+    # path, so a capable host keeps exactly the faster code it had.
+    #
+    # Per entry: 8 B list slot + 32 B CPython int object, rounded to 40 B.
+    _CANDIDATE_ENTRY_BYTES = 40
+    # Largest share of the frozen query budget the full candidate list may
+    # claim.  The same budget must also cover match state, aggregation state
+    # and the materialised result, so the list is capped well below it.
+    _CANDIDATE_FULL_BUDGET_FRACTION = 0.25
+    # Share the sliding window may hold once the full list has been refused.
+    _CANDIDATE_WINDOW_BUDGET_FRACTION = 0.02
+    # Never window below this many entries: a window this small is always
+    # affordable, and smaller ones would refill too often to be useful.
+    _CANDIDATE_WINDOW_MIN = 1 << 16
+
+    def _candidate_window_size(self, count):
+        """Entries the candidate scan may hold at once.
+
+        Returns ``count`` when the whole candidate list fits the frozen query
+        budget's full-materialisation allowance - the fast path, byte for byte
+        the previous behaviour - and otherwise a smaller, budget-derived
+        window.  Evaluated once per query, never inside a candidate loop, and
+        it performs no host, cgroup, CPU or environment detection: the
+        immutable per-query profile is its only input.
+        """
+        if not count:
+            return 0
+        try:
+            budget = self._resource_profile.query_budget_bytes
+        except Exception:  # pragma: no cover - the profile is always present
+            budget = 0
+        entry = self._CANDIDATE_ENTRY_BYTES
+        if count * entry <= budget * self._CANDIDATE_FULL_BUDGET_FRACTION:
+            return count
+        # Fail closed: an unknown or exhausted budget windows at the floor.
+        window = int(budget * self._CANDIDATE_WINDOW_BUDGET_FRACTION) // entry
+        return max(1, min(count, max(window, self._CANDIDATE_WINDOW_MIN)))
+
     def _run_fast_one_row_pass(self, rows, config, measures):
         """Fused enumeration + output for ONE ROW PER MATCH fast paths.
 
@@ -10610,12 +10660,18 @@ class EnhancedMatcher:
                 # that boxing.  ``advance`` itself is left as an array: it has
                 # one entry per row, so materialising it would cost more than
                 # the scan saves.  Values and visit order are unchanged.
-                sp_list = (
-                    start_positions.tolist()
-                    if start_positions is not None
-                    else None
-                )
-                sp_len = len(sp_list) if sp_list is not None else 0
+                sp_arr = start_positions
+                sp_len = 0 if sp_arr is None else len(sp_arr)
+                win_size = self._candidate_window_size(sp_len)
+                if sp_arr is None or win_size >= sp_len:
+                    sp_list = None if sp_arr is None else sp_arr.tolist()
+                    win = None
+                    win_hi = win_n = win_i = 0
+                else:
+                    sp_list = None
+                    win = sp_arr[0:win_size].tolist()
+                    win_hi = win_n = len(win)
+                    win_i = 0
                 advance_item = advance.item
                 cursor = 0
                 pos = 0
@@ -10627,6 +10683,24 @@ class EnhancedMatcher:
                             break
                         pos = sp_list[cursor]
                         cursor += 1
+                    elif sp_arr is not None:
+                        # Windowed scan.  ``win_i`` indexes the window, not the
+                        # whole array, so this loop is the full-list loop with a
+                        # shorter bound; refilling is a rarely taken branch, not
+                        # per-candidate work.
+                        while win_i < win_n and win[win_i] < pos:
+                            win_i += 1
+                        while win_i >= win_n and win_hi < sp_len:
+                            win = sp_arr[win_hi:win_hi + win_size].tolist()
+                            win_n = len(win)
+                            win_hi += win_n
+                            win_i = 0
+                            while win_i < win_n and win[win_i] < pos:
+                                win_i += 1
+                        if win_i >= win_n:
+                            break
+                        pos = win[win_i]
+                        win_i += 1
                     starts_append(pos)
                     pos = advance_item(pos)
                 starts = np.asarray(starts_list, dtype=np.int64)
@@ -10670,10 +10744,18 @@ class EnhancedMatcher:
             # Read the candidate starts as a Python list: the cursor walks the
             # whole array once and NumPy scalar boxing dominates that walk.
             # Same values, same visit order.
-            sp_list = (
-                start_positions.tolist() if start_positions is not None else None
-            )
-            sp_len = len(sp_list) if sp_list is not None else 0
+            sp_arr = start_positions
+            sp_len = 0 if sp_arr is None else len(sp_arr)
+            win_size = self._candidate_window_size(sp_len)
+            if sp_arr is None or win_size >= sp_len:
+                sp_list = None if sp_arr is None else sp_arr.tolist()
+                win = None
+                win_hi = win_n = win_i = 0
+            else:
+                sp_list = None
+                win = sp_arr[0:win_size].tolist()
+                win_hi = win_n = len(win)
+                win_i = 0
             cursor = 0
             while start < row_count:
                 if sp_list is not None:
@@ -10683,6 +10765,24 @@ class EnhancedMatcher:
                         break
                     start = sp_list[cursor]
                     cursor += 1
+                elif sp_arr is not None:
+                    # Windowed scan.  ``win_i`` indexes the window, not the
+                    # whole array, so this loop is the full-list loop with a
+                    # shorter bound; refilling is a rarely taken branch, not
+                    # per-candidate work.
+                    while win_i < win_n and win[win_i] < start:
+                        win_i += 1
+                    while win_i >= win_n and win_hi < sp_len:
+                        win = sp_arr[win_hi:win_hi + win_size].tolist()
+                        win_n = len(win)
+                        win_hi += win_n
+                        win_i = 0
+                        while win_i < win_n and win[win_i] < start:
+                            win_i += 1
+                    if win_i >= win_n:
+                        break
+                    start = win[win_i]
+                    win_i += 1
                 if dp_token_ends is not None:
                     segments = self._linear_dp_segments(dp_token_ends, start)
                 else:
@@ -10736,10 +10836,18 @@ class EnhancedMatcher:
             # Read the candidate starts as a Python list: the cursor walks the
             # whole array once and NumPy scalar boxing dominates that walk.
             # Same values, same visit order.
-            sp_list = (
-                start_positions.tolist() if start_positions is not None else None
-            )
-            sp_len = len(sp_list) if sp_list is not None else 0
+            sp_arr = start_positions
+            sp_len = 0 if sp_arr is None else len(sp_arr)
+            win_size = self._candidate_window_size(sp_len)
+            if sp_arr is None or win_size >= sp_len:
+                sp_list = None if sp_arr is None else sp_arr.tolist()
+                win = None
+                win_hi = win_n = win_i = 0
+            else:
+                sp_list = None
+                win = sp_arr[0:win_size].tolist()
+                win_hi = win_n = len(win)
+                win_i = 0
             cursor = 0
             while start < row_count:
                 if sp_list is not None:
@@ -10749,6 +10857,24 @@ class EnhancedMatcher:
                         break
                     start = sp_list[cursor]
                     cursor += 1
+                elif sp_arr is not None:
+                    # Windowed scan.  ``win_i`` indexes the window, not the
+                    # whole array, so this loop is the full-list loop with a
+                    # shorter bound; refilling is a rarely taken branch, not
+                    # per-candidate work.
+                    while win_i < win_n and win[win_i] < start:
+                        win_i += 1
+                    while win_i >= win_n and win_hi < sp_len:
+                        win = sp_arr[win_hi:win_hi + win_size].tolist()
+                        win_n = len(win)
+                        win_hi += win_n
+                        win_i = 0
+                        while win_i < win_n and win[win_i] < start:
+                            win_i += 1
+                    if win_i >= win_n:
+                        break
+                    start = win[win_i]
+                    win_i += 1
                 state = start_state
                 state_plan = decisions[state]
                 idx = start
