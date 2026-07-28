@@ -129,6 +129,43 @@ def test_missing_proc_filesystem_is_survivable():
     assert probe.cpu_snapshot().effective_cpus == 4
 
 
+def test_non_linux_platform_falls_back_to_portable_host_providers():
+    """Windows/macOS have no Linux procfs or cgroup hierarchy."""
+    def absent_reader(path):
+        raise FileNotFoundError(path)
+
+    probe = SystemResourceProbe(
+        host_memory_provider=lambda: _FakeMemory(
+            32 * 1024 * MIB,
+            20 * 1024 * MIB,
+        ),
+        host_cpu_provider=lambda: 8,
+        affinity_provider=lambda: None,
+        text_reader=absent_reader,
+        enable_cgroup_probe=False,
+    )
+
+    memory = probe.memory_snapshot()
+    cpu = probe.cpu_snapshot()
+    assert memory.source == 'host'
+    assert memory.effective_limit_bytes == 32 * 1024 * MIB
+    assert memory.effective_available_bytes == 20 * 1024 * MIB
+    assert cpu.source == 'host'
+    assert cpu.effective_cpus == 8
+
+
+def test_known_cgroup_limit_with_unknown_usage_fails_closed():
+    probe, _ = build_probe({
+        '/sys/fs/cgroup/mygroup/memory.max': str(8 * 1024 * MIB),
+    })
+
+    snapshot = probe.memory_snapshot()
+    assert snapshot.effective_limit_bytes == 8 * 1024 * MIB
+    assert snapshot.effective_available_bytes == 0
+    with pytest.raises(InsufficientExecutionResourcesError):
+        _profile_from(probe).require_query_capacity()
+
+
 def test_cpu_quota_limits_effective_cpus():
     probe, _ = build_probe({'/sys/fs/cgroup/mygroup/cpu.max': '200000 100000'}, cpus=16)
     snapshot = probe.cpu_snapshot()

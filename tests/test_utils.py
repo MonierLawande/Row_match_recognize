@@ -386,7 +386,7 @@ class TestAdaptiveResourceProfile:
         assert cpu.cgroup_quota_cpus == pytest.approx(2.5)
         assert cpu.effective_cpus == 2
 
-    def test_cache_and_query_budgets_scale_without_environment_plateau(self):
+    def test_budgets_scale_down_and_saturate_at_stable_defaults(self):
         small = _resource_profile(0.5, 1)
         medium = _resource_profile(8, 4)
         large = _resource_profile(64, 16)
@@ -396,18 +396,23 @@ class TestAdaptiveResourceProfile:
             small.query_budget_bytes
             < medium.query_budget_bytes
             < large.query_budget_bytes
-            < very_large.query_budget_bytes
         )
+        assert large.query_budget_bytes == very_large.query_budget_bytes
         assert (
             small.cache_budget_bytes
             < medium.cache_budget_bytes
             < large.cache_budget_bytes
-            < very_large.cache_budget_bytes
         )
+        assert large.cache_budget_bytes == very_large.cache_budget_bytes
 
     def test_optional_cache_ceiling_remains_an_administrator_limit(self):
         gib = 1024 ** 3
-        unconstrained = _resource_profile(1024, 64)
+        base = _resource_profile(1024, 64)
+        unconstrained = AdaptiveResourceProfile(
+            memory=base.memory,
+            cpu=base.cpu,
+            cache_hard_max_bytes=None,
+        )
         constrained = AdaptiveResourceProfile(
             memory=unconstrained.memory,
             cpu=unconstrained.cpu,
@@ -610,7 +615,7 @@ class TestAdaptiveResourceProfile:
             < large.performance.cache_size_limit
         )
         assert small.performance.max_workers == 1
-        assert large.performance.max_workers == 16
+        assert large.performance.max_workers == 4
 
     def test_environment_resource_values_are_ceilings_not_expansions(
         self,
@@ -924,6 +929,26 @@ class TestParallelExecutionFailClosed:
             "wait": False,
             "cancel_futures": True,
         }
+
+    def test_executor_shutdown_supports_python_38_signature(self):
+        from src.utils.performance_optimizer import (
+            _shutdown_executor_compat,
+        )
+
+        observed = []
+
+        class LegacyExecutor:
+            def shutdown(self, wait=True, **kwargs):
+                observed.append((wait, kwargs))
+                if "cancel_futures" in kwargs:
+                    raise TypeError("unexpected keyword argument")
+
+        _shutdown_executor_compat(LegacyExecutor())
+
+        assert observed == [
+            (False, {"cancel_futures": True}),
+            (False, {}),
+        ]
 
     def test_uninstalled_generic_executor_fails_explicitly(self):
         from src.utils.performance_optimizer import (

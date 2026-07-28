@@ -1381,8 +1381,8 @@ class TestExponentialProtection:
         assert resolved_states(96) == 96
         assert resolved_states(128) == 128
 
-    def test_default_adaptive_limit_scales_to_large_memory_hosts(self):
-        """The default policy grows on 256 GiB and 1 TiB hosts."""
+    def test_default_adaptive_limit_retains_production_safety_ceiling(self):
+        """Large hosts do not silently raise the structural safety ceiling."""
         policy = DFAAdaptiveMemoryPolicy()
 
         def resolved_states(memory_gib):
@@ -1400,13 +1400,11 @@ class TestExponentialProtection:
         states_1_tib = resolved_states(1024)
         states_8_tib = resolved_states(8 * 1024)
 
-        assert (
-            states_32_gib
-            < states_256_gib
-            < states_1_tib
-            < states_8_tib
-        )
-        assert policy.hard_max_states is None
+        assert states_32_gib == 50_000
+        assert states_256_gib == 50_000
+        assert states_1_tib == 50_000
+        assert states_8_tib == 50_000
+        assert policy.hard_max_states == 50_000
 
     def test_administrator_can_add_a_dfa_state_ceiling(self):
         """An optional deployment ceiling intersects the memory-derived cap."""
@@ -1548,8 +1546,8 @@ class TestExponentialProtection:
         ):
             DFABuilder(nfa, memory_probe=FailingProbe())
 
-    def test_adaptive_iteration_limit_scales_with_state_budget(self):
-        """Large-memory state budgets are not blocked by the old 100K guard."""
+    def test_default_iteration_limit_respects_stable_state_ceiling(self):
+        """Large-memory hosts retain the tested default construction bounds."""
         nfa = NFABuilder().build(tokenize_pattern("A B"), {}, {})
         gib = 1024 ** 3
         probe = SystemMemoryProbe(
@@ -1563,7 +1561,7 @@ class TestExponentialProtection:
         )
         builder = DFABuilder(nfa, memory_probe=probe)
 
-        assert builder.MAX_DFA_STATES > 100_000
+        assert builder.MAX_DFA_STATES == 50_000
         assert builder.MAX_ITERATIONS >= builder.MAX_DFA_STATES
         assert (
             builder.metadata['construction_limits']['mode']
