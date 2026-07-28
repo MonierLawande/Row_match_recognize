@@ -9,7 +9,418 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.executor.match_recognize import match_recognize
+from src.executor.match_recognize import (
+    DataFrameRowAccessor,
+    _create_dataframe_with_preserved_types,
+    _derive_output_source_columns,
+    _parse_query_cached,
+    match_recognize,
+)
+
+
+def test_lazy_row_output_copy_does_not_fill_source_cache():
+    """Projection owns its row copy and must not retain a second dictionary."""
+    frame = pd.DataFrame(
+        {
+            "id": [1, 2],
+            "flag": [True, False],
+            "value": [10, 20],
+        }
+    )
+    rows = DataFrameRowAccessor(frame)
+
+    projected = rows.copy_row(1)
+
+    assert projected == {"id": 2, "flag": False, "value": 20}
+    assert rows._row_cache == {}
+    projected["value"] = 99
+    assert rows.get_value(1, "value") == 20
+
+    assert rows[1]["value"] == 20
+    assert list(rows._row_cache) == [1]
+
+
+def test_result_materialization_preserves_pandas_types_and_record_order():
+    """Output construction must not require a duplicate intermediate frame."""
+    records = [
+        {
+            "ordered_second": 1,
+            "ordered_first": True,
+            "timestamp": pd.Timestamp("2024-01-01", tz="UTC"),
+            "nullable": pd.NA,
+        },
+        {
+            "ordered_second": 2,
+            "ordered_first": False,
+            "timestamp": pd.Timestamp("2024-01-02", tz="UTC"),
+            "nullable": "value",
+        },
+    ]
+
+    actual = _create_dataframe_with_preserved_types(records)
+    expected = pd.DataFrame.from_records(records)
+
+    pd.testing.assert_frame_equal(actual, expected)
+    assert list(actual.columns) == list(records[0])
+
+
+def test_output_source_projection_plans_only_direct_columns():
+    ast = _parse_query_cached(
+        """
+        SELECT m.id AS row_id, label
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES CLASSIFIER() AS label
+            ALL ROWS PER MATCH
+            PATTERN (A)
+            DEFINE A AS A.kind = 'A'
+        )
+        ORDER BY row_id
+        """
+    )
+
+    assert _derive_output_source_columns(
+        ast,
+        ["id", "kind", "unused"],
+        {"label": "CLASSIFIER()"},
+    ) == ("id",)
+
+
+@pytest.mark.parametrize(
+    "select_text",
+    [
+        "*",
+        "m.*",
+        "CAST(id AS VARCHAR) AS text_id",
+        "id + 1 AS next_id",
+        "missing",
+    ],
+)
+def test_output_source_projection_falls_back_for_ambiguous_expressions(
+    select_text,
+):
+    ast = _parse_query_cached(
+        f"""
+        SELECT {select_text}
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES CLASSIFIER() AS label
+            ALL ROWS PER MATCH
+            PATTERN (A)
+            DEFINE A AS A.kind = 'A'
+        ) AS m
+        """
+    )
+
+    assert _derive_output_source_columns(
+        ast,
+        ["id", "kind", "unused"],
+        {"label": "CLASSIFIER()"},
+    ) is None
+
+
+def test_output_source_projection_falls_back_for_name_collisions_and_duplicates():
+    ast = _parse_query_cached(
+        """
+        SELECT label
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES CLASSIFIER() AS label
+            ALL ROWS PER MATCH
+            PATTERN (A)
+            DEFINE A AS A.kind = 'A'
+        ) AS m
+        """
+    )
+
+    assert _derive_output_source_columns(
+        ast,
+        ["id", "kind", "label"],
+        {"label": "CLASSIFIER()"},
+    ) is None
+    assert _derive_output_source_columns(
+        ast,
+        ["id", "id", "kind"],
+        {"label": "CLASSIFIER()"},
+    ) is None
+
+    repeated_expression_ast = _parse_query_cached(
+        """
+        SELECT id AS id_measure
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES id AS id_measure
+            ALL ROWS PER MATCH
+            PATTERN (A)
+            DEFINE A AS A.kind = 'A'
+        ) AS m
+        """
+    )
+    assert _derive_output_source_columns(
+        repeated_expression_ast,
+        ["id", "kind"],
+        {"id_measure": "id"},
+    ) is None
+
+
+def test_output_source_projection_rejects_unselected_outer_sort_key():
+    ast = _parse_query_cached(
+        """
+        SELECT label
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES CLASSIFIER() AS label
+            ALL ROWS PER MATCH
+            PATTERN (A)
+            DEFINE A AS A.kind = 'A'
+        )
+        ORDER BY id
+        """
+    )
+
+    assert _derive_output_source_columns(
+        ast,
+        ["id", "kind", "unused"],
+        {"label": "CLASSIFIER()"},
+    ) is None
+
+
+def test_selective_all_rows_does_not_gather_unselected_source_columns(
+    monkeypatch,
+):
+    frame = pd.DataFrame(
+        {
+            "id": range(100),
+            "kind": ["A", "B"] * 50,
+            **{
+                f"unused_{index}": [float(index)] * 100
+                for index in range(12)
+            },
+        }
+    )
+    query = """
+        SELECT id, label
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES CLASSIFIER() AS label
+            ALL ROWS PER MATCH
+            PATTERN ((A B)+)
+            DEFINE
+                A AS A.kind = 'A',
+                B AS B.kind = 'B'
+        ) AS m
+    """
+
+    def unexpected_all_column_gather(_self):
+        raise AssertionError("selective output requested every source column")
+
+    monkeypatch.setattr(
+        DataFrameRowAccessor,
+        "column_names",
+        unexpected_all_column_gather,
+    )
+    result = match_recognize(query, frame)
+
+    assert list(result.columns) == ["id", "label"]
+    assert result["id"].tolist() == list(range(100))
+    assert result["label"].tolist() == ["A", "B"] * 50
+
+
+def test_wildcard_all_rows_keeps_all_source_columns(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "id": range(6),
+            "kind": ["A", "B"] * 3,
+            "unused": range(10, 16),
+        }
+    )
+    query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES CLASSIFIER() AS label
+            ALL ROWS PER MATCH
+            PATTERN ((A B)+)
+            DEFINE
+                A AS A.kind = 'A',
+                B AS B.kind = 'B'
+        ) AS m
+    """
+    original = DataFrameRowAccessor.column_names
+    calls = []
+
+    def tracked_all_column_gather(self):
+        calls.append(True)
+        return original(self)
+
+    monkeypatch.setattr(
+        DataFrameRowAccessor,
+        "column_names",
+        tracked_all_column_gather,
+    )
+    result = match_recognize(query, frame)
+
+    assert calls
+    assert {"id", "kind", "unused", "label"}.issubset(result.columns)
+
+
+def test_generic_compiled_all_rows_prunes_unused_source_columns(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "id": range(8),
+            "kind": ["A"] * 8,
+            "value": range(1, 9),
+            "unused": range(100, 108),
+        }
+    )
+    query = """
+        SELECT id, running_total
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES RUNNING SUM(A.value) AS running_total
+            ALL ROWS PER MATCH
+            PATTERN (A+)
+            DEFINE A AS A.kind = 'A'
+        ) AS m
+    """
+
+    def unexpected_all_column_gather(_self):
+        raise AssertionError("generic output requested every source column")
+
+    monkeypatch.setattr(
+        DataFrameRowAccessor,
+        "column_names",
+        unexpected_all_column_gather,
+    )
+    result = match_recognize(query, frame)
+
+    assert list(result.columns) == ["id", "running_total"]
+    assert result["id"].tolist() == list(range(8))
+    assert result["running_total"].tolist() == [
+        1,
+        3,
+        6,
+        10,
+        15,
+        21,
+        28,
+        36,
+    ]
+
+
+def test_projection_plan_is_query_local_across_automata_cache_hits(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "id": range(6),
+            "kind": ["A", "B"] * 3,
+            "unused": range(10, 16),
+        }
+    )
+    query_template = """
+        SELECT {projection}
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES CLASSIFIER() AS label
+            ALL ROWS PER MATCH
+            PATTERN ((A B)+)
+            DEFINE
+                A AS A.kind = 'A',
+                B AS B.kind = 'B'
+        ) AS m
+    """
+    original = DataFrameRowAccessor.column_names
+    calls = []
+
+    def tracked_all_column_gather(self):
+        calls.append(True)
+        return original(self)
+
+    monkeypatch.setattr(
+        DataFrameRowAccessor,
+        "column_names",
+        tracked_all_column_gather,
+    )
+    narrow_first = match_recognize(
+        query_template.format(projection="id, label"),
+        frame,
+    )
+    wildcard = match_recognize(
+        query_template.format(projection="*"),
+        frame,
+    )
+    narrow_cached = match_recognize(
+        query_template.format(projection="id, label"),
+        frame,
+    )
+
+    pd.testing.assert_frame_equal(narrow_first, narrow_cached)
+    assert list(narrow_first.columns) == ["id", "label"]
+    assert "unused" in wildcard.columns
+    assert len(calls) == 1
+
+
+def test_with_unmatched_streams_selective_rows_and_preserves_partitions(
+    monkeypatch,
+):
+    frame = pd.DataFrame(
+        {
+            "id": [2, 3, 1, 1, 2, 3],
+            "part": ["B", "A", "A", "B", "A", "B"],
+            "kind": ["B", "X", "A", "A", "B", "X"],
+            "unused": [20, 30, 10, 10, 20, 30],
+        }
+    )
+    query = """
+        SELECT part, id, label
+        FROM data
+        MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES CLASSIFIER() AS label
+            ALL ROWS PER MATCH WITH UNMATCHED ROWS
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (A B)
+            DEFINE
+                A AS A.kind = 'A',
+                B AS B.kind = 'B'
+        ) AS m
+    """
+    original_copy_row = DataFrameRowAccessor.copy_row
+    requested_columns = []
+
+    def tracked_copy_row(self, index, columns=None):
+        requested_columns.append(columns)
+        return original_copy_row(self, index, columns)
+
+    monkeypatch.setattr(
+        DataFrameRowAccessor,
+        "copy_row",
+        tracked_copy_row,
+    )
+    result = match_recognize(query, frame)
+
+    assert list(result.columns) == ["part", "id", "label"]
+    assert result["part"].tolist() == ["A", "A", "A", "B", "B", "B"]
+    assert result["id"].tolist() == [1, 2, 3, 1, 2, 3]
+    assert result["label"].tolist()[:2] == ["A", "B"]
+    assert pd.isna(result["label"].iloc[2])
+    assert result["label"].tolist()[3:5] == ["A", "B"]
+    assert pd.isna(result["label"].iloc[5])
+    assert requested_columns
+    assert all(
+        columns is not None and "unused" not in columns
+        for columns in requested_columns
+    )
+
 
 class TestOutputLayout:
     """Test output column layout and ordering."""

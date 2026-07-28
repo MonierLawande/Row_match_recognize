@@ -62,6 +62,17 @@ class TestExponentialProtection:
             'value': [1] * 20 + [2]  # 20 ones followed by a 2
         })
 
+    def test_direct_matcher_initializes_metadata_without_pattern_text(self):
+        """Direct construction must not depend on optional diagnostic text."""
+        nfa = NFABuilder().build(tokenize_pattern("A"), {}, {})
+        dfa = DFABuilder(nfa).build()
+
+        matcher = EnhancedMatcher(dfa)
+
+        assert matcher.transition_index
+        assert matcher._anchor_metadata["has_start_anchor"] is False
+        assert matcher._anchor_metadata["has_end_anchor"] is False
+
     def test_potentially_exponential_pattern_basic(self):
         """Test basic potentially exponential pattern - should complete quickly."""
         df = self.exponential_data
@@ -986,7 +997,7 @@ class TestExponentialProtection:
         )
 
     def test_nfa_optional_resources_follow_shared_profile(self):
-        """NFA caches and pools disable at zero and grow with safe capacity."""
+        """Optional NFA caches follow the profile; graph states are owned."""
         disabled_profile = self._cache_resource_profile(0)
         disabled_builder = NFABuilder(
             resource_profile=disabled_profile,
@@ -998,8 +1009,8 @@ class TestExponentialProtection:
         )
 
         assert disabled_nfa._epsilon_cache_limit == 0
-        assert disabled_builder._state_pool._capacity_limit == 0
-        assert disabled_builder._transition_pool._capacity_limit == 0
+        assert not hasattr(disabled_builder, "_state_pool")
+        assert not hasattr(disabled_builder, "_transition_pool")
         disabled_nfa.epsilon_closure([disabled_nfa.start])
         assert disabled_nfa._epsilon_cache == {}
 
@@ -1012,8 +1023,25 @@ class TestExponentialProtection:
         )
 
         assert larger_nfa._epsilon_cache_limit > 0
-        assert larger_builder._state_pool._capacity_limit > 0
-        assert larger_builder._transition_pool._capacity_limit > 0
+        assert not hasattr(larger_builder, "_state_pool")
+        assert not hasattr(larger_builder, "_transition_pool")
+
+    def test_nfa_builder_cleanup_does_not_mutate_returned_graph(self):
+        """A live automaton must remain valid after its builder is released."""
+        builder = NFABuilder()
+        nfa = builder.build(
+            tokenize_pattern("OWNERSHIP_A OWNERSHIP_B"),
+            {},
+            {},
+        )
+        state_count = len(nfa.states)
+
+        builder.cleanup()
+
+        assert builder.states == []
+        assert len(nfa.states) == state_count
+        assert nfa.states[nfa.accept].is_accept
+        assert nfa.validate()
 
     def test_resource_profile_flows_through_all_automata_layers(self):
         """Low-level callers inherit one profile without re-probing the host."""
@@ -1124,6 +1152,146 @@ class TestExponentialProtection:
         assert error.value.reason == "greedy_dfa_state_limit"
         assert error.value.start_idx == 0
         assert error.value.explored_steps == error.value.step_budget
+
+    def test_greedy_candidate_score_matches_legacy_order_for_normal_priorities(
+        self,
+    ):
+        """The linear key preserves length/count/leftmost-priority ordering."""
+        matcher = self._build_limit_test_matcher(
+            "(A | B | C)+",
+            ["A", "B", "C"],
+        )
+        candidates = [
+            {
+                "start": 0,
+                "end": 3,
+                "variables": {"A": [0, 2], "B": [1, 3], "C": []},
+            },
+            {
+                "start": 0,
+                "end": 3,
+                "variables": {"A": [0, 3], "B": [1, 2], "C": []},
+            },
+            {
+                "start": 0,
+                "end": 3,
+                "variables": {"A": [1, 2], "B": [0, 3], "C": []},
+            },
+            {
+                "start": 0,
+                "end": 4,
+                "variables": {"A": [0, 2, 4], "B": [1, 3], "C": []},
+            },
+        ]
+
+        def legacy_score(match):
+            length = match["end"] - match["start"] + 1
+            assigned_count = sum(
+                len(indices)
+                for indices in match["variables"].values()
+            )
+            priority = 0
+            for row_idx in range(match["start"], match["end"] + 1):
+                for variable, indices in match["variables"].items():
+                    if row_idx in indices:
+                        priority = (
+                            priority * 1000
+                            + matcher.alternation_order.get(variable, 0)
+                        )
+                        break
+            return length, assigned_count, -priority
+
+        expected_order = sorted(
+            range(len(candidates)),
+            key=lambda index: legacy_score(candidates[index]),
+        )
+        actual_order = sorted(
+            range(len(candidates)),
+            key=lambda index: matcher._match_candidate_score(
+                candidates[index]
+            ),
+        )
+
+        assert actual_order == expected_order
+
+    def test_greedy_candidate_score_uses_exact_lexicographic_priority(self):
+        """Priority comparison is not corrupted by a base-1000 carry."""
+        matcher = self._build_limit_test_matcher(
+            "(A | B | C)+",
+            ["A", "B", "C"],
+        )
+        matcher.alternation_order = {"A": 1, "B": 0, "C": 1001}
+        starts_with_a = {
+            "start": 0,
+            "end": 1,
+            "variables": {"A": [0], "B": [1], "C": []},
+        }
+        starts_with_b = {
+            "start": 0,
+            "end": 1,
+            "variables": {"A": [], "B": [0], "C": [1]},
+        }
+
+        assert (
+            matcher._match_candidate_score(starts_with_b)
+            > matcher._match_candidate_score(starts_with_a)
+        )
+
+    def test_greedy_candidate_score_keeps_first_assignment_on_overlap(self):
+        """Defensive overlapping assignments retain mapping-order semantics."""
+        matcher = self._build_limit_test_matcher(
+            "(A | B)+",
+            ["A", "B"],
+        )
+        overlap = {
+            "start": 0,
+            "end": 1,
+            "variables": {"B": [0, 1], "A": [0, 1]},
+        }
+
+        length, assigned_count, priority_key = (
+            matcher._match_candidate_score(overlap)
+        )
+
+        assert length == 2
+        assert assigned_count == 4
+        assert priority_key == (-matcher.alternation_order["B"],) * 2
+
+    def test_greedy_search_defers_tiebreak_for_distinct_lengths(
+        self,
+        monkeypatch,
+    ):
+        """A deterministic growing match does not build secondary keys."""
+        matcher = self._build_limit_test_matcher(
+            "A B+",
+            ["A", "B"],
+        )
+        rows = [{"value": 1} for _ in range(32)]
+        context = RowContext(
+            rows=rows,
+            defined_variables=["A", "B"],
+        )
+        calls = 0
+
+        def record_tiebreak(match):
+            nonlocal calls
+            calls += 1
+            return 0, ()
+
+        monkeypatch.setattr(
+            matcher,
+            "_match_candidate_tiebreak_key",
+            record_tiebreak,
+        )
+
+        result = matcher._find_single_match_greedy_dfa_search(
+            rows,
+            0,
+            context,
+        )
+
+        assert result["end"] == len(rows) - 1
+        assert calls == 0
 
     @pytest.mark.parametrize(
         ("max_iterations", "max_depth", "expected_reason"),

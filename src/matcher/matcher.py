@@ -1203,7 +1203,8 @@ class EnhancedMatcher:
                  define_conditions: Optional[Dict[str, str]] = None,
                  partition_columns: Optional[List[str]] = None,
                  order_columns: Optional[List[str]] = None,
-                 resource_profile: Optional[AdaptiveResourceProfile] = None):
+                 resource_profile: Optional[AdaptiveResourceProfile] = None,
+                 output_source_columns: Optional[Tuple[str, ...]] = None):
         """
         Initialize the enhanced matcher with comprehensive validation and configuration.
         
@@ -1219,6 +1220,8 @@ class EnhancedMatcher:
             define_conditions: Actual DEFINE condition expressions
             partition_columns: List of partition column names from PARTITION BY clause
             order_columns: List of order column names from ORDER BY clause
+            output_source_columns: Source columns required by the final
+                projection, or ``None`` to retain every source column
             
         Raises:
             ValueError: If DFA is invalid or configuration is inconsistent
@@ -1238,6 +1241,11 @@ class EnhancedMatcher:
             dfa, measures, measure_semantics, exclusion_ranges, after_match_skip,
             subsets, original_pattern, defined_variables, define_conditions,
             partition_columns, order_columns
+        )
+        self._output_source_columns = (
+            tuple(output_source_columns)
+            if output_source_columns is not None
+            else None
         )
         
         # Analyze pattern for special features like empty alternations
@@ -1666,8 +1674,9 @@ class EnhancedMatcher:
             # Fallback to legacy behavior
             self.metadata = {}
             # Use exclusion handler to get excluded variables
-            if self.exclusion_handler:
-                self.excluded_vars = self.exclusion_handler.excluded_vars
+            exclusion_handler = getattr(self, "exclusion_handler", None)
+            if exclusion_handler:
+                self.excluded_vars = exclusion_handler.excluded_vars
             else:
                 self.excluded_vars = set()
         
@@ -1964,6 +1973,27 @@ class EnhancedMatcher:
     def _copy_assignments(self, assignments: Dict[str, List[int]]) -> Dict[str, List[int]]:
         """Copy variable assignments without sharing mutable row-index lists."""
         return {var: indices[:] for var, indices in assignments.items()}
+
+    @staticmethod
+    def _copy_output_row(
+        rows,
+        row_index: int,
+        source_columns=None,
+    ) -> Dict[str, Any]:
+        """Copy one source row without populating an accessor read cache."""
+        copy_row = getattr(rows, "copy_row", None)
+        if callable(copy_row):
+            if source_columns is None:
+                return copy_row(row_index)
+            return copy_row(row_index, source_columns)
+        row = rows[row_index]
+        if source_columns is None:
+            return dict(row)
+        return {
+            column: row[column]
+            for column in source_columns
+            if column in row
+        }
 
     def _row_available_for_assignment(
         self,
@@ -3129,7 +3159,49 @@ class EnhancedMatcher:
         return any(func in self._define_text_upper
                    for func in ["FIRST(", "LAST(", "PREV(", "NEXT(", "CLASSIFIER("])
 
-    def _match_candidate_score(self, match: Dict[str, Any]) -> Tuple[int, int, int]:
+    def _match_candidate_tiebreak_key(
+        self,
+        match: Dict[str, Any],
+    ) -> Tuple[int, Tuple[int, ...]]:
+        """Return the assignment-count and variable-priority tie-break key.
+
+        A candidate normally assigns each consumed row to one pattern
+        variable.  Defensive/direct callers can provide overlapping
+        assignments, however, so retain the established rule that the first
+        variable in assignment-map order owns that row for priority purposes.
+
+        The previous implementation looked up every consumed row in every
+        assignment list and encoded the resulting sequence in one base-1000
+        integer.  That made long matches quadratic and produced integers whose
+        size grew with the match.  An ordinary tuple is the exact
+        lexicographic representation of the same left-to-right priority rule:
+        negating each priority lets Python's normal "higher key wins"
+        comparison prefer lower variable priorities.  Tuple comparison also
+        stops at the first difference instead of constructing a giant integer.
+        """
+        variables = match.get("variables", {})
+        assigned_count = sum(len(indices) for indices in variables.values())
+        start = match["start"]
+        end = match["end"]
+
+        first_priority_by_row: Dict[int, int] = {}
+        for variable, indices in variables.items():
+            priority = self.alternation_order.get(variable, 0)
+            for row_idx in indices:
+                if start <= row_idx <= end:
+                    first_priority_by_row.setdefault(row_idx, priority)
+
+        priority_key = tuple(
+            -first_priority_by_row[row_idx]
+            for row_idx in range(start, end + 1)
+            if row_idx in first_priority_by_row
+        )
+        return assigned_count, priority_key
+
+    def _match_candidate_score(
+        self,
+        match: Dict[str, Any],
+    ) -> Tuple[int, int, Tuple[int, ...]]:
         """
         Score candidate matches for greedy quantified semantics.
 
@@ -3138,20 +3210,8 @@ class EnhancedMatcher:
         priority from the pattern/alternation order.
         """
         length = match["end"] - match["start"] + 1
-        assigned_count = sum(len(indices) for indices in match.get("variables", {}).values())
-
-        priority_score = 0
-        for row_idx in range(match["start"], match["end"] + 1):
-            matched_var = None
-            for var, indices in match.get("variables", {}).items():
-                if row_idx in indices:
-                    matched_var = var
-                    break
-            if matched_var is not None:
-                priority_score = priority_score * 1000 + self.alternation_order.get(matched_var, 0)
-
-        # Lower priority_score should win, so negate it.
-        return (length, assigned_count, -priority_score)
+        assigned_count, priority_key = self._match_candidate_tiebreak_key(match)
+        return length, assigned_count, priority_key
 
     def _build_partition_backtracking_budget(
         self,
@@ -3312,15 +3372,22 @@ class EnhancedMatcher:
         accepting candidate reachable from the same start row and returns the
         best candidate according to greedy row-pattern semantics.
         """
-        best_match: Optional[Dict[str, Any]] = None
-        best_score: Optional[Tuple[int, int, int]] = None
+        best_state: Optional[int] = None
+        best_assignments: Optional[Dict[str, List[int]]] = None
+        best_excluded_rows: Optional[List[int]] = None
+        best_end: Optional[int] = None
+        best_length: Optional[int] = None
+        best_tiebreak: Optional[Tuple[int, Tuple[int, ...]]] = None
 
         search_budget = self._partition_backtracking_budget_for(len(rows))
         max_states = search_budget.greedy_dfa_step_budget
         explored = 0
 
-        stack: List[Tuple[int, int, Dict[str, List[int]], Set[int], List[int]]] = [
-            (self.start_state, start_idx, {}, set(), [])
+        # Every consuming transition advances ``row_idx`` by one.  A path
+        # therefore cannot assign the same input row twice, so a copied
+        # occupied-row set would only duplicate the forward-search invariant.
+        stack: List[Tuple[int, int, Dict[str, List[int]], List[int]]] = [
+            (self.start_state, start_idx, {}, [])
         ]
 
         while stack:
@@ -3332,38 +3399,83 @@ class EnhancedMatcher:
                     reason="greedy_dfa_state_limit",
                 )
 
-            state, row_idx, assignments, assigned_row_indices, excluded_rows = stack.pop()
+            state, row_idx, assignments, excluded_rows = stack.pop()
             explored += 1
 
             if self.dfa.states[state].is_accept:
-                all_indices = [idx for indices in assignments.values() for idx in indices]
-                if all_indices:
-                    candidate_end = max(all_indices)
+                # Every DFA transition consumes and assigns the current row,
+                # then advances ``row_idx`` by one.  Therefore a non-empty
+                # candidate from this fixed search start is exactly
+                # ``[start_idx, row_idx)``.  Avoid flattening all assignment
+                # lists and taking min/max at every accepting state.
+                if row_idx > start_idx:
+                    candidate_end = row_idx - 1
                     if self._check_anchors(state, candidate_end, len(rows), "end"):
-                        candidate = {
-                            "start": min(all_indices),
-                            "end": candidate_end,
-                            "variables": self._copy_assignments(assignments),
-                            "state": state,
-                            "is_empty": False,
-                            "excluded_vars": self.excluded_vars.copy() if hasattr(self, "excluded_vars") else set(),
-                            "excluded_rows": excluded_rows[:],
-                            "has_empty_alternation": self.has_empty_alternation,
-                            "greedy_dfa_search": True,
-                        }
-                        score = self._match_candidate_score(candidate)
-                        if not prefer_longest:
-                            score = (-score[0], score[1], score[2])
-                        if best_score is None or score > best_score:
-                            best_match = candidate
-                            best_score = score
+                        candidate_length = row_idx - start_idx
+                        primary_is_better = (
+                            best_length is None
+                            or (
+                                candidate_length > best_length
+                                if prefer_longest
+                                else candidate_length < best_length
+                            )
+                        )
+                        if primary_is_better:
+                            # Search states use copy-on-branch assignments.
+                            # Keep the winning immutable snapshot by reference
+                            # and materialize the public result only once after
+                            # exploration finishes.
+                            best_state = state
+                            best_assignments = assignments
+                            best_excluded_rows = excluded_rows
+                            best_end = candidate_end
+                            best_length = candidate_length
+                            # Most accepting candidates have a distinct
+                            # length.  Defer the linear secondary score until
+                            # an actual primary-key tie occurs.
+                            best_tiebreak = None
+                        elif candidate_length == best_length:
+                            candidate_view = {
+                                "start": start_idx,
+                                "end": candidate_end,
+                                "variables": assignments,
+                            }
+                            candidate_tiebreak = (
+                                self._match_candidate_tiebreak_key(
+                                    candidate_view
+                                )
+                            )
+                            if best_tiebreak is None:
+                                best_view = {
+                                    "start": start_idx,
+                                    "end": best_end,
+                                    "variables": best_assignments,
+                                }
+                                best_tiebreak = (
+                                    self._match_candidate_tiebreak_key(
+                                        best_view
+                                    )
+                                )
+                            if candidate_tiebreak > best_tiebreak:
+                                best_state = state
+                                best_assignments = assignments
+                                best_excluded_rows = excluded_rows
+                                best_end = candidate_end
+                                best_tiebreak = candidate_tiebreak
 
             if row_idx >= len(rows) or state not in self.transition_index:
                 continue
 
-            row = rows[row_idx]
+            # Row-local DEFINE predicates normally read a precomputed boolean
+            # vector.  Materialize a Python row mapping only if a transition
+            # actually falls back to the scalar evaluator; otherwise a large
+            # sequential match would populate the lazy accessor's row cache
+            # without reading the mapping.
+            row = None
             context.rows = rows
-            successors: List[Tuple[int, int, Dict[str, List[int]], Set[int], List[int], str]] = []
+            successors: List[
+                Tuple[int, int, Dict[str, List[int]], List[int], str]
+            ] = []
 
             for transition_tuple in self.transition_index[state]:
                 if len(transition_tuple) == 5:
@@ -3384,20 +3496,30 @@ class EnhancedMatcher:
                     if vectorized_result is not None:
                         if not vectorized_result:
                             continue
-                    elif not condition(row, context):
-                        continue
-
-                    if not self._row_available_for_assignment(var, row_idx, assignments, assigned_row_indices):
-                        continue
+                    else:
+                        if row is None:
+                            row = rows[row_idx]
+                        if not condition(row, context):
+                            continue
 
                     next_assignments = self._copy_assignments(assignments)
                     next_assignments.setdefault(var, [])
 
                     next_assignments[var].append(row_idx)
-                    next_assigned_row_indices = set(assigned_row_indices)
-                    next_assigned_row_indices.add(row_idx)
-                    next_excluded_rows = excluded_rows[:] + ([row_idx] if is_excluded else [])
-                    successors.append((target, row_idx + 1, next_assignments, next_assigned_row_indices, next_excluded_rows, var))
+                    next_excluded_rows = (
+                        excluded_rows + [row_idx]
+                        if is_excluded
+                        else excluded_rows
+                    )
+                    successors.append(
+                        (
+                            target,
+                            row_idx + 1,
+                            next_assignments,
+                            next_excluded_rows,
+                            var,
+                        )
+                    )
                 except PatternSearchLimitError:
                     raise
                 except Exception as exc:
@@ -3413,14 +3535,43 @@ class EnhancedMatcher:
                 key=lambda item: (
                     self.dfa.states[item[0]].is_accept,
                     item[0] != state,
-                    -self.alternation_order.get(item[5], 999),
-                    item[5],
+                    -self.alternation_order.get(item[4], 999),
+                    item[4],
                 )
             )
-            stack.extend((target, next_row, next_assignments, next_assigned_row_indices, next_excluded_rows)
-                         for target, next_row, next_assignments, next_assigned_row_indices, next_excluded_rows, _ in successors)
+            stack.extend(
+                (target, next_row, next_assignments, next_excluded_rows)
+                for (
+                    target,
+                    next_row,
+                    next_assignments,
+                    next_excluded_rows,
+                    _,
+                ) in successors
+            )
 
-        return best_match
+        if best_assignments is None:
+            return None
+
+        return {
+            "start": start_idx,
+            "end": best_end,
+            "variables": self._copy_assignments(best_assignments),
+            "state": best_state,
+            "is_empty": False,
+            "excluded_vars": (
+                self.excluded_vars.copy()
+                if hasattr(self, "excluded_vars")
+                else set()
+            ),
+            "excluded_rows": (
+                best_excluded_rows[:]
+                if best_excluded_rows is not None
+                else []
+            ),
+            "has_empty_alternation": self.has_empty_alternation,
+            "greedy_dfa_search": True,
+        }
     
     def _find_single_match_generalized_quantifiers(self, rows: List[Dict[str, Any]], start_idx: int, 
                                                   context: RowContext, config: Any) -> Optional[Dict[str, Any]]:
@@ -7471,9 +7622,10 @@ class EnhancedMatcher:
         # Lightweight pattern analysis
         self._analyze_pattern_characteristics()
         
-        # Skip expensive metadata extraction in simple cases
-        if self.original_pattern and len(self.original_pattern) < 50:
-            self._extract_dfa_metadata()
+        # Transition construction always consumes anchor/exclusion metadata.
+        # Initializing it only for short pattern text left valid larger
+        # patterns with a partially initialized matcher.
+        self._extract_dfa_metadata()
         
         # Fast alternation order parsing
         self.alternation_order = self._parse_alternation_order(self.original_pattern) if self.original_pattern else {}
@@ -8467,7 +8619,6 @@ class EnhancedMatcher:
         results = []
         match_number = 1
         start_idx = 0
-        processed_indices = set()  # Track processed indices to prevent infinite loops
         self._matches = []  # Reset matches
         self._match_count = 0
         # Executor-owned lazy ONE ROW scans materialize each output row before
@@ -8488,11 +8639,38 @@ class EnhancedMatcher:
             self._prepare_all_rows_measure_plans(measures)
             if all_rows else None
         )
-        unmatched_indices = set(range(len(rows))) if include_unmatched else None
         track_processed_indices = (
             include_unmatched
             or bool(config and config.skip_mode != SkipMode.PAST_LAST_ROW)
         )
+        # Dense row positions are represented by one byte each.  Python sets
+        # retain a boxed integer plus hash-table capacity per row and made
+        # WITH UNMATCHED ROWS consume several times the input size.
+        matched_index_mask = bytearray(len(rows)) if include_unmatched else None
+        processed_indices = (
+            bytearray(len(rows)) if track_processed_indices else None
+        )
+
+        def mark_assigned_indices(match):
+            variables = match.get("variables") or {}
+            if not variables:
+                return
+            row_count = len(rows)
+            for indices in variables.values():
+                for idx in indices:
+                    if 0 <= idx < row_count:
+                        if matched_index_mask is not None:
+                            matched_index_mask[idx] = 1
+                        if processed_indices is not None:
+                            processed_indices[idx] = 1
+
+        def mark_processed(indices):
+            if processed_indices is None:
+                return
+            row_count = len(rows)
+            for idx in indices:
+                if 0 <= idx < row_count:
+                    processed_indices[idx] = 1
 
         logger.info(f"Find matches with all_rows={all_rows}, show_empty={show_empty}, include_unmatched={include_unmatched}")
 
@@ -8625,6 +8803,7 @@ class EnhancedMatcher:
                 and not self.has_exclusions
             )
             columnar_all_rows_output = {
+                "source_columns": self._output_source_columns,
                 "row_indices": [],
                 "segments": [] if segment_projection else None,
                 "segment_projection": segment_projection,
@@ -8852,7 +9031,11 @@ class EnhancedMatcher:
             # PRODUCTION FIX: Skip already processed indices
             # TO_NEXT_ROW SHOULD allow overlaps - it creates overlapping matches by advancing only 1 position
             # TO_FIRST and TO_LAST also allow overlap behavior for variable-based skipping
-            if track_processed_indices and start_idx in processed_indices and not allow_overlap:
+            if (
+                track_processed_indices
+                and processed_indices[start_idx]
+                and not allow_overlap
+            ):
                 if DEBUG_ENABLED:
                     logger.debug(f"Skipping already processed index {start_idx}")
                 start_idx += 1
@@ -8936,14 +9119,11 @@ class EnhancedMatcher:
                         # unmatched-row output or non-default processed-index
                         # protection.  The default PAST LAST ROW path does not
                         # need a matched-index set.
-                        if (unmatched_indices is not None or track_processed_indices) and match.get("variables"):
-                            matched_indices = set()
-                            for var, indices in match["variables"].items():
-                                matched_indices.update(indices)
-                            if unmatched_indices is not None:
-                                unmatched_indices -= matched_indices
-                            if track_processed_indices:
-                                processed_indices.update(matched_indices)
+                        if (
+                            matched_index_mask is not None
+                            or track_processed_indices
+                        ):
+                            mark_assigned_indices(match)
                         
                         match_number += 1
                     
@@ -9089,18 +9269,12 @@ class EnhancedMatcher:
                 self.timing["process_match"] += time.time() - match_time_start
 
                 # Update unmatched indices efficiently only when tracking is active.
-                if (unmatched_indices is not None or track_processed_indices) and match.get("variables"):
-                    matched_indices = set()
-                    for var, indices in match["variables"].items():
-                        matched_indices.update(indices)
-                    if unmatched_indices is not None:
-                        unmatched_indices -= matched_indices
-                    if track_processed_indices:
-                        processed_indices.update(matched_indices)
+                if matched_index_mask is not None or track_processed_indices:
+                    mark_assigned_indices(match)
                     
                     # Also mark excluded rows as processed
                     if track_processed_indices and match.get("excluded_rows"):
-                        processed_indices.update(match["excluded_rows"])
+                        mark_processed(match["excluded_rows"])
             else:
                 if DEBUG_ENABLED:
                     logger.debug("\nProcessing match with ONE ROW PER MATCH:")
@@ -9115,25 +9289,22 @@ class EnhancedMatcher:
                 )
                 if match_row:
                     results.append(match_row)
-                    if (unmatched_indices is not None or track_processed_indices) and match.get("variables"):
-                        matched_indices = set()
-                        for var, indices in match["variables"].items():
-                            matched_indices.update(indices)
-                        if unmatched_indices is not None:
-                            unmatched_indices -= matched_indices
-                        if track_processed_indices:
-                            processed_indices.update(matched_indices)
+                    if (
+                        matched_index_mask is not None
+                        or track_processed_indices
+                    ):
+                        mark_assigned_indices(match)
                         
                         # Also mark excluded rows as processed
                         if track_processed_indices and match.get("excluded_rows"):
-                            processed_indices.update(match["excluded_rows"])
+                            mark_processed(match["excluded_rows"])
 
             # Update start index based on skip mode
             old_start_idx = start_idx
             if match.get("is_empty", False):
                 # For empty matches, always move to the next position
                 if track_processed_indices:
-                    processed_indices.add(start_idx)
+                    processed_indices[start_idx] = 1
                 start_idx += 1
                 if DEBUG_ENABLED:
                     logger.debug(f"Empty match, advancing from {old_start_idx} to {start_idx}")
@@ -9154,12 +9325,14 @@ class EnhancedMatcher:
                     logger.debug(f"Non-empty match, advancing from {old_start_idx} to {start_idx}")
                 # Mark all indices in the match as processed (except for TO_NEXT_ROW which allows overlaps)
                 if track_processed_indices and not (config and config.skip_mode == SkipMode.TO_NEXT_ROW):
-                    for idx in range(old_start_idx, match["end"] + 1):
-                        processed_indices.add(idx)
+                    left = max(0, old_start_idx)
+                    right = min(len(rows), match["end"] + 1)
+                    if right > left:
+                        processed_indices[left:right] = b'\x01' * (right - left)
                     
                 # Also mark excluded rows as processed
                 if track_processed_indices and match.get("excluded_rows"):
-                    processed_indices.update(match["excluded_rows"])
+                    mark_processed(match["excluded_rows"])
                     logger.debug(f"Marked excluded rows as processed: {match['excluded_rows']}")
                 
                 # SKIP PAST LAST ROW should continue searching for non-overlapping matches
@@ -9182,17 +9355,26 @@ class EnhancedMatcher:
             )
 
         # Add unmatched rows only when explicitly requested via WITH UNMATCHED ROWS
-        if include_unmatched and unmatched_indices is not None:
-            for idx in sorted(unmatched_indices):
-                if idx not in processed_indices:  # Avoid duplicates
-                    unmatched_row = self._handle_unmatched_row(rows[idx], measures or {})
+        if include_unmatched and matched_index_mask is not None:
+            for idx, was_matched in enumerate(matched_index_mask):
+                if not was_matched and not processed_indices[idx]:
+                    unmatched_row = self._copy_output_row(
+                        rows,
+                        idx,
+                        self._output_source_columns,
+                    )
+                    unmatched_row = self._handle_unmatched_row(
+                        unmatched_row,
+                        measures or {},
+                        copy_input=False,
+                    )
                     # Add original row index for proper sorting in executor
                     unmatched_row['_original_row_idx'] = idx
                     unmatched_row['_match_sort_pos'] = idx
                     unmatched_row['_match_sort_kind'] = 0
                     unmatched_row['_match_output_order'] = 0
                     results.append(unmatched_row)
-                    processed_indices.add(idx)
+                    processed_indices[idx] = 1
 
         if columnar_one_row_output is not None:
             columns = {}
@@ -9441,7 +9623,14 @@ class EnhancedMatcher:
         # Priority 4: Looping transitions (lowest priority)
         return 4
     
-    def _process_empty_match(self, start_idx: int, rows: List[Dict[str, Any]], measures: Dict[str, str], match_number: int) -> Dict[str, Any]:
+    def _process_empty_match(
+        self,
+        start_idx: int,
+        rows: List[Dict[str, Any]],
+        measures: Dict[str, str],
+        match_number: int,
+        output_source_columns=None,
+    ) -> Dict[str, Any]:
         """
         Process an empty match according to SQL:2016 standard, preserving original row data.
         
@@ -9469,7 +9658,11 @@ class EnhancedMatcher:
             return None
             
         # Start with a copy of the original row to preserve all columns
-        result = rows[start_idx].copy()
+        result = self._copy_output_row(
+            rows,
+            start_idx,
+            output_source_columns,
+        )
         
         # Create context for empty match (no variables assigned)
         context = RowContext(
@@ -9529,7 +9722,13 @@ class EnhancedMatcher:
         
         return result
 
-    def _handle_unmatched_row(self, row: Dict[str, Any], measures: Dict[str, str]) -> Dict[str, Any]:
+    def _handle_unmatched_row(
+        self,
+        row: Dict[str, Any],
+        measures: Dict[str, str],
+        *,
+        copy_input: bool = True,
+    ) -> Dict[str, Any]:
         """
         Create output row for unmatched input row according to SQL standard.
         
@@ -9541,7 +9740,7 @@ class EnhancedMatcher:
             Result row for the unmatched row
         """
         # For ALL ROWS PER MATCH WITH UNMATCHED ROWS, include original columns
-        result = row.copy()
+        result = row.copy() if copy_input else row
         
         # Add NULL values for all measures
         for alias in measures:
@@ -10465,6 +10664,7 @@ class EnhancedMatcher:
             return None
 
         state = {
+            "source_columns": self._output_source_columns,
             "row_indices": [],
             "segments": segments,
             "segment_projection": True,
@@ -12908,11 +13108,14 @@ class EnhancedMatcher:
             match_output_order = state["match_output_order"]
             classifier_values = None
         columns = {}
-        for column_name in rows.column_names():
+        source_columns = state.get("source_columns")
+        if source_columns is None:
+            source_columns = rows.column_names()
+        for column_name in source_columns:
             source = rows.column_array_exact(column_name)
             if source is None:
                 columns[column_name] = [
-                    rows[idx].get(column_name) for idx in state["row_indices"]
+                    rows[int(idx)].get(column_name) for idx in indices
                 ]
             else:
                 columns[column_name] = source[indices]
@@ -12950,7 +13153,11 @@ class EnhancedMatcher:
             aliases = tuple(state["measures"])
             materialized = []
             for position, idx in enumerate(row_indices):
-                result = dict(rows[int(idx)])
+                result = self._copy_output_row(
+                    rows,
+                    int(idx),
+                    self._output_source_columns,
+                )
                 match_number = int(match_numbers[position])
                 for alias in aliases:
                     result[alias] = (
@@ -12972,7 +13179,11 @@ class EnhancedMatcher:
         materialized = []
         aliases = tuple(state["measures"])
         for position, idx in enumerate(state["row_indices"]):
-            result = dict(rows[idx])
+            result = self._copy_output_row(
+                rows,
+                idx,
+                self._output_source_columns,
+            )
             for alias in aliases:
                 result[alias] = state["measures"][alias][position]
             result["MATCH_NUMBER"] = state["match_numbers"][position]
@@ -13023,7 +13234,13 @@ class EnhancedMatcher:
                 # For empty matches, use proper measure evaluation
                 if match["start"] < len(rows):
                     # Use the production-ready empty match processing method
-                    empty_row = self._process_empty_match(match["start"], rows, measures, match_number)
+                    empty_row = self._process_empty_match(
+                        match["start"],
+                        rows,
+                        measures,
+                        match_number,
+                        self._output_source_columns,
+                    )
                     
                     if empty_row is not None:
                         # Track that this is an empty pattern match
@@ -13156,6 +13373,159 @@ class EnhancedMatcher:
             )
             empty_pattern_rows = set(match.get("empty_pattern_rows") or ())
 
+        # General RUNNING/navigation expressions need the same progressively
+        # visible assignments for every measure at one output row.  The legacy
+        # path rebuilt a RowContext, its row/variable indexes, and a
+        # MeasureEvaluator for every (row, measure) pair.  It also filtered
+        # every complete variable list again at every row, making a long
+        # single match quadratic even though the visible assignment prefix
+        # only grows.
+        #
+        # Keep one evaluator for the match.  Its lookup indexes are built from
+        # the complete, stable match once.  The public ``variables`` mapping
+        # remains the exact progressive view used by the old path: variables
+        # with no visible rows are omitted, variable order follows the complete
+        # assignment mapping, and each visible list preserves assignment order.
+        # Only the prefix lists are mutated; the complete assignments exposed
+        # through ``_full_match_variables`` are never changed.
+        running_context = None
+        running_evaluator = None
+        running_prefixes = None
+        running_cursors = None
+        running_sorted = None
+        running_visible_idx = None
+
+        def advance_running_context(current_idx):
+            nonlocal running_context
+            nonlocal running_evaluator
+            nonlocal running_prefixes
+            nonlocal running_cursors
+            nonlocal running_sorted
+            nonlocal running_visible_idx
+
+            full_variables = match["variables"]
+            if running_context is None:
+                shared_subsets = self.subsets.copy() if self.subsets else {}
+                # Construct with an empty assignment mapping, then install the
+                # match-owned variables and indexes.  This preserves the
+                # legacy projection boundary: an internal optimization must
+                # not introduce RowContext's direct-construction variable
+                # ceiling only for queries that contain a general RUNNING
+                # measure.
+                running_context = RowContext(
+                    rows=rows,
+                    subsets=shared_subsets,
+                    current_idx=current_idx,
+                    match_number=match_number,
+                    defined_variables=self.defined_variables,
+                    resource_profile=self._resource_profile,
+                )
+                running_context.variables = full_variables
+                running_context._build_indices()
+                running_context.excluded_rows = excluded_rows
+                running_context._full_match_variables = full_variables
+
+                # Build evaluator-owned lookup indexes while the complete
+                # assignments are installed.  The timeline and row index are
+                # read-only during output projection and are therefore safe to
+                # retain while ``variables`` advances through its prefixes.
+                running_context._timeline = tuple(
+                    running_context.get_timeline()
+                )
+                running_context._timeline_row_indices = tuple(
+                    row_idx
+                    for row_idx, _variable in running_context._timeline
+                )
+                running_context._timeline_dirty = False
+                running_evaluator = MeasureEvaluator(running_context)
+
+                running_prefixes = {
+                    variable: [] for variable in full_variables
+                }
+                running_cursors = {
+                    variable: 0 for variable in full_variables
+                }
+                running_sorted = {
+                    variable: all(
+                        indices[position - 1] <= indices[position]
+                        for position in range(1, len(indices))
+                    )
+                    for variable, indices in full_variables.items()
+                }
+                running_context.variables = {}
+                running_context._running_variables = (
+                    running_context.variables
+                )
+
+            # RowContext navigation caches are assignment-dependent.  Some
+            # FIRST/LAST offset paths intentionally memoize more than one
+            # current position, which was safe when every output row owned a
+            # fresh context but would otherwise leak an earlier prefix into a
+            # later row.  Keep evaluator-level row-specific caches, but clear
+            # context caches whenever the visible assignment prefix changes.
+            if (
+                running_visible_idx is not None
+                and current_idx != running_visible_idx
+            ):
+                running_context.navigation_cache.clear()
+                running_context.variable_cache.clear()
+                running_context.position_cache.clear()
+                # MeasureEvaluator keys row-specific results by current_idx.
+                # The projection advances monotonically and never revisits an
+                # earlier output row, so retaining those entries only grows
+                # memory.  Clearing at the row boundary still allows duplicate
+                # aliases on the same row to share work.
+                running_evaluator._classifier_cache.clear()
+                running_evaluator._var_ref_cache.clear()
+                running_evaluator._navigation_cache.clear()
+                running_evaluator._aggregate_cache.clear()
+                aggregate_cache = getattr(
+                    running_evaluator, "_agg_cache", None
+                )
+                if aggregate_cache:
+                    aggregate_cache.clear()
+
+            # Output indices are normally increasing.  Rebuild defensively if
+            # a future output policy supplies a lower index, so reuse never
+            # changes semantics.
+            if (
+                running_visible_idx is not None
+                and current_idx < running_visible_idx
+            ):
+                for variable in running_prefixes:
+                    running_prefixes[variable].clear()
+                    running_cursors[variable] = 0
+
+            progressive_variables = running_context.variables
+            progressive_variables.clear()
+            for variable, full_indices in full_variables.items():
+                prefix = running_prefixes[variable]
+                if running_sorted[variable]:
+                    cursor = running_cursors[variable]
+                    while (
+                        cursor < len(full_indices)
+                        and full_indices[cursor] <= current_idx
+                    ):
+                        prefix.append(full_indices[cursor])
+                        cursor += 1
+                    running_cursors[variable] = cursor
+                else:
+                    # Match-produced assignments are chronological, but keep
+                    # the legacy filtering order for defensive/direct callers
+                    # that provide an unsorted assignment list.
+                    prefix[:] = [
+                        row_idx
+                        for row_idx in full_indices
+                        if row_idx <= current_idx
+                    ]
+                if prefix:
+                    progressive_variables[variable] = prefix
+
+            running_context.current_idx = current_idx
+            running_context._running_variables = progressive_variables
+            running_visible_idx = current_idx
+            return running_evaluator
+
         # Process each row in the match range
         measure_evaluator = None
         for output_pos, idx in enumerate(all_indices):
@@ -13168,7 +13538,11 @@ class EnhancedMatcher:
                 continue
 
             # Create result row from original data
-            result = dict(rows[idx])
+            result = self._copy_output_row(
+                rows,
+                idx,
+                self._output_source_columns,
+            )
             if context is not None:
                 context.current_idx = idx
 
@@ -13208,37 +13582,15 @@ class EnhancedMatcher:
                     # For RUNNING semantics or complex navigation expressions, create a context with variables only up to current row
                     # Complex expressions with nested navigation or arithmetic should use temporal context
                     if semantics == "RUNNING" or has_complex_navigation:
-                        # Create running context with variables up to current row
-                        running_context = RowContext(
-                            defined_variables=self.defined_variables,
-                            resource_profile=self._resource_profile,
-                        )
-                        running_context.rows = rows
-                        running_context.match_number = match_number
-                        running_context.current_idx = idx
-                        running_context.subsets = self.subsets.copy() if self.subsets else {}
-                        running_context.excluded_rows = excluded_rows
-                        
-                        # Include only variables assigned up to and including current row
-                        full_variables = match["variables"]
-                        running_variables = {}
-                        for var_name, var_indices in full_variables.items():
-                            # Include only indices up to and including current row
-                            running_indices = [i for i in var_indices if i <= idx]
-                            if running_indices:
-                                running_variables[var_name] = running_indices
-                        
-                        running_context.variables = running_variables
-                        # Store full variables for forward navigation (NEXT operations)
-                        running_context._full_match_variables = full_variables
-                        logger.debug(f"DEBUG: Row {idx} - Full variables: {full_variables}, Running variables: {running_variables}")
-                        
-                        # Create evaluator with running context
-                        running_evaluator = MeasureEvaluator(running_context)
-                        
-                        # Evaluate with running context
+                        # Reuse one evaluator and incrementally advance the
+                        # assignment prefix to this output row.
+                        running_evaluator = advance_running_context(idx)
                         result[alias] = running_evaluator.evaluate(expr, semantics)
-                        logger.debug(f"DEBUG: Set {alias}={result[alias]} for row {idx} with {semantics} semantics (using running context for complex navigation)")
+                        if DEBUG_ENABLED:
+                            logger.debug(
+                                f"Set {alias}={result[alias]} for row {idx} "
+                                f"with {semantics} semantics"
+                            )
                     else:
                         # Use original context for FINAL semantics
                         context.current_idx = idx

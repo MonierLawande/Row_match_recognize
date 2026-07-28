@@ -268,6 +268,7 @@ class ProductionAggregateEvaluator:
         # Enhanced caching structures
         self._validation_cache = {}
         self._result_cache = {}
+        self._result_cache_snapshot = None
         self._expression_cache = {}
         self._variable_data_cache = {}
         self._active_window_frame = None
@@ -340,13 +341,24 @@ class ProductionAggregateEvaluator:
             start_time = time.time()
             
             try:
-                # Check cache first - fix unhashable type issue
-                # Convert variable indices lists to tuples for hashing
+                # Retain results only for the current exact semantic snapshot.
+                # A reused ALL ROWS evaluator advances ``current_idx`` and
+                # grows its assignment prefixes for each output row.  Keeping
+                # the complete prefix in every cache key made a length-L match
+                # retain O(L^2) row indices even though older snapshots could
+                # never be cache hits.
                 hashable_variables = tuple(sorted(
                     (k, tuple(v) if isinstance(v, list) else v) 
                     for k, v in self.context.variables.items()
                 ))
-                cache_key = (clean_expr, semantics, self.context.current_idx, hashable_variables)
+                snapshot = (
+                    self.context.current_idx,
+                    hashable_variables,
+                )
+                if snapshot != self._result_cache_snapshot:
+                    self._result_cache.clear()
+                    self._result_cache_snapshot = snapshot
+                cache_key = (clean_expr, semantics)
                 
                 if cache_key in self._result_cache:
                     self.stats["cache_hits"] += 1
@@ -2101,6 +2113,7 @@ class ProductionAggregateEvaluator:
         """Clear all caches."""
         self._validation_cache.clear()
         self._result_cache.clear()
+        self._result_cache_snapshot = None
 
     def _convert_sql_to_python(self, expr: str) -> str:
         """Convert SQL function syntax to Python-compatible syntax."""

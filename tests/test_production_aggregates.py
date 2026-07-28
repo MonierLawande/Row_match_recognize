@@ -681,6 +681,54 @@ class TestAggregateExpressionConversionSafety:
         assert error.value.error_code == "AGG_EXPR_CONVERSION"
 
 
+class TestAggregateResultCacheLifetime:
+    """Aggregate results must not retain obsolete assignment snapshots."""
+
+    def test_cache_keeps_only_current_exact_context_snapshot(self):
+        context = RowContext(
+            rows=[{"value": 1}, {"value": 2}, {"value": 4}],
+            variables={"A": [0]},
+            current_idx=0,
+        )
+        evaluator = ProductionAggregateEvaluator(context)
+
+        assert evaluator.evaluate_aggregate("SUM(A.value)", "FINAL") == 1
+        misses = evaluator.stats["cache_misses"]
+        assert evaluator.evaluate_aggregate("SUM(A.value)", "FINAL") == 1
+        assert evaluator.stats["cache_hits"] == 1
+        assert evaluator.stats["cache_misses"] == misses
+        assert len(evaluator._result_cache) == 1
+
+        # Direct callers may mutate public assignment lists without a context
+        # generation counter.  The exact snapshot comparison must still
+        # invalidate the old value at the same current row.
+        context.variables["A"].append(1)
+        assert evaluator.evaluate_aggregate("SUM(A.value)", "FINAL") == 3
+        assert len(evaluator._result_cache) == 1
+
+        context.current_idx = 1
+        assert evaluator.evaluate_aggregate("SUM(A.value)", "FINAL") == 3
+        assert len(evaluator._result_cache) == 1
+
+    def test_growing_running_prefix_does_not_grow_result_cache(self):
+        row_count = 256
+        context = RowContext(
+            rows=[{"value": value} for value in range(row_count)],
+            variables={"A": []},
+            current_idx=0,
+        )
+        evaluator = ProductionAggregateEvaluator(context)
+
+        for row_idx in range(row_count):
+            context.variables["A"].append(row_idx)
+            context.current_idx = row_idx
+            assert (
+                evaluator.evaluate_aggregate("COUNT(A.*)", "RUNNING")
+                == row_idx + 1
+            )
+            assert len(evaluator._result_cache) <= 1
+
+
 if __name__ == "__main__":
     test_suite = AggregateTestSuite()
     test_suite.run_all_tests()

@@ -1880,31 +1880,6 @@ class NFABuilder:
         # Phase 3: Memory management and optimization
         self._resource_manager = get_resource_manager()
         
-        # Initialize object pools for frequently allocated objects
-        self._state_pool = self._resource_manager.get_pool(
-            "nfa_states", 
-            factory=lambda: NFAState(),
-            reset_func=self._reset_nfa_state,
-            max_size=self._resource_profile.cache_entry_limit(
-                estimated_entry_bytes=4 * 1024,
-                budget_share=0.005,
-                minimum=16,
-                maximum=100_000,
-            ),
-        )
-        
-        self._transition_pool = self._resource_manager.get_pool(
-            "transitions",
-            factory=lambda: None,  # Will create Transition objects
-            reset_func=None,
-            max_size=self._resource_profile.cache_entry_limit(
-                estimated_entry_bytes=2 * 1024,
-                budget_share=0.005,
-                minimum=32,
-                maximum=200_000,
-            ),
-        )
-        
         # Pattern compilation cache from Phase 2
         self._pattern_cache = get_pattern_cache()
         
@@ -1918,29 +1893,8 @@ class NFABuilder:
         # Thread safety
         self._lock = threading.RLock()
     
-    def _reset_nfa_state(self, state: NFAState) -> None:
-        """Reset an NFA state for reuse in object pool."""
-        state.state_id = None
-        state.transitions.clear()
-        state.epsilon.clear()
-        state.variable = None
-        state.is_excluded = False
-        state.is_anchor = False
-        state.anchor_type = None
-        state.subset_vars.clear()
-        state.permute_data.clear()
-        state.is_empty_match = False
-        state.can_accept = False
-        state.is_accept = False
-        state.subset_parent = None
-        state.priority = 0
-        state.epsilon_priorities.clear()
-        state._epsilon_targets_cache_key = None
-        state._epsilon_targets_cache_value = ()
-        state._validated = False
-    
     def new_state(self) -> int:
-        """Create a new NFA state using object pool and return its index."""
+        """Create a builder-owned NFA state and return its index."""
         with self._lock:
             # Phase 3: Check memory pressure periodically
             self._memory_pressure_checks += 1
@@ -1951,15 +1905,10 @@ class NFABuilder:
                     adaptation = self._resource_manager.adapt_to_memory_pressure()
                     logger.debug(f"Memory pressure adaptation: {adaptation['pressure_level']}")
             
-            # Try to get state from pool first
-            try:
-                state = self._state_pool.acquire()
-                # Set unique state ID for debugging
-                state.state_id = len(self.states)
-            except Exception:
-                # Fallback to direct creation if pool fails
-                state = NFAState(state_id=len(self.states))
-            
+            # States become part of the returned NFA graph.  Pooling them
+            # provides no reusable lifetime boundary and risks resetting a
+            # graph that is still in use, so each graph owns its states.
+            state = NFAState(state_id=len(self.states))
             self.states.append(state)
             return len(self.states) - 1
     
@@ -2248,40 +2197,27 @@ class NFABuilder:
             return nfa
 
     def cleanup(self) -> None:
-        """
-        Phase 3: Cleanup method to release pooled objects and free memory.
-        
-        This method should be called when the NFABuilder is no longer needed
-        to ensure proper resource cleanup and prevent memory leaks.
-        """
+        """Release builder references without mutating a returned NFA graph."""
         with self._lock:
-            # Release all states back to the pool
-            for state in self.states:
-                try:
-                    self._state_pool.release(state)
-                except Exception as e:
-                    logger.debug(f"Failed to release state to pool: {e}")
-            
-            # Clear internal state
-            self.states.clear()
-            self.exclusion_ranges.clear()
-            self.metadata.clear()
-            self.subset_vars.clear()
-            
-            # Phase 2: Clear optimization caches periodically
-            # Note: We don't clear global caches here as they're shared
-            
-            # Force garbage collection for any remaining references
-            import gc
-            gc.collect()
+            # NFA owns these objects after build().  Rebinding drops only the
+            # builder's references; clearing or resetting the shared objects
+            # would corrupt the live automaton.
+            self.states = []
+            self.exclusion_ranges = []
+            self.metadata = {}
+            self.subset_vars = {}
+            self.current_exclusion = False
+            if hasattr(self, '_variable_state_cache'):
+                self._variable_state_cache.clear()
     
     def get_memory_stats(self) -> Dict[str, Any]:
         """Get memory usage statistics for this builder."""
         return {
             "active_states": len(self.states),
             "pool_stats": self._resource_manager.get_stats(),
-            "state_pool_size": self._state_pool.size(),
-            "transition_pool_size": self._transition_pool.size(),
+            "state_pool_size": 0,
+            "transition_pool_size": 0,
+            "state_allocation": "graph_owned",
             # Phase 2: Include optimization cache stats
             "phase2_stats": self.get_phase2_optimization_stats(),
             # Phase 3: Include memory management stats

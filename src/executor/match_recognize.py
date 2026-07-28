@@ -4,18 +4,17 @@ import pandas as pd
 import re
 import time
 import itertools
-import hashlib
 import copy
 import ast as python_ast
+import importlib.util
+from collections import OrderedDict
 from functools import lru_cache
 from typing import List, Dict, Any, Optional, Set, Tuple, Union
 
-# Polars import for performance optimization
-try:
-    import polars as pl
-    POLARS_AVAILABLE = True
-except ImportError:
-    POLARS_AVAILABLE = False
+# Discover the optional accelerator without importing it into every engine
+# process.  Importing Polars eagerly adds a sizeable resident-memory baseline
+# even when a query stays on the pandas/NumPy execution paths.
+POLARS_AVAILABLE = importlib.util.find_spec("polars") is not None
 from src.parser.match_recognize_extractor import parse_full_query
 from src.matcher.pattern_tokenizer import tokenize_pattern, PermuteHandler
 from src.matcher.automata import (
@@ -50,7 +49,7 @@ from src.utils.performance_optimizer import (
 
 # Phase 2: Smart caching system imports (unified caching solution)
 from src.utils.performance_optimizer import (
-    get_smart_cache, PatternCompilationCache, DataSubsetCache,
+    get_smart_cache, PatternCompilationCache,
     get_cache_invalidation_manager, create_performance_context,
     finalize_performance_context, generate_comprehensive_cache_report,
     get_smart_cache_stats, is_smart_caching_enabled
@@ -571,7 +570,7 @@ class DataFrameRowAccessor:
     dictionaries lazily only when a caller explicitly asks for a row.
     """
 
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, resource_profile=None):
         self._df = df
         self._length = len(df)
         self._columns = list(df.columns)
@@ -604,7 +603,18 @@ class DataFrameRowAccessor:
             if getattr(array.dtype, "kind", None) == "b"
         )
         self._case_map = {str(column).upper(): column for column in self._columns}
-        self._row_cache: Dict[int, Dict[str, Any]] = {}
+        profile = resource_profile or get_adaptive_resource_profile()
+        estimated_row_bytes = 256 + (64 * len(self._columns))
+        self._row_cache_limit = min(
+            self._length,
+            profile.cache_entry_limit(
+                estimated_entry_bytes=estimated_row_bytes,
+                budget_share=0.0005,
+                minimum=32,
+                maximum=16_384,
+            ),
+        )
+        self._row_cache: OrderedDict[int, Dict[str, Any]] = OrderedDict()
         self._non_null_masks: Dict[str, Any] = {}
         self._all_non_null: Dict[str, bool] = {}
 
@@ -617,20 +627,56 @@ class DataFrameRowAccessor:
     def __getitem__(self, index):
         if isinstance(index, slice):
             return [self[i] for i in range(*index.indices(len(self)))]
+        index = self._validated_index(index)
+        cached = self._row_cache.get(index)
+        if cached is not None:
+            self._row_cache.move_to_end(index)
+            return cached
+        row = self._materialize_row(index)
+        if self._row_cache_limit > 0:
+            if len(self._row_cache) >= self._row_cache_limit:
+                self._row_cache.popitem(last=False)
+            self._row_cache[index] = row
+        return row
+
+    def _validated_index(self, index: int) -> int:
+        """Normalize one scalar index and enforce sequence bounds."""
         if index < 0:
             index += len(self)
         if index < 0 or index >= len(self):
             raise IndexError(index)
-        cached = self._row_cache.get(index)
-        if cached is not None:
-            return cached
+        return index
+
+    def _materialize_row(self, index: int) -> Dict[str, Any]:
+        """Build one independent row mapping from the backing columns."""
         row = {
             column: self._scalar_arrays[column][index]
             for column in self._columns
         }
         for column in self._boolean_columns:
             row[column] = bool(row[column])
-        self._row_cache[index] = row
+        return row
+
+    def copy_row(
+        self,
+        index: int,
+        columns=None,
+    ) -> Dict[str, Any]:
+        """Return a fresh output row without retaining a cached duplicate.
+
+        ``columns`` is an executor-proved output projection.  Scalar matching
+        and measure evaluation continue to use the complete accessor.
+        """
+        index = self._validated_index(index)
+        if columns is None:
+            return self._materialize_row(index)
+        row = {
+            column: self._scalar_arrays[column][index]
+            for column in columns
+        }
+        for column in self._boolean_columns:
+            if column in row:
+                row[column] = bool(row[column])
         return row
 
     def __iter__(self):
@@ -694,6 +740,134 @@ def _normalize_query_cache_key(query: str) -> str:
     return query.strip()
 
 
+def _automata_compilation_options(
+    subset_dict: Dict[str, List[str]],
+) -> Dict[str, Any]:
+    """Return only semantic inputs that change the compiled automata."""
+    canonical_subsets = tuple(
+        (
+            subset_name,
+            tuple(sorted(components)),
+        )
+        for subset_name, components in sorted(subset_dict.items())
+    )
+    return {
+        'automata_compiler_schema': DFA_COMPILER_SCHEMA_VERSION,
+        'nfa_compiler_schema': NFA_COMPILER_SCHEMA_VERSION,
+        'subsets': canonical_subsets,
+    }
+
+
+_SIMPLE_OUTPUT_COLUMN_RE = re.compile(
+    r'^(?:(?:[A-Za-z_][A-Za-z0-9_$]*)\.)?'
+    r'([A-Za-z_][A-Za-z0-9_$]*)$'
+)
+
+
+def _derive_output_source_columns(
+    ast,
+    input_columns,
+    measures: Dict[str, str],
+) -> Optional[Tuple[str, ...]]:
+    """Return source columns needed by a simple outer projection.
+
+    The plan controls only the final ALL ROWS result gather.  Matching still
+    receives the complete input accessor, so DEFINE predicates, navigation,
+    ordering, partitioning, and measure evaluation can read every source
+    column.  ``None`` deliberately means "gather all columns".
+
+    Only direct source-column references and declared measure aliases are
+    accepted.  Wildcards, unresolved names, expression evaluation, or a name
+    shared by an input column and a measure alias fall back to the established
+    all-column path.  This conservative boundary makes the optimization
+    semantics-preserving as the SQL expression surface grows.
+    """
+    select_clause = getattr(ast, "select_clause", None)
+    select_items = getattr(select_clause, "items", None)
+    if not select_items:
+        return None
+
+    ordered_input_columns = tuple(input_columns)
+    input_column_set = set(ordered_input_columns)
+    if len(input_column_set) != len(ordered_input_columns):
+        # pandas permits duplicate labels, but selecting one such label
+        # produces a multi-column frame rather than one scalar array.
+        return None
+    measure_aliases = set(measures)
+    measure_expression_aliases: Dict[str, List[str]] = {}
+    for alias, expression in measures.items():
+        normalized = str(expression).strip()
+        measure_expression_aliases.setdefault(normalized, []).append(alias)
+
+    required = set()
+    projected_names = set()
+    for item in select_items:
+        expression = str(getattr(item, "expression", "")).strip()
+        alias = getattr(item, "alias", None)
+        output_name = str(alias).strip() if alias else None
+
+        if expression == "*" or expression.endswith(".*"):
+            return None
+
+        # A measure alias is already produced by the matcher.  If the source
+        # frame contains the same name, retaining all columns preserves the
+        # existing collision behavior rather than guessing which symbol the
+        # query intended.
+        if expression in measure_aliases:
+            if expression in input_column_set:
+                return None
+            projected_names.add(output_name or expression)
+            continue
+
+        # The parser also permits an outer SELECT to repeat a complete MEASURES
+        # expression.  It is safe to avoid a source gather only when that
+        # expression identifies one declared alias and the requested output
+        # alias is exactly that alias.
+        expression_aliases = measure_expression_aliases.get(expression, ())
+        if expression_aliases:
+            if expression in input_column_set:
+                return None
+            if len(expression_aliases) != 1:
+                return None
+            measure_alias = expression_aliases[0]
+            if output_name != measure_alias:
+                return None
+            projected_names.add(output_name)
+            continue
+
+        match = _SIMPLE_OUTPUT_COLUMN_RE.fullmatch(expression)
+        if match is None:
+            return None
+        column_name = match.group(1)
+        if column_name in measure_aliases:
+            if column_name in input_column_set:
+                return None
+            projected_names.add(output_name or column_name)
+            continue
+        if column_name not in input_column_set:
+            return None
+
+        required.add(column_name)
+        projected_names.add(output_name or column_name)
+
+    # Outer ORDER BY is currently applied after SELECT aliases.  It therefore
+    # needs no hidden source column, but an unresolved order symbol makes the
+    # projection ambiguous and keeps the all-column path in charge.
+    order_by_clause = getattr(ast, "order_by_clause", None)
+    for sort_item in getattr(order_by_clause, "sort_items", ()) or ():
+        order_name = str(getattr(sort_item, "column", "")).strip()
+        if order_name not in projected_names:
+            return None
+
+    # Preserve source DataFrame order.  This keeps duplicate SELECT aliases and
+    # final descriptor ordering under the existing projection code's control.
+    return tuple(
+        column
+        for column in ordered_input_columns
+        if column in required
+    )
+
+
 @lru_cache(maxsize=256)
 def _cached_parse_full_query(query_key: str):
     """Parse SQL once per query text and cache the AST template."""
@@ -716,6 +890,8 @@ def _create_dataframe_with_polars_optimization(data, columns=None):
     
     try:
         if POLARS_AVAILABLE and len(data) > 100:
+            import polars as pl
+
             # Use Polars for faster DataFrame creation on larger datasets
             pl_df = pl.DataFrame(data)
             if columns:
@@ -741,94 +917,18 @@ except Exception as e:
     logger.warning(f"Failed to enable production aggregates: {e}")
 
 def _create_dataframe_with_preserved_types(results: List[Dict[str, Any]]) -> pd.DataFrame:
-    """
-    Create a DataFrame from results while preserving None values and original data types.
-    
-    POLARS OPTIMIZATION: Use Polars for faster DataFrame creation when available,
-    with automatic fallback to pandas for compatibility.
-    
-    This function addresses pandas' automatic conversion of None to nan and integers to floats
-    by using object dtype for columns containing None values and inferring appropriate types
-    for others.
+    """Materialize result records once using the engine's pandas contract.
+
+    Building an intermediate Polars frame and converting it back to pandas
+    retains two columnar representations at the output-memory peak.  Pandas'
+    record constructor already preserves record key order and performs the
+    type inference expected by callers, so the intermediate frame provides no
+    semantic benefit.
     """
     if not results:
         return pd.DataFrame()
-    
-    # Try Polars optimization first for better performance
-    try:
-        import polars as pl
-        
-        # Polars handles mixed types and None values better than pandas
-        polars_df = pl.DataFrame(results)
-        
-        # Convert back to pandas for compatibility with existing code
-        # Polars -> pandas conversion preserves types better
-        return polars_df.to_pandas()
-        
-    except ImportError:
-        # Fallback to original pandas implementation
-        pass
-    except Exception as e:
-        # If Polars fails for any reason, fallback to pandas
-        logger.debug(f"Polars optimization failed, falling back to pandas: {e}")
-    
-    # Original pandas implementation (fallback)
-    # Get all column names
-    all_columns = set()
-    for result in results:
-        all_columns.update(result.keys())
-    
-    # Analyze each column to determine if it contains None values and infer best dtype
-    column_dtypes = {}
-    column_data = {col: [] for col in all_columns}
-    
-    # Collect all values for each column
-    for result in results:
-        for col in all_columns:
-            column_data[col].append(result.get(col))
-    
-    # Determine appropriate dtype for each column
-    for col, values in column_data.items():
-        has_none = any(v is None for v in values)
-        has_bool = any(isinstance(v, bool) for v in values)
-        non_none_values = [v for v in values if v is not None]
-        
-        if has_none:
-            # If column has None values, use object dtype to preserve them
-            column_dtypes[col] = 'object'
-        elif has_bool:
-            # If column has boolean values, use object dtype to preserve them
-            column_dtypes[col] = 'object'
-        elif non_none_values:
-            # Try to infer the best dtype for non-None values
-            try:
-                # Check if all non-None values are integers
-                if all(isinstance(v, int) or (isinstance(v, float) and v.is_integer()) for v in non_none_values):
-                    column_dtypes[col] = 'Int64'  # Nullable integer dtype
-                else:
-                    # Let pandas infer the type
-                    column_dtypes[col] = None
-            except:
-                column_dtypes[col] = 'object'
-        else:
-            # All values are None
-            column_dtypes[col] = 'object'
-    
-    # Create DataFrame with explicit dtypes
-    df_data = {}
-    for col in all_columns:
-        values = column_data[col]
-        dtype = column_dtypes[col]
-        
-        if dtype == 'object':
-            df_data[col] = pd.Series(values, dtype='object')
-        elif dtype == 'Int64':
-            # Convert to nullable integers, preserving None
-            df_data[col] = pd.Series(values, dtype='Int64')
-        else:
-            df_data[col] = pd.Series(values)
-    
-    return pd.DataFrame(df_data)
+
+    return pd.DataFrame.from_records(results)
 
 # Removed local pattern cache in favor of centralized cache utility
 
@@ -901,7 +1001,12 @@ def _process_empty_match(start_idx: int, rows: List[Dict[str, Any]], measures: D
         return None
         
     # Start with a copy of the original row to preserve all columns
-    result = rows[start_idx].copy()
+    copy_row = getattr(rows, "copy_row", None)
+    result = (
+        copy_row(start_idx)
+        if callable(copy_row)
+        else rows[start_idx].copy()
+    )
     
     # Create context for empty match (no variables assigned)
     context = RowContext()
@@ -1209,7 +1314,11 @@ def _estimate_pattern_complexity(pattern: str, data_size: int) -> int:
     
     return complexity
 
-def _should_use_parallel_execution(partitions, df, parallel_config) -> bool:
+def _should_use_parallel_execution(
+    partition_count: int,
+    df,
+    parallel_config,
+) -> bool:
     """Determine if parallel execution should be used."""
     if not parallel_config.enabled:
         return False
@@ -1221,7 +1330,7 @@ def _should_use_parallel_execution(partitions, df, parallel_config) -> bool:
         return False
     
     # Need multiple partitions to benefit from parallelization
-    if len(partitions) <= 1:
+    if partition_count <= 1:
         return False
     
     # Need sufficient data to justify overhead
@@ -1276,20 +1385,50 @@ def _can_use_lazy_partition_rows(matcher, match_config) -> bool:
 
     Lazy rows avoid DataFrame.to_dict('records') for ordinary output paths.
     DataFrameRowAccessor reconstructs exactly the rows that are emitted and
-    exposes column arrays to compiled measures, so both ONE ROW and ALL ROWS
-    can use it when matches are consumed immediately.  Unmatched-row output,
-    PERMUTE post-filters, and non-default skip modes retain materialization
-    because they revisit the global retained-match/input collections.
+    exposes column arrays to compiled measures, so ONE ROW, ALL ROWS, and
+    ordinary WITH UNMATCHED output can use it when matches are consumed
+    immediately.  PERMUTE post-filters and non-default skip modes retain
+    materialization because they revisit global retained-match/input
+    collections.
     """
     pattern = (getattr(matcher, "original_pattern", "") or "").upper()
     return (
         match_config.skip_mode == SkipMode.PAST_LAST_ROW
-        and not getattr(match_config, "include_unmatched", False)
         and "PERMUTE" not in pattern
     )
 
-def _partition_rows_for_matching(partition: pd.DataFrame, use_lazy_rows: bool):
-    return DataFrameRowAccessor(partition) if use_lazy_rows else partition.to_dict('records')
+def _partition_rows_for_matching(
+    partition: pd.DataFrame,
+    use_lazy_rows: bool,
+    resource_profile=None,
+):
+    return (
+        DataFrameRowAccessor(partition, resource_profile)
+        if use_lazy_rows
+        else partition.to_dict('records')
+    )
+
+
+def _iter_dataframe_partitions(
+    df: pd.DataFrame,
+    partition_by: List[str],
+):
+    """Return a one-pass partition iterable and its exact partition count.
+
+    MATCH_RECOGNIZE partitions are independent during the current sequential
+    execution stage.  Keeping every grouped DataFrame in a list therefore
+    duplicates the complete input for no semantic benefit.  A pandas GroupBy
+    already owns the grouping index and can yield one partition at a time,
+    bounding retained partition data by the largest partition rather than by
+    the full dataset.
+    """
+    if not partition_by:
+        return (df,), 1
+
+    group_key = partition_by[0] if len(partition_by) == 1 else partition_by
+    grouped = df.groupby(group_key, sort=True)
+    partition_count = grouped.ngroups
+    return (group for _key, group in grouped), partition_count
 
 def _collect_partition_matches(
     matcher,
@@ -1386,7 +1525,11 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
     
     for partition_idx, partition in partition_data:
         use_lazy_rows = _can_use_lazy_partition_rows(matcher, match_config)
-        rows = _partition_rows_for_matching(partition, use_lazy_rows)
+        rows = _partition_rows_for_matching(
+            partition,
+            use_lazy_rows,
+            getattr(matcher, "_resource_profile", None),
+        )
         partition_start_idx = len(all_rows)
         if not use_lazy_rows:
             all_rows.extend(rows)
@@ -1463,7 +1606,11 @@ def _process_partitions_sequentially(partitions, partition_by, order_by, matcher
         partition = _order_partition_if_needed(partition, order_by)
         
         use_lazy_rows = _can_use_lazy_partition_rows(matcher, match_config)
-        rows = _partition_rows_for_matching(partition, use_lazy_rows)
+        rows = _partition_rows_for_matching(
+            partition,
+            use_lazy_rows,
+            getattr(matcher, "_resource_profile", None),
+        )
         partition_start_idx = len(all_rows)  # Remember where this partition starts
         if not use_lazy_rows:
             all_rows.extend(rows)  # Store rows for post-processing
@@ -1754,22 +1901,18 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             show_empty=show_empty,
             include_unmatched=include_unmatched,
         )
+        output_source_columns = _derive_output_source_columns(
+            ast,
+            df.columns,
+            measures,
+        )
         
         # --- BUILD PATTERN MATCHING AUTOMATA ---
         
         automata_start = time.time()
         
         # Phase 2: Enhanced pattern compilation caching with smart cache
-        compilation_options = {
-            'automata_compiler_schema': DFA_COMPILER_SCHEMA_VERSION,
-            'nfa_compiler_schema': NFA_COMPILER_SCHEMA_VERSION,
-            'rows_per_match': rows_per_match,
-            'skip_mode': skip_mode.value if hasattr(skip_mode, 'value') else str(skip_mode),
-            'show_empty': show_empty,
-            'include_unmatched': include_unmatched,
-            'partition_by': partition_by,
-            'order_by': order_by
-        }
+        compilation_options = _automata_compilation_options(subset_dict)
         
         try:
             # Try to get compiled pattern from smart cache first
@@ -1836,6 +1979,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     partition_columns=partition_by,
                     order_columns=order_by,
                     resource_profile=execution_profile,
+                    output_source_columns=output_source_columns,
                 )
             else:
                 # Cache miss - compile pattern and cache the result
@@ -1906,9 +2050,6 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         'timestamp': time.time()
                     })
                     
-                    # Estimate cache size (rough approximation)
-                    estimated_size_mb = (len(pattern_text) + len(str(define))) * 0.001
-                    
                     PatternCompilationCache.cache_compiled_pattern(
                         pattern_text, define, compilation_options, compiled_result
                     )
@@ -1931,6 +2072,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     partition_columns=partition_by,
                     order_columns=order_by,
                     resource_profile=execution_profile,
+                    output_source_columns=output_source_columns,
                 )
                 
         except (NFAConstructionError, DFAConstructionError):
@@ -1959,108 +2101,44 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     columns.extend(measures.keys())
                 return pd.DataFrame(columns=columns)
             
-            # Create partitions - ENHANCED POLARS OPTIMIZATION for faster groupby
-            try:
-                if POLARS_AVAILABLE and partition_by and len(df) > 1000:
-                    # Use Polars for significant performance improvement on 1K+ rows
-                    logger.debug(f"🚀 Using enhanced Polars optimization for {len(df)} rows with partitions: {partition_by}")
-                    
-                    # Convert to Polars DataFrame
-                    polars_df = pl.from_pandas(df)
-                    
-                    # Use Polars lazy evaluation for memory efficiency
-                    lazy_df = polars_df.lazy()
-                    
-                    # Group by partition columns and collect all data
-                    grouped = lazy_df.group_by(partition_by, maintain_order=True).agg(pl.all()).collect()
-                    
-                    # Extract partitions efficiently
-                    partitions = []
-                    for row in grouped.iter_rows(named=True):
-                        # Create partition DataFrame from grouped data
-                        partition_dict = {}
-                        for col in df.columns:
-                            if col in row and row[col] is not None:
-                                partition_dict[col] = row[col]
-                        
-                        if partition_dict:
-                            partition_df = pl.DataFrame(partition_dict).to_pandas()
-                            partitions.append(partition_df)
-                    
-                    logger.debug(f"Polars created {len(partitions)} partitions efficiently")
-                    
-                elif partition_by:
-                    # Use pandas for smaller datasets
-                    partitions = [group for _, group in df.groupby(partition_by, sort=True)]
-                else:
-                    # Single partition case
-                    partitions = [df]
-                    
-            except Exception as e:
-                # Robust fallback to pandas
-                logger.debug(f"Polars optimization failed, using pandas fallback: {e}")
-                partitions = [group for _, group in df.groupby(partition_by, sort=True)] if partition_by else [df]
-                
-            metrics["partition_count"] = len(partitions)
-            
-            # Phase 2: Data subset preprocessing caching.
-            # Hashing the entire DataFrame is expensive on large inputs and is
-            # wasted when the cache policy would reject the dataset by size.
-            # Compute memory size first and hash only small partitioned inputs
-            # where preprocessing-cache reuse is realistic.
-            cached_partitions = None
-            # Computing deep DataFrame memory usage is itself an O(n) pass and
-            # can dominate small/medium unpartitioned queries.  The current
-            # preprocessing cache is useful only for partitioned inputs, so
-            # avoid paying the memory-estimation cost when caching cannot be
-            # used anyway.
-            data_size_mb = 0
-            should_check_preprocessing_cache = (
-                caching_enabled
-                and len(df) > 100
-                and bool(partition_by)
+            # Partition lazily.  The old path first converted the complete
+            # input to Polars, aggregated every group into lists, converted
+            # every group back to pandas, and retained all groups in a Python
+            # list (and sometimes in a process-wide data cache).  Besides the
+            # duplicate memory, hashing via ``df.to_csv`` created another
+            # full-size transient string.  Compiled automata remain cached;
+            # input partitions are query-owned and streamed once.
+            partitions, partition_count = _iter_dataframe_partitions(
+                df, partition_by
             )
-            if should_check_preprocessing_cache:
-                data_size_mb = df.memory_usage(deep=True).sum() / (1024 * 1024) if not df.empty else 0
-            preprocessing_cache_limit_mb = (
-                execution_profile.cache_budget_bytes
-                / 8
-                / (1024 ** 2)
-            )
-            should_cache_preprocessing = (
-                should_check_preprocessing_cache
-                and data_size_mb <= preprocessing_cache_limit_mb
-            )
-            if should_cache_preprocessing:
-                data_hash = hashlib.sha256(df.to_csv(index=False).encode("utf-8")).hexdigest()[:16]
-                cached_partitions = DataSubsetCache.get_preprocessed_data(
-                    data_hash, partition_by, order_by, {}
-                )
-                
-                if cached_partitions:
-                    logger.debug(f"Data preprocessing cache HIT for {len(df)} rows")
-                    partitions = cached_partitions
-                else:
-                    logger.debug(f"Data preprocessing cache MISS for {len(df)} rows")
-                    # Cache the partitioned data for future use
-                    DataSubsetCache.cache_preprocessed_data(
-                        data_hash, partition_by, order_by, {}, partitions, data_size_mb
-                    )
+            metrics["partition_count"] = partition_count
             
             # Phase 1: Parallel Execution Optimization
             # Check if parallel execution is beneficial
             parallel_manager = get_parallel_execution_manager()
-            should_use_parallel = _should_use_parallel_execution(partitions, df, parallel_manager.config)
+            should_use_parallel = _should_use_parallel_execution(
+                partition_count,
+                df,
+                parallel_manager.config,
+            )
             
             if should_use_parallel:
-                logger.info(f"Using parallel execution for {len(partitions)} partitions with {len(df)} total rows")
+                logger.info(
+                    "Using parallel execution for %s partitions with %s "
+                    "total rows",
+                    partition_count,
+                    len(df),
+                )
                 # Process partitions in parallel
                 total_match_count = _process_partitions_in_parallel(
                     partitions, partition_by, order_by, matcher, match_config, 
                     measures, all_rows, all_matches, all_matched_indices, metrics, parallel_manager, results
                 )
             else:
-                logger.debug(f"Using sequential execution for {len(partitions)} partitions")
+                logger.debug(
+                    "Using sequential execution for %s partitions",
+                    partition_count,
+                )
                 # Process partitions sequentially (original behavior)
                 total_match_count = _process_partitions_sequentially(
                     partitions, partition_by, order_by, matcher, match_config, 
@@ -2512,34 +2590,41 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     isinstance(item, _FastRowChunk) for item in results
                 )
                 if match_config.include_unmatched:
-                    for i, result in enumerate(results):
-                        result['_original_order'] = i
-
                     def safe_sort_key(r):
+                        partition_position = r.get('_partition_index', 0)
                         if '_match_sort_pos' in r:
                             return (
+                                partition_position,
                                 r.get('_match_sort_pos', 0),
                                 r.get('_match_sort_kind', 0),
                                 r.get('_match_output_order', 0),
                             )
                         if '_original_row_idx' in r:
-                            return (r.get('_original_row_idx', 0), 0, 0)
+                            return (
+                                partition_position,
+                                r.get('_original_row_idx', 0),
+                                0,
+                                0,
+                            )
 
                         if '_partition_index' in r and '_partition_row_index' in r:
                             return (
                                 r.get('_partition_index', 0),
                                 r.get('_partition_row_index', 0),
+                                0,
+                                0,
                             )
 
                         match_num = r.get('match', r.get('MATCH_NUMBER', 0))
                         if match_num is None:
                             match_num = 0
-                        original_order = r.get('_original_order', 0)
-                        if original_order is None:
-                            original_order = 0
-                        return (match_num, original_order)
+                        # Python's sort is stable, so equal fallback keys keep
+                        # append order without storing another boxed integer
+                        # in every result row.
+                        return (partition_position, match_num, 0, 0)
 
-                    sorted_results = sorted(results, key=safe_sort_key)
+                    results.sort(key=safe_sort_key)
+                    sorted_results = results
                 else:
                     sorted_results = results
 

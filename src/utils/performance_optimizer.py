@@ -500,6 +500,7 @@ class SmartCache:
                     if not hasattr(entry, 'key') or not hasattr(entry, 'value'):
                         logger.warning(f"Corrupted entry detected in {level}: {key}")
                         del cache[key]
+                        self._drop_key_metadata_if_unretained(key)
                         corruption_found = True
                         continue
                     
@@ -514,6 +515,7 @@ class SmartCache:
                         if age > entry.ttl:
                             logger.debug(f"Removing stale entry from {level}: {key}")
                             del cache[key]
+                            self._drop_key_metadata_if_unretained(key)
             
             if corruption_found:
                 self.stats['corruption_detections'] += 1
@@ -931,6 +933,7 @@ class SmartCache:
             # Demote to L2 if still valuable
             if evicted_entry.access_count > 1:
                 self._demote_to_l2(evict_key, evicted_entry)
+            self._drop_key_metadata_if_unretained(evict_key)
     
     def _evict_from_l2(self):
         """Intelligent eviction from L2 cache."""
@@ -945,14 +948,16 @@ class SmartCache:
         # Demote to L3 if still has value
         if oldest_entry.access_count > 0:
             self._demote_to_l3(oldest_key, oldest_entry)
+        self._drop_key_metadata_if_unretained(oldest_key)
     
     def _evict_from_l3(self):
         """LRU eviction from L3 cache."""
         if not self.l3_cache:
             return
         
-        self.l3_cache.popitem(last=False)
+        evicted_key, _entry = self.l3_cache.popitem(last=False)
         self.stats['l3_evictions'] += 1
+        self._drop_key_metadata_if_unretained(evicted_key)
     
     def _promote_to_l1(self, key: str, entry: CacheEntry):
         """Promote entry from L2 to L1."""
@@ -993,6 +998,33 @@ class SmartCache:
     def _remove_expired_entry(self, cache: OrderedDict, key: str):
         """Remove expired entry from cache."""
         cache.pop(key, None)
+        self._drop_key_metadata_if_unretained(key)
+
+    def _drop_key_metadata_if_unretained(self, key: str) -> None:
+        """Release auxiliary analysis state after a cache entry disappears."""
+        if (
+            key in self.l1_cache
+            or key in self.l2_cache
+            or key in self.l3_cache
+        ):
+            return
+
+        self.access_patterns.pop(key, None)
+        self.frequency_counter.pop(key, None)
+        self.hot_patterns.discard(key)
+        self.error_patterns.discard(key)
+        self.navigation_patterns.discard(key)
+        self.navigation_cache_keys.pop(key, None)
+        self.partition_signatures.pop(key, None)
+        self.partition_sharing_map.pop(key, None)
+        self.pattern_vectors.pop(key, None)
+        self.similarity_cache.pop(key, None)
+
+        related = self.pattern_relationships.pop(key, ())
+        for other_key in related:
+            other_links = self.pattern_relationships.get(other_key)
+            if other_links is not None:
+                other_links.discard(key)
     
     def _record_access(self, key: str, level: str):
         """Record access pattern for analysis."""
@@ -1246,6 +1278,7 @@ class SmartCache:
         ]
         for key in expired_keys:
             self.l1_cache.pop(key, None)
+            self._drop_key_metadata_if_unretained(key)
         
         # Clean L2 cache
         expired_keys = [
@@ -1254,6 +1287,7 @@ class SmartCache:
         ]
         for key in expired_keys:
             self.l2_cache.pop(key, None)
+            self._drop_key_metadata_if_unretained(key)
         
         # Clean L3 cache
         expired_keys = [
@@ -1262,6 +1296,7 @@ class SmartCache:
         ]
         for key in expired_keys:
             self.l3_cache.pop(key, None)
+            self._drop_key_metadata_if_unretained(key)
     
     def _optimize_hot_patterns(self):
         """Optimize hot patterns with priority boosting."""
@@ -1382,20 +1417,33 @@ class SmartCache:
     def clear_cache(self, level: str = 'all'):
         """Clear specified cache level(s)."""
         with self.lock:
+            removed_keys = set()
             if level == 'all' or level == 'l1':
+                removed_keys.update(self.l1_cache)
                 self.l1_cache.clear()
             if level == 'all' or level == 'l2':
+                removed_keys.update(self.l2_cache)
                 self.l2_cache.clear()
             if level == 'all' or level == 'l3':
+                removed_keys.update(self.l3_cache)
                 self.l3_cache.clear()
             
             if level == 'all':
                 self.pattern_vectors.clear()
                 self.pattern_relationships.clear()
                 self.access_history.clear()
+                self.similarity_cache.clear()
+                self.access_patterns.clear()
+                self.frequency_counter.clear()
                 self.hot_patterns.clear()
+                self.error_patterns.clear()
                 self.navigation_patterns.clear()
+                self.navigation_cache_keys.clear()
                 self.partition_signatures.clear()
+                self.partition_sharing_map.clear()
+            else:
+                for key in removed_keys:
+                    self._drop_key_metadata_if_unretained(key)
     
     def resize_cache(self, l1_size_mb: float = None, l2_size_mb: float = None, 
                     l3_size_mb: float = None, l1_entries: int = None, 
@@ -1790,6 +1838,7 @@ class SmartCache:
             # Update size stats
             size_mb = evicted_entry.size_bytes / (1024 * 1024)
             self.stats[f'{level.lower()}_size_mb'] -= size_mb
+            self._drop_key_metadata_if_unretained(evicted_key)
     
     def _smart_eviction_candidate(self, cache: Dict[str, Any]) -> Optional[str]:
         """Select smart eviction candidate based on access patterns."""
@@ -2695,8 +2744,18 @@ class MemoryOptimizer:
 class DefineOptimizer:
     """Optimization utilities for DEFINE clauses in pattern matching."""
     
-    def __init__(self):
-        self.optimization_cache = {}
+    def __init__(
+        self,
+        resource_profile: Optional[AdaptiveResourceProfile] = None,
+    ):
+        profile = resource_profile or get_adaptive_resource_profile()
+        self._cache_size_limit = profile.cache_entry_limit(
+            estimated_entry_bytes=2 * 1024,
+            budget_share=0.005,
+            minimum=32,
+            maximum=4_096,
+        )
+        self.optimization_cache = OrderedDict()
         self.pattern_stats = defaultdict(int)
         self.lock = threading.RLock()
     
@@ -2720,7 +2779,8 @@ class DefineOptimizer:
             cache_key = self._create_define_cache_key(define_dict)
             
             if cache_key in self.optimization_cache:
-                cached_result = self.optimization_cache[cache_key]
+                cached_result = self.optimization_cache.pop(cache_key)
+                self.optimization_cache[cache_key] = cached_result
                 logger.debug(f"Using cached DEFINE optimization for {len(define_dict)} clauses")
                 return cached_result
             
@@ -2750,17 +2810,25 @@ class DefineOptimizer:
                 'optimization_time': time.time() - start_time
             }
             
-            # Cache the result
-            self.optimization_cache[cache_key] = result
+            # Keep only the most recently used optimization plans within the
+            # process resource budget.  DEFINE text is caller-controlled and a
+            # service can see an unbounded number of unique queries.
+            if self._cache_size_limit > 0:
+                while len(self.optimization_cache) >= self._cache_size_limit:
+                    self.optimization_cache.popitem(last=False)
+                self.optimization_cache[cache_key] = result
             
             logger.debug(f"Optimized {len(define_dict)} DEFINE clauses in {result['optimization_time']:.3f}s")
             return result
     
-    def _create_define_cache_key(self, define_dict: Dict[str, str]) -> str:
+    def _create_define_cache_key(
+        self,
+        define_dict: Dict[str, str],
+    ) -> Tuple[Tuple[str, str], ...]:
         """Create a cache key for the define dictionary."""
-        # Sort definitions for consistent caching
-        sorted_items = sorted(define_dict.items())
-        return str(hash(tuple(sorted_items)))
+        # The immutable canonical definitions are collision-safe.  A built-in
+        # hash string can alias distinct DEFINE clauses within one process.
+        return tuple(sorted(define_dict.items()))
     
     def _analyze_patterns(self, define_dict: Dict[str, str]) -> Dict[str, Any]:
         """Analyze patterns to identify optimization opportunities."""
@@ -3060,6 +3128,16 @@ class PatternCompilationCache:
             estimated_bytes += (
                 dfa_transitions + nfa_transitions
             ) * 4 * 1024
+
+            # The tokenizer uses the same cache before an automaton exists.
+            # Account for token objects and their metadata rather than the
+            # outer list alone.
+            if not dfa_states and isinstance(dfa, (list, tuple)):
+                estimated_bytes += len(dfa) * 2 * 1024
+                estimated_bytes += sum(
+                    len(repr(getattr(token, 'metadata', {})).encode('utf-8'))
+                    for token in dfa
+                )
         except (AttributeError, IndexError, TypeError):
             # The cache remains usable for compatibility objects, with a
             # conservative non-zero admission cost.

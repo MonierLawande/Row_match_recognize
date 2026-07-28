@@ -74,6 +74,45 @@ class MockMatchRecognize:
         
         return pd.DataFrame(result_data)
 
+
+class TestDefineOptimizerCacheBounds:
+    """Global DEFINE planning must have a finite, collision-safe lifetime."""
+
+    def test_cache_is_lru_bounded_and_uses_canonical_definition_keys(self):
+        from src.utils.performance_optimizer import DefineOptimizer
+
+        profile = SimpleNamespace(
+            cache_entry_limit=lambda **_kwargs: 2,
+        )
+        optimizer = DefineOptimizer(resource_profile=profile)
+        definitions = [
+            {"A": "value > 0"},
+            {"A": "value > 1"},
+            {"A": "value > 2"},
+        ]
+
+        optimizer.optimize_define_clauses(definitions[0])
+        optimizer.optimize_define_clauses(definitions[1])
+        first_key = optimizer._create_define_cache_key(definitions[0])
+        second_key = optimizer._create_define_cache_key(definitions[1])
+
+        assert isinstance(first_key, tuple)
+        assert list(optimizer.optimization_cache) == [
+            first_key,
+            second_key,
+        ]
+
+        # A hit makes the first plan most recent; admitting a third plan must
+        # evict the second one and never exceed the configured capacity.
+        optimizer.optimize_define_clauses(definitions[0])
+        optimizer.optimize_define_clauses(definitions[2])
+        third_key = optimizer._create_define_cache_key(definitions[2])
+
+        assert list(optimizer.optimization_cache) == [
+            first_key,
+            third_key,
+        ]
+
 class TestDataGenerator:
     """Utility class for generating test data for aggregation testing."""
     
@@ -460,6 +499,93 @@ class TestAdaptiveResourceProfile:
             minimum=32,
         ) == 0
 
+    def test_derived_budgets_are_cached_without_changing_profile_semantics(
+        self,
+    ):
+        import pickle
+
+        profile = _resource_profile(8, 4)
+        equivalent = _resource_profile(8, 4)
+
+        expected = profile.as_dict()
+
+        assert {
+            'reserved_headroom_bytes',
+            'usable_available_bytes',
+            'cache_budget_bytes',
+            'query_budget_bytes',
+        } <= profile.__dict__.keys()
+        assert profile.as_dict() == expected
+        assert profile == equivalent
+        assert hash(profile) == hash(equivalent)
+        restored = pickle.loads(pickle.dumps(profile))
+        assert restored == profile
+        assert restored.as_dict() == expected
+
+    def test_cache_entry_limit_cache_is_bounded_and_thread_safe(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from src.utils import resource_profile
+
+        cached_limit = resource_profile._cached_cache_entry_limit
+        cached_limit.cache_clear()
+        profile = _resource_profile(8, 4)
+        arguments = [
+            (
+                entry_size_mib * 1024 ** 2,
+                (entry_size_mib % 10 + 1) / 10.0,
+            )
+            for entry_size_mib in range(1, 700)
+        ]
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(
+                lambda values: profile.cache_entry_limit(
+                    values[0],
+                    budget_share=values[1],
+                    minimum=1,
+                    maximum=500_000,
+                ),
+                arguments,
+            ))
+
+        assert results == [
+            min(
+                50_000,
+                int(profile.cache_budget_bytes * budget_share)
+                // entry_bytes,
+            )
+            for entry_bytes, budget_share in arguments
+        ]
+        cache_info = cached_limit.cache_info()
+        assert cache_info.maxsize == 512
+        assert cache_info.currsize <= cache_info.maxsize
+
+        assert profile.cache_entry_limit(
+            699 * 1024 ** 2,
+            budget_share=1.0,
+            minimum=1,
+            maximum=500_000,
+        ) == results[-1]
+        before_hit = cached_limit.cache_info().hits
+        assert profile.cache_entry_limit(
+            699 * 1024 ** 2,
+            budget_share=1.0,
+            minimum=1,
+            maximum=500_000,
+        ) == results[-1]
+        assert cached_limit.cache_info().hits == before_hit + 1
+
+        with pytest.raises(
+            ValueError,
+            match='estimated_entry_bytes',
+        ):
+            profile.cache_entry_limit(0)
+        with pytest.raises(ValueError, match='budget_share'):
+            profile.cache_entry_limit(1, budget_share=0.0)
+        with pytest.raises(ValueError, match='bounds'):
+            profile.cache_entry_limit(1, minimum=2, maximum=1)
+
     def test_tiny_optional_cache_budget_disables_cache_without_expansion(
         self,
         monkeypatch,
@@ -810,6 +936,97 @@ class TestAdaptiveResourceProfile:
 
         assert 0 <= config.max_size_mb <= original_size
         assert 0 <= config.max_entries <= original_entries
+
+    def test_smart_cache_eviction_releases_keyed_analysis_metadata(self):
+        from src.utils.performance_optimizer import (
+            CacheEvictionPolicy,
+            SmartCache,
+            SmartCacheConfig,
+        )
+
+        config = SmartCacheConfig(
+            max_size_mb=1.0,
+            max_entries=2,
+            eviction_policy=CacheEvictionPolicy.LRU,
+            enable_background_optimization=False,
+            enable_dynamic_sizing=False,
+            enable_predictive_loading=False,
+        )
+        cache = SmartCache(config)
+        cache._check_memory_pressure = lambda: False
+
+        for index in range(10):
+            key = f"pattern-{index}"
+            assert cache.put(key, index, size_hint=0.001)
+            assert cache.get(key) == index
+
+        retained = set(cache.l1_cache) | set(cache.l2_cache) | set(cache.l3_cache)
+        assert len(retained) <= config.max_entries
+        assert set(cache.access_patterns) <= retained
+        assert set(cache.frequency_counter) <= retained
+        assert cache.hot_patterns <= retained
+        assert cache.navigation_patterns <= retained
+        assert set(cache.pattern_vectors) <= retained
+        assert set(cache.similarity_cache) <= retained
+
+    def test_pattern_stage_cache_admission_uses_graph_size_hint(
+        self,
+        monkeypatch,
+    ):
+        from src.utils import pattern_cache
+
+        observed = {}
+
+        class RecordingCache:
+            def put(self, key, value, size_hint=None, metadata=None):
+                observed.update(
+                    key=key,
+                    value=value,
+                    size_hint=size_hint,
+                    metadata=metadata,
+                )
+                return True
+
+        states = [
+            SimpleNamespace(transitions=[SimpleNamespace()]),
+            SimpleNamespace(transitions=[]),
+        ]
+        nfa = SimpleNamespace(states=states)
+        monkeypatch.setattr(
+            pattern_cache,
+            "get_pattern_cache",
+            lambda: RecordingCache(),
+        )
+
+        assert pattern_cache.cache_pattern(
+            "compiled-pattern",
+            None,
+            nfa,
+            compilation_time=0.25,
+        )
+        assert observed["value"] == (None, nfa, 0.25)
+        assert observed["size_hint"] >= (2 * 16 + 4) / 1024
+
+    def test_automata_cache_options_are_semantic_and_subset_aware(self):
+        from src.executor.match_recognize import _automata_compilation_options
+
+        first = _automata_compilation_options(
+            {"U": ["B", "A"], "V": ["C"]}
+        )
+        reordered = _automata_compilation_options(
+            {"V": ["C"], "U": ["A", "B"]}
+        )
+        different = _automata_compilation_options(
+            {"U": ["A"], "V": ["C"]}
+        )
+
+        assert first == reordered
+        assert first != different
+        assert set(first) == {
+            "automata_compiler_schema",
+            "nfa_compiler_schema",
+            "subsets",
+        }
 
 
 class TestParallelExecutionFailClosed:

@@ -10,6 +10,7 @@ SQL semantics or turn resource exhaustion into an incomplete result.
 """
 
 from dataclasses import dataclass, replace
+from functools import cached_property, lru_cache
 import math
 import os
 import posixpath
@@ -26,6 +27,7 @@ DEFAULT_QUERY_MEMORY_CEILING_BYTES = 8 * 1024 * MIB
 DEFAULT_CACHE_MEMORY_CEILING_BYTES = 2 * 1024 * MIB
 DEFAULT_WORKER_CEILING = 4
 DEFAULT_CACHE_ENTRY_CEILING = 50_000
+_CACHE_ENTRY_LIMIT_CACHE_SIZE = 512
 
 
 class InsufficientExecutionResourcesError(RuntimeError):
@@ -752,6 +754,21 @@ def reset_default_probe() -> None:
         _default_probe_instance = None
 
 
+@lru_cache(maxsize=_CACHE_ENTRY_LIMIT_CACHE_SIZE)
+def _cached_cache_entry_limit(
+    cache_budget_bytes: int,
+    estimated_entry_bytes: int,
+    budget_share: float,
+    effective_maximum: int,
+) -> int:
+    """Resolve a cache limit from immutable primitive budget values."""
+    component_budget = int(cache_budget_bytes * budget_share)
+    affordable_entries = component_budget // estimated_entry_bytes
+    if affordable_entries < 1:
+        return 0
+    return min(effective_maximum, affordable_entries)
+
+
 @dataclass(frozen=True)
 class AdaptiveResourceProfile:
     """Frozen resource budgets used by one component or query."""
@@ -902,7 +919,7 @@ class AdaptiveResourceProfile:
             ),
         )
 
-    @property
+    @cached_property
     def reserved_headroom_bytes(self) -> int:
         requested = max(
             self.reserve_floor_bytes,
@@ -916,7 +933,7 @@ class AdaptiveResourceProfile:
             self.memory.effective_available_bytes // 2,
         )
 
-    @property
+    @cached_property
     def usable_available_bytes(self) -> int:
         return max(
             0,
@@ -924,7 +941,7 @@ class AdaptiveResourceProfile:
             - self.reserved_headroom_bytes,
         )
 
-    @property
+    @cached_property
     def cache_budget_bytes(self) -> int:
         candidates = [
             int(
@@ -943,7 +960,7 @@ class AdaptiveResourceProfile:
         # one-entry allocation outside the detected resource ceiling.
         return max(0, min(candidates))
 
-    @property
+    @cached_property
     def query_budget_bytes(self) -> int:
         candidates = [
             int(
@@ -1017,11 +1034,12 @@ class AdaptiveResourceProfile:
             raise ValueError("invalid cache entry bounds")
         if self.cache_entry_hard_max is not None:
             maximum = min(maximum, self.cache_entry_hard_max)
-        component_budget = int(self.cache_budget_bytes * budget_share)
-        affordable_entries = component_budget // estimated_entry_bytes
-        if affordable_entries < 1:
-            return 0
-        return min(maximum, affordable_entries)
+        return _cached_cache_entry_limit(
+            self.cache_budget_bytes,
+            estimated_entry_bytes,
+            budget_share,
+            maximum,
+        )
 
     def as_dict(self) -> Dict[str, Any]:
         return {

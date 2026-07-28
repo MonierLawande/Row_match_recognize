@@ -77,11 +77,12 @@ setup(
     cmdclass={
         'build_py': CustomBuildPy,
     },
-    python_requires=">=3.7",
+    python_requires=">=3.8",
     install_requires=[
         "pandas>=1.0.0,<3.0",
         "numpy>=1.18.0,<2.2",
         "antlr4-python3-runtime>=4.9.0",
+        "psutil>=5.8.0",
     ],
     extras_require={
         "dev": [
@@ -104,7 +105,6 @@ setup(
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8", 
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",

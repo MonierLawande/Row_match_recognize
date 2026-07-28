@@ -24,7 +24,17 @@ Version: 3.0.0
 
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional, Set, Tuple, Union, Callable
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+)
 from collections import defaultdict
 import time
 import traceback
@@ -54,6 +64,8 @@ class NavigationMode(Enum):
 class _BoundedCacheDict(dict):
     """Dictionary-compatible FIFO cache with a strict entry ceiling."""
 
+    __slots__ = ("max_entries", "__weakref__")
+
     def __init__(self, max_entries: int = 0, initial=None):
         super().__init__()
         self.max_entries = max(0, int(max_entries))
@@ -68,6 +80,39 @@ class _BoundedCacheDict(dict):
             oldest_key = next(iter(self))
             super().pop(oldest_key, None)
         super().__setitem__(key, value)
+
+    def update(self, *args, **kwargs):
+        """Insert every value through the bounded ``__setitem__`` path."""
+        if len(args) > 1:
+            raise TypeError(
+                f"update expected at most 1 argument, got {len(args)}"
+            )
+        if args:
+            source = args[0]
+            if hasattr(source, "keys"):
+                for key in source.keys():
+                    self[key] = source[key]
+            else:
+                for key, value in source:
+                    self[key] = value
+        for key, value in kwargs.items():
+            self[key] = value
+
+    def setdefault(self, key, default=None):
+        """Preserve the entry ceiling when a missing key is initialized."""
+        if key in self:
+            return self[key]
+        self[key] = default
+        return default
+
+    def __ior__(self, other):
+        """Preserve the entry ceiling for the in-place union operator."""
+        self.update(other)
+        return self
+
+    def __reduce__(self):
+        """Retain cache capacity and contents across pickle round trips."""
+        return type(self), (self.max_entries, dict(self))
 
 
 class ContextValidationError(Exception):
@@ -147,7 +192,14 @@ class RowContext:
     )
     
     # Private fields for optimization and caching
-    _timeline: List[Tuple[int, str]] = field(default_factory=list, repr=False)
+    _timeline: Sequence[Tuple[int, str]] = field(
+        default_factory=list,
+        repr=False,
+    )
+    _timeline_row_indices: Tuple[int, ...] = field(
+        default_factory=tuple,
+        repr=False,
+    )
     _row_var_index: Dict[int, Set[str]] = field(default_factory=lambda: defaultdict(set), repr=False)
     _subset_index: Dict[str, Set[str]] = field(default_factory=dict, repr=False)
     _timeline_dirty: bool = field(default=True, repr=False)
@@ -331,7 +383,7 @@ class RowContext:
             logger.debug(f"Built indices: {len(self._row_var_index)} row mappings, "
                         f"{len(self._subset_index)} subset mappings")
     
-    def build_timeline(self) -> List[Tuple[int, str]]:
+    def build_timeline(self) -> Sequence[Tuple[int, str]]:
         """Build or rebuild the timeline of all pattern variables in current match."""
         with self._context_lock:
             timeline = []
@@ -340,16 +392,30 @@ class RowContext:
                     timeline.append((idx, var))
             timeline.sort()  # Sort by row index for proper chronological order
             self._timeline = timeline
+            self._timeline_row_indices = tuple(
+                row_idx for row_idx, _variable in timeline
+            )
             self._timeline_dirty = False
             
             logger.debug(f"Built timeline with {len(timeline)} entries")
             return timeline
     
-    def get_timeline(self) -> List[Tuple[int, str]]:
+    def get_timeline(self) -> Sequence[Tuple[int, str]]:
         """Get the current timeline, rebuilding if needed."""
         if self._timeline_dirty:
             return self.build_timeline()
         return self._timeline
+
+    def get_timeline_row_indices(self) -> Tuple[int, ...]:
+        """Return immutable row positions aligned with :meth:`get_timeline`.
+
+        Logical navigation frequently needs only the ordered row positions.
+        Keeping this tuple beside the timeline permits binary search without
+        rebuilding or copying the assignment sequence for every output row.
+        """
+        if self._timeline_dirty:
+            self.build_timeline()
+        return self._timeline_row_indices
     
     def invalidate_caches(self) -> None:
         """
@@ -387,6 +453,7 @@ class RowContext:
             
             # Reset timeline
             self._timeline_dirty = True
+            self._timeline_row_indices = ()
             
             # Update metrics
             self._metrics["last_cache_invalidation"] = time.time()
@@ -445,8 +512,9 @@ class RowContext:
                         self._subset_index.setdefault(component, set()).add(subset_name)
 
             if self._timeline:
-                self._timeline.clear()
+                self._timeline = []
             self._timeline_dirty = True
+            self._timeline_row_indices = ()
             if self._row_var_index:
                 self._row_var_index.clear()
 
@@ -505,8 +573,9 @@ class RowContext:
                     )
 
         if self._timeline:
-            self._timeline.clear()
+            self._timeline = []
         self._timeline_dirty = True
+        self._timeline_row_indices = ()
         if self._row_var_index:
             self._row_var_index.clear()
         if self._navigation_cache:

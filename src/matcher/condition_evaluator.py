@@ -17,6 +17,7 @@ Version: 2.0.0
 """
 
 import ast
+from bisect import bisect_left, bisect_right
 import operator
 import re
 import time
@@ -2112,36 +2113,54 @@ class ConditionEvaluator(ast.NodeVisitor):
             logger.debug("[LOGICAL_NAV] No variables in context")
             return None
         
-        # Build timeline of variable assignments
-        timeline = []
-        for var, indices in self.context.variables.items():
-            for idx in indices:
-                timeline.append((idx, var))
-        
-        # Sort by row index for consistent ordering
-        timeline.sort()
+        # Reuse the RowContext timeline.  ALL ROWS projection installs the
+        # complete immutable match timeline once and exposes progressively
+        # visible variables through ``context.variables``.  Other contexts
+        # build the same sorted timeline lazily through the public API.
+        timeline = self.context.get_timeline()
         
         if not timeline:
             logger.debug("[LOGICAL_NAV] Empty timeline")
             return None
         
-        # Find current position in timeline
         curr_idx = self.context.current_idx
+        timeline_rows = self.context.get_timeline_row_indices()
+        visible_stop = len(timeline)
+        if (
+            getattr(self.context, "_running_variables", None)
+            is self.context.variables
+            and hasattr(self.context, "_full_match_variables")
+        ):
+            # Preserve the old progressive-context behavior: logical
+            # navigation cannot see assignments after the current output row.
+            visible_stop = bisect_right(timeline_rows, curr_idx)
+
+        if visible_stop <= 0:
+            logger.debug("[LOGICAL_NAV] Empty visible timeline")
+            return None
+
+        # Locate only the entries for the current row.  The old implementation
+        # linearly scanned the complete prefix twice; binary search has the
+        # same tie ordering because the timeline itself is unchanged.
+        row_start = bisect_left(timeline_rows, curr_idx, 0, visible_stop)
+        row_stop = bisect_right(
+            timeline_rows, curr_idx, row_start, visible_stop
+        )
         curr_pos = -1
         current_var = getattr(self.context, 'current_var', None)
-        
-        # Find position in timeline
-        for i, (idx, var) in enumerate(timeline):
-            if idx == curr_idx and (current_var is None or var == current_var or var_name is None):
-                curr_pos = i
+
+        for position in range(row_start, row_stop):
+            _row_idx, variable = timeline[position]
+            if (
+                current_var is None
+                or variable == current_var
+                or var_name is None
+            ):
+                curr_pos = position
                 break
-        
+
         if curr_pos < 0:
-            # Try alternative matching
-            for i, (idx, var) in enumerate(timeline):
-                if idx == curr_idx:
-                    curr_pos = i
-                    break
+            curr_pos = row_start if row_start < row_stop else -1
         
         if curr_pos < 0:
             logger.debug(f"[LOGICAL_NAV] Could not find current position for idx {curr_idx}")
@@ -2154,8 +2173,8 @@ class ConditionEvaluator(ast.NodeVisitor):
             target_pos = curr_pos + steps
         
         # Bounds checking
-        if target_pos < 0 or target_pos >= len(timeline):
-            logger.debug(f"[LOGICAL_NAV] Target position {target_pos} out of bounds [0, {len(timeline)})")
+        if target_pos < 0 or target_pos >= visible_stop:
+            logger.debug(f"[LOGICAL_NAV] Target position {target_pos} out of bounds [0, {visible_stop})")
             return None
         
         target_idx, _ = timeline[target_pos]

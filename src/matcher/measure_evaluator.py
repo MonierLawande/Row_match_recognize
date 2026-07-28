@@ -315,13 +315,13 @@ class MeasureEvaluator:
         # Thread safety
         self._lock = threading.RLock()
         
-        # Build optimized indices for fast lookup
-        try:
-            self._build_row_variable_index()
-            self._build_navigation_index()
-        except Exception as e:
-            logger.error(f"Failed to build evaluation indices: {e}")
-            # Continue with basic functionality
+        # RowContext owns the live row-variable and timeline indexes used by
+        # navigation.  Earlier versions built two evaluator-local duplicates,
+        # but no evaluation path reads them; on ALL ROWS these copies retained
+        # another complete match-sized index.  Keep the attributes for
+        # compatibility with diagnostic callers without materializing data.
+        self._row_var_index = defaultdict(set)
+        self._navigation_index = {}
 
     def _cache_put(self, cache: Dict[Any, Any], key: Any, value: Any) -> bool:
         """Store one value without exceeding the adaptive entry ceiling."""

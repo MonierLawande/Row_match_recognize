@@ -3,6 +3,7 @@ Tests for the navigation functions and condition evaluation in match_recognize.
 """
 
 import ast
+import pickle
 import pytest
 import pandas as pd
 import numpy as np
@@ -23,7 +24,7 @@ from src.matcher.condition_evaluator import (
 )
 from src.matcher.evaluation_utils import ExpressionValidationError
 from src.matcher.measure_evaluator import MeasureEvaluator
-from src.matcher.row_context import RowContext
+from src.matcher.row_context import RowContext, _BoundedCacheDict
 from src.utils.resource_profile import (
     AdaptiveResourceProfile,
     EffectiveCPUSnapshot,
@@ -80,6 +81,42 @@ def test_row_context_public_caches_share_adaptive_bounded_storage():
 
     assert len(context.navigation_cache) == 2
     assert 'first' not in context.navigation_cache
+
+
+def test_bounded_cache_enforces_limit_for_all_dictionary_mutations():
+    cache = _BoundedCacheDict(2)
+
+    cache.update({"first": 1, "second": 2, "third": 3})
+    assert cache == {"second": 2, "third": 3}
+
+    assert cache.setdefault("fourth", 4) == 4
+    assert cache == {"third": 3, "fourth": 4}
+    assert cache.setdefault("third", 30) == 3
+
+    cache |= {"fifth": 5, "sixth": 6}
+    assert cache == {"fifth": 5, "sixth": 6}
+
+
+def test_disabled_bounded_cache_rejects_every_dictionary_mutation():
+    cache = _BoundedCacheDict(0)
+
+    cache["direct"] = 1
+    cache.update({"updated": 2})
+    assert cache.setdefault("defaulted", 3) == 3
+    cache |= {"unioned": 4}
+
+    assert cache == {}
+
+
+def test_bounded_cache_pickle_round_trip_preserves_capacity_and_order():
+    cache = _BoundedCacheDict(2, {"first": 1, "second": 2})
+
+    restored = pickle.loads(pickle.dumps(cache))
+    restored["third"] = 3
+
+    assert isinstance(restored, _BoundedCacheDict)
+    assert restored.max_entries == 2
+    assert restored == {"second": 2, "third": 3}
 
 
 def test_measure_evaluator_does_not_invent_capacity_when_cache_is_disabled():
@@ -426,6 +463,109 @@ class TestConditionEvaluator:
         # B_value should be the value of the most recent B row
         for i in range(1, len(result)):
             assert result.iloc[i]['B_value'] > 10
+
+    def test_all_rows_reuses_general_running_measure_evaluator(
+        self, monkeypatch
+    ):
+        """General RUNNING measures share one evaluator for the whole match.
+
+        This exercises the non-vectorized navigation fallback.  Reuse must not
+        change progressive LAST/PREV visibility, FINAL values, or CLASSIFIER.
+        """
+        import src.matcher.matcher as matcher_module
+
+        original_evaluator = matcher_module.MeasureEvaluator
+
+        class CountingMeasureEvaluator(original_evaluator):
+            instances = 0
+
+            def __init__(self, *args, **kwargs):
+                type(self).instances += 1
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(
+            matcher_module,
+            "MeasureEvaluator",
+            CountingMeasureEvaluator,
+        )
+
+        df = pd.DataFrame({
+            "id": [1, 2, 3, 4],
+            "value": [10, 20, 30, 40],
+        })
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                RUNNING LAST(A.value) + PREV(A.value) AS running_value,
+                FINAL LAST(A.value) AS final_a_value,
+                CLASSIFIER() AS label
+            ALL ROWS PER MATCH
+            PATTERN (A+ B+)
+            DEFINE
+                A AS A.value < 30,
+                B AS B.value >= 30
+        ) AS m
+        """
+
+        result = match_recognize(query, df)
+
+        assert list(result["running_value"].iloc[1:]) == [30, 40, 50]
+        assert result["running_value"].isna().iloc[0]
+        assert list(result["final_a_value"]) == [20, 20, 20, 20]
+        assert list(result["label"]) == ["A", "A", "B", "B"]
+        assert CountingMeasureEvaluator.instances == 1
+
+    def test_reused_running_context_invalidates_assignment_caches(self):
+        """Variable-qualified offsets must follow each visible prefix."""
+        df = pd.DataFrame({
+            "id": [1, 2, 3, 4, 5],
+            "value": [10, 20, 30, 40, 50],
+        })
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                RUNNING FIRST(A.value, 2) AS first_a_2,
+                RUNNING LAST(A.value, 2) AS last_a_2
+            ALL ROWS PER MATCH
+            PATTERN (A+)
+            DEFINE A AS true
+        ) AS m
+        """
+
+        result = match_recognize(query, df)
+
+        assert list(result["first_a_2"]) == [10, 20, 30, 30, 30]
+        assert list(result["last_a_2"]) == [10, 10, 10, 20, 30]
+
+    def test_long_pattern_running_projection_is_fully_initialized(self):
+        """Long patterns must not depend on a short-text metadata fast path."""
+        variables = [f"V{position}" for position in range(101)]
+        df = pd.DataFrame({
+            "id": range(101),
+            "value": range(101),
+        })
+        query = f"""
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY id
+            MEASURES
+                RUNNING LAST(V100.value) + PREV(V100.value) AS x
+            ALL ROWS PER MATCH
+            PATTERN ({' '.join(variables)})
+        ) AS m
+        """
+
+        result = match_recognize(query, df)
+
+        assert len(result) == 101
+        assert result["x"].iloc[-1] == 199
 
 
 # ----------------------------------------------------------------------------

@@ -665,8 +665,20 @@ def cache_pattern(key: str, dfa: Any, nfa: Any, compilation_time: float = 0.0,
             return False
             
         cache = get_pattern_cache()
+        from .performance_optimizer import PatternCompilationCache
+
+        cached_value = (dfa, nfa, compilation_time)
+        size_hint = PatternCompilationCache._estimate_compiled_size_mb(
+            key,
+            cached_value,
+        )
         # Store as tuple (dfa, nfa, compilation_time) for backward compatibility
-        return cache.put(key, (dfa, nfa, compilation_time), metadata=pattern_metadata)
+        return cache.put(
+            key,
+            cached_value,
+            size_hint=size_hint,
+            metadata=pattern_metadata,
+        )
     except Exception as e:
         logger.error(f"Pattern caching error: {e}")
         return False
