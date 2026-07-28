@@ -1568,7 +1568,10 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
     # Freeze one effective resource view for the query.  Every component
     # created below inherits this snapshot, so a cache, automaton, and matcher
     # cannot make contradictory decisions from different host/cgroup samples.
-    execution_profile = get_adaptive_resource_profile(refresh=True)
+    # Coalesce resource discovery across queries started within the short
+    # profile TTL. This removes repeated procfs/cgroup I/O for tiny, high-QPS
+    # workloads while still observing a changed envelope within one second.
+    execution_profile = get_adaptive_resource_profile()
     execution_profile.require_query_capacity()
     app_config = MatchRecognizeConfig.from_env(execution_profile)
     # Reuse compiled entries only after the process-wide cache has adopted the

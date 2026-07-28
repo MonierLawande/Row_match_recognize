@@ -66,7 +66,9 @@ def _adaptive_permute_cache_size() -> int:
 
 
 # Compatibility value for callers that import the historical constant.
-MAX_CACHE_SIZE = _adaptive_permute_cache_size()
+# Runtime instances still resolve their cache size lazily from the query
+# resource profile; importing this module must never perform system probing.
+MAX_CACHE_SIZE = 50_000
 
 class PermuteValidationLevel(Enum):
     """Validation levels for PERMUTE pattern processing."""

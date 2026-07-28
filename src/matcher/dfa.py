@@ -49,10 +49,11 @@ logger = get_logger(__name__)
 FAIL_STATE = -1
 MAX_OPTIMIZATION_ITERATIONS = 100
 DFA_COMPILER_SCHEMA_VERSION = 2
+DEFAULT_DFA_STATE_CEILING = 50_000
 
 @dataclass(frozen=True)
 class DFAAdaptiveMemoryPolicy:
-    """Continuously derive a safe DFA state ceiling from effective memory.
+    """Derive a safe DFA state budget within a structural ceiling.
 
     The byte budget is intentionally conservative because a DFA state owns
     Python objects, an NFA subset, transitions, map entries, and queue entries.
@@ -66,10 +67,12 @@ class DFAAdaptiveMemoryPolicy:
     available_fraction: float = 0.25
     total_fraction: float = 0.10
     estimated_bytes_per_state: int = 64 * 1024
-    # An administrator may set a ceiling for multi-tenant deployments.  The
-    # default is deliberately uncapped: effective memory is the physical
-    # ceiling, so larger containers continue to receive a larger budget.
-    hard_max_states: Optional[int] = None
+    # Dataset size does not determine DFA size; pattern structure does.
+    # Retain the proven 50,000-state production ceiling by default while the
+    # memory-derived budget can still reduce it on constrained machines.
+    # Advanced embedders may pass an explicit policy after validating a larger
+    # ceiling for their pattern workload.
+    hard_max_states: Optional[int] = DEFAULT_DFA_STATE_CEILING
     minimum_states: int = 1_000
     iteration_multiplier: int = 2
 
@@ -680,12 +683,16 @@ class DFABuilder:
             profile = self._resource_profile
             if profile is not None:
                 profile.require_query_capacity()
+            default_ceiling = DEFAULT_DFA_STATE_CEILING
             hard_max_states = (
-                None
+                default_ceiling
                 if profile is None
-                else max(
-                    1,
-                    profile.query_budget_bytes // (64 * 1024),
+                else min(
+                    default_ceiling,
+                    max(
+                        1,
+                        profile.query_budget_bytes // (64 * 1024),
+                    ),
                 )
             )
             self._memory_policy = DFAAdaptiveMemoryPolicy(

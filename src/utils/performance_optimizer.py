@@ -25,6 +25,19 @@ from src.utils.resource_profile import (
 
 logger = get_logger(__name__)
 
+
+def _shutdown_executor_compat(executor: Any) -> None:
+    """Stop an executor on every supported Python version.
+
+    ``cancel_futures`` was added in Python 3.9. Pending futures are cancelled
+    by the caller first, so Python 3.8 can safely use the older signature.
+    """
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        executor.shutdown(wait=False)
+
+
 class CacheEvictionPolicy(Enum):
     """Cache eviction policies for smart caching."""
     LRU = "lru"  # Least Recently Used
@@ -2328,7 +2341,7 @@ class ParallelExecutionManager:
                 pool = self.thread_pool
                 self.thread_pool = None
                 if pool is not None:
-                    pool.shutdown(wait=False, cancel_futures=True)
+                    _shutdown_executor_compat(pool)
                 raise ParallelExecutionTimeoutError(
                     partition_id,
                     self.config.thread_timeout_seconds,
@@ -2373,7 +2386,7 @@ class ParallelExecutionManager:
                 pool = self.process_pool
                 self.process_pool = None
                 if pool is not None:
-                    pool.shutdown(wait=False, cancel_futures=True)
+                    _shutdown_executor_compat(pool)
                 raise ParallelExecutionTimeoutError(
                     partition_id,
                     self.config.process_timeout_seconds,

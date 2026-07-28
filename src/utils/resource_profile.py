@@ -12,6 +12,8 @@ SQL semantics or turn resource exhaustion into an incomplete result.
 from dataclasses import dataclass, replace
 import math
 import os
+import posixpath
+import sys
 import threading
 import time
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
@@ -20,6 +22,10 @@ import psutil
 
 
 MIB = 1024 ** 2
+DEFAULT_QUERY_MEMORY_CEILING_BYTES = 8 * 1024 * MIB
+DEFAULT_CACHE_MEMORY_CEILING_BYTES = 2 * 1024 * MIB
+DEFAULT_WORKER_CEILING = 4
+DEFAULT_CACHE_ENTRY_CEILING = 50_000
 
 
 class InsufficientExecutionResourcesError(RuntimeError):
@@ -107,6 +113,7 @@ class SystemResourceProbe:
         proc_cgroup_path: str = '/proc/self/cgroup',
         proc_mountinfo_path: str = '/proc/self/mountinfo',
         host_provider: Optional[Callable[[], Any]] = None,
+        enable_cgroup_probe: Optional[bool] = None,
     ) -> None:
         if host_memory_provider is not None and host_provider is not None:
             raise ValueError(
@@ -122,6 +129,16 @@ class SystemResourceProbe:
             affinity_provider or self._default_affinity
         )
         self._text_reader = text_reader or self._read_text
+        # Native Windows and macOS do not expose Linux cgroups. Injected
+        # readers remain enabled so cgroup parsing can be tested portably.
+        self._cgroup_probe_enabled = (
+            (
+                sys.platform.startswith('linux')
+                or text_reader is not None
+            )
+            if enable_cgroup_probe is None
+            else bool(enable_cgroup_probe)
+        )
         self._cgroup_root = cgroup_root
         self._proc_cgroup_path = proc_cgroup_path
         self._proc_mountinfo_path = proc_mountinfo_path
@@ -145,6 +162,16 @@ class SystemResourceProbe:
     def _default_affinity() -> Optional[Any]:
         if hasattr(os, 'sched_getaffinity'):
             return os.sched_getaffinity(0)
+        # Windows exposes processor affinity through psutil rather than
+        # os.sched_getaffinity. macOS normally has neither API and safely
+        # falls back to os.cpu_count in cpu_snapshot().
+        try:
+            process = psutil.Process()
+            cpu_affinity = getattr(process, 'cpu_affinity', None)
+            if cpu_affinity is not None:
+                return cpu_affinity()
+        except (AttributeError, NotImplementedError, OSError, psutil.Error):
+            pass
         return None
 
     def _safe_read(self, path: str) -> Optional[str]:
@@ -299,24 +326,24 @@ class SystemResourceProbe:
         process_cgroup_path: str,
     ) -> Optional[str]:
         """Map a process hierarchy path to its visible mounted directory."""
-        mount_root = os.path.normpath('/' + mount.root.lstrip('/'))
-        process_path = os.path.normpath(
+        mount_root = posixpath.normpath('/' + mount.root.lstrip('/'))
+        process_path = posixpath.normpath(
             '/' + process_cgroup_path.lstrip('/')
         )
         if mount_root == '/':
             relative = process_path.lstrip('/')
         elif process_path == mount_root:
             relative = ''
-        elif process_path.startswith(mount_root + os.sep):
+        elif process_path.startswith(mount_root + '/'):
             relative = process_path[len(mount_root):].lstrip('/')
         else:
             # The mount does not expose this process hierarchy path.
             return None
 
-        mount_point = os.path.abspath(mount.mount_point)
-        resolved = os.path.abspath(os.path.join(mount_point, relative))
+        mount_point = posixpath.abspath(mount.mount_point)
+        resolved = posixpath.abspath(posixpath.join(mount_point, relative))
         try:
-            if os.path.commonpath([mount_point, resolved]) != mount_point:
+            if posixpath.commonpath([mount_point, resolved]) != mount_point:
                 return None
         except ValueError:
             return None
@@ -383,16 +410,19 @@ class SystemResourceProbe:
         *,
         path_is_leaf: bool = False,
     ) -> List[str]:
-        normalized_root = os.path.abspath(root)
+        normalized_root = posixpath.abspath(root)
         if path_is_leaf:
-            leaf = os.path.abspath(relative_path)
+            leaf = posixpath.abspath(relative_path)
         else:
             relative = relative_path.lstrip('/')
-            leaf = os.path.abspath(
-                os.path.join(normalized_root, relative)
+            leaf = posixpath.abspath(
+                posixpath.join(normalized_root, relative)
             )
         try:
-            if os.path.commonpath([normalized_root, leaf]) != normalized_root:
+            if (
+                posixpath.commonpath([normalized_root, leaf])
+                != normalized_root
+            ):
                 return [normalized_root]
         except ValueError:
             return [normalized_root]
@@ -403,7 +433,7 @@ class SystemResourceProbe:
             directories.append(current)
             if current == normalized_root:
                 break
-            parent = os.path.dirname(current)
+            parent = posixpath.dirname(current)
             if parent == current:
                 break
             current = parent
@@ -413,6 +443,8 @@ class SystemResourceProbe:
         self,
         raw_entries: Optional[str] = None,
     ) -> Tuple[Optional[int], Optional[int]]:
+        if not self._cgroup_probe_enabled:
+            return None, None
         candidates: List[Tuple[str, str, bool]] = []
         for version, relative_path in self._process_cgroup_entries(raw_entries):
             if version == 'v2':
@@ -427,8 +459,8 @@ class SystemResourceProbe:
                     )
                 candidates.extend(
                     (
-                        os.path.join(directory, 'memory.max'),
-                        os.path.join(directory, 'memory.current'),
+                        posixpath.join(directory, 'memory.max'),
+                        posixpath.join(directory, 'memory.current'),
                         False,
                     )
                     for directory in roots
@@ -440,18 +472,18 @@ class SystemResourceProbe:
                     controller='memory',
                 )
                 if not roots:
-                    root = os.path.join(self._cgroup_root, 'memory')
+                    root = posixpath.join(self._cgroup_root, 'memory')
                     roots = self._ancestor_directories(
                         root,
                         relative_path,
                     )
                 candidates.extend(
                     (
-                        os.path.join(
+                        posixpath.join(
                             directory,
                             'memory.limit_in_bytes',
                         ),
-                        os.path.join(
+                        posixpath.join(
                             directory,
                             'memory.usage_in_bytes',
                         ),
@@ -470,17 +502,17 @@ class SystemResourceProbe:
         if not candidates:
             candidates.extend([
                 (
-                    os.path.join(self._cgroup_root, 'memory.max'),
-                    os.path.join(self._cgroup_root, 'memory.current'),
+                    posixpath.join(self._cgroup_root, 'memory.max'),
+                    posixpath.join(self._cgroup_root, 'memory.current'),
                     False,
                 ),
                 (
-                    os.path.join(
+                    posixpath.join(
                         self._cgroup_root,
                         'memory',
                         'memory.limit_in_bytes',
                     ),
-                    os.path.join(
+                    posixpath.join(
                         self._cgroup_root,
                         'memory',
                         'memory.usage_in_bytes',
@@ -506,8 +538,11 @@ class SystemResourceProbe:
                 continue
             limits.append(limit)
             usage = self._parse_memory_value(self._safe_read(usage_path))
+            # A known limit with unknown usage cannot establish safe remaining
+            # capacity. Fail closed rather than treating the whole cgroup
+            # allowance as free and risking an OOM kill.
             remaining_values.append(
-                limit if usage is None else max(0, limit - usage)
+                0 if usage is None else max(0, limit - usage)
             )
 
         return (
@@ -574,6 +609,8 @@ class SystemResourceProbe:
         self,
         raw_entries: Optional[str] = None,
     ) -> Optional[float]:
+        if not self._cgroup_probe_enabled:
+            return None
         quotas: List[float] = []
         v2_directories: List[str] = []
         v1_directories: List[str] = []
@@ -602,7 +639,7 @@ class SystemResourceProbe:
                     for cpu_root_name in ('cpu', 'cpu,cpuacct'):
                         v1_directories.extend(
                             self._ancestor_directories(
-                                os.path.join(
+                                posixpath.join(
                                     self._cgroup_root,
                                     cpu_root_name,
                                 ),
@@ -617,22 +654,22 @@ class SystemResourceProbe:
         if not v2_directories and not v1_directories:
             v2_directories.append(self._cgroup_root)
             v1_directories.extend([
-                os.path.join(self._cgroup_root, 'cpu'),
-                os.path.join(self._cgroup_root, 'cpu,cpuacct'),
+                posixpath.join(self._cgroup_root, 'cpu'),
+                posixpath.join(self._cgroup_root, 'cpu,cpuacct'),
             ])
         for directory in dict.fromkeys(v2_directories):
             quota = self._parse_cpu_max(
-                self._safe_read(os.path.join(directory, 'cpu.max'))
+                self._safe_read(posixpath.join(directory, 'cpu.max'))
             )
             if quota is not None:
                 quotas.append(quota)
 
         for directory in dict.fromkeys(v1_directories):
             quota_raw = self._safe_read(
-                os.path.join(directory, 'cpu.cfs_quota_us')
+                posixpath.join(directory, 'cpu.cfs_quota_us')
             )
             period_raw = self._safe_read(
-                os.path.join(directory, 'cpu.cfs_period_us')
+                posixpath.join(directory, 'cpu.cfs_period_us')
             )
             try:
                 quota_value = int(quota_raw) if quota_raw is not None else -1
@@ -725,12 +762,16 @@ class AdaptiveResourceProfile:
     reserve_floor_bytes: int = 512 * MIB
     cache_available_fraction: float = 0.10
     cache_limit_fraction: float = 0.05
-    cache_hard_max_bytes: Optional[int] = None
+    cache_hard_max_bytes: Optional[int] = (
+        DEFAULT_CACHE_MEMORY_CEILING_BYTES
+    )
     query_available_fraction: float = 0.50
     query_limit_fraction: float = 0.25
-    query_hard_max_bytes: Optional[int] = None
-    worker_hard_max: Optional[int] = None
-    cache_entry_hard_max: Optional[int] = None
+    query_hard_max_bytes: Optional[int] = (
+        DEFAULT_QUERY_MEMORY_CEILING_BYTES
+    )
+    worker_hard_max: Optional[int] = DEFAULT_WORKER_CEILING
+    cache_entry_hard_max: Optional[int] = DEFAULT_CACHE_ENTRY_CEILING
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -1009,7 +1050,7 @@ _cached_profile_at = 0.0
 def get_adaptive_resource_profile(
     *,
     refresh: bool = False,
-    max_age_seconds: float = 5.0,
+    max_age_seconds: float = 1.0,
 ) -> AdaptiveResourceProfile:
     """Return a short-lived profile so pressure changes are observed safely."""
     global _cached_profile, _cached_profile_at

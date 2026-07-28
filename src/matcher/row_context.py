@@ -144,7 +144,6 @@ class RowContext:
     resource_profile: Optional[AdaptiveResourceProfile] = field(
         default=None,
         repr=False,
-        kw_only=True,
     )
     
     # Private fields for optimization and caching
