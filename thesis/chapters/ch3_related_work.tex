@@ -157,10 +157,10 @@ DataFrame-native execution path.
 \label{subsec:related-snowflake}
 % ................................
 
-Snowflake is a managed cloud data platform.  It provides documented
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} support with rich
-\texttt{DEFINE} and \texttt{MEASURES} expression capabilities for
-row-pattern queries~\cite{snowflake2025match_recognize,hoffa2021snowflake}.
+Snowflake is a managed cloud data platform.  It documents
+\texttt{MATCH\_RECOGNIZE} support, with rich \texttt{DEFINE} and
+\texttt{MEASURES} expressions for row-pattern
+queries~\cite{snowflake2025match_recognize,hoffa2021snowflake}.
 Its documentation also notes implementation-specific behavior.  The
 engine uses backtracking, and some pattern and data combinations can
 take a long time to execute.  Some row-pattern functions are also
@@ -174,9 +174,10 @@ warehouse size and query workload~\cite{snowflake2025match_recognize}.
 \label{subsec:related-flink}
 % ................................
 
-Apache Flink is designed for real-time stream processing and exposes
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} through Flink SQL, backed by
-its Complex Event Processing (CEP) runtime library~\cite{flink,vsprem2024building,georgiou2025streaming}.
+Apache Flink is designed for real-time stream processing.  It exposes
+\texttt{MATCH\_RECOGNIZE} through Flink SQL, backed by its Complex
+Event Processing (CEP) runtime
+library~\cite{flink,vsprem2024building,georgiou2025streaming}.
 Its documented implementation is a SQL subset oriented toward
 streaming use cases.  The current Flink documentation lists
 unsupported features including pattern groups, subsequence
@@ -283,7 +284,7 @@ error-prone as patterns lengthen, need overlap control, or refer to
 already-matched rows.
 
 Despite its reach, the Pandas~2.3.3 API used in this thesis has no
-native SQL:2016 \texttt{MATCH\_\allowbreak{}RECOGNIZE}-style
+native SQL:2016 \texttt{MATCH\_RECOGNIZE}-style
 primitive~\cite{pandas233api}.  Analysts therefore fall back on
 \texttt{DataFrame.\allowbreak{}apply()} chains, \texttt{iterrows()},
 or database round-trips, which are harder to read and maintain.
