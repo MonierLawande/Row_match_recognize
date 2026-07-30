@@ -7,11 +7,11 @@
 \chapter{Conclusions and Future Work}
 \label{chap:conclusions}
 
-This chapter closes the thesis: it reads the main findings, states what
+This chapter closes the thesis.  It reads the main findings, states what
 the work does not cover, and points to next steps.
 Section~\ref{sec:discussion} reads the evaluation results in practical
-terms, Section~\ref{sec:conc-validation} maps each claim to its
-evidence, Section~\ref{sec:conc-limitations} lists the limitations,
+terms.  Section~\ref{sec:conc-validation} maps each claim to its
+evidence, and Section~\ref{sec:conc-limitations} lists the limitations.
 Section~\ref{sec:conclusion} states the overall conclusion, and
 Section~\ref{sec:conc-future} sets out future work.
 
@@ -22,7 +22,7 @@ Section~\ref{sec:conc-future} sets out future work.
 
 The results show a practical subset of SQL row-pattern recognition can
 move into \texttt{pandas} without giving up the declarative shape of
-\texttt{MATCH\_\allowbreak{}RECOGNIZE}.  For the reported reference
+\texttt{MATCH\_RECOGNIZE}.  For the reported reference
 queries, the engine returned the same rows and measure values as
 Trino~473, Oracle, and hand-written \texttt{pandas}---including
 partition-local ordering, implicit \texttt{DEFINE} behavior,
@@ -43,27 +43,31 @@ Performance backs the approach for medium-scale in-memory work.
 Chapter~\ref{chap:evaluation} reported 30 pattern--size cells (each the
 mean of twenty runs after five warmups) over five families and six
 sizes, 100\,K to 2.22\,M rows.  Throughput averaged
-4\,976\,348~rows/s and held steady as input grew; the variation came
+6\,391\,929~rows/s and held steady as input grew; the variation came
 from pattern structure, not match volume---simple sequences and bounded
 quantifiers were fastest, \texttt{complex\_nested} slowest despite
 producing fewer matches than \texttt{simple\_sequence}.  Under one shared budget the
-engine had the lowest average time of the three (0.20\,s versus
+engine had the lowest average time of the three (0.16\,s versus
 Oracle's 1.04\,s and a warm Trino's 1.98\,s) and won every one of the
 30 cells.  The reason is narrow specialization---no query planner or
 distributed layer, in-process arrays, compiled fast paths
 (Section~\ref{subsec:eval-findings}).  It holds only for the supported
-subset and the single-node in-memory setting, and it is not universal:
-on a state-dependent \texttt{DEFINE} the ranking reverses---Oracle is
-the fastest system there, Trino second, and the engine slowest
-(Section~\ref{subsec:eval-worst-cases}).  A separate scalability test then
-pushed all three to the 227.9\,M-row Amazon Reviews~2023
-corpus---about $100\times$ larger.  The engine's time and memory stayed
-near-linear and it kept a $3$--$5\times$ lead over Oracle~EE and
-$6$--$8\times$ over Trino; Oracle~EE also reached
+subset, on one machine, with the data in memory.  The speed comes from
+turning conditions into column operations.  One condition that depends
+on the match itself is handled that way too: a running aggregate over
+the matched rows, carried forward in a single $O(n)$ pass.  But that
+form had to be written explicitly.  Every other condition the compiler
+cannot turn into column operations still falls back to the slower exact
+search (Section~\ref{subsec:eval-worst-cases}).
+
+A separate scalability test then pushed all three to the 227.9\,M-row
+Amazon Reviews~2023 corpus, about $100\times$ larger.  The engine's time
+and memory stayed near-linear.  It kept a $4.7$--$9.0\times$ lead over
+Oracle~EE and $10.5$--$13.2\times$ over Trino.  Oracle~EE also reached
 the full corpus, while Trino's hardest pattern ran out of the time
-budget.  The price is memory: the engine holds the scanned data in RAM,
+budget.  The price is memory.  The engine holds the scanned data in RAM,
 so its per-query peak is the highest of the three and grows with the
-data---below 300\,MB at 2.22\,M rows, tens of gigabytes at the full
+data---about 200\,MB at 2.22\,M rows, tens of gigabytes at the full
 corpus.
 
 Architecturally, the system keeps parsing, semantic validation,
@@ -82,10 +86,10 @@ a distributed or broadly parallel SQL engine---Trino and Oracle bring
 mature optimizers, wider dialect coverage, and execution infrastructure
 that stay outside this prototype.
 
-The central finding is scoped but real: SQL row-pattern semantics can
+The central finding is scoped but real.  SQL row-pattern semantics can
 be compiled into a finite-automata engine and run directly over
-DataFrames, with correct results on the evaluated scenarios and
-predictable performance across the measured range.
+DataFrames.  The results are correct on the evaluated scenarios and the
+performance is predictable across the measured range.
 
 % ----------------------------------------------------------------
 \section{Validation of Chapter Claims}
@@ -144,27 +148,27 @@ Reviews~2023 corpus. &
 Execution time scales predictably over the measured range
 ($R^2 \geq 0.99$ for the proposed engine on each of its five pattern
 families), with average throughput of
-4\,976\,348~rows/s and the lowest average execution time of the
-three systems (0.20\,s, versus 1.04\,s for Oracle and 1.98\,s for a
+6\,391\,929~rows/s and the lowest average execution time of the
+three systems (0.16\,s, versus 1.04\,s for Oracle and 1.98\,s for a
 fully-warmed Trino) under the same nominal budget; the scalability
-sweep stays near-linear, $3$--$5\times$ ahead of Oracle~EE and
-$6$--$8\times$ ahead of Trino through 227.9\,M rows. &
+sweep stays near-linear, $4.7$--$9.0\times$ ahead of Oracle~EE and
+$10.5$--$13.2\times$ ahead of Trino through 227.9\,M rows. &
 The scalability sweep is a single pass per size, not the repeated,
 IQR-filtered protocol above; distributed and multi-partition
-workloads remain untested; and on state-dependent \texttt{DEFINE}
-patterns the databases are faster
+workloads remain untested; and predicates the compiler cannot
+vectorize still take the slower exact-search fallback
 (Section~\ref{subsec:eval-worst-cases}). \\
 \midrule
 Memory use &
 Incremental-peak and footprint measurements for all 30 benchmark
 scenarios under one shared cgroup-v2 instrument, including the
-engine's maximum observed incremental peak of 290.11\,MB. &
+engine's maximum observed incremental peak of 200.96\,MB. &
 Memory use remains bounded for the evaluated workloads. &
 The measurements are empirical and do not define a formal upper bound
 for all possible patterns or datasets. \\
 \midrule
 Developer effort &
-Comparison between declarative \texttt{MATCH\_\allowbreak{}RECOGNIZE} queries and
+Comparison between declarative \texttt{MATCH\_RECOGNIZE} queries and
 hand-written \texttt{pandas} baselines using grouping, shifting, and
 manual skip handling. &
 The SQL form reduces procedural code and improves readability for the
@@ -205,7 +209,7 @@ A few limitations bound how far the results generalize.
 
 \textbf{Supported subset, not exhaustive SQL.}
 The engine targets a substantial but bounded slice of
-\texttt{MATCH\_\allowbreak{}RECOGNIZE}: \texttt{PARTITION BY},
+\texttt{MATCH\_RECOGNIZE}: \texttt{PARTITION BY},
 \texttt{ORDER BY}, \texttt{PATTERN}, \texttt{DEFINE}, selected
 \texttt{MEASURES}, supported skip and output modes, navigation,
 subsets, exclusion blocks, anchors, and \texttt{PERMUTE}.  It does not
@@ -223,12 +227,17 @@ guards.  If a determinized automaton would exceed the configured state
 limit, compilation fails explicitly.  The engine does not execute or
 cache an incomplete DFA.  NFA construction failures are also reported
 instead of being converted to a no-match automaton.  These rules prevent
-silent missed matches, but they remain an availability boundary for very
-large patterns.  A future lazy
-determinizer or complete NFA backend could extend the boundary while
-preserving the supported matching semantics.  A state-dependent
-\texttt{DEFINE} takes the exact-search fallback, the engine's slowest
-path---there both databases are faster
+silently missed matches.  The cost is that a very large pattern is
+refused rather than run.  Building the automaton only as far as the data
+requires, or keeping the NFA instead of converting it, would raise that
+limit without changing what the engine matches.
+
+Predicates set a second limit.  A \texttt{DEFINE} that cannot become
+column operations takes the exact search, the engine's slowest path.  A
+running \texttt{AVG} over the matched rows is the exception: it is
+carried forward as the match grows, so that case stays fast.  Every
+other form has to be handled one at a time, which is what keeps this a
+limit rather than a solved problem
 (Section~\ref{subsec:eval-worst-cases}).
 
 \textbf{Measure and aggregate scope.}
@@ -274,7 +283,7 @@ Pandas has no native row-pattern primitive: detecting a multi-row
 pattern means shifted columns, manual loops, and custom state
 handling, or a round trip through an external SQL engine.  This thesis
 addressed that gap with a SQL-in-\texttt{pandas} implementation that
-runs a supported subset of \texttt{MATCH\_\allowbreak{}RECOGNIZE} over
+runs a supported subset of \texttt{MATCH\_RECOGNIZE} over
 DataFrames.  It contributes a Trino-syntax parsing and validation
 pipeline, an internal representation of row-pattern queries,
 finite-automata pattern compilation, a \texttt{pandas} matcher, measure
@@ -284,14 +293,13 @@ execution.
 The evaluation gives three conclusions.  First, the selected
 correctness scenarios matched Trino, Oracle, and hand-written
 \texttt{pandas}.  Second, the declarative form cuts the procedural
-Python needed for sequential pattern analysis substantially.  Third,
-the Amazon UK Products benchmark shows stable performance across 30
-cells from 100\,K to 2.22\,M rows---4\,976\,348~rows/s average, the
-lowest average time of the three under one budget (0.20\,s versus
-1.04\,s Oracle and 1.98\,s warm Trino), and bounded memory over the
-range; a separate sweep on Amazon Reviews~2023 shows the same lead
-holds near-linearly to 227.9\,M rows.  The lead is workload-specific:
-on a state-dependent pattern both databases win.
+Python needed for sequential pattern analysis substantially.  Third, the
+Amazon UK Products benchmark shows stable performance across 30 cells
+from 100\,K to 2.22\,M rows: 6\,391\,929~rows/s on average, the lowest
+time of the three systems in every cell, and bounded memory over the
+range (Table~\ref{tab:conc-claim-validation}).  A separate sweep on
+Amazon Reviews~2023 shows the same lead holds near-linearly to
+227.9\,M rows.
 
 The approach is a bridge between SQL row-pattern
 recognition and DataFrame analytics.  It does not replace mature SQL
@@ -347,16 +355,17 @@ teaching.
 \label{sec:conc-summary}
 % ----------------------------------------------------------------
 
-This chapter drew the findings together in a scoped context.  The
-implementation supports a useful subset of
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} over \texttt{pandas}, with
-correctness evidence from selected reference queries, performance
-evidence from a benchmark of twenty measured runs per cell, and a
-separate scalability sweep to 227.9\,M rows.
+This chapter drew the findings together in a scoped context.  It read
+the evaluation in practical terms: what the engine matched, what the
+declarative form saved in code, and where its speed comes from.  It then
+mapped each claim to the evidence behind it and to the boundary within
+which it holds, and set out the threats to validity.
 
-It also named the main limits---bounded SQL coverage, complex-pattern
-growth, the state-dependent fallback, expression-evaluation scope,
-large-scale performance, memory
-variability, and limited optimizer integration---and set future work
-against them: broader conformance testing, parallel and distributed
+It named the main limits: bounded SQL coverage, complex-pattern growth,
+the state-dependent fallback, expression-evaluation scope, large-scale
+performance, memory variability, and limited optimizer integration.  The
+conclusion drawn from all of this is that a practical subset of SQL
+row-pattern recognition can run directly over DataFrames, inside the
+scope the evidence supports.  Future work is set against the
+limits---broader conformance testing, parallel and distributed
 execution, backend abstraction, optimization, and better tooling.

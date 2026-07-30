@@ -38,6 +38,13 @@ structure.  \emph{Pattern compilation} turns the pattern into a finite
 automaton, and \emph{execution} runs that automaton over the ordered
 data and returns a DataFrame.
 
+The stages are a real division of work, not just a way to describe it.
+Each one has a single job and a single output.  A failure therefore has
+one place to come from, and each stage can be tested on its own
+artifact.  The order also puts the cheap work first: the query is
+checked before the automaton is built, and the automaton is built before
+a single row is read.
+
 \begin{figure}[htbp]
   \centering
   \makebox[\textwidth][l]{\hspace*{-2cm}\begin{tikzpicture}[
@@ -89,8 +96,9 @@ query's parts---partitioning, ordering, the pattern, its conditions,
 and the output measures---and organizes them into the AST, which the
 semantic validator and logical planner then check and normalise before
 anything is compiled.  The \emph{automata compiler} converts the pattern
-into a non-deterministic automaton and then a deterministic one, so
-that repetition, alternation, and sequencing are all handled
+into a non-deterministic finite automaton (NFA) and then a
+deterministic one (DFA), so that repetition, alternation, and
+sequencing are all handled
 uniformly~\cite{georgiou2025streaming}.  The \emph{execution engine}
 partitions and orders the DataFrame, scans it with the compiled
 automaton under the configured skip mode, computes each match's
@@ -149,57 +157,88 @@ path, which is sufficient for the \texttt{FROM}-clause row-pattern
 cases evaluated in this thesis.
 
 \paragraph{Choosing a parser.}
-No existing Python SQL library parses this sub-language adequately:
-\texttt{sqlparse}~\cite{sqlparse_tool} produces only a shallow token
-stream, \texttt{sqlglot}~\cite{sqlglot_tool} and
+The requirement is a typed tree for both languages at once.  None of the
+Python SQL libraries surveyed when the parser was chosen met it.
+\texttt{sqlparse}~\cite{sqlparse_tool}
+produces only a shallow token stream;
+\texttt{sqlglot}~\cite{sqlglot_tool} and
 \texttt{mo\_sql\_parsing}~\cite{mo_sql_parsing_tool} expose a typed AST
 but omit constructs such as exclusions, anchors, \texttt{PERMUTE}, and
-bounded quantifiers, and \texttt{pglast}~\cite{pglast_tool} cannot
+bounded quantifiers; and \texttt{pglast}~\cite{pglast_tool} cannot
 parse \texttt{MATCH\_RECOGNIZE} at all.  Rather than extend one of
 these, the engine reuses the community ANTLR4 grammar for the Trino
 SQL dialect~\cite{antlr_trino_sql,Parr2013}, whose \texttt{.g4} files
 already contain a \texttt{pattern\-Recognition} rule covering all eight
 sub-clauses.  ANTLR4 generates the lexer, parser, and traversal
 scaffolding directly from that grammar, so no grammar changes were
-needed, and syntax errors are reported with the exact line, column,
-and source snippet.  A hand-written recursive-descent parser or a set
-of regular expressions was rejected: the former is hard to maintain
-across SQL's hundreds of productions, and the latter cannot model
-recursive structures such as nested grouping.
+needed.
+
+Two properties of the tool matter for a grammar this size.  The first is
+lookahead.  Most parser generators commit to a rule after a fixed number
+of tokens, and a grammar needing one more must be reshaped by hand.
+ANTLR4 instead reads as far ahead as the input requires.  Its authors
+call this \emph{adaptive} $LL(*)$, written
+\emph{ALL(*)}~\cite{parr2014adaptive}.  So where ordinary SQL and a
+row-pattern construct could be read either way, the input decides.  The second is
+\emph{left recursion}: rules that refer to themselves on the left.  The
+grammar writes conjunction as \texttt{booleanExpression AND
+booleanExpression}, the shape a classical top-down parser loops forever
+on.  ANTLR4 rewrites it internally, so SQL's expression rules keep the
+form the standard gives them.
+
+Syntax errors go through a custom \emph{error listener} rather than
+ANTLR's console default, so each carries the exact line, column, and
+source snippet.  A hand-written recursive-descent parser or a set of
+regular expressions was rejected: the former is hard to maintain across
+SQL's hundreds of productions, and the latter cannot model recursive
+structures such as nested grouping.
 
 \paragraph{From parse tree to a typed AST.}
-ANTLR4's raw parse tree carries many nodes---keywords and
-punctuation---that execution does not need.  A pair of cooperating
-visitors walks it and produces a compact, typed AST: a root node
-holding the outer \texttt{SELECT}/\texttt{FROM} and a single
+ANTLR4's raw parse tree is a \emph{concrete syntax tree}: it keeps every
+token the grammar matched, keywords and punctuation included, most of
+which execution does not need.  Lowering it to an abstract one follows
+the \emph{Visitor} pattern~\cite{robson2022designpatterns}.  ANTLR4
+emits a visitor base class from the grammar, and a pair of cooperating
+subclasses---one for the outer query, one for the
+\texttt{MATCH\_RECOGNIZE} clause---walk the tree and produce a compact,
+typed AST: a root node holding the outer \texttt{SELECT}/\texttt{FROM}
+and a single
 \texttt{MatchRecognizeClause}, with every sub-clause represented as its
 own typed dataclass (partitioning, ordering, measures, rows-per-match,
 skip mode, pattern, subset, and define).  Later stages then dispatch
-on node type instead of re-inspecting raw strings.  The predicates in
-\texttt{DEFINE} and the expressions in \texttt{MEASURES} are kept as
-text at this stage and interpreted on demand, which keeps the grammar
-small.
+on node type instead of re-inspecting raw strings.
+
+One exception is deliberate.  The predicates in \texttt{DEFINE} and the
+expressions in \texttt{MEASURES} stay as text and are interpreted on
+demand.  That keeps the grammar small.  The price is that those strings
+must still be evaluated safely later.
 
 \paragraph{Safe expression evaluation.}
-Because those predicate and measure strings are user-supplied, the
-engine never calls Python's \texttt{eval()} on them---that would be a
-code-injection risk.  Instead it translates the supported SQL
-expression subset into a restricted Python form and evaluates it by
-walking only an approved set of AST nodes: comparisons, arithmetic,
-boolean logic, literals, subscripts, and the navigation functions
-\texttt{PREV}, \texttt{NEXT}, \texttt{FIRST}, and \texttt{LAST}.
-Imports, arbitrary function calls, assignments, and any access to
-built-ins, the file system, or the network are all disallowed, so only
-the current row context and pattern-variable bindings are ever
-exposed.
+Those strings come from the user, so the engine never runs them as
+Python code.  It reads each one into a small tree of operations and
+walks that tree itself.  The walk follows an \emph{allowlist}: an
+operation is evaluated only if the engine has a handler for it.
+Anything not on the list cannot run at all.  Safety comes from how the
+evaluator is built, not from remembering to block things one at a time.
 
-The parser is exercised by a dedicated test layer that includes
+The list holds what the row-pattern language needs: comparisons,
+arithmetic and unary operators, and boolean connectives; literals, and
+the tuple and list forms \texttt{IN} uses; conditional expressions for
+\texttt{CASE~WHEN}; qualified references such as \texttt{A.price}; and a
+fixed set of calls---the navigation functions \texttt{PREV},
+\texttt{NEXT}, \texttt{FIRST} and \texttt{LAST}, \texttt{CLASSIFIER},
+and the supported aggregates.  Imports, assignments, and any reach into
+built-ins, the file system, or the network are not on it.  An expression
+therefore sees one thing: the \emph{row context}, holding the current
+row and the pattern-variable bindings.
+
+The parser is exercised by a dedicated test layer.  It includes
 adversarial inputs---undefined variables, prohibited function forms,
 invalid skip targets, and incompatible output-mode combinations---and
 end-to-end scenarios adapted from Trino's row-pattern test suite.  Two
-limits follow from the design: SQL features outside the row-pattern
-subset (for example recursive CTEs inside predicate subqueries) are not
-on the main execution path, and because the grammar tracks Trino's
+limits follow from the design.  SQL features outside the row-pattern
+subset, recursive CTEs inside predicate subqueries for example, are not
+on the main execution path.  And because the grammar tracks Trino's
 dialect, other vendors' extensions may need small grammar adjustments.
 
 % ----------------------------------------------------------------
@@ -207,46 +246,73 @@ dialect, other vendors' extensions may need small grammar adjustments.
 \label{sec:meth-semantic}
 % ----------------------------------------------------------------
 
-Once the AST exists, a validation pass runs before any automaton is
-built.  It rejects queries that parse but have no well-defined meaning
-in the supported subset, and normalises a few things for later stages.
-The checks fall into three groups.
+Parsing proves a query is well formed.  It does not prove the query
+means anything.  \texttt{PATTERN (A B)} with \texttt{DEFINE B AS
+B.price > Q.price} parses cleanly, but \texttt{Q} is a variable the
+pattern never declares, so the condition compares against nothing.
 
-\emph{References must resolve.}  Every column in \texttt{PARTITION BY},
-\texttt{ORDER BY}, \texttt{DEFINE}, or \texttt{MEASURES} must exist in
-the input, and every variable reference must name a \texttt{PATTERN}
-variable or a declared \texttt{SUBSET} alias---including a variable with
-no \texttt{DEFINE}, already legal by the rule in
-Section~\ref{sec:meth-compiler}.  Subset aliases are resolved to their
-members.
+A validation pass therefore runs once the AST is complete, before any
+automaton is built.  It does two jobs: it rejects queries that parse but
+have no clear meaning in the supported subset, and it fills in the
+defaults the later stages depend on.  Running it here is what makes the
+error useful.  Nothing has been compiled and no row has been read, so
+the message can name the reference it could not resolve and the clauses
+it searched.  The checks fall into three groups.
 
-\emph{Navigation must be consistently ordered.}  The validator builds a
-timeline of when each variable first appears and checks that
-cross-variable \texttt{NEXT}/\texttt{PREV} references point a valid way;
-nested forms like \texttt{NEXT(PREV(A.price, 1), 1)} are supported.  A
-condition that can never hold yields an empty result, not an
-exception---matching the reference engines.
+\emph{Every name must refer to something.}  This is ordinary \emph{name
+resolution}, with the pattern as its scope.  A condition cannot be
+evaluated if the variables it mentions do not exist, so the validator
+checks each name in \texttt{DEFINE} and \texttt{MEASURES} against the
+variables the \texttt{PATTERN} declares and any \texttt{SUBSET} aliases.
+A subset such as \texttt{SUBSET U = (A, B)} lets \texttt{U.price} stand
+for the rows matched by either variable, and the alias is replaced by
+its members before matching.  A variable used without a \texttt{DEFINE}
+still counts, because it is treated as always true.  A name that matches
+nothing is rejected, and the message says which one.  Column names are
+resolved later, against the DataFrame itself, so a missing
+\texttt{PARTITION BY} or \texttt{ORDER BY} column is reported at that
+point.
 
-\emph{Output and skip modes must be compatible.}  The exclusion syntax
-\texttt{\{-\ \ldots\ -\}} clashes with \texttt{ALL ROWS PER MATCH WITH
-UNMATCHED ROWS} and is rejected; \texttt{AFTER MATCH SKIP TO
-FIRST/LAST~$V$} must target a real variable or alias; and a skip that
-would re-anchor at the previous match's start is caught, since it would
-loop forever.  When every check passes, the validator records the
-resolved configuration---output mode, skip mode, and implicit-variable
-defaults---ready for planning; measure semantics are resolved next,
-during planning (Section~\ref{sec:meth-logical}).
+\emph{Calls must be written correctly.}  Each navigation and aggregate
+function takes a fixed set of arguments: \texttt{FIRST}, \texttt{LAST},
+\texttt{PREV} and \texttt{NEXT} take a value and an optional offset,
+\texttt{COUNT\_IF} takes one condition, and \texttt{SUM\_IF} and
+\texttt{AVG\_IF} take two.  Checking this here means a badly written
+call is caught before anything is compiled, instead of failing later
+inside execution where the cause is harder to trace.  Nesting is
+allowed, so \texttt{NEXT(PREV(A.price, 1), 1)} passes.  What this check
+does not do is decide whether a condition can ever be true.  A condition
+that never holds simply returns no rows, which is how the reference
+engines behave.
+
+\emph{Settings must work together.}  Some combinations ask for
+contradictory output.  An exclusion, written \texttt{\{-\ \ldots\ -\}},
+keeps matched rows out of the result, while \texttt{ALL ROWS PER MATCH
+WITH UNMATCHED ROWS} asks for every row to appear; one removes what the
+other requires, so the standard forbids the pair and the validator
+rejects it.  An \texttt{AFTER MATCH SKIP} target is treated the same
+way: skipping to a variable only means something if that variable
+exists.  One case cannot be settled in advance.  \texttt{AFTER MATCH
+SKIP TO FIRST A} on \texttt{PATTERN (A B)} would send the search back to
+the row the match began on and find the same match forever, so the
+matcher detects it while running and stops with an explicit error.  When
+the checks pass, the resolved configuration goes to the planner---the
+output mode, the skip mode, and the always-true default for variables
+with no condition---and measure semantics are decided during planning
+(Section~\ref{sec:meth-logical}).
 
 % ................................................................
 \section{Logical Plan Construction}
 \label{sec:meth-logical}
 % ................................................................
 
-The logical plan flattens the validated AST into one canonical
-structure that drives every later phase without re-reading the SQL.  It
-is a set of typed attributes pulled from the
-\texttt{MatchRecognizeClause} and passed explicitly to the execution
-functions (Table~\ref{tab:logical-plan}).
+The logical plan is the engine's \emph{intermediate representation}: the
+one structure every later phase reads.  It is a set of typed attributes
+pulled from the \texttt{MatchRecognizeClause} and passed explicitly to
+the execution functions (Table~\ref{tab:logical-plan}).  From here on no stage reads
+the SQL text again.  That is what the boundary buys: a change to the
+query syntax stays in the front end, a change to matching stays in the
+back end.
 
 \begin{table}[htbp]
   \centering
@@ -365,7 +431,7 @@ representation.  Along the way it explained why an ANTLR4 grammar for
 the Trino dialect was reused rather than a new parser written, how
 user expressions are evaluated safely, and how output and measure
 semantics are resolved.  These stages mark the boundary between
-declarative SQL input and the execution machinery that
-Chapter~\ref{chap:implementation} takes up next, covering automata
+declarative SQL input and the execution machinery.
+Chapter~\ref{chap:implementation} takes that up next: automata
 compilation, the Pandas execution model, and the optimization
 techniques behind the engine's runtime and memory behaviour.
