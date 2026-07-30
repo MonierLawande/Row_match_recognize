@@ -287,10 +287,10 @@ engines behave.
 
 \emph{Settings must work together.}  Some combinations ask for
 contradictory output.  An exclusion, written \texttt{\{-\ \ldots\ -\}},
-keeps matched rows out of the result, while \texttt{ALL ROWS PER MATCH
-WITH UNMATCHED ROWS} asks for every row to appear; one removes what the
-other requires, so the standard forbids the pair and the validator
-rejects it.  An \texttt{AFTER MATCH SKIP} target is treated the same
+keeps matched rows out of the result, while the
+\texttt{WITH UNMATCHED ROWS} form of \texttt{ALL ROWS PER MATCH} asks
+for every row to appear; one removes what the other requires, so the
+standard forbids the pair and the validator rejects it.  An \texttt{AFTER MATCH SKIP} target is treated the same
 way: skipping to a variable only means something if that variable
 exists.  One case cannot be settled in advance.  \texttt{AFTER MATCH
 SKIP TO FIRST A} on \texttt{PATTERN (A B)} would send the search back to
@@ -319,7 +319,9 @@ back end.
   \caption{Principal logical-plan attributes extracted from the
     validated AST}
   \label{tab:logical-plan}
-  \begin{tabular}{llp{6.5cm}}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{llp{6.2cm}}
     \toprule
     \textbf{Attribute} & \textbf{Type} & \textbf{Semantics} \\
     \midrule
