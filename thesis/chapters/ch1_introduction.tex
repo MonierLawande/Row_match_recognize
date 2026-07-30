@@ -9,7 +9,7 @@
 Row-pattern recognition searches an ordered series of table rows for
 relationships that span several events.  It can detect shapes such as V, W,
 and U, as well as trends and repeated behavior.  These patterns support
-analysis and prediction in many domains.  Examples include money-laundering
+analysis in many domains.  Examples include money-laundering
 transaction chains~\cite{petkovic2022fraud}, failures in IoT sensor data, and
 user journeys through e-commerce clickstreams.  Unlike an ordinary SQL
 filter, which evaluates one row at a time, a row pattern uses event order and
@@ -26,7 +26,7 @@ SQL:2016 standardized row-pattern recognition through the
 query define and search patterns within ordered rows.  Oracle had already
 introduced it in Oracle Database~12c in 2013~\cite{OracleMR,
 oracle2021dwhsg,book}.
-Adoption nevertheless remains limited.
+Support nevertheless remains uneven.
 
 Trino~\cite{trino2022,trino2021row},
 Snowflake~\cite{snowflake2025match_recognize}, and Apache
@@ -87,7 +87,7 @@ for _, grp in df.groupby('customer_id'):
 result_df = pd.DataFrame(all_matches)
 \end{lstlisting}
 
-Even this fixed three-row pattern needs more than 20 source lines.  The
+Even this fixed three-row pattern needs several procedural steps.  The
 hand-written logic is vulnerable to alignment errors and does not extend
 cleanly to longer patterns or patterns with more conditions.  Such cases also
 require custom indexing, overlap handling, and output logic.
@@ -135,15 +135,16 @@ four- or five-step sequence with conditional alternation normally changes the
 traversal code~\cite{michels2018new,petkovic2022rpr}.  The implementation can
 then compile the pattern into automata, cache repeated pattern structures,
 and process ordered partitions without exposing those details to the user.
-The full structure and sub-clauses of \texttt{MATCH\_RECOGNIZE} are introduced in Chapter~\ref{chap:background}. 
+Chapter~\ref{chap:background} introduces the full structure and
+sub-clauses of \texttt{MATCH\_RECOGNIZE}.
 % ----------------------------------------------------------------
 \section{Research Objectives and Contributions}
 \label{sec:intro-objectives}
 % ----------------------------------------------------------------
 This thesis brings a practical R010-style subset of SQL:2016 row-pattern
-recognition into Pandas, joining relational pattern queries with
-in-memory analytics.  It asks whether this can be done without requiring a
-database server.  Three objectives guide the work.
+recognition into Pandas.  It connects relational pattern queries with
+in-memory analytics and asks whether they can run without a database
+server.  Three objectives guide the work.
 
 \paragraph{Research objectives.}
 
@@ -156,9 +157,10 @@ database server.  Three objectives guide the work.
     Listing~\ref{lst:ch1-mr}.
 
   \item \textbf{Support and verify useful row-pattern semantics.}  The
-    target is the evaluated R010-style subset.  It includes the main
-    clauses, output and skip modes, and navigation functions.  Its
-    pattern operators include quantifiers (\texttt{*}, \texttt{+},
+    target is the evaluated R010-style subset.  It includes the evaluated
+    forms of the main clauses, output and skip modes, and navigation
+    and aggregate functions.  Its pattern constructs include
+    quantifiers (\texttt{*}, \texttt{+},
     \texttt{?}, and \texttt{\{n,m\}}), alternation (\texttt{|}), grouping,
     anchors, exclusions (\texttt{\{-\ldots-\}}), and \texttt{PERMUTE}.
     Automated and cross-system tests verify the supported behavior.
@@ -180,33 +182,35 @@ PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)
 \end{enumerate}
 
 \paragraph{Contributions.}
-The thesis makes three contributions: an in-process Pandas engine, a general
-optimization layer, and a theoretical and empirical evaluation.
-Section~\ref{sec:related-contribution} develops these three and positions
-them against the related systems; the engine itself is built as five core
-stages (Chapter~\ref{chap:methodology}).
+Together, these objectives produce three contributions: an in-process
+Pandas engine with tested row-pattern semantics, an optimized and guarded
+execution design, and a theoretical and empirical evaluation.
+Section~\ref{sec:related-contribution} explains these contributions and
+positions them against related systems.  Chapter~\ref{chap:methodology}
+describes the engine's five core stages.
 
 \paragraph{Evidence at a glance.}
-The regression suite contains 702 automated test cases, all
-passing~\cite{monierashraf2025rowmatch}.  They cover pattern families,
+At the time of evaluation, the regression suite contained 704 passing
+test cases~\cite{monierashraf2025tests}.  The cases cover pattern families,
 constructs, output modes, navigation, and aggregation behavior.  The
 controlled cross-system benchmark adds direct comparison with Trino~473 and
 Oracle~XE~21c.  It uses five pattern families and six nested prefixes of the
 Amazon UK Products dataset, from 100\,K rows to the full 2{,}222{,}742 rows.
 All 90 system--pattern--size cells completed.  For each of the 30
 pattern--size combinations, all three systems returned the same normalized
-result.  Under the shared one-core, 32\,GB budget, the engine recorded the
-lowest average time.  Its execution time grew almost linearly, with higher
-per-query memory than either database.
+result set.  Under the shared one-core, 32\,GB memory limit, mean time was
+0.17\,s for the engine, 1.04\,s for Oracle, and 1.98\,s for Trino.
+Engine time grew almost linearly.  Its measured query-time memory was
+higher than either database, but its process footprint was lower.
 
 The larger Amazon Reviews test extends the range to 227.9~million rows,
-about $100\times$ the main dataset.  This test uses one core, 58\,GB, and a
-600-second per-query limit.  Trino reads a disk-backed table, while Oracle
-runs as 21c Enterprise Edition.  The engine and Oracle completed the full
-range.  Trino exceeded the limit on \texttt{complex\_nested} from 160~million
-rows.  Across the five row-local pattern families and completed cells, the
-engine remained close to linear and kept a $3$--$5\times$ time advantage
-over Oracle~EE and $6$--$8\times$ over Trino.
+about $100\times$ the main dataset.  Under a shared one-core, 58\,GB
+memory limit, the engine and Oracle~21c Enterprise Edition completed all
+35 cases.  Trino~473 completed 33.  Its complex nested cases at 160 and
+227.9~million rows reached the 600\,s limit.  Engine time remained close to linear.
+Across the four pattern families completed by all three systems,
+Oracle's per-size mean time was $5.1$--$10.1\times$ the engine's.
+Trino's was $11.4$--$13.8\times$ the engine's.
 Chapter~\ref{chap:evaluation} reports the complete method, trade-offs, and
 limits.
 
@@ -237,8 +241,8 @@ a declarative query to automata-based execution.
 \textbf{Chapter~\ref{chap:implementation} --- Implementation and Optimization}
 explains NFA and DFA construction, Pandas execution, output construction,
 and measure evaluation.  It also presents the performance layer: vectorized
-conditions, row-local decision tables, linear-pattern search, the fused
-\texttt{ONE ROW PER MATCH} driver, pattern caching, and memory management.
+conditions, compiled fast paths, pattern caching, compact output
+construction, and memory management.
 
 \textbf{Chapter~\ref{chap:evaluation} --- Experimental Evaluation}
 presents the methodology, datasets, and results.  It evaluates correctness,
@@ -266,7 +270,7 @@ Pandas: Bringing MATCH\_RECOGNIZE to Python DataFrames''
 \cite{lawande2026rpr}, addresses the lack of native row-pattern recognition
 in Python data-analysis frameworks.  It presents an SQL-in-Pandas engine for
 running \texttt{MATCH\_RECOGNIZE}-style queries directly on DataFrames.  The
-paper describes its SQL:2016 row-pattern features, NFA-based matching method,
+paper describes its supported row-pattern features, NFA-based matching method,
 and initial tests.  Those tests show that the declarative interface reduces
 procedural Pandas code while preserving the expected results in the studied
 cases.
