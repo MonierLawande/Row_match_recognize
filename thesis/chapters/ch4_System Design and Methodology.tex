@@ -42,6 +42,8 @@ before matching begins.
 \begin{figure}[htbp]
   \centering
   \resizebox{\textwidth}{!}{%
+  % break stage names at the space, never inside the word
+  \hyphenpenalty=10000 \exhyphenpenalty=10000
   \begin{tikzpicture}[
     node distance=0.35cm,
     every node/.style={font=\small},
@@ -81,10 +83,7 @@ before matching begins.
     \draw[arrow] (execute) -- (dfout);
     \draw[arrow] (dfin.east) -- ++(0.35cm,0) -| (execute.south);
   \end{tikzpicture}}
-  \caption{Five-stage architecture.  The SQL query passes through
-    parsing, validation, planning, and pattern compilation.  Execution
-    then combines the compiled automata with the input DataFrame and
-    returns a result DataFrame.}
+  \caption{Five-stage architecture.}
   \label{fig:system-architecture}
 \end{figure}
 
