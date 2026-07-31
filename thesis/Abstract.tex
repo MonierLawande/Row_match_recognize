@@ -1,4 +1,35 @@
-SQL:2016 introduced the \texttt{MATCH\_RECOGNIZE} clause for row pattern recognition, which searches ordered partitions of rows for a user-defined pattern. This matters wherever the significant information is a sequence of events rather than an isolated record, as in financial monitoring, sensor analytics, and e-commerce. Several database systems, including Oracle, Snowflake, Trino, and Apache Flink, now offer row pattern recognition, but Pandas has no native support. Analysts therefore simulate it with shifted columns, manual loops, and custom state handling, which makes the code longer and more error-prone. To close this gap, the proposed engine parses a SQL \texttt{MATCH\_RECOGNIZE} query, validates its row-pattern clauses, translates the pattern into finite automata, and runs the matcher over ordered DataFrame partitions. The supported scope covers \texttt{PARTITION BY}, \texttt{ORDER BY}, \texttt{PATTERN}, \texttt{DEFINE}, \texttt{MEASURES}, skip modes, output modes, quantifiers, alternation, grouping, anchors, exclusions, \texttt{PERMUTE}, and selected navigation and aggregate functions. The system was evaluated through five methods: correctness, SQL:2016 feature coverage, usability, performance, and scalability. Correctness compared the engine's output against Trino and Oracle on every benchmark query. Coverage was measured against Feature~R010, row pattern recognition in the \texttt{FROM} clause. Usability compared the declarative form against hand-written Pandas. Performance used the Amazon UK Products catalogue, with five pattern families over six sizes, from 100\,K rows to the full 2.2 million. Scalability used the Amazon Reviews~2023 corpus, up to 227.9 million rows. The engine reproduced the reference outputs row-for-row in all thirty benchmark cells. It also recorded the lowest average execution time: 0.16\,s against 1.04\,s for Oracle and 1.98\,s for Trino. Time and memory scaled almost linearly, and the engine stayed ahead of both databases to 227.9 million rows. These results show that \texttt{MATCH\_RECOGNIZE} in Pandas bridges SQL and Python workflows, and makes sequential analysis more readable and portable.
+SQL:2016 introduced the \texttt{MATCH\_RECOGNIZE} clause to search
+ordered rows for user-defined patterns.  It is useful when the
+important information is a sequence rather than one isolated row.  It
+can express shapes such as V, W, and U, and repeated behaviour.  Uses include fraud detection, IoT sensor monitoring, market
+analysis, and e-commerce clickstreams, such as small test charges
+before a large purchase.
+Database systems provide this feature, but Pandas has no native
+equivalent.  Analysts therefore use shifted columns, loops, and custom state
+handling, making the code longer and harder to verify.  This
+thesis addressed that gap by building an in-process engine for an
+evaluated R010-style subset: row pattern recognition in the
+\texttt{FROM} clause.  The engine parses and validates a query,
+compiles its row pattern into finite automata, and executes it over
+ordered DataFrame partitions.  The supported scope includes the main
+clauses, output and skip modes, pattern constructs, navigation, and
+aggregates.  The evaluation covered correctness,
+feature support, usability, performance, and scalability.  All 704 regression
+tests passed.  Trino and Oracle served as
+cross-system references; usability compared the SQL form with
+hand-written Pandas.  The main benchmark used five
+patterns and six Amazon UK Products~2023 sizes from 100\,K to
+2.22 million rows.  All three systems returned the same normalized
+results in all thirty pattern--size combinations.  Under one CPU core
+and a 32\,GB memory limit, mean time across those combinations was
+0.17\,s for the engine, 1.04\,s for Oracle, and 1.98\,s for Trino.
+The scalability study using Amazon Reviews~2023 extended the engine to
+227.9 million rows.  The engine and Oracle completed all 35
+cases; Trino completed 33.  Engine time
+remained close to linear, while its query-time working memory grew
+with the input.  The results show that row-pattern recognition can
+connect declarative SQL with in-process Pandas analysis while keeping
+sequential queries readable.
 
-\vspace{\baselineskip}
-\noindent\textbf{Keywords:} \texttt{MATCH\_RECOGNIZE}; Row Pattern Recognition; Pandas; SQL:2016; Finite Automata; Pattern Matching.
+\noindent\textbf{Keywords:} \texttt{MATCH\_RECOGNIZE}; Row Pattern
+Recognition; Pandas; SQL:2016; Finite Automata; Pattern Matching.
