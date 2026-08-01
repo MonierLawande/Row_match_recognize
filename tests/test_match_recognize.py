@@ -967,6 +967,132 @@ class TestRowPatternMatching:
             assert result.iloc[i]['val'] == val
             assert result.iloc[i]['label'] == label
 
+    def test_order_by_direction_controls_first_and_last(self):
+        """ASC and DESC must define the row sequence used by measures."""
+        df = pd.DataFrame({'id': [1, 2, 3, 4, 5, 6]})
+
+        for direction, expected in [
+            ('ASC', {'first_id': 1, 'last_id': 6}),
+            ('DESC', {'first_id': 6, 'last_id': 1}),
+            ('desc', {'first_id': 6, 'last_id': 1}),
+        ]:
+            query = f"""
+            SELECT *
+            FROM data
+            MATCH_RECOGNIZE (
+                ORDER BY id {direction}
+                MEASURES
+                    FIRST(A.id) AS first_id,
+                    LAST(A.id) AS last_id
+                ONE ROW PER MATCH
+                PATTERN (A+)
+                DEFINE A AS true
+            ) AS m
+            """
+
+            result = match_recognize(query, df)
+            assert result.to_dict('records') == [expected]
+
+    def test_order_by_desc_is_applied_inside_each_partition(self):
+        """Direction metadata must reach every independently sorted partition."""
+        df = pd.DataFrame({
+            'part': ['p1', 'p2', 'p1', 'p2', 'p1', 'p2'],
+            'id': [1, 2, 3, 1, 2, 3],
+        })
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id DESC
+            MEASURES
+                FIRST(A.id) AS first_id,
+                LAST(A.id) AS last_id
+            ONE ROW PER MATCH
+            PATTERN (A+)
+            DEFINE A AS true
+        ) AS m
+        """
+
+        result = match_recognize(query, df)
+        assert result.to_dict('records') == [
+            {'part': 'p1', 'first_id': 3, 'last_id': 1},
+            {'part': 'p2', 'first_id': 3, 'last_id': 1},
+        ]
+
+    def test_order_by_supports_mixed_column_directions(self):
+        """Every ORDER BY item keeps its own direction."""
+        df = pd.DataFrame({
+            'row_id': [12, 21, 11, 22, 13, 23],
+            'grp': ['A', 'B', 'A', 'B', 'A', 'B'],
+            'seq': [2, 1, 1, 2, 3, 3],
+        })
+        query = """
+        SELECT row_id
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY grp ASC, seq DESC
+            ALL ROWS PER MATCH
+            PATTERN (X+)
+            DEFINE X AS true
+        ) AS m
+        """
+
+        result = match_recognize(query, df)
+        assert result['row_id'].tolist() == [13, 12, 11, 23, 22, 21]
+
+    def test_order_by_applies_null_placement_and_preserves_peers(self):
+        """Explicit null placement is per key and sorting peers is stable."""
+        df = pd.DataFrame({
+            'row_id': ['two', 'null-a', 'one', 'null-b', 'three'],
+            'id': [2, None, 1, None, 3],
+        })
+
+        cases = [
+            ('ASC NULLS LAST', ['one', 'two', 'three', 'null-a', 'null-b']),
+            ('desc nulls first', ['null-a', 'null-b', 'three', 'two', 'one']),
+        ]
+        for order_spec, expected in cases:
+            query = f"""
+            SELECT row_id
+            FROM data
+            MATCH_RECOGNIZE (
+                ORDER BY id {order_spec}
+                ALL ROWS PER MATCH
+                PATTERN (A+)
+                DEFINE A AS true
+            ) AS m
+            """
+
+            result = match_recognize(query, df)
+            assert result['row_id'].tolist() == expected
+
+        mixed_df = pd.DataFrame({
+            'row_id': ['value-2', 'null-1', 'value-null', 'null-3', 'value-1'],
+            'major': [1, None, 1, None, 1],
+            'minor': [2, 1, None, 3, 1],
+        })
+        mixed_query = """
+        SELECT row_id
+        FROM data
+        MATCH_RECOGNIZE (
+            ORDER BY
+                major ASC NULLS LAST,
+                minor DESC NULLS FIRST
+            ALL ROWS PER MATCH
+            PATTERN (A+)
+            DEFINE A AS true
+        ) AS m
+        """
+        mixed_result = match_recognize(mixed_query, mixed_df)
+        assert mixed_result['row_id'].tolist() == [
+            'value-null',
+            'value-2',
+            'value-1',
+            'null-3',
+            'null-1',
+        ]
+
     def test_subset_functionality(self):
         """Test SUBSET functionality."""
         df = pd.DataFrame({

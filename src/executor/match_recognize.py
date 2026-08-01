@@ -1,6 +1,7 @@
 # src/executor/match_recognize.py
 
 import pandas as pd
+import numpy as np
 import re
 import time
 import itertools
@@ -316,12 +317,19 @@ def _execute_row_pattern_window_query(query: str, df: pd.DataFrame) -> pd.DataFr
     order_items = _split_top_level_sql(order_text)
     order_columns: List[str] = []
     ascending: List[bool] = []
+    nulls_position: List[str] = []
     for item in order_items:
-        order_match = re.match(r'(?is)^([A-Za-z_][A-Za-z0-9_]*)(?:\s+(ASC|DESC))?(?:\s+NULLS\s+(?:FIRST|LAST))?$', item)
+        order_match = re.match(
+            r'(?is)^([A-Za-z_][A-Za-z0-9_]*)'
+            r'(?:\s+(ASC|DESC))?'
+            r'(?:\s+NULLS\s+(FIRST|LAST))?$',
+            item,
+        )
         if not order_match:
             raise ValueError(f"Unsupported row-pattern window ORDER BY expression: {item}")
         order_columns.append(order_match.group(1))
         ascending.append((order_match.group(2) or "ASC").upper() != "DESC")
+        nulls_position.append((order_match.group(3) or "LAST").lower())
 
     measures = _parse_measure_definitions(segments["MEASURES"])
     pattern_text = segments["PATTERN"].strip()
@@ -348,7 +356,12 @@ def _execute_row_pattern_window_query(query: str, df: pd.DataFrame) -> pd.DataFr
 
     output_rows: List[Dict[str, Any]] = []
     for partition in partitions:
-        ordered = partition.sort_values(order_columns, ascending=ascending, kind="mergesort").reset_index(drop=True)
+        ordered = _order_partition_if_needed(
+            partition,
+            order_columns,
+            ascending,
+            nulls_position,
+        ).reset_index(drop=True)
         ordered[hidden_position] = range(len(ordered))
 
         measure_sql = ",\n                ".join(
@@ -1345,7 +1358,80 @@ def _should_use_parallel_execution(
     
     return True
 
-def _is_already_ordered(df: pd.DataFrame, order_by: List[str]) -> bool:
+def _normalize_order_options(
+    order_by: List[str],
+    ascending: Optional[Union[bool, List[bool], Tuple[bool, ...]]] = None,
+    nulls_position: Optional[
+        Union[str, List[str], Tuple[str, ...]]
+    ] = None,
+) -> Tuple[Tuple[bool, ...], Tuple[str, ...]]:
+    """Return validated per-column direction and null-position options."""
+    item_count = len(order_by)
+
+    if ascending is None:
+        ascending_values = (True,) * item_count
+    elif isinstance(ascending, bool):
+        ascending_values = (ascending,) * item_count
+    else:
+        ascending_values = tuple(bool(value) for value in ascending)
+
+    if nulls_position is None:
+        # Trino uses NULLS LAST by default for both ASC and DESC.
+        null_values = ("last",) * item_count
+    elif isinstance(nulls_position, str):
+        null_values = (nulls_position.lower(),) * item_count
+    else:
+        null_values = tuple(str(value).lower() for value in nulls_position)
+
+    if len(ascending_values) != item_count:
+        raise ValueError(
+            "ORDER BY direction count does not match the number of columns"
+        )
+    if len(null_values) != item_count:
+        raise ValueError(
+            "ORDER BY null-position count does not match the number of columns"
+        )
+    invalid_nulls = [value for value in null_values if value not in {"first", "last"}]
+    if invalid_nulls:
+        raise ValueError(f"Unsupported ORDER BY null placement: {invalid_nulls[0]}")
+
+    return ascending_values, null_values
+
+
+def _sort_item_options(sort_items) -> Tuple[List[str], List[bool], List[str]]:
+    """Convert AST sort items into the executor's normalized order spec."""
+    columns: List[str] = []
+    ascending: List[bool] = []
+    nulls_position: List[str] = []
+    for sort_item in sort_items or ():
+        direction = str(getattr(sort_item, "ordering", "ASC")).upper()
+        if direction not in {"ASC", "DESC"}:
+            raise ValueError(f"Unsupported ORDER BY direction: {direction}")
+        null_ordering = getattr(sort_item, "nulls_ordering", None)
+        if null_ordering is None:
+            null_position = "last"
+        else:
+            normalized_nulls = str(null_ordering).upper()
+            if normalized_nulls not in {"NULLS FIRST", "NULLS LAST"}:
+                raise ValueError(
+                    f"Unsupported ORDER BY null placement: {null_ordering}"
+                )
+            null_position = "first" if normalized_nulls.endswith("FIRST") else "last"
+
+        columns.append(sort_item.column)
+        ascending.append(direction == "ASC")
+        nulls_position.append(null_position)
+    return columns, ascending, nulls_position
+
+
+def _is_already_ordered(
+    df: pd.DataFrame,
+    order_by: List[str],
+    ascending: Optional[Union[bool, List[bool], Tuple[bool, ...]]] = None,
+    nulls_position: Optional[
+        Union[str, List[str], Tuple[str, ...]]
+    ] = None,
+) -> bool:
     """
     Return True when a partition is already ordered by the MATCH_RECOGNIZE
     ORDER BY columns.
@@ -1359,25 +1445,139 @@ def _is_already_ordered(df: pd.DataFrame, order_by: List[str]) -> bool:
         return True
 
     try:
-        if len(order_by) == 1:
-            column = order_by[0]
-            if column not in df.columns:
-                return False
-            return bool(df[column].is_monotonic_increasing)
-
         missing_columns = [column for column in order_by if column not in df.columns]
         if missing_columns:
             return False
 
-        return bool(pd.MultiIndex.from_frame(df[order_by]).is_monotonic_increasing)
+        ascending_values, null_values = _normalize_order_options(
+            order_by,
+            ascending,
+            nulls_position,
+        )
+
+        if len(order_by) == 1:
+            values = df[order_by[0]]
+            null_mask = values.isna()
+            if null_mask.any():
+                null_count = int(null_mask.sum())
+                if null_values[0] == "first":
+                    nulls_at_edge = (
+                        bool(null_mask.iloc[:null_count].all())
+                        and not bool(null_mask.iloc[null_count:].any())
+                    )
+                else:
+                    split = len(values) - null_count
+                    nulls_at_edge = (
+                        not bool(null_mask.iloc[:split].any())
+                        and bool(null_mask.iloc[split:].all())
+                    )
+                if not nulls_at_edge:
+                    return False
+                values = values[~null_mask]
+
+            return bool(
+                values.is_monotonic_increasing
+                if ascending_values[0]
+                else values.is_monotonic_decreasing
+            )
+
+        unresolved = np.ones(len(df) - 1, dtype=bool)
+
+        # Compare adjacent rows lexicographically.  A pair remains unresolved
+        # only while all keys seen so far are equal.  This keeps the check O(n)
+        # and supports mixed ASC/DESC directions and per-key null placement.
+        for column, is_ascending, null_position in zip(
+            order_by,
+            ascending_values,
+            null_values,
+        ):
+            if not unresolved.any():
+                return True
+
+            values = df[column].reset_index(drop=True)
+            left = values.iloc[:-1].reset_index(drop=True)
+            right = values.iloc[1:].reset_index(drop=True)
+            left_null = left.isna().to_numpy(dtype=bool)
+            right_null = right.isna().to_numpy(dtype=bool)
+            both_null = left_null & right_null
+            both_values = ~left_null & ~right_null
+
+            equal_values = left.eq(right).fillna(False).to_numpy(dtype=bool)
+            if is_ascending:
+                value_order = left.le(right).fillna(False).to_numpy(dtype=bool)
+            else:
+                value_order = left.ge(right).fillna(False).to_numpy(dtype=bool)
+
+            equal = both_null | (both_values & equal_values)
+            in_order = both_null | (both_values & value_order)
+            if null_position == "first":
+                in_order |= left_null & ~right_null
+            else:
+                in_order |= ~left_null & right_null
+
+            if np.any(unresolved & ~in_order):
+                return False
+            unresolved &= equal
+
+        return True
     except Exception:
         return False
 
-def _order_partition_if_needed(partition: pd.DataFrame, order_by: List[str]) -> pd.DataFrame:
-    """Order a partition only when it is not already ordered."""
-    if not order_by or _is_already_ordered(partition, order_by):
+
+def _stable_sort_dataframe(
+    frame: pd.DataFrame,
+    order_by: List[str],
+    ascending: Optional[Union[bool, List[bool], Tuple[bool, ...]]] = None,
+    nulls_position: Optional[
+        Union[str, List[str], Tuple[str, ...]]
+    ] = None,
+) -> pd.DataFrame:
+    """Apply a stable lexicographic sort with per-column SQL options."""
+    if not order_by or len(frame) <= 1:
+        return frame
+
+    ascending_values, null_values = _normalize_order_options(
+        order_by,
+        ascending,
+        nulls_position,
+    )
+    ordered = frame
+    # Stable least-significant-key-first passes preserve peer order and allow
+    # NULLS FIRST/LAST to differ between individual ORDER BY items.
+    for column, is_ascending, null_position in reversed(
+        tuple(zip(order_by, ascending_values, null_values))
+    ):
+        ordered = ordered.sort_values(
+            by=column,
+            ascending=is_ascending,
+            na_position=null_position,
+            kind="mergesort",
+        )
+    return ordered
+
+
+def _order_partition_if_needed(
+    partition: pd.DataFrame,
+    order_by: List[str],
+    ascending: Optional[Union[bool, List[bool], Tuple[bool, ...]]] = None,
+    nulls_position: Optional[
+        Union[str, List[str], Tuple[str, ...]]
+    ] = None,
+) -> pd.DataFrame:
+    """Order a partition only when it does not satisfy the complete spec."""
+    if not order_by or _is_already_ordered(
+        partition,
+        order_by,
+        ascending,
+        nulls_position,
+    ):
         return partition
-    return partition.sort_values(by=order_by)
+    return _stable_sort_dataframe(
+        partition,
+        order_by,
+        ascending,
+        nulls_position,
+    )
 
 def _can_use_lazy_partition_rows(matcher, match_config) -> bool:
     """
@@ -1470,7 +1670,8 @@ def _collect_partition_matches(
 
         all_matches.append(match)
 
-def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher, match_config, 
+def _process_partitions_in_parallel(partitions, partition_by, order_by,
+                                   order_ascending, order_nulls, matcher, match_config,
                                    measures, all_rows, all_matches, all_matched_indices, 
                                    metrics, parallel_manager, results):
     """Reserved for a semantics-preserving independent-session executor."""
@@ -1493,7 +1694,12 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
             continue
             
         # Order the partition
-        partition = _order_partition_if_needed(partition, order_by)
+        partition = _order_partition_if_needed(
+            partition,
+            order_by,
+            order_ascending,
+            order_nulls,
+        )
         
         partition_data.append((partition_idx, partition))
         
@@ -1508,7 +1714,9 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
                 'measures': measures,
                 'match_config': match_config,
                 'partition_by': partition_by,
-                'order_by': order_by
+                'order_by': order_by,
+                'order_ascending': order_ascending,
+                'order_nulls': order_nulls,
             },
             estimated_complexity=complexity,
             priority=0  # All partitions have equal priority
@@ -1592,7 +1800,8 @@ def _process_partitions_in_parallel(partitions, partition_by, order_by, matcher,
     logger.info(f"Parallel-aware partition processing completed in {parallel_time:.3f}s")
     return total_match_count
 
-def _process_partitions_sequentially(partitions, partition_by, order_by, matcher, match_config, 
+def _process_partitions_sequentially(partitions, partition_by, order_by,
+                                   order_ascending, order_nulls, matcher, match_config,
                                    measures, all_rows, all_matches, all_matched_indices, results):
     """Process partitions sequentially (original behavior)."""
     total_match_count = 0
@@ -1603,7 +1812,12 @@ def _process_partitions_sequentially(partitions, partition_by, order_by, matcher
             continue
         
         # Order the partition
-        partition = _order_partition_if_needed(partition, order_by)
+        partition = _order_partition_if_needed(
+            partition,
+            order_by,
+            order_ascending,
+            order_nulls,
+        )
         
         use_lazy_rows = _can_use_lazy_partition_rows(matcher, match_config)
         rows = _partition_rows_for_matching(
@@ -1745,7 +1959,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
         
         # Extract partitioning and ordering information
         partition_by = mr_clause.partition_by.columns if mr_clause.partition_by else []
-        order_by = [si.column for si in mr_clause.order_by.sort_items] if mr_clause.order_by else []
+        order_items = mr_clause.order_by.sort_items if mr_clause.order_by else []
+        order_by, order_ascending, order_nulls = _sort_item_options(order_items)
         
         # Extract pattern information
         if not mr_clause.pattern:
@@ -2131,7 +2346,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 )
                 # Process partitions in parallel
                 total_match_count = _process_partitions_in_parallel(
-                    partitions, partition_by, order_by, matcher, match_config, 
+                    partitions, partition_by, order_by,
+                    order_ascending, order_nulls, matcher, match_config,
                     measures, all_rows, all_matches, all_matched_indices, metrics, parallel_manager, results
                 )
             else:
@@ -2141,7 +2357,8 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                 )
                 # Process partitions sequentially (original behavior)
                 total_match_count = _process_partitions_sequentially(
-                    partitions, partition_by, order_by, matcher, match_config, 
+                    partitions, partition_by, order_by,
+                    order_ascending, order_nulls, matcher, match_config,
                     measures, all_rows, all_matches, all_matched_indices, results
                 )
                 
@@ -2430,25 +2647,32 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     logger.debug(f"Applying outer ORDER BY clause: {ast.order_by_clause}")
                     logger.debug(f"Available result columns: {list(result_df.columns)}")
                     outer_sort_columns = []
+                    outer_ascending = []
+                    outer_nulls = []
                     for sort_item in ast.order_by_clause.sort_items:
                         column = sort_item.column
                         logger.debug(f"Checking outer ORDER BY column: '{column}'")
                         if column in result_df.columns:
                             outer_sort_columns.append(column)
+                            outer_ascending.append(sort_item.ordering.upper() == 'ASC')
+                            outer_nulls.append(
+                                "first"
+                                if sort_item.nulls_ordering == "NULLS FIRST"
+                                else "last"
+                            )
                             logger.debug(f"Found column '{column}' in result, adding to sort columns")
                         else:
                             logger.warning(f"Outer ORDER BY column '{column}' not found in result columns: {list(result_df.columns)}")
                     
                     if outer_sort_columns:
-                        # Determine sort order (ascending vs descending)
-                        ascending_list = []
-                        for sort_item in ast.order_by_clause.sort_items:
-                            if sort_item.column in outer_sort_columns:
-                                ascending_list.append(sort_item.ordering.upper() == 'ASC')
-                        
-                        logger.debug(f"Sorting final result by outer ORDER BY: columns={outer_sort_columns}, ascending={ascending_list}")
+                        logger.debug(f"Sorting final result by outer ORDER BY: columns={outer_sort_columns}, ascending={outer_ascending}")
                         logger.debug(f"Before sorting: dataframe shape={result_df.shape}, columns={list(result_df.columns)}")
-                        result_df = result_df.sort_values(by=outer_sort_columns, ascending=ascending_list)
+                        result_df = _stable_sort_dataframe(
+                            result_df,
+                            outer_sort_columns,
+                            outer_ascending,
+                            outer_nulls,
+                        )
                         result_df.reset_index(drop=True, inplace=True)
                         logger.debug(f"Before sorting: dataframe shape={result_df.shape}, columns={list(result_df.columns)}")
                     else:
@@ -2976,9 +3200,39 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     valid_sort_columns = [col for col in sort_columns if col in result_df.columns]
                     
                     if valid_sort_columns:
+                        order_options_by_output = {}
+                        for column, is_ascending, null_position in zip(
+                            order_by,
+                            order_ascending,
+                            order_nulls,
+                        ):
+                            output_column = (
+                                column_alias_map.get(column, column)
+                                if column_alias_map
+                                else column
+                            )
+                            order_options_by_output.setdefault(
+                                output_column,
+                                (is_ascending, null_position),
+                            )
+                        final_ascending = []
+                        final_nulls = []
+                        for column in valid_sort_columns:
+                            is_ascending, null_position = order_options_by_output.get(
+                                column,
+                                (True, "last"),
+                            )
+                            final_ascending.append(is_ascending)
+                            final_nulls.append(null_position)
+
                         # Reset DataFrame index before final sort to ensure proper ordering
                         result_df.reset_index(drop=True, inplace=True)
-                        result_df = result_df.sort_values(by=valid_sort_columns)
+                        result_df = _stable_sort_dataframe(
+                            result_df,
+                            valid_sort_columns,
+                            final_ascending,
+                            final_nulls,
+                        )
                         # Reset index again after sort
                         result_df.reset_index(drop=True, inplace=True)
                 
@@ -2992,25 +3246,32 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     logger.debug(f"Applying outer ORDER BY clause: {ast.order_by_clause}")
                     logger.debug(f"Available result columns: {list(result_df.columns)}")
                     outer_sort_columns = []
+                    outer_ascending = []
+                    outer_nulls = []
                     for sort_item in ast.order_by_clause.sort_items:
                         column = sort_item.column
                         logger.debug(f"Checking outer ORDER BY column: '{column}'")
                         if column in result_df.columns:
                             outer_sort_columns.append(column)
+                            outer_ascending.append(sort_item.ordering.upper() == 'ASC')
+                            outer_nulls.append(
+                                "first"
+                                if sort_item.nulls_ordering == "NULLS FIRST"
+                                else "last"
+                            )
                             logger.debug(f"Found column '{column}' in result, adding to sort columns")
                         else:
                             logger.warning(f"Outer ORDER BY column '{column}' not found in result columns: {list(result_df.columns)}")
                     
                     if outer_sort_columns:
-                        # Determine sort order (ascending vs descending)
-                        ascending_list = []
-                        for sort_item in ast.order_by_clause.sort_items:
-                            if sort_item.column in outer_sort_columns:
-                                ascending_list.append(sort_item.ordering.upper() == 'ASC')
-                        
-                        logger.debug(f"Sorting final result by outer ORDER BY: columns={outer_sort_columns}, ascending={ascending_list}")
+                        logger.debug(f"Sorting final result by outer ORDER BY: columns={outer_sort_columns}, ascending={outer_ascending}")
                         logger.debug(f"Before sorting: dataframe shape={result_df.shape}, columns={list(result_df.columns)}")
-                        result_df = result_df.sort_values(by=outer_sort_columns, ascending=ascending_list)
+                        result_df = _stable_sort_dataframe(
+                            result_df,
+                            outer_sort_columns,
+                            outer_ascending,
+                            outer_nulls,
+                        )
                         result_df.reset_index(drop=True, inplace=True)
                         logger.debug(f"Before sorting: dataframe shape={result_df.shape}, columns={list(result_df.columns)}")
                     else:

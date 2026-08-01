@@ -372,22 +372,17 @@ class MatchRecognizeExtractor(TrinoParserVisitor):
     def extract_order_by(self, ctx):
         sort_items = []
         for si in ctx.sortItem():
-            column = post_process_text(si.getChild(0).getText())
-            ordering = "ASC"
-            nulls_ordering = None
-            child_tokens = [si.getChild(i).getText() for i in range(1, si.getChildCount())]
-            if "DESC" in child_tokens:
-                ordering = "DESC"
-            elif "ASC" in child_tokens:
-                ordering = "ASC"
-            if "NULLS" in child_tokens:
-                null_index = child_tokens.index("NULLS")
-                if null_index + 1 < len(child_tokens):
-                    next_tok = child_tokens[null_index + 1].upper()
-                    if next_tok == "FIRST":
-                        nulls_ordering = "NULLS FIRST"
-                    elif next_tok == "LAST":
-                        nulls_ordering = "NULLS LAST"
+            column = post_process_text(si.expression().getText())
+            ordering = (
+                si.ordering.text.upper()
+                if getattr(si, "ordering", None) is not None
+                else "ASC"
+            )
+            nulls_ordering = (
+                f"NULLS {si.nullOrdering.text.upper()}"
+                if getattr(si, "nullOrdering", None) is not None
+                else None
+            )
             sort_items.append(SortItem(column, ordering, nulls_ordering))
         return OrderByClause(sort_items)
 
@@ -1085,20 +1080,29 @@ class FullQueryExtractor(TrinoParserVisitor):
             sort_items = []
             columns = [col.strip() for col in order_by_text.split(',')]
             for col in columns:
-                # Handle ASC/DESC and column references like m.category
-                col_match = re.match(r'(.+?)\s+(ASC|DESC)$', col, re.IGNORECASE)
-                if col_match:
-                    column_name = col_match.group(1).strip()
-                    ordering = col_match.group(2).upper()
-                else:
-                    column_name = col.strip()
-                    ordering = "ASC"
+                # Handle direction, null placement, and qualified columns.
+                col_match = re.match(
+                    r'(?is)^(.+?)(?:\s+(ASC|DESC))?'
+                    r'(?:\s+NULLS\s+(FIRST|LAST))?$',
+                    col,
+                )
+                if not col_match:
+                    raise ParserError(f"Invalid ORDER BY item: {col}")
+                column_name = col_match.group(1).strip()
+                ordering = (col_match.group(2) or "ASC").upper()
+                nulls_ordering = (
+                    f"NULLS {col_match.group(3).upper()}"
+                    if col_match.group(3)
+                    else None
+                )
                 
                 # Remove table alias prefix (e.g., m.category -> category)
                 if '.' in column_name:
                     column_name = column_name.split('.')[-1]
                     
-                sort_items.append(SortItem(column_name, ordering))
+                sort_items.append(
+                    SortItem(column_name, ordering, nulls_ordering)
+                )
                 
             self.order_by_clause = OrderByClause(sort_items)
             logger.debug(f"Extracted outer ORDER BY clause: {self.order_by_clause}")
@@ -1197,5 +1201,4 @@ def _preprocess_query_for_parser(query: str) -> str:
     query = re.sub(r'\bNOT\s+IN\s*\(\s*\)', "NOT IN ('__EMPTY_IN_TRUE__')", query, flags=re.IGNORECASE)
     
     return query
-
 

@@ -20,8 +20,14 @@ class SortItem(ASTNode):
 
     def __post_init__(self):
         self.ordering = self.ordering.upper()
+        if self.ordering not in {"ASC", "DESC"}:
+            raise ValueError(f"Unsupported sort direction: {self.ordering}")
         if self.nulls_ordering:
             self.nulls_ordering = self.nulls_ordering.upper()
+            if self.nulls_ordering not in {"NULLS FIRST", "NULLS LAST"}:
+                raise ValueError(
+                    f"Unsupported null ordering: {self.nulls_ordering}"
+                )
 
 @dataclass
 class OrderByClause(ASTNode):
