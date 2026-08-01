@@ -23,7 +23,7 @@ execution, and optimization.
 \label{sec:meth-overview}
 % ----------------------------------------------------------------
 
-The engine takes two inputs: a query string and a \texttt{pandas}
+The engine takes two inputs: an SQL query and a \texttt{pandas}
 DataFrame.  It returns a result DataFrame.  The work has five stages
 (Figure~\ref{fig:system-architecture}).  \emph{Parsing} creates an
 abstract syntax tree (AST).  \emph{Semantic validation} checks
@@ -41,62 +41,262 @@ before matching begins.
 
 \begin{figure}[htbp]
   \centering
-  \resizebox{\textwidth}{!}{%
-  % break stage names at the space, never inside the word
-  \hyphenpenalty=10000 \exhyphenpenalty=10000
   \begin{tikzpicture}[
-    node distance=0.35cm,
+    node distance=0.34cm,
     every node/.style={font=\small},
-    input/.style={draw, dashed, rounded corners=3pt, thick,
-                  fill=gray!10, text width=1.65cm,
-                  minimum height=0.85cm, align=center},
-    phase/.style={draw, rounded corners=3pt, thick, fill=blue!8,
-                  text width=1.95cm, minimum height=1.05cm,
-                  align=center},
-    output/.style={draw, rounded corners=3pt, thick, fill=green!10,
-                   text width=1.70cm, minimum height=0.85cm,
-                   align=center},
-    arrow/.style={-{Stealth[length=2.2mm]}, thick}
+    input/.style={draw=gray!65, dashed, rounded corners=3pt,
+                  line width=0.8pt, fill=gray!8, text width=2.45cm,
+                  minimum height=0.95cm, align=center},
+    phase/.style={draw=blue!55!black, rounded corners=3pt,
+                  line width=0.9pt, fill=blue!6, text width=6.35cm,
+                  minimum height=1.02cm, align=center, inner sep=5pt},
+    execute/.style={phase, fill=blue!13},
+    output/.style={draw=green!45!black, rounded corners=3pt,
+                   line width=0.9pt, fill=green!9, text width=2.45cm,
+                   minimum height=0.95cm, align=center},
+    flow/.style={-{Stealth[length=2.3mm,width=1.6mm]},
+                 line width=0.9pt, draw=blue!55!black},
+    dataflow/.style={-{Stealth[length=2.3mm,width=1.6mm]},
+                     line width=0.9pt, draw=gray!70!black}
   ]
-    \node[input] (sqlin) {\textbf{Input}\\SQL query};
-    \node[input, below=0.85cm of sqlin] (dfin)
-      {\textbf{Input}\\Pandas DataFrame};
+    \node[phase] (parse)
+      {\textbf{1. Parsing}\\[-1pt]
+       \footnotesize SQL text $\longrightarrow$ abstract syntax tree};
+    \node[phase, below=of parse] (validate)
+      {\textbf{2. Semantic validation}\\[-1pt]
+       \footnotesize check supported clauses and references};
+    \node[phase, below=of validate] (plan)
+      {\textbf{3. Logical-plan construction}\\[-1pt]
+       \footnotesize resolve the execution configuration};
+    \node[phase, below=of plan] (compile)
+      {\textbf{4. Pattern compilation}\\[-1pt]
+       \footnotesize pattern tokens $\longrightarrow$ NFA and complete DFA};
+    \node[execute, below=of compile] (run)
+      {\textbf{5. DataFrame execution}\\[-1pt]
+       \footnotesize partition and order $\longrightarrow$ match\\[-1pt]
+       \footnotesize evaluate measures $\longrightarrow$ assemble result};
 
-    \node[phase, right=0.55cm of sqlin] (parse)
-      {\textbf{1. Parsing}\\[-1pt]\scriptsize AST};
-    \node[phase, right=of parse] (validate)
-      {\textbf{2. Validation}\\[-1pt]\scriptsize checked AST};
-    \node[phase, right=of validate] (plan)
-      {\textbf{3. Logical plan}\\[-1pt]\scriptsize execution configuration};
-    \node[phase, right=of plan] (compile)
-      {\textbf{4. Pattern compilation}\\[-1pt]\scriptsize NFA and DFA};
-    \node[phase, right=of compile] (execute)
-      {\textbf{5. Execution}\\[-1pt]\scriptsize matching and measures};
-    \node[output, right=0.55cm of execute] (dfout)
+    \node[input, left=0.68cm of parse] (sqlin)
+      {\textbf{Input 1}\\SQL query};
+    \node[input, left=0.68cm of run] (dfin)
+      {\textbf{Input 2}\\\texttt{pandas} DataFrame};
+    \node[output, right=0.68cm of run] (dfout)
       {\textbf{Output}\\Result DataFrame};
 
-    \draw[arrow] (sqlin) -- (parse);
-    \draw[arrow] (parse) -- (validate);
-    \draw[arrow] (validate) -- (plan);
-    \draw[arrow] (plan) -- (compile);
-    \draw[arrow] (compile) -- (execute);
-    \draw[arrow] (execute) -- (dfout);
-    \draw[arrow] (dfin.east) -- ++(0.35cm,0) -| (execute.south);
-  \end{tikzpicture}}
-  \caption{Five-stage architecture.}
+    \draw[dataflow] (sqlin) -- (parse);
+    \draw[flow] (parse) -- (validate);
+    \draw[flow] (validate) -- (plan);
+    \draw[flow] (plan) -- (compile);
+    \draw[flow] (compile) -- (run);
+    \draw[dataflow] (dfin) -- (run);
+    \draw[dataflow] (run) -- (dfout);
+  \end{tikzpicture}
+  \caption{Five-stage architecture of the proposed engine.}
   \label{fig:system-architecture}
 \end{figure}
 
 The parser recognizes partitioning, ordering, the pattern, its
 conditions, and the output measures.  Validation and planning then
-resolve the configuration before compilation.  The compiler converts
-the pattern into a non-deterministic finite automaton (NFA) and then a
-deterministic finite automaton (DFA)~\cite{georgiou2025streaming}.  A
+resolve the configuration before compilation.  These settings remain
+in the execution context while the pattern is compiled.  The compiler
+converts the pattern into a non-deterministic finite automaton (NFA)
+and then a deterministic finite automaton
+(DFA)~\cite{georgiou2025streaming}.  A
 DFA is returned only after complete determinization.  If a configured
 resource limit prevents this, compilation fails explicitly rather than
 using a partial automaton.  The execution stage partitions and orders
 the DataFrame, finds matches, evaluates measures, and assembles the
 output.  The rest of this chapter covers the first three stages.
+
+% ................................
+\subsection{Worked Pipeline Example}
+\label{subsec:meth-worked-pipeline}
+% ................................
+
+Listing~\ref{lst:orders-mr} applies the architecture to the
+\texttt{orders} example.  Its two inputs are the SQL query and the
+eight-row DataFrame in that listing.  Figure~\ref{fig:orders-pipeline}
+traces both inputs through the architecture in
+Figure~\ref{fig:system-architecture}.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    node distance=0.26cm,
+    every node/.style={font=\small},
+    queryinput/.style={draw=gray!65, rounded corners=3pt,
+                       line width=0.8pt, fill=gray!5,
+                       align=left, inner sep=5pt},
+    examplephase/.style={draw=blue!55!black, rounded corners=3pt,
+                         line width=0.9pt, fill=blue!5,
+                         text width=7.55cm, minimum height=1.02cm,
+                         align=center, inner sep=5pt},
+    examplecompile/.style={examplephase, minimum height=2.55cm},
+    examplerun/.style={examplephase, fill=blue!10,
+                       text width=2.65cm, minimum height=3.25cm},
+    inputtable/.style={draw=gray!65, rounded corners=3pt,
+                       line width=0.8pt, fill=gray!5,
+                       align=center, inner sep=3pt},
+    resulttable/.style={draw=green!45!black, rounded corners=3pt,
+                        line width=0.9pt, fill=green!7,
+                        align=center, inner sep=3pt},
+    statepoint/.style={circle, draw=blue!55!black, line width=0.8pt,
+                       fill=white, minimum size=0.54cm, inner sep=1pt,
+                       font=\scriptsize},
+    acceptpoint/.style={statepoint, double, double distance=1.1pt},
+    exampleflow/.style={-{Stealth[length=2.3mm,width=1.6mm]},
+                        line width=0.9pt, draw=blue!55!black},
+    exampledata/.style={-{Stealth[length=2.3mm,width=1.6mm]},
+                        line width=0.9pt, draw=gray!70!black}
+  ]
+    \node[examplephase] (exparse)
+      {\textbf{1. Parsing}\\[-1pt]
+       \footnotesize partition: \texttt{customer\_id};
+       order: \texttt{order\_date}\\[-1pt]
+       \footnotesize pattern: \texttt{A B C}; three measures; two definitions};
+    \node[examplephase, below=of exparse] (exvalidate)
+      {\textbf{2. Semantic validation}\\[-1pt]
+       \footnotesize pattern-variable references are valid;
+       $A\equiv\mathrm{true}$\\[-1pt]
+       \footnotesize $B.\mathrm{price}<A.\mathrm{price}$;
+       $C.\mathrm{price}<B.\mathrm{price}$};
+    \node[examplephase, below=of exvalidate] (explan)
+      {\textbf{3. Logical plan}\\[-1pt]
+       \footnotesize \texttt{ONE ROW PER MATCH} (default)\\[-1pt]
+       \footnotesize \texttt{SKIP PAST LAST ROW} (default)\\[-1pt]
+       \footnotesize three measures $+$ partition key $\longrightarrow$ four columns};
+
+    % Stage 4 shows the actual reachable DFA produced for PATTERN (A B C).
+    \node[examplecompile, below=of explan] (excompile) {};
+    \node[font=\small\bfseries]
+      at ([yshift=0.97cm]excompile.center) {4. Pattern compilation};
+    \node[font=\scriptsize]
+      at ([yshift=0.64cm]excompile.center)
+      {NFA (10 states) $\longrightarrow$ subset construction
+       $\longrightarrow$ guarded DFA};
+    \node[statepoint] (qzero)
+      at ([xshift=-2.55cm,yshift=0.08cm]excompile.center) {$D_0$};
+    \node[statepoint] (qone)
+      at ([xshift=-0.85cm,yshift=0.08cm]excompile.center) {$D_1$};
+    \node[statepoint] (qtwo)
+      at ([xshift=0.85cm,yshift=0.08cm]excompile.center) {$D_2$};
+    \node[acceptpoint] (qthree)
+      at ([xshift=2.55cm,yshift=0.08cm]excompile.center) {$D_3$};
+    \draw[exampleflow] ([xshift=-0.42cm]qzero.west) -- (qzero.west);
+    \draw[exampleflow] (qzero) -- node[above,font=\scriptsize]{A} (qone);
+    \draw[exampleflow] (qone) -- node[above,font=\scriptsize]{B} (qtwo);
+    \draw[exampleflow] (qtwo) -- node[above,font=\scriptsize]{C} (qthree);
+    \node[font=\scriptsize]
+      at ([xshift=-2.55cm,yshift=-0.42cm]excompile.center) {$\{0,2,3\}$};
+    \node[font=\scriptsize]
+      at ([xshift=-0.85cm,yshift=-0.42cm]excompile.center) {$\{4,5\}$};
+    \node[font=\scriptsize]
+      at ([xshift=0.85cm,yshift=-0.42cm]excompile.center) {$\{6,7\}$};
+    \node[font=\scriptsize]
+      at ([xshift=2.55cm,yshift=-0.42cm]excompile.center) {$\{1,8,9\}$};
+    \node[font=\scriptsize]
+      at ([yshift=-0.91cm]excompile.center)
+      {$D_3$ accepts; a missing transition rejects the candidate};
+
+    % Stage 5 is deliberately compact; the adjacent tables carry the data.
+    \node[examplerun, below=of excompile] (exrun)
+      {\textbf{5. DataFrame}\\[-1pt]
+       \textbf{execution}\\[3pt]
+       \footnotesize partition $+$ order\\[-1pt]
+       $\downarrow$\\[-1pt]
+       \footnotesize DFA scan\\[-1pt]
+       $\downarrow$\\[-1pt]
+       \footnotesize measure evaluation\\[-1pt]
+       $\downarrow$\\[-1pt]
+       \footnotesize result assembly};
+
+    \node[queryinput, above=0.30cm of exparse] (exquery)
+      {\scriptsize
+       \setlength{\tabcolsep}{0pt}
+       \renewcommand{\arraystretch}{0.91}
+       \begin{tabular}{@{}l@{}}
+         \multicolumn{1}{c}{\normalsize\textbf{SQL query
+           (Listing~\ref{lst:orders-mr})}} \\[2pt]
+         \texttt{SELECT customer\_id, start\_date,} \\
+         \texttt{\hspace*{2em}end\_date, bottom\_price} \\
+         \texttt{FROM orders} \\
+         \texttt{MATCH\_RECOGNIZE (} \\
+         \texttt{\hspace*{1em}PARTITION BY customer\_id} \\
+         \texttt{\hspace*{1em}ORDER BY order\_date} \\
+         \texttt{\hspace*{1em}MEASURES} \\
+         \texttt{\hspace*{2em}A.order\_date AS start\_date,} \\
+         \texttt{\hspace*{2em}C.order\_date AS end\_date,} \\
+         \texttt{\hspace*{2em}C.price AS bottom\_price} \\
+         \texttt{\hspace*{1em}PATTERN (A B C)} \\
+         \texttt{\hspace*{1em}DEFINE} \\
+         \texttt{\hspace*{2em}B AS B.price < A.price,} \\
+         \texttt{\hspace*{2em}C AS C.price < B.price} \\
+         \texttt{);}
+       \end{tabular}};
+    \node[inputtable, left=0.18cm of exrun] (exdata)
+      {\scriptsize
+       \setlength{\tabcolsep}{1.5pt}
+       \renewcommand{\arraystretch}{0.91}
+       \arrayrulecolor{gray!55}
+       \begin{tabular}{|l|c|r|}
+         \hline
+         \multicolumn{3}{|c|}{\cellcolor{gray!12}
+           \textbf{\texttt{pandas} DataFrame: \texttt{orders}}} \\
+         \hline
+         \rowcolor{gray!20}
+         \texttt{customer\_id} & \texttt{order\_date} & \texttt{price} \\
+         \hline
+         cust\_1 & 2020-05-11 & 100 \\
+         cust\_1 & 2020-05-12 & 200 \\
+         cust\_2 & 2020-05-13 &   8 \\
+         cust\_1 & 2020-05-14 & 100 \\
+         cust\_2 & 2020-05-15 &   4 \\
+         cust\_1 & 2020-05-16 &  50 \\
+         cust\_1 & 2020-05-17 & 100 \\
+         cust\_2 & 2020-05-18 &   6 \\
+         \hline
+       \end{tabular}};
+    \node[resulttable, right=0.18cm of exrun] (exoutput)
+      {\scriptsize
+       \setlength{\tabcolsep}{1pt}
+       \renewcommand{\arraystretch}{0.96}
+       \arrayrulecolor{green!45!black}
+       \begin{tabular}{|l|c|c|r|}
+         \hline
+         \multicolumn{4}{|c|}{\cellcolor{green!13}
+           \textbf{Result DataFrame}} \\
+         \hline
+         \rowcolor{green!20}
+         \shortstack{\texttt{customer}\\[-1pt]\texttt{\_id}} &
+         \shortstack{\texttt{start}\\[-1pt]\texttt{\_date}} &
+         \shortstack{\texttt{end}\\[-1pt]\texttt{\_date}} &
+         \shortstack{\texttt{bottom}\\[-1pt]\texttt{\_price}} \\
+         \hline
+         cust\_1 & 2020-05-12 & 2020-05-16 & 50 \\
+         \hline
+       \end{tabular}};
+
+    \draw[exampledata] (exquery) -- (exparse);
+    \draw[exampleflow] (exparse) -- (exvalidate);
+    \draw[exampleflow] (exvalidate) -- (explan);
+    \draw[exampleflow] (explan) -- (excompile);
+    \draw[exampleflow] (excompile) -- (exrun);
+    \draw[exampledata] (exdata) -- (exrun);
+    \draw[exampledata] (exrun) -- (exoutput);
+  \end{tikzpicture}
+  \caption{Worked \texttt{orders} pipeline from
+    Listing~\ref{lst:orders-mr}.  The query is processed in
+    Stages~1--4; the DataFrame joins at Stage~5 and produces one match.}
+  \label{fig:orders-pipeline}
+\end{figure}
+
+The input table accounts for all eight rows.  Stage~4 shows the four
+reachable DFA states produced by the current compiler; the sets below
+them are the corresponding NFA-state subsets.  The transition labels
+use the predicates validated in Stage~2.  During execution,
+\texttt{cust\_1} satisfies $A\rightarrow B\rightarrow C$ with prices
+$200>100>50$ and produces the output row.  The \texttt{cust\_2}
+candidate fails at $C$ because $6<4$ is false.
 
 % ----------------------------------------------------------------
 \section{SQL Parsing}
@@ -329,9 +529,12 @@ the leading function decides first: an expression beginning with
 and one beginning with \texttt{LAST} is \textsc{Running}.  Only when
 the expression begins with neither is it examined for a nested
 \texttt{FIRST}, \texttt{PREV}, or \texttt{NEXT} (\textsc{Final}) or
-\texttt{LAST} (\textsc{Running}).  If any measure has an explicit prefix, the remaining
-unprefixed measures are \textsc{Final}.  Otherwise, measures beginning
-with \texttt{COUNT}, \texttt{SUM}, \texttt{ARRAY\_AGG},
+\texttt{LAST} (\textsc{Running}).  If any measure has an explicit
+prefix, an unprefixed measure that is still unresolved is
+\textsc{Final}.  The earlier navigation rules keep their priority.
+For example, an unprefixed \texttt{LAST} expression remains
+\textsc{Running}.  If no measure has an explicit prefix, measures
+beginning with \texttt{COUNT}, \texttt{SUM}, \texttt{ARRAY\_AGG},
 \texttt{MAX\_BY}, \texttt{MIN\_BY}, \texttt{STRING\_AGG},
 \texttt{COUNT\_IF}, \texttt{SUM\_IF}, or \texttt{AVG\_IF} are
 \textsc{Running}.  Other expressions are \textsc{Final}.
@@ -340,80 +543,100 @@ Figure~\ref{fig:measure-sem-resolution} shows this order.
 \begin{figure}[htbp]
   \centering
   \begin{tikzpicture}[
-    node distance=0.55cm and 1.05cm,
+    node distance=0.30cm and 0.62cm,
     font=\footnotesize,
-    msstage/.style={draw=black!55, rounded corners=2pt, thick,
-                    fill=blue!7, text width=7.6cm, minimum height=0.58cm,
+    msscan/.style={draw=black!65, rounded corners=2pt, thick,
+                   fill=black!8, text width=9.4cm, minimum height=0.62cm,
+                   align=center, inner sep=4pt},
+    msstart/.style={draw=black!65, rounded corners=2pt, thick,
+                    fill=blue!9, text width=7.5cm, minimum height=0.56cm,
                     align=center, inner sep=3pt},
-    mstest/.style={draw=black!55, rounded corners=2pt, thick,
-                   fill=orange!8, text width=7.6cm, minimum height=0.52cm,
+    mstest/.style={draw=black!65, rounded corners=2pt, thick,
+                   fill=white, text width=7.5cm, minimum height=0.48cm,
                    align=center, inner sep=3pt},
-    msout/.style={draw=black!55, rounded corners=2pt, thick,
-                  fill=green!12, text width=2.55cm, minimum height=0.48cm,
-                  align=center, inner sep=3pt},
-    arrow/.style={-{Stealth[length=2.0mm]}, thick, black!70},
+    msdeclared/.style={draw=black!70, rounded corners=2pt, thick, dashed,
+                       fill=black!4, text width=2.05cm, minimum height=0.44cm,
+                       align=center, inner sep=3pt},
+    msfinal/.style={draw=black!75, double, rounded corners=2pt, thick,
+                    fill=green!9, text width=2.05cm, minimum height=0.44cm,
+                    align=center, inner sep=3pt},
+    msrunning/.style={draw=black!75, rounded corners=2pt, very thick,
+                      fill=blue!13, text width=2.05cm, minimum height=0.44cm,
+                      align=center, inner sep=3pt},
+    msnote/.style={draw=black!45, rounded corners=2pt,
+                   fill=black!3, text width=11.8cm,
+                   align=left, inner sep=4pt, font=\scriptsize},
+    arrow/.style={-{Stealth[length=1.9mm]}, thick, black!75},
     yes/.style={font=\scriptsize, above, inner sep=2pt},
-    no/.style={font=\scriptsize, right, inner sep=2.5pt, xshift=0.5pt}
+    no/.style={font=\scriptsize, right, inner sep=2pt}
   ]
-    \node[msstage] (scan)
-      {\textbf{First, look at all the measures once}\\[-2pt]
-       does any of them say \texttt{RUNNING} or \texttt{FINAL}?};
-    \node[msstage, below=of scan] (current)
-      {\textbf{Then take one measure and go down the list}\\[-2pt]
-       stop at the first \emph{yes}};
+    \node[msscan] (scan)
+      {\textbf{Query pre-scan (once)}\\[-2pt]
+       Set $E=\mathrm{true}$ when any measure has an explicit leading\\[-2pt]
+       \texttt{RUNNING} or \texttt{FINAL} prefix.};
+    \node[msstart, below=of scan] (current)
+      {\textbf{For each measure $m$}\\[-2pt]
+       Apply the first matching rule.};
 
     \node[mstest, below=of current] (explicit)
-      {1.\ Does this measure say \texttt{RUNNING} or \texttt{FINAL}?};
-    \node[msout, right=of explicit] (stated) {use what it says};
+      {1.\ Does $m$ have an explicit \texttt{RUNNING} or \texttt{FINAL} prefix?};
+    \node[msdeclared, right=of explicit] (stated) {declared mode};
 
     \node[mstest, below=of explicit] (one)
       {2.\ Does the query return one row per match?};
-    \node[msout, right=of one] (onefinal) {\textsc{Final}};
+    \node[msfinal, right=of one] (onefinal) {\textsc{Final}};
 
     \node[mstest, below=of one] (leadnav)
       {3.\ Does it \emph{start with} \texttt{FIRST}, \texttt{PREV}, or \texttt{NEXT}?};
-    \node[msout, right=of leadnav] (leadfinal) {\textsc{Final}};
+    \node[msfinal, right=of leadnav] (leadfinal) {\textsc{Final}};
 
     \node[mstest, below=of leadnav] (leadlast)
       {4.\ Does it \emph{start with} \texttt{LAST}?};
-    \node[msout, right=of leadlast] (leadrun) {\textsc{Running}};
+    \node[msrunning, left=of leadlast] (leadrun) {\textsc{Running}};
 
     \node[mstest, below=of leadlast] (hasnav)
       {5.\ Does it use \texttt{FIRST}, \texttt{PREV}, or \texttt{NEXT} anywhere?};
-    \node[msout, right=of hasnav] (navfinal) {\textsc{Final}};
+    \node[msfinal, right=of hasnav] (navfinal) {\textsc{Final}};
 
     \node[mstest, below=of hasnav] (haslast)
       {6.\ Does it use \texttt{LAST} anywhere?};
-    \node[msout, right=of haslast] (lastrun) {\textsc{Running}};
+    \node[msrunning, left=of haslast] (lastrun) {\textsc{Running}};
 
     \node[mstest, below=of haslast] (mixed)
-      {7.\ Did another measure say \texttt{RUNNING} or \texttt{FINAL}?};
-    \node[msout, right=of mixed] (mixedfinal) {\textsc{Final}};
+      {7.\ Is $E=\mathrm{true}$?};
+    \node[msfinal, right=of mixed] (mixedfinal) {\textsc{Final}};
 
     \node[mstest, below=of mixed] (aggregate)
-      {8.\ Does it start with a running total such as \texttt{SUM}?};
-    \node[msout, right=of aggregate] (aggrun) {\textsc{Running}};
+      {8.\ Does it start with a default-running aggregate?\textsuperscript{*}};
+    \node[msrunning, left=of aggregate] (aggrun) {\textsc{Running}};
 
-    \node[msout, below=of aggregate, text width=7.6cm] (fallback)
-      {9.\ Anything else: \textsc{Final}};
+    \node[msfinal, below=of aggregate, text width=7.5cm] (fallback)
+      {9.\ Otherwise: \textsc{Final}};
+
+    \node[msnote, below=0.42cm of fallback] (aggregatekey)
+      {\textsuperscript{*}\textbf{Default-running aggregates:}
+       \texttt{COUNT}, \texttt{SUM}, \texttt{ARRAY\_AGG},
+       \texttt{MAX\_BY}, \texttt{MIN\_BY}, \texttt{STRING\_AGG},
+       \texttt{COUNT\_IF}, \texttt{SUM\_IF}, and \texttt{AVG\_IF}.};
+    \node[msnote, below=0.20cm of aggregatekey] (meaning)
+      {\textbf{Meaning:} \textsc{Running} uses rows through the current
+       output row; \textsc{Final} uses the complete match.};
 
     \draw[arrow] (scan) -- (current);
     \draw[arrow] (current) -- (explicit);
     \foreach \a/\b in {explicit/stated, one/onefinal, leadnav/leadfinal,
-                       leadlast/leadrun, hasnav/navfinal, haslast/lastrun,
-                       mixed/mixedfinal, aggregate/aggrun}
+                       hasnav/navfinal, mixed/mixedfinal}
+      \draw[arrow] (\a) -- node[yes]{yes} (\b);
+    \foreach \a/\b in {leadlast/leadrun, haslast/lastrun,
+                       aggregate/aggrun}
       \draw[arrow] (\a) -- node[yes]{yes} (\b);
     \foreach \a/\b in {explicit/one, one/leadnav, leadnav/leadlast,
                        leadlast/hasnav, hasnav/haslast, haslast/mixed,
                        mixed/aggregate, aggregate/fallback}
       \draw[arrow] (\a) -- node[no]{no} (\b);
-
-    \draw[arrow, dashed, black!55]
-      (fallback.west) -- ++(-0.85cm,0) |- (current.west)
-      node[pos=0.28, left, font=\scriptsize, align=center]
-      {then the\\next measure};
   \end{tikzpicture}
-  \caption{Choosing how each measure is calculated.}
+  \caption{Priority rules for resolving \texttt{RUNNING} and
+    \texttt{FINAL} measure semantics.}
   \label{fig:measure-sem-resolution}
 \end{figure}
 
