@@ -11,7 +11,20 @@ import pandas as pd
 import sys
 import os
 import psutil
+import pytest
 from typing import Dict, Any
+
+# The Amazon UK CSV is ~621 MB and is deliberately not tracked in git, so a
+# fresh checkout (CI included) does not have it.  Skip rather than fail: an
+# absent input is a missing prerequisite, not a defect in the engine.
+DATASET_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "Performance", "amz_uk_processed_data.csv",
+)
+requires_amazon_dataset = pytest.mark.skipif(
+    not os.path.exists(DATASET_PATH),
+    reason=f"dataset not present: {DATASET_PATH}",
+)
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -236,11 +249,13 @@ def run_production_scale_performance(max_rows: int = 100000):
     return results
 
 
+@requires_amazon_dataset
 def test_production_scale_performance():
     """Pytest wrapper: benchmark helpers may return data; tests must not."""
     results = run_production_scale_performance()
     assert results, "production-scale benchmark did not execute any scenarios"
 
+@requires_amazon_dataset
 def test_full_dataset_capability():
     """Test capability to handle the full 2.2M row dataset."""
     
