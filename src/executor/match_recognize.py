@@ -2203,7 +2203,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
             else:
                 # Cache miss - compile pattern and cache the result
                 logger.info(f"Smart cache MISS for pattern: {pattern_text}")
-                compilation_start = time.time()
+                compilation_start = time.perf_counter()
                 
                 # Build pattern matching automata
                 pattern_tokens = tokenize_pattern(pattern_text)
@@ -2229,7 +2229,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                     empty_df = df.iloc[0:0].copy()  # Same structure, no rows
                     
                     # Record metrics for empty result
-                    compilation_time = time.time() - compilation_start
+                    compilation_time = time.perf_counter() - compilation_start
                     current_parsing_time = metrics.get("parsing_time", 0)
                     metrics.update({
                         'automata_build_time': 0,
@@ -2259,7 +2259,7 @@ def match_recognize(query: str, df: pd.DataFrame) -> pd.DataFrame:
                         "construction marker; refusing to execute or cache it."
                     )
                 
-                compilation_time = time.time() - compilation_start
+                compilation_time = time.perf_counter() - compilation_start
                 
                 # Cache the compiled pattern using smart cache
                 if caching_enabled:

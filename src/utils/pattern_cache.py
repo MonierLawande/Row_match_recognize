@@ -839,11 +839,16 @@ def resize_cache(new_size: int) -> bool:
                 # Keep only the newest entries in L3 up to new_size
                 with cache.lock:
                     if len(cache.l3_cache) > new_size:
-                        items = list(cache.l3_cache.items())
-                        # Keep the most recently accessed entries
-                        items.sort(key=lambda x: x[1].last_access, reverse=True)
+                        # l3_cache is an OrderedDict held in LRU order by
+                        # _move_to_end on every hit, so the most recently used
+                        # entries are simply the last ones.  Sorting by the
+                        # wall-clock last_access was wrong on Windows, where
+                        # time.time() has ~15.6 ms granularity: entries stored
+                        # in a tight loop share one timestamp, the sort becomes
+                        # a no-op, and eviction kept the oldest entries.
+                        items = list(cache.l3_cache.items())[-new_size:]
                         cache.l3_cache.clear()
-                        for key, entry in items[:new_size]:
+                        for key, entry in items:
                             cache.l3_cache[key] = entry
             
             logger.info(f"Cache resized to {new_size} entries")
