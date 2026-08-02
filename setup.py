@@ -22,7 +22,7 @@ class CustomBuildPy(build_py):
             
             # Copy src directory
             shutil.copytree(src_dir, target_src)
-            print(f"✓ Copied src directory to {target_src}")
+            print(f"Copied src directory to {target_src}")
 
 def get_all_packages():
     """Dynamically find all packages including src subdirectories"""
@@ -38,7 +38,7 @@ def get_all_packages():
                 src_packages.append(package)
     
     all_packages = packages + src_packages
-    print(f"📦 Found packages: {all_packages}")
+    print(f"Found packages: {all_packages}")
     return all_packages
 
 # Read README for long description
