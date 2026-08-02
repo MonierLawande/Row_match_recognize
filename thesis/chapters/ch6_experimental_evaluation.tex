@@ -37,14 +37,15 @@ references, Trino~473 and Oracle~XE~21c, by exact row-level equality
 (same rows, values, and order where deterministic).  This covers the
 two small synthetic tables---\texttt{orders} (Table~\ref{tab:orders})
 and \texttt{stock\_price} (Table~\ref{tab:stock_price})---and the 30
-pattern--size cells of the Amazon benchmark
-(Section~\ref{subsec:eval-cross-system}).  The hand-written Pandas
-baseline is not a correctness oracle; it appears only in the usability
-dimension (Section~\ref{subsec:eval-usability}).
+pattern--size combinations of the Amazon benchmark
+(Section~\ref{subsec:eval-cross-system}).  The SQL engines are the
+correctness references.  The hand-written Pandas functions provide an
+additional output cross-check and the usability baseline
+(Section~\ref{subsec:eval-usability}).
 
 \paragraph{SQL feature coverage.}
 Two views are recorded.  \emph{Feature coverage} marks each main
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} clause---partitioning,
+\texttt{MATCH\_RECOGNIZE} clause---partitioning,
 ordering, \texttt{PATTERN}, \texttt{DEFINE}, \texttt{MEASURES},
 \texttt{SUBSET}, the output and skip modes, and navigation
 functions~\cite{iso2016,ISO2021,monierashraf2025rowmatch}---as
@@ -60,14 +61,16 @@ covered when at least one case matches the reference output
 Execution time is the client-observed end-to-end latency per
 pattern--size run on the Amazon UK Products dataset
 (Section~\ref{subsec:eval-real-dataset}): five pattern families, six
-sizes, result transfer included.  Each cell runs five warmups (the
-JVM-based Trino needs them) and twenty measured runs, each preceded
+sizes, result transfer included.  Each cell runs five warmups to reduce
+cold-start and JIT effects, followed by twenty measured runs, each preceded
 by a five-second idle window that sets the pre-query memory baseline.
 Outliers are removed per metric with the $1.5\times$IQR rule; cells
 report the mean of the retained runs with its standard deviation.
-Throughput is dataset size divided by mean time.  The two memory
-metrics---one instrument for all three systems---are defined in
-Section~\ref{subsec:eval-memory}.
+Throughput is computed per run---dataset size divided by that run's
+time---and then averaged the same way, so it is the mean of the rates
+rather than the rate of the mean.  For the main benchmark, the two
+memory metrics use one instrument for all three systems.  Their scope
+is defined in Section~\ref{subsec:eval-memory}.
 
 \paragraph{Scalability.}
 Mean execution time is regressed against row count for each pattern
@@ -79,7 +82,7 @@ does not prove the algorithm's asymptotic complexity.
 \paragraph{Usability (developer effort).}
 For each worked example, the line count of the idiomatic Pandas
 solution is compared with the single
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} statement
+\texttt{MATCH\_RECOGNIZE} statement
 (Table~\ref{tab:loc_comparison}); the reduction measures developer
 effort~\cite{iso2016,ISO2021,melton2017sqlrpr,Python_UDF}.
 
@@ -90,20 +93,25 @@ effort~\cite{iso2016,ISO2021,melton2017sqlrpr,Python_UDF}.
 
 The experiments ran on a workstation with an Intel Core i7-11800H
 processor and 64\,GB of RAM under Ubuntu 24.04.4 LTS.  For the
-cross-system benchmark, each system was restricted to one CPU core and
-a 32\,GB memory budget; the enforcement mechanisms are detailed in
-Section~\ref{subsec:eval-pattern-defs}.  The scalability stress test
-(Section~\ref{subsec:eval-stress}) instead uses a 58\,GB budget and, to
-reach hundreds of millions of rows on equal terms, replaces the two
-database deployments: Trino reads from a disk-backed Hive/Parquet
-connector rather than its in-memory connector, and Oracle runs as
-21c~Enterprise Edition rather than the resource-capped free XE
-edition.  All database containers run on the host's native Docker
-daemon so that container limits map directly to host control groups,
-the same instrument used for the engine.  The software stack comprised
-the two baseline SQL engines---Trino~473 and Oracle~21c, each run as a
-Docker container---the Java~11.0.25 LTS and Python~3.12.7 runtimes, and
-the core Python libraries \texttt{pandas}~2.3.3, \texttt{numpy}~2.1.3,
+cross-system benchmark, each system had the same outer control-group
+limit of one CPU core and 32\,GB.  Oracle XE's own database-memory cap
+remained in effect~\cite{oracle2021xelimits}.
+Section~\ref{subsec:eval-pattern-defs} details the
+enforcement mechanisms.
+
+The scalability stress test (Section~\ref{subsec:eval-stress}) instead
+uses a 58\,GB memory limit.  Reaching hundreds of millions of rows on equal
+terms also meant replacing the two database deployments.  Trino reads
+from a disk-backed Hive/Parquet connector rather than its in-memory
+connector, and Oracle runs as 21c~Enterprise Edition rather than the
+resource-capped free XE edition.  All database containers run on the
+host's native Docker daemon, so container limits map directly to host
+control groups---the same instrument used for the engine.
+
+The software stack comprised the two baseline SQL engines, Trino~473 and
+Oracle~21c, each run as a Docker container.  It also included the
+Java~11.0.25 LTS and Python~3.12.7 runtimes and the core Python
+libraries \texttt{pandas}~2.3.3, \texttt{numpy}~2.1.3,
 \texttt{antlr4-python3-\allowbreak{}runtime}~4.13.2,
 \texttt{antlr4-\allowbreak{}tools}~0.2.1, and \texttt{pytest}~8.3.4.
 The implementation itself uses ANTLR4 to parse Trino SQL,
@@ -125,11 +133,11 @@ systems and result sets are compared by row order and measure values
 \label{subsec:eval-dataset-orders}
 % ................................
 
-Four datasets are used: two small synthetic tables that can be
-verified by hand (\texttt{orders} and \texttt{stock\_price}), the
-real-world Amazon UK Products dataset (up to 2.2\,million rows) for the
-cross-system timing and memory benchmark, and the Amazon Reviews~2023
-corpus (up to 227.9\,million rows) for the scalability test
+Four datasets are used.  Two are small synthetic tables that can be
+verified by hand, \texttt{orders} and \texttt{stock\_price}.  The
+real-world Amazon UK Products dataset, up to 2.2\,million rows, carries
+the cross-system timing and memory benchmark.  The Amazon Reviews~2023
+corpus, up to 227.9\,million rows, carries the scalability test
 (Section~\ref{subsec:eval-stress}).
 
 \paragraph{Dataset 1: the \texttt{orders} table.}
@@ -225,29 +233,30 @@ The scalability test (Section~\ref{subsec:eval-stress}) needs far more
 rows than the product tables provide, so it uses the Amazon
 Reviews~2023 corpus~\cite{hou2024amazonreviews} from the McAuley Lab at
 UC~San~Diego---roughly 571~million genuine review events across product
-categories.  Only the pattern-relevant \texttt{rating\_only} files are
-taken (\texttt{user\_id}, \texttt{parent\_asin}, \texttt{rating},
-\texttt{timestamp}; no review text, images, or
-product metadata), and five categories are merged in global timestamp
-order into nested prefixes of 5\,M to 227.9\,M rows.  Each review's
+categories.  Only the pattern-relevant fields are taken:
+\texttt{user\_id}, \texttt{parent\_asin}, \texttt{rating}, and
+\texttt{timestamp}.  Review text, images, and product metadata are
+excluded.  Five categories are merged in global timestamp order into
+nested prefixes of 5\,M to 227.9\,M rows.  Each review's
 $1$--$5$ rating is mapped to the same A--E \texttt{category} alphabet as
-the benchmark, so the five pattern families carry over unchanged.
+the benchmark.  The same five pattern families are used.  Four keep
+the main benchmark structure with different rating labels; the stress
+test's optional family uses \texttt{E D? C+ B*}.
 Unlike a tiled copy of a smaller table, every row is a distinct real
-event, which makes this the more honest test of scaling behaviour.
+event, which makes this the more honest test of scaling behavior.
 
 % ----------------------------------------------------------------
 \section{Validation of Concept}
 \label{sec:eval-correctness}
 % ----------------------------------------------------------------
 
-Each worked example runs the same
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} query through the proposed
-engine and both SQL references, and compares outputs, exercised
-clauses, and developer effort.  Beyond these examples, the engine is
-checked by the regression suite (553 passing test
-cases~\cite{monierashraf2025rowmatch}) and by the 30 benchmark
-queries of Section~\ref{subsec:eval-cross-system}, where all three
-systems produce identical results.
+Each worked example compares the proposed engine, Trino, Oracle, and
+an equivalent hand-written Pandas function.  The comparison covers
+output, exercised clauses, and developer effort.  Beyond these
+examples, the engine is checked by the regression suite (709 passing
+test cases~\cite{monierashraf2025tests}).  The 30 benchmark
+pattern--size combinations in Section~\ref{subsec:eval-cross-system}
+also agree across all three systems.
 
 % ................................
 \subsection{Example 1: Dip Pattern on the \texttt{orders} Dataset}
@@ -257,15 +266,15 @@ systems produce identical results.
 The first example detects a `dip'---three consecutive orders with
 successively lower prices---on the \texttt{orders} dataset
 (Dataset~1, Table~\ref{tab:orders}).  The same detection is expressed
-three ways---as a Trino SQL query (Listing~\ref{lst:orders-trino}), as
-a call to the proposed engine (Listing~\ref{lst:orders-mr}), and as a
-hand-written Python/pandas UDF (Listing~\ref{lst:orders-udf})---and
-Table~\ref{tab:sql-match-recognize-examples} confirms that all three,
-together with Oracle, return the identical match.
+three ways: as a Trino SQL query (Listing~\ref{lst:orders-trino}), as a
+call to the proposed engine (Listing~\ref{lst:orders-mr}), and as a
+hand-written Pandas function (Listing~\ref{lst:orders-udf}).  Oracle
+provides the second SQL reference.  All four return the same match
+(Table~\ref{tab:sql-match-recognize-examples}).
 
 \begin{lstlisting}[basicstyle=\ttfamily\small,
   backgroundcolor=\color{gray!10},
-  caption={[Trino SQL for the dip pattern]Trino SQL: create and load the \texttt{orders} table, then detect the dip pattern with \texttt{MATCH\_\allowbreak{}RECOGNIZE}.},
+  caption={[Trino SQL for the dip pattern]Trino SQL: create and load the \texttt{orders} table, then detect the dip pattern with \texttt{MATCH\_RECOGNIZE}.},
   label={lst:orders-trino}]
 CREATE TABLE memory.default.orders (
     customer_id VARCHAR,
@@ -302,11 +311,10 @@ MATCH_RECOGNIZE (
 \begin{lstlisting}[language=Python,
   basicstyle=\ttfamily\small,
   backgroundcolor=\color{gray!10},
-  caption={[Proposed MATCH\_RECOGNIZE on orders]Proposed engine: the same query as a \texttt{MATCH\_\allowbreak{}RECOGNIZE} string over an \texttt{orders} DataFrame.},
+  caption={[Proposed MATCH\_RECOGNIZE on orders]Proposed engine: the same query as a \texttt{MATCH\_RECOGNIZE} string over an \texttt{orders} DataFrame.},
   label={lst:orders-mr}]
 import pandas as pd
-from src.executor.match_recognize import match_recognize
-
+from pandas_match_recognize import match_recognize
 orders = pd.DataFrame({
     "customer_id": ["cust_1","cust_1","cust_2","cust_1",
                     "cust_2","cust_1","cust_1","cust_2"],
@@ -337,7 +345,7 @@ print(result)
 \begin{lstlisting}[language=Python,
   basicstyle=\ttfamily\small,
   backgroundcolor=\color{gray!10},
-  caption={[Equivalent dip detection in pandas]Python UDF: the same `dip' detection as hand-written Python/pandas.},
+  caption={[Equivalent dip detection in pandas]Hand-written Pandas function for the same `dip' detection.},
   label={lst:orders-udf}]
 import pandas as pd
 
@@ -372,15 +380,15 @@ print(result)
 
 For the \emph{correctness} criterion, all four implementations return
 the same single match, shown in
-Table~\ref{tab:sql-match-recognize-examples}; the query also exercises
+Table~\ref{tab:sql-match-recognize-examples}.  The query also exercises
 the \texttt{PARTITION~BY}, \texttt{ORDER~BY}, \texttt{PATTERN},
-\texttt{DEFINE}, and \texttt{MEASURES} clauses and covers the
+\texttt{DEFINE}, and \texttt{MEASURES} clauses, and covers the
 simple-sequence pattern type.
 
 \begin{table}[H]
 \centering
 \caption{Dip-pattern result on the \texttt{orders} dataset: the Trino
-  SQL query, the proposed engine, the Python UDF, and Oracle all
+  SQL query, the proposed engine, the Pandas function, and Oracle all
   return the identical match~\cite{monierashraf2025rowmatch}}
 \label{tab:sql-match-recognize-examples}
 {\small
@@ -391,7 +399,7 @@ simple-sequence pattern type.
 Trino~473 (SQL)             & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 \\
 Oracle XE~21c (SQL)         & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 \\
 Proposed engine            & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 \\
-Python UDF                 & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 \\
+Pandas function            & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 \\
 \bottomrule
 \end{tabular}
 }
@@ -409,14 +417,14 @@ uses \texttt{PATTERN (A B C)} with \texttt{PREV}-based
 \texttt{DEFINE} predicates (\texttt{A} is implicitly always true).
 The same detection is written as Trino SQL
 (Listing~\ref{lst:stock-trino}), a call to the proposed engine
-(Listing~\ref{lst:stock-mr}), and a hand-written UDF
+(Listing~\ref{lst:stock-mr}), and a hand-written Pandas function
 (Listing~\ref{lst:stock-pandas});
-Table~\ref{tab:stock-results} confirms all four systems return the
+Table~\ref{tab:stock-results} confirms all four implementations return the
 identical three matches.
 
 \begin{lstlisting}[basicstyle=\ttfamily\small,
   backgroundcolor=\color{gray!10},
-  caption={[Trino SQL for the stock-price pattern]Trino SQL: create and load the \texttt{stock\_price} table, then detect the increasing-window pattern with \texttt{MATCH\_\allowbreak{}RECOGNIZE}.},
+  caption={[Trino SQL for the stock-price pattern]Trino SQL: create and load the \texttt{stock\_price} table, then detect the increasing-window pattern with \texttt{MATCH\_RECOGNIZE}.},
   label={lst:stock-trino}]
 CREATE TABLE memory.default.stock_price (
     Company    VARCHAR,
@@ -455,11 +463,10 @@ MATCH_RECOGNIZE (
 \begin{lstlisting}[language=Python,
   basicstyle=\ttfamily\small,
   backgroundcolor=\color{gray!10},
-  caption={[Proposed MATCH\_RECOGNIZE on stock\_price]Proposed engine: the same query as a \texttt{MATCH\_\allowbreak{}RECOGNIZE} string over a \texttt{stock\_price} DataFrame.},
+  caption={[Proposed MATCH\_RECOGNIZE on stock\_price]Proposed engine: the same query as a \texttt{MATCH\_RECOGNIZE} string over a \texttt{stock\_price} DataFrame.},
   label={lst:stock-mr}]
 import pandas as pd
-from src.executor.match_recognize import match_recognize
-
+from pandas_match_recognize import match_recognize
 data = {
     "Company": ["A","B","A","B","A","B","A","B","A","B",
                 "A","B","A","B","A","B","A","B","A","B"],
@@ -496,7 +503,7 @@ print(result)
 \begin{lstlisting}[language=Python,
   basicstyle=\ttfamily\small,
   backgroundcolor=\color{gray!10},
-  caption={[Equivalent logic in pandas]Python UDF: the same increasing-window detection as hand-written Python/pandas.},
+  caption={[Equivalent logic in pandas]Hand-written Pandas function for the same increasing-window detection.},
   label={lst:stock-pandas}]
 import pandas as pd
 
@@ -538,12 +545,12 @@ print(result)
 All four implementations return the same three matches
 (Table~\ref{tab:stock-results}), covering partitioning, ordering,
 implicit \texttt{DEFINE}, \texttt{PREV} navigation,
-\texttt{MATCH\_NUMBER()}, and measure materialisation.
+\texttt{MATCH\_NUMBER()}, and measure materialization.
 
 \begin{table}[H]
 \centering
 \caption{Stock-price result on the \texttt{stock\_price} dataset: the
-  Trino SQL query, the proposed engine, the Python UDF, and Oracle all
+  Trino SQL query, the proposed engine, the Pandas function, and Oracle all
   return these three identical matches~\cite{petkovic2022rpr,monierashraf2025oracle}}
 \label{tab:stock-results}
 {\small
@@ -568,13 +575,13 @@ The third example detects a \emph{V-shape recovery} on the same
 table: a strictly falling run followed by a strictly rising one.
 Unlike the fixed three-row patterns above, \texttt{PATTERN (A B+ C+)}
 uses the \texttt{+} quantifier twice, with the fall and rise defined
-through \texttt{PREV}; the measures report the start, bottom, and
+through \texttt{PREV}.  The measures report the start, bottom, and
 recovered prices.  As before, the same detection
 is expressed as a Trino SQL query (Listing~\ref{lst:vshape-trino}), as
 a call to the proposed engine (Listing~\ref{lst:vshape-mr}), and as a
-hand-written Python/pandas UDF (Listing~\ref{lst:vshape-udf}), and
-Table~\ref{tab:vshape-results} confirms that all three, together with
-Oracle, return the identical matches.
+hand-written Pandas function (Listing~\ref{lst:vshape-udf}).  Oracle
+provides the second SQL reference.  All four return the same matches
+(Table~\ref{tab:vshape-results}).
 
 \begin{lstlisting}[basicstyle=\ttfamily\small,
   backgroundcolor=\color{gray!10},
@@ -603,7 +610,7 @@ MATCH_RECOGNIZE (
   backgroundcolor=\color{gray!10},
   caption={[Proposed MATCH\_RECOGNIZE V-shape]Proposed engine: the same V-shape query over the \texttt{stock\_price} DataFrame \texttt{df} of Listing~\ref{lst:stock-mr}.},
   label={lst:vshape-mr}]
-from src.executor.match_recognize import match_recognize
+from pandas_match_recognize import match_recognize
 
 query = """
 SELECT *
@@ -629,7 +636,7 @@ print(result)
 \begin{lstlisting}[language=Python,
   basicstyle=\ttfamily\small,
   backgroundcolor=\color{gray!10},
-  caption={[Equivalent V-shape detection in pandas]Python UDF: the same V-shape detection as hand-written Python/pandas.},
+  caption={[Equivalent V-shape detection in pandas]Hand-written Pandas function for the same V-shape detection.},
   label={lst:vshape-udf}]
 import pandas as pd
 
@@ -680,7 +687,7 @@ handling agrees with the reference engines.
 \begin{table}[H]
 \centering
 \caption{V-shape result on the \texttt{stock\_price} dataset: the
-  Trino SQL query, the proposed engine, the Python UDF, and Oracle all
+  Trino SQL query, the proposed engine, the Pandas function, and Oracle all
   return these three identical matches~\cite{petkovic2022rpr,monierashraf2025oracle}}
 \label{tab:vshape-results}
 {\small
@@ -702,55 +709,61 @@ handling agrees with the reference engines.
 % ................................
 
 Each worked example expresses the same detection three ways: SQL
-query, engine call, and hand-written UDF.
-Table~\ref{tab:loc_comparison} counts non-blank, non-comment lines:
-the declarative statement is half the UDF's code or less (14 vs 27,
-14 vs 33, 16 vs 35 lines), and the gap widens with pattern
-complexity.
+query, engine call, and hand-written Pandas function.
+Table~\ref{tab:loc_comparison} counts the detection logic on both
+sides---the \texttt{MATCH\_RECOGNIZE} statement against the Pandas
+detection function---in non-blank, non-comment lines.  Data setup, the
+imports, and the printing are shared, so they are left out of both.  The
+declarative form takes 14 vs 24, 14 vs 30, and 16 vs 32 lines, and the
+gap widens with pattern complexity.
 
 \begin{table}[H]
 \centering
-\caption{Lines-of-code comparison for the three worked examples
-  (non-blank, non-comment lines)}
+\caption{Lines-of-code comparison for the three worked examples.  Both
+  columns count detection logic only---the \texttt{MATCH\_RECOGNIZE}
+  statement against the Pandas detection function---in non-blank,
+  non-comment lines.  Shared data setup, imports, and printing are
+  excluded from both.}
 \label{tab:loc_comparison}
 {\small
-\begin{tabular}{lllr}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llp{4.6cm}r}
 \toprule
 \textbf{Example} & \textbf{Implementation} & \textbf{Notes} & \textbf{LOC} \\
 \midrule
 Dip (\texttt{orders}) & \texttt{MATCH\_RECOGNIZE} statement & single declarative query & 14 \\
-Dip (\texttt{orders}) & Hand-written \texttt{pandas} UDF & loop / index / skip bookkeeping & 27 \\
+Dip (\texttt{orders}) & Hand-written Pandas function & loop / index / skip bookkeeping & 24 \\
 \midrule
 Stock (\texttt{stock\_price}) & \texttt{MATCH\_RECOGNIZE} statement & single declarative query & 14 \\
-Stock (\texttt{stock\_price}) & Hand-written \texttt{pandas} UDF & \texttt{groupby}/\texttt{shift}/index bookkeeping & 33 \\
+Stock (\texttt{stock\_price}) & Hand-written Pandas function & \texttt{groupby}/\texttt{shift}/index bookkeeping & 30 \\
 \midrule
 V-shape (\texttt{stock\_price}) & \texttt{MATCH\_RECOGNIZE} statement & quantified declarative query & 16 \\
-V-shape (\texttt{stock\_price}) & Hand-written \texttt{pandas} UDF & nested falling/rising run scan & 35 \\
+V-shape (\texttt{stock\_price}) & Hand-written Pandas function & nested falling/rising run scan & 32 \\
 \bottomrule
 \end{tabular}
 }
 \end{table}
 
-The declarative form states \emph{what} to find in one statement
-and lets the engine decide \emph{how}; each UDF hand-codes grouping,
+The declarative form states \emph{what} to find in one statement and
+lets the engine decide \emph{how}.  Each Pandas function hand-codes grouping,
 sorting, and skip logic, where one off-by-one silently changes the
-result---which is why the UDFs were more
+result.  That is why the procedural baselines were more
 error-prone~\cite{Python_UDF}.  Against an external SQL engine the
-value is \emph{where} it runs: in-process on the DataFrame, no
-\texttt{CREATE TABLE}/\texttt{INSERT} round-trip, footprint below
-0.6\,GB versus 2.0\,GB (Oracle) and 14.6\,GB (Trino).  The
-trade-off is scope: the supported subset only, no optimiser or
-distributed execution; and this is a code-level comparison, not a
-user study (Chapter~\ref{chap:conclusions}).
+value is \emph{where} it runs: in-process on the DataFrame, with no
+\texttt{CREATE TABLE}/\texttt{INSERT} round-trip and a footprint below
+0.6\,GB versus 2.0\,GB (Oracle) and 14.6\,GB (Trino).  The trade-off is
+scope---the supported subset only, without a database query planner or
+distributed execution.  This is a code-level comparison, not a user study
+(Chapter~\ref{chap:conclusions}).
 
 % ----------------------------------------------------------------
-\section{Coverage and Usability Results}
+\section{Coverage and Complexity Results}
 \label{sec:eval-coverage}
 % ----------------------------------------------------------------
 
-This section reports feature coverage (clauses and pattern types);
-usability was covered with the worked examples, and complexity
-analysis follows in Section~\ref{subsec:eval-complexity}.
+This section reports feature and pattern coverage, then analyzes
+theoretical complexity.  Usability was covered with the worked
+examples.
 
 % ................................
 \subsection{SQL Feature Coverage}
@@ -770,7 +783,7 @@ outside the validated scope.
   proposed engine}
 \label{tab:feature_coverage}
 {\small
-\begin{tabular}{ll}
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.43\textwidth}X}
 \toprule
 \textbf{Feature} & \textbf{Status} \\
 \midrule
@@ -785,37 +798,37 @@ Anchors \texttt{\^{}}, \texttt{\$} & supported \\
 \texttt{DEFINE} predicates & supported \\
 Navigation \texttt{PREV/NEXT/FIRST/LAST} & supported \\
 \texttt{MEASURES} core aggregates & supported \\
-\texttt{RUNNING}/\texttt{FINAL} semantics & supported \\
-General SQL expressions & partially supported \\
+\texttt{RUNNING}/\texttt{FINAL} semantics & supported  \\
 \texttt{SUBSET} & supported \\
 \texttt{ONE ROW PER MATCH} & supported \\
 \texttt{ALL ROWS PER MATCH} & supported \\
 \texttt{AFTER MATCH SKIP} modes & supported \\
 \texttt{MATCH\_NUMBER()}, \texttt{CLASSIFIER()} & supported \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 }
 \end{table}
 
-In summary, the engine \emph{supports} the full core of the SQL:2016
-row-pattern clause: partitioning and ordering; the complete
-\texttt{PATTERN} grammar (quantifiers, alternation, grouping and
-nesting, anchors, exclusions, and \texttt{PERMUTE}); \texttt{DEFINE}
-predicates; \texttt{SUBSET} union variables; \texttt{MEASURES} with
-the navigation functions and core aggregates; \texttt{RUNNING} and
-\texttt{FINAL} semantics; both output modes; all four
-\texttt{AFTER MATCH SKIP} modes; and
-\texttt{MATCH\_NUMBER()}/\texttt{CLASSIFIER()}.  Inside \texttt{DEFINE}
-and \texttt{MEASURES} it also evaluates arithmetic, comparisons,
-\texttt{IN} lists, \texttt{NULL} checks, and common scalar and string
-functions (\texttt{LOWER}, \texttt{CAST}, \texttt{COALESCE},
-\texttt{CASE}, \texttt{||}).  It does \emph{not} support scalar
-subqueries embedded in those expressions, the
-\texttt{WINDOW}/\texttt{OVER} form of row-pattern recognition
-(Feature~R020), or database-level facilities such as a cost-based
-optimiser and distributed execution---all of which lie outside the
-R010-oriented scope of Chapters~\ref{chap:methodology}
-and~\ref{chap:implementation}.
+{\emergencystretch=3em
+In summary, the engine supports the evaluated R010-style subset:
+partitioning; ordering; the listed \texttt{PATTERN}
+constructs; \texttt{DEFINE} predicates; \texttt{SUBSET} union
+variables; \texttt{MEASURES} with supported navigation functions and
+aggregates; \texttt{RUNNING} and \texttt{FINAL} semantics; both output
+modes; the evaluated \texttt{AFTER MATCH SKIP} modes; and
+\texttt{MATCH\_NUMBER()}\slash\texttt{CLASSIFIER()}.\par}
+
+Inside \texttt{DEFINE} and \texttt{MEASURES} it also evaluates
+arithmetic, comparisons, \texttt{IN} lists, \texttt{NULL} checks, and
+common scalar and string functions (\texttt{LOWER}, \texttt{CAST},
+\texttt{COALESCE}, \texttt{CASE}, \texttt{||}).  Constant scalar
+subqueries without a \texttt{FROM} clause are supported inside tested
+expressions.  Table-reading and correlated subqueries are not.
+General \texttt{ORDER BY} expressions, general relational planning,
+and distributed execution are also outside the evaluated R010 path.
+The separate R020 window path is not evaluated in this chapter.
+These limits define the scope of
+Chapters~\ref{chap:methodology} and~\ref{chap:implementation}.
 
 At the pattern level, Table~\ref{tab:pattern_type_coverage} lists the
 row-pattern types the engine detects, each with a regex example and a
@@ -864,7 +877,7 @@ Permutation & \texttt{PERMUTE(A,B,C)} &
 \label{subsec:eval-complexity}
 % ................................................................
 
-Complexity is analysed twice: theoretically here, empirically in
+Complexity is analyzed twice: theoretically here, empirically in
 Section~\ref{sec:eval-performance}.  Theory predicts scaling;
 experiments measure the implementation on a specific machine and
 dataset.
@@ -903,102 +916,142 @@ Five symbols recur: $n$ input rows, $m$ pattern symbols (a bounded
 quantifier \texttt{\{i,j\}} counts as $j$ copies of its fragment,
 since the builder clones the fragment per repetition), $d$
 \texttt{DEFINE} variables, $k$ matches, $\ell$ average rows per
-match.
+match that are materialized in the output.  Thus $\ell=1$ for
+\texttt{ONE ROW PER MATCH}; it can be larger for
+\texttt{ALL ROWS PER MATCH}.
 
-Running a query has five stages: (1) parse the query and extract the
-\texttt{MATCH\_\allowbreak{}RECOGNIZE} clauses; (2) build the
-pattern's automaton (NFA, then DFA); (3) order the rows; (4) check the
-\texttt{DEFINE} conditions on every row; and (5) scan for matches and
-build the output.
+Running a query does five kinds of work.  Parsing reads the query and
+extracts its \texttt{MATCH\_\allowbreak{}RECOGNIZE} clauses.  Automaton
+construction builds the pattern's automaton, NFA then DFA.  Ordering
+sorts the rows.  Condition checking tests the \texttt{DEFINE}
+conditions on every row.  Matching scans for matches and builds the
+output.
 
-\emph{Stages~1--2 (parse, build automaton)} depend on the pattern,
+\emph{Parsing and automaton construction} depend on the pattern,
 not the data: NFA construction is $O(m)$, and the NFA-to-DFA
 conversion is $O(2^{m})$ states in the worst case but a handful in
 practice.  For a fixed pattern this is a one-time constant.
+\emph{Ordering} is the only data-dependent cost above
+linear for the fixed row-local benchmark path.  A full comparison sort
+costs $O(n \log n)$, done per partition---more
+precisely $\sum_i O(n_i \log n_i)$ over partitions of $n_i$ rows, which
+the benchmark's single partition bounds by $O(n \log n)$.  But the
+engine sorts only when needed.  It first checks in $O(n)$ whether the
+rows are already ordered and, if so, skips the sort.
+\emph{Condition checking} prepares one Boolean result per row
+and variable on the compiled row-local path, costing $O(nd)$.
+\emph{Matching and output} then costs $O(n+k\ell)$ on the
+compiled default-skip path: one scan plus the rows materialized for the
+$k$ matches.  These bounds describe the path used by the main
+benchmark.  They are not a bound for every supported expression and
+skip mode.
 
-\emph{Stage~4 (check conditions)} reads each of the $n$ rows a fixed
-number of times, costing $O(nd)$.  \emph{Stage~5 (scan and output)}
-costs $O(n + k\ell)$: one pass over the rows (the default
-\texttt{PAST LAST ROW} skip never scans a matched row again) plus the
-work to assemble the $k$ matches of average length $\ell$.  \emph{Stage~3
-(ordering)} is the only stage that can grow faster than linearly: a
-full sort costs $O(n \log n)$---done per partition, so more precisely
-$\sum_i O(n_i \log n_i)$ over partitions of $n_i$ rows, which the
-benchmark's single partition makes exactly $O(n \log n)$---but the
-engine sorts only when
-needed---it first checks in $O(n)$ whether the rows are already
-ordered and, if so, skips the sort.
+Combining the data-dependent work, the cost has \emph{two independent
+axes}, and it is important to keep them apart.  One is growth with the
+data size~$n$ for a fixed pattern.  The other is growth with the pattern
+complexity for fixed data.
 
-Combining the data-dependent stages, the cost has \emph{two
-independent axes}, and it is important to keep them apart: growth with
-the data size~$n$ (for a fixed pattern), and growth with the pattern
-complexity (for fixed data).
 
-\emph{Axis~1---growth with the input size~$n$, for a fixed row-local
-pattern.}  This is the axis the benchmark scales.  The automaton is
-built once, and every data-dependent stage except ordering is linear,
-so only whether a sort is needed separates the two cases:
+\emph{Axis~1---growth with the input size~$n$, for a fixed compiled
+row-local pattern.}  This is the axis the benchmark scales.  The
+automaton is fixed, and every data-dependent stage except ordering is
+linear, so only whether a sort is needed separates the two cases:
 \begin{itemize}
   \item \textbf{Best case} (input already ordered, as in the
-    benchmark): the $O(n)$ check skips the sort, giving
-    $O(n + k\ell) = \Theta(n)$.  This is optimal, because reading
-    every row once is unavoidable---it meets the $\Omega(n)$ lower
-    bound.
+    benchmark): the $O(n)$ check skips the sort.  With fixed $d$ and
+    the benchmark's linear-size output, this gives
+    $\Theta(nd+n+k\ell)=\Theta(n)$.  The final equality depends on
+    fixed $d$ and $k\ell=O(n)$.
   \item \textbf{Worst case} (input unordered, a real sort required):
-    $O(n \log n + nd + k\ell)$.  The sort term grows fastest, so it
-    dominates asymptotically; at the measured sizes it is still a
-    minority share of the total
-    (Section~\ref{subsec:eval-ordering}).
+    $O(n \log n + nd + n + k\ell)$.  With fixed $d$ and
+    $k\ell=O(n)$, this reduces to $O(n\log n)$.
 \end{itemize}
-These two bracket the engine's realistic scaling and are measured
-directly by the ordered and shuffled scenarios of
-Section~\ref{subsec:eval-ordering}.  One reading note: across the
-measured 100\,K--2.22\,M range, $\log_2 n$ grows only from about 17 to
-21, so the $O(n\log n)$ worst case looks almost straight in the
-plots---the two cases separate by a near-constant factor, not by a
-visible bend.  Memory use is $O(n + k\ell)$ in
-both cases---the input, the per-row marks, and the output each grow in
-proportion to the data.
+These two bracket the engine's realistic scaling.  The ordered and
+shuffled scenarios of Section~\ref{subsec:eval-ordering} measure them
+directly.  One reading note: across the measured 100\,K--2.22\,M range,
+$\log_2 n$ grows only from about 17 to 21.  The $O(n\log n)$ worst case
+therefore looks almost straight in the plots---the two cases separate by
+a near-constant factor, not by a visible bend.  Extra memory on this
+compiled path is $O(nd+n+k\ell)$, which reduces to $O(n)$ for the
+fixed benchmark and its linear-size output.  Other modes can
+materialise more output or retain more search state.
 
 Figure~\ref{fig:complexity_bigO} draws the two cases.
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=0.72\textwidth]{images/complexity_bigO.png}
-  \caption{Best-case and worst-case growth of the proposed engine.}
+  \begin{tikzpicture}[
+      box/.style={draw, rounded corners=2pt, align=center,
+        minimum height=0.85cm, text width=2.85cm, inner sep=4pt},
+      total/.style={box, fill=gray!12, text width=3.0cm},
+      arrow/.style={-{Latex[length=2mm]}, thick},
+      node distance=0.75cm and 0.35cm
+    ]
+    \node[box] (ordered) {Input already ordered};
+    \node[box, right=of ordered] (check1)
+      {Order check\\$\Theta(n)$};
+    \node[box, right=of check1] (scan1)
+      {Conditions, scan, output\\$O(nd+n+k\ell)$};
+    \node[total, right=of scan1] (total1)
+      {Fixed benchmark\\$\Theta(n)$};
+
+    \node[box, below=0.75cm of ordered] (unordered)
+      {Input unordered};
+    \node[box, right=of unordered] (sort)
+      {Order check + sort\\$\scriptstyle O(n+\sum_i n_i\log n_i)$};
+    \node[box, right=of sort] (scan2)
+      {Conditions, scan, output\\$O(nd+n+k\ell)$};
+    \node[total, right=of scan2] (total2)
+      {Single partition\\$O(n\log n)$};
+
+    \draw[arrow] (ordered) -- (check1);
+    \draw[arrow] (check1) -- (scan1);
+    \draw[arrow] (scan1) -- (total1);
+    \draw[arrow] (unordered) -- (sort);
+    \draw[arrow] (sort) -- (scan2);
+    \draw[arrow] (scan2) -- (total2);
+  \end{tikzpicture}
+  \caption[Data-size complexity of the compiled benchmark path]{Data-size
+    complexity for a fixed compiled row-local pattern.  The final simplified
+    bounds assume fixed $d$ and output size $k\ell=O(n)$.}
   \label{fig:complexity_bigO}
 \end{figure}
 
-The engine's running time falls in the shaded region between the two
-curves, depending only on whether the input arrives ordered.
+For this fixed compiled path, ordering determines which branch applies.
 
 \emph{Axis~2---growth with pattern complexity, for fixed data.}  A few
 constructs are expensive in the pattern size~$m$ rather than in the
-number of rows~$n$, and each is either paid once or held in check by an
-explicit guard, so none of them appears as a growth curve in the data
-size.  The NFA-to-DFA conversion is $O(2^{m})$ states in the worst
-case, but it is a one-time, cached compile step capped at a
-memory-adaptive state limit of roughly 10{,}000--50{,}000 states.
-Reaching this limit now raises an explicit compilation error; the
-engine does not execute or cache a partial DFA.  None of the evaluated
-patterns reached the limit.  A \texttt{PERMUTE} of $m$ variables expands to $O(m!)$
-branches, rejected above eight variables (or an estimated fifty
-thousand branches).  And a \texttt{DEFINE} predicate that depends on
-the match built so far---a running aggregate or \texttt{CLASSIFIER()},
-or overlapping skip modes such as \texttt{SKIP TO NEXT ROW}---cannot be
-vectorized; the engine falls back to an exact preference-ordered search
-whose worst case is exponential but is bounded by a fixed
-$200\,000$-step budget per match
-(Section~\ref{subsec:meth-exec-backtracking}) and driven by an
-explicit-stack search that does not depend on Python's recursion limit,
-so it terminates over the full size range---though far more slowly than
-the vectorized path (Section~\ref{subsec:eval-worst-cases}).  The
-benchmark and the ordering
-scenarios stay on the row-local fast path and therefore exercise
-Axis~1; Section~\ref{subsec:eval-worst-cases} exercises Axis~2
-empirically \emph{across all three systems}, and there the databases'
-general-purpose engines overtake the proposed engine on exactly this
-query class.
+number of rows~$n$.  Each is either paid once or held in check by an
+explicit guard, so none appears as a growth curve in the data size.
+
+The NFA-to-DFA conversion is $O(2^{m})$ states in the worst case.  But
+it is a one-time, cached compile step, capped at a state limit the
+engine derives from its own memory budget at roughly 64\,KiB per state,
+with a conservative default ceiling of 50{,}000 states.  The memory term
+is what tightens on a small machine; the ceiling is what holds on a
+large one, and on the evaluation host it is the ceiling that binds.
+Reaching this limit raises an explicit compilation error, and the engine
+does not execute or cache a partial DFA.  None of the evaluated patterns
+came close.
+
+A \texttt{PERMUTE} of $m$ variables expands to $O(m!)$ branches,
+rejected above eight variables or an estimated fifty thousand branches.
+A \texttt{DEFINE} predicate that reads the match built so far cannot
+use the row-local Boolean matrix.  Ambiguous quantified choices may
+then require the exact preference-ordered search, whose worst case is
+exponential.  Non-default skip modes are different: they disable some
+fused enumeration and output paths, but do not by themselves make a
+predicate state-dependent or force exact search.
+
+The exact search has a partition-level search budget
+(Section~\ref{subsec:meth-exec-backtracking}) and uses an explicit
+stack.  It therefore avoids Python's recursion limit.  If the search
+budget is exhausted, the query raises an error instead of returning a partial
+result.  The main benchmark and the ordering scenarios stay on the
+compiled row-local path and exercise Axis~1.  The state-dependent test
+in Section~\ref{subsec:eval-worst-cases} uses a compiled incremental
+exact-search plan.  It measures one important form, not the worst case
+of every state-dependent expression.
 
 % ----------------------------------------------------------------
 \section{Empirical and Cross-System Analysis}
@@ -1010,8 +1063,8 @@ This section compares the engine with Trino~473 and Oracle~XE~21c on
 the Amazon UK Products dataset: five pattern families, six sizes
 (100\,K to 2.22\,M rows), 30 cells per system.  Each cell is the
 IQR-filtered mean of twenty runs after five warmups.  All 90 cells
-completed.  The engine averaged nearly 5\,M\,rows/s.  Its per-family
-time fits give $R^2=0.9996$--$0.9998$, so growth is close to linear
+completed.  The engine averaged about 6.1\,M\,rows/s.  Its per-family
+time fits give $R^2=0.9904$--$0.9997$, so growth is close to linear
 over these six sizes.  Complex nested patterns cost the most.
 Section~\ref{subsec:eval-pattern-defs} defines the
 patterns and the resource policy,
@@ -1026,7 +1079,8 @@ platforms.  It brings a practical subset of row-pattern matching into
 in-memory Python and skips the load-into-a-server step.  In return it
 supports only the subset of
 Chapters~\ref{chap:methodology}--\ref{chap:implementation}, while the
-databases have mature optimizers, distributed execution, and full SQL.
+databases have mature optimizers, distributed execution, and broader SQL
+coverage.
 Against hand-written Pandas, though, the SQL form states partitioning,
 ordering, pattern, skip, and measures in one query.
 
@@ -1036,7 +1090,8 @@ ordering, pattern, skip, and measures in one query.
 % ................................................................
 
 {\small
-\begin{longtable}{llp{0.55\textwidth}}
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{llp{0.48\textwidth}}
 \caption{SQL Pattern Definitions and Detection Goals}
 \label{tab:pattern_definitions} \\
 \toprule
@@ -1104,10 +1159,12 @@ pattern family. \\
 \noindent
 All patterns run on a derived \texttt{category} column from the product
 \texttt{price}: $A$~= budget ($\le$\pounds10), $B$~= low-mid
-(\pounds10--25), $C$~= mid (\pounds25--50), $D$~= upper-mid
-(\pounds50--100), and $E$~= premium ($>$\pounds100).  Each row carries
-a sequential \texttt{seq\_id} in CSV order, and the six sizes (100\,K to
-2{,}222{,}742 rows) are nested prefixes of the same file.  Queries use
+($>$\pounds10 and $\le$\pounds25), $C$~= mid ($>$\pounds25 and
+$\le$\pounds50), $D$~= upper-mid ($>$\pounds50 and
+$\le$\pounds100), and $E$~= premium ($>$\pounds100).  Each row carries
+a sequential \texttt{seq\_id} in source order, and the six sizes
+(100\,K to 2{,}222{,}742 rows) are nested prefixes of the same source.
+Queries use
 \texttt{ORDER~BY seq\_id} and no \texttt{PARTITION~BY}, so each dataset
 is one logical partition.  The sequence is a controlled listing order,
 not a temporal one; what matters is that all three systems process the
@@ -1117,30 +1174,19 @@ identical rows.
 The benchmark is 90 cells (three systems, five families, six sizes;
 1{,}800 measured executions) on the same CSVs and query bodies.
 
-The three systems ran one at a time, with the other database containers
-stopped.  Each was pinned to a single core: the engine via
-\texttt{sched\_setaffinity} (with \texttt{OMP}, \texttt{OpenBLAS},
-\texttt{MKL}, and \texttt{NumExpr} capped at one thread), the database
-containers via \texttt{-{}-cpuset-cpus=0 -{}-cpus=1}.  Each got the same
-32\,GB budget, enforced natively---an address-space \texttt{rlimit} for
-the Python process, a container memory limit with no extra swap for the
-databases.  The engine runs in its own cgroup, so its memory is read
-from the same cgroup~v2 interface that meters the containers, and each
-container is restarted before every size for a clean start (warmups
-then re-warm caches and Trino's JIT).  The 32\,GB is an
-engine/container cap, below the workstation's 64\,GB, so it actually
-binds.
-
-One caveat for the database runs: the Python client that issues the
-query and builds the result DataFrame is also pinned to core~0, so
-client and engine time-share it.  The client's memory sits outside the
-32\,GB \texttt{rlimit} and is counted in neither database's memory
-metric.  Reported times are client-observed wall-clock, measured
-tightly around the call and stopped only once the full result set is
-materialized; every system returns the same normalized rows
-(Table~\ref{tab:match_counts}), so retrieval is timed on equal terms.
-Database load time is excluded---the times are query execution after
-loading.
+The proposed-engine values describe the fixed benchmark revision
+recorded in Appendix~\ref{app:provenance}.  The Oracle and Trino values
+were retained from an earlier campaign under the same one-core, outer
+32\,GB, five-warmup, twenty-run protocol.  Oracle XE's internal cap
+remained in effect.  The systems ran sequentially, not
+at the same time.  The engine ran in its own control group; Trino and
+Oracle ran in limited containers that were restarted before each size.
+The same control-group counter measured all three memory footprints.
+Reported times are client-observed wall-clock values and include result
+materialization, but exclude data loading.  The database client's
+memory is outside the measured containers, which is a limitation of
+the memory comparison.  Every system returned the same normalized
+rows (Table~\ref{tab:match_counts}).
 
 The engine's throughput is stable across the range (a scan-dominated
 path) and it records the lowest time on all 30 cells.  Memory uses the
@@ -1148,13 +1194,13 @@ two unified metrics of Section~\ref{subsec:eval-memory}: incremental
 peak (per-query working memory) and absolute peak (footprint).
 
 % ................................................................
-\subsection{Cross-System Comparison Under a Common Resource Budget}
+\subsection{Cross-System Comparison Under a Common Outer Resource Limit}
 \label{subsec:eval-cross-system}
 % ................................................................
 
-All artifacts (result CSVs, datasets, SQL, summaries) live in
-\texttt{Performance/\allowbreak cross\_\allowbreak system\_\allowbreak matrix}; the per-system queries
-differ only in the source table.  Match counts per cell are in
+The three systems run the same query bodies; they differ only in the
+source table.  Appendix~\ref{app:provenance} records the benchmark
+protocol and evidence used to reproduce the comparison.  Match counts per cell are in
 Table~\ref{tab:match_counts}, identical across the three systems (all
 use \texttt{ONE ROW PER MATCH}).  \texttt{optional\_pattern} yields the
 most matches and \texttt{alternation} the fewest.  Match volume feeds
@@ -1163,7 +1209,7 @@ variation below---\texttt{complex\_nested} is the slowest family
 despite fewer matches than \texttt{simple\_sequence}.
 
 % Final run (each cell = 5 warmup + 20 measured; 1 core, 32GB; sizes 100K-2.22M; mean +/- sample std)
-% pandas: total=5.85, avg=0.20, avgthr=4{,}976{,}348, minthr=2{,}173{,}146, maxthr=7{,}185{,}316, maxqmem=290.11, maxfmem=584.56, medCV=1.6%
+% pandas: total=5.02, avg=0.17, avgthr=6{,}110{,}392, minthr=2{,}494{,}341, maxthr=9{,}403{,}104, maxqmem=189.05, maxfmem=523.97, medCV=3.5%
 % Trino~473: total=59.33, avg=1.98, avgthr=602{,}098, minthr=144{,}049, maxthr=996{,}563, maxqmem=20.75, maxfmem=14{,}992.9, medCV=3.8%
 % Oracle XE~21c: total=31.34, avg=1.04, avgthr=1{,}156{,}106, minthr=308{,}102, maxthr=1{,}698{,}711, maxqmem=58.71, maxfmem=2{,}057.17, medCV=2.3%
 
@@ -1177,10 +1223,10 @@ despite fewer matches than \texttt{simple\_sequence}.
 
 In Figure~\ref{fig:summary_by_pattern} each family is averaged over the
 six sizes: throughput on the left (higher is better), time on the right
-(lower is better).  The engine wins both on all five families.  The widest gap is
-\texttt{complex\_nested}, where Trino averages 5.28\,s against the
-engine's 0.36\,s---$14.5\times$.  Values in
-Tables~\ref{tab:pattern_summary} and~\ref{tab:avg_time_by_pattern}.
+(lower is better).  The engine leads both measures on all five families.
+The widest gap is \texttt{complex\_nested}, where Trino averages
+5.28\,s against the engine's 0.34\,s---$15.4\times$.  The values are in
+Table~\ref{tab:pattern_summary}.
 
 \begin{figure}[htbp]
   \centering
@@ -1191,22 +1237,22 @@ Tables~\ref{tab:pattern_summary} and~\ref{tab:avg_time_by_pattern}.
 \end{figure}
 
 Figure~\ref{fig:summary_by_size} groups the same data by size.  The
-engine is fastest at every size, holding 3.9--5.4\,M rows/s as input
-grows.  Per size it beats a warm
-Trino by about $8.1$--$11.0\times$ and Oracle by about
-$3.4$--$5.8\times$.  Values in Tables~\ref{tab:size_summary}
-and~\ref{tab:avg_time_by_size}.
+engine is fastest at every size, holding 5.0--6.9\,M rows/s as input
+grows.  Per size it is about $9.3$--$13.3\times$ faster than
+Trino and $4.3$--$7.0\times$ faster than Oracle.  The values are in
+Table~\ref{tab:size_summary}.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/execution_times.png}
   \caption[Execution time by pattern, size, and system]{Execution time
-    by pattern, size, and system.}
+    by pattern, size, and system.  Each panel uses an independent linear
+    scale starting at zero.  Each series is labeled at the largest size.}
   \label{fig:execution_times}
 \end{figure}
 
-One panel per pattern, time versus size.  The engine (blue) is the
-lowest curve everywhere.  The margin widens most on
+Figure~\ref{fig:execution_times} gives one time-versus-size panel per
+pattern.  The engine (blue) is the lowest curve everywhere.  The margin widens most on
 \texttt{complex\_nested}, where the databases bend upward past 400\,K
 rows while the engine stays near-linear
 (Table~\ref{tab:execution_times}).
@@ -1220,84 +1266,97 @@ rows while the engine stays near-linear
   \centering
   \includegraphics[width=\textwidth]{images/viz_throughput.png}
   \caption[Throughput by pattern, size, and system]{Throughput by
-    pattern, size, and system.}
+    pattern, size, and system.  Each panel is scaled to its own family and
+    every series is labeled with its value at the largest size.}
   \label{fig:throughput}
 \end{figure}
 
-Figure~\ref{fig:throughput} plots throughput (rows per second $=$
-size\,/\,time), one panel per pattern; higher is better.  The engine is
-the highest curve in every panel (Table~\ref{tab:throughput}).
+Figure~\ref{fig:throughput} plots throughput, one panel per pattern;
+higher is better.  Throughput is computed for each measured run, then
+filtered and averaged.  The engine is the highest curve in every panel
+(Table~\ref{tab:throughput}).
 
 % ................................................................
 \subsection{Memory Metrics by Pattern, Size, and System}
 \label{subsec:eval-memory}
 % ................................................................
 
-Both memory metrics come from a single instrument applied identically
-to all three systems: the cgroup~v2 \texttt{memory.current} counter
-of the control group that contains the measured system---the Docker
-container for Trino and Oracle, and a dedicated control group for the
-engine process---sampled every 50\,ms throughout the run.  Each
-measured run is preceded by a five-second idle window whose average
-defines the run's \emph{baseline}; the \emph{absolute peak} is the
-maximum sample observed during query execution; and the
-\emph{incremental peak}---the primary per-query metric---is their
-difference, which removes each system's fixed resident overhead (the
-already-loaded input DataFrame for the engine, Oracle's SGA, Trino's
-JVM heap) from the comparison.  Like the timing figures, every
-memory statistic is the mean over the twenty measured runs after
-per-metric $1.5\times$IQR outlier filtering.  \emph{Query memory}
-(Figure~\ref{fig:query_memory}; Table~\ref{tab:memory_cache} in
-Appendix~\ref{app:benchmark-tables}) reports the incremental peak;
-\emph{footprint memory} (Figure~\ref{fig:footprint_memory};
-Table~\ref{tab:memory_footprint}) reports the absolute peak, which
-documents the practical deployment cost of the resident engine or
-container and is \emph{not} a per-query or algorithm-level metric.
-Two supporting values are recorded per cell in the released
-artifacts: a \emph{memory-per-million-rows} normalization (the
+For the main benchmark, both memory metrics use the same cgroup~v2
+\texttt{memory.current} counter.  It measures the dedicated engine
+control group or the complete Trino or Oracle container every 50\,ms.
+The boundaries are therefore operational rather than identical: the
+engine value covers its Python process, while each database value
+covers its server container and excludes the external client.  Shorter
+allocation spikes can also fall between samples.
+
+The scripts divide byte counters by $1024^2$ and $1024^3$.  For compact
+labels, MB and GB in the memory results therefore mean the binary units
+MiB and GiB.
+
+Each measured run has a five-second idle window.  Its average defines
+the \emph{baseline}.  The \emph{absolute peak} is the largest query-time
+sample, and the \emph{incremental peak} is that sample minus the
+baseline.  The subtraction removes most fixed resident memory, such as
+the already-loaded DataFrame, Oracle SGA, and Trino JVM heap.  It does
+not turn the values into an exact algorithm-only measurement.  As with
+time, each reported memory value is the IQR-filtered mean over twenty
+measured runs.
+
+\emph{Query memory} (Figure~\ref{fig:query_memory};
+Table~\ref{tab:memory_cache} in Appendix~\ref{app:benchmark-tables})
+reports the incremental peak.  \emph{Footprint memory}
+(Figure~\ref{fig:footprint_memory}; Table~\ref{tab:memory_footprint})
+reports the absolute peak.  The footprint documents the practical
+deployment cost of the resident engine or container, and is \emph{not} a
+per-query or algorithm-level metric.
+
+Two supporting values are recorded per cell in the benchmark evidence.
+The first is a \emph{memory-per-million-rows} normalization---the
 incremental peak divided by the input size in millions, meaningful
-mainly at the larger sizes) and each database's own per-query
-counter (Trino's \texttt{peakMemoryBytes}, Oracle's session-PGA
-high-water delta), which serve as cross-checks below.
+mainly at the larger sizes.  The second is each database's own per-query
+counter, Trino's \texttt{peakMemoryBytes} and Oracle's session-PGA
+high-water delta, which serve as cross-checks below.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_query_memory.png}
   \caption[Query memory by pattern, size, and system]{Query memory
-    (incremental peak) by pattern, size, and system.}
+    (incremental peak) by pattern, size, and system.  Each family panel
+    uses its own scale, and each series is labeled at the largest size.
+    The common counter measures growth above each runtime's resident
+    baseline.}
   \label{fig:query_memory}
 \end{figure}
 
 The engine's and Oracle's peaks rise roughly with size---the engine
-5.7\,MB to 290\,MB at 2.22\,M rows, Oracle 2.4 to 58.7\,MB, with little
-pattern dependence.  The engine's per-query memory is the largest of
-the three (mean 89.7\,MB versus Oracle's 23.6\,MB, about $3.8\times$):
-the cost of materializing whole-column intermediates on the vectorized
-path.  It buys speed with memory.
+5.9\,MB to 189\,MB, and Oracle 2.4\,MB to 58.7\,MB.  The engine's
+incremental peak is the largest of the three (mean 64.5\,MB versus
+Oracle's 23.6\,MB, about $2.7\times$).  This is consistent with the
+compiled path creating whole-column masks and intermediate arrays.
 
-One caveat for Trino: the JVM serves queries from its pre-committed
-heap, so most of its per-query memory never crosses the OS boundary the
-instrument watches.  Its reading sits at a 0.5--3\,MB floor in 27 of
-the 30 cells (occasional GC-window spikes reach 21\,MB) and
-\emph{understates} the true cost; its own \texttt{peakMemoryBytes}
-(1.3 to 41.5\,MB) is the fairer reference.  Oracle agrees with its PGA
-counter.
+One caveat for Trino is that the incremental cgroup measure observes
+growth above an already-resident JVM heap.  It stays below 2.5\,MB in
+27 of the 30 cells, with a largest value of 20.8\,MB.  Trino's native
+\texttt{peakMemoryBytes} counter ranges from 1.3 to 41.5\,MB.  The two
+counters have different scopes, so neither should be substituted for
+the common footprint comparison.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_footprint_memory.png}
   \caption[Footprint memory by pattern, size, and system]{Footprint
-    memory (absolute peak) by pattern, size, and system.}
+    memory (absolute peak) by pattern, size, and system.  Each panel is
+    scaled to its own family and every series is labeled with its value at
+    the largest size.}
   \label{fig:footprint_memory}
 \end{figure}
 
-These are deployment footprints, whose boundaries differ by
-construction: the engine is one Python process peaking at 0.57\,GB,
-while the database values cover whole containers---Trino
-8.2--14.6\,GB (the table lives in its JVM heap), Oracle near 2.0\,GB
-at every size.  Per-size restarts make these independent per-size
-figures.  They show deployment cost; per-query comparisons use
-Table~\ref{tab:memory_cache}.
+These deployment footprints have different boundaries.  The engine is
+one Python process and peaks at 0.51\,GB.  The database values cover
+whole containers: Trino uses 8.2--14.6\,GB because the table resides in
+its JVM heap, while Oracle stays near 2.0\,GB.  Per-size restarts make
+the measurements independent across sizes.  They show deployment cost;
+per-query comparisons use Table~\ref{tab:memory_cache}.
 
 % ................................................................
 \subsection{Cross-System Summary}
@@ -1326,7 +1385,7 @@ for the highest per-query memory (Table~\ref{tab:overall_stats}).
 \end{figure}
 
 Averaged over the five patterns (Figure~\ref{fig:avg_memory_by_size}),
-the engine's per-query memory rises with size and stays the highest of
+the engine's per-query memory rises with size.  It stays the highest of
 the three (Table~\ref{tab:avg_memory_by_size}).
 
 \begin{figure}[htbp]
@@ -1337,41 +1396,19 @@ the three (Table~\ref{tab:avg_memory_by_size}).
   \label{fig:avg_footprint_by_size}
 \end{figure}
 
-The footprint picture inverts (Figure~\ref{fig:avg_footprint_by_size}):
-the engine's single process stays well below the Trino and Oracle
+The footprint picture inverts (Figure~\ref{fig:avg_footprint_by_size}).
+The engine's single process stays well below the Trino and Oracle
 containers at every size (Table~\ref{tab:avg_footprint_by_size}).
 
-All 90 benchmark cells completed
-successfully, and Trino and Oracle reproduced the proposed engine's
-normalized output for all 30 pattern--size combinations each---verified
-cell by cell in Table~\ref{tab:cross_system_correctness}
-(Appendix~\ref{app:benchmark-tables}), so all three systems produced
-identical result sets.  The proposed Pandas engine had the lowest average
-execution time in this benchmark (0.20\,s), ahead of Oracle
-(1.04\,s) and a fully-warmed Trino (1.98\,s): it recorded the
-lowest time on all 30 pattern--size cells, faster than Trino by
-roughly 5.5--14.5$\times$ per family and faster than Oracle by
-roughly 2.8--6.9$\times$, with the widest margins on
-\texttt{complex\_nested} (where Trino averages 5.28\,s against the
-engine's 0.36\,s).  The unified memory instrument makes the price of
-this speed explicit: the engine's incremental peak is the largest of
-the three at every size, reaching 290\,MB at the full 2.22\,M rows
-against Oracle's 58.7\,MB, while Trino's reading sits at its JVM
-floor (1.6--7.2\,MB there; its native counter reports about
-41.5\,MB, Section~\ref{subsec:eval-memory}).  The operational
-footprints invert that picture: the Pandas engine peaks at about
-0.57\,GB as a single Python process, the Oracle container stays near
-2.0\,GB (about $3.5\times$ the Pandas peak), and the Trino container
-reaches about 14.6\,GB under its memory-connector setup.
-Across the twenty measured runs per cell, run-to-run variability is
-low: the median \emph{coefficient of variation} (the standard
-deviation as a fraction of the mean) is about 1.6\% for the Pandas
-engine, 3.8\% for Trino, and 2.3\% for Oracle; the five warmup runs
-and the per-metric IQR rule remove the cold-start outliers that a
-single warmup had left behind for the JVM-based Trino.  These
-results are not presented as a claim that one system is universally
-better; they show the trade-off observed under the selected
-workload, data sizes, and resource configuration.
+All 90 system cells completed, and all 30 pattern--size combinations
+agreed across the three systems.  The engine had the lowest mean time
+(0.17\,s, against 1.04\,s for Oracle and 1.98\,s for Trino).  It also
+had the highest incremental query peak but the lowest total footprint.
+Run-to-run variation remained low after warmup and IQR filtering.  The
+detailed values are reported once in
+Appendix~\ref{app:benchmark-tables}.  These results describe the
+selected workload and resource configuration; they do not establish
+universal superiority.
 
 Figure~\ref{fig:relative_comparison} puts the two databases against the
 engine, drawn as a $1\times$ reference.
@@ -1386,33 +1423,41 @@ engine, drawn as a $1\times$ reference.
 
 Each bar is a database's average time or footprint as a multiple of the
 engine's (blue $1\times$ line; lower is better).  Oracle needs
-$5.4\times$ the time and $7.9\times$ the footprint; Trino $10.1\times$
-and $44.1\times$.  Throughput mirrors the time result.  The engine's
-one trade-off---higher per-query memory, because it holds the data in
-RAM (about $3.8\times$ Oracle's peak)---is shown fairly in
+$6.2\times$ the time and $8.6\times$ the footprint; Trino $11.8\times$
+and $48.1\times$.  Throughput mirrors the time result.  The engine's
+one trade-off---higher incremental query memory, because the compiled
+path creates whole-column working arrays (about $2.7\times$ Oracle's
+mean incremental peak)---is shown in
 Figure~\ref{fig:query_memory}; signed percentages are in
 Table~\ref{tab:relative_comparison}.
 
 % ................................................................
-\subsection{Worst-Case Analysis}
+\subsection{Sensitivity and Boundary Analysis}
 \label{subsec:eval-ordering}
 \label{subsec:eval-worst-cases}
 % ................................................................
 
-Everything so far is the engine's best case.  It has two worst cases:
-when it must sort the input, and when the pattern cannot be vectorized.
-This section measures both, across all three systems.
+The main matrix uses ordered input and row-local predicates.  Two
+sensitivity cases remove these advantages: shuffled input and a
+state-dependent predicate.  Both are measured across all three
+systems.
 
-\paragraph{Worst case 1: forcing a sort.}
+\paragraph{Sensitivity case 1: shuffled input.}
 The benchmark orders by an already-monotonic \texttt{seq\_id}, so the
-engine's $O(n)$ check skips the sort---a shortcut the databases never
-take, since \texttt{ORDER~BY} always sorts.  To measure the
-$O(n\log n)$ branch, the whole matrix was rerun with every input
-\emph{shuffled} (deterministically), forcing a genuine sort everywhere.
-The logical order is unchanged, so matches are identical across
-scenarios (verified for all 90 cells) and any time difference is the
-sort alone: Scenario~A (ordered) is the best case, Scenario~B
-(shuffled) the fair worst case.
+engine's $O(n)$ check skips its sort.  The matrix was rerun with every
+input deterministically shuffled, which makes the engine enter its
+$O(n\log n)$ sorting branch.  The query still restores the same logical
+order.  All 90 system cells completed, and all 30 pattern--size
+combinations still agreed across systems.  Scenario~A is ordered and
+Scenario~B is shuffled.  The difference measures sensitivity to
+physical input order; it is not a direct profile of the sort operator
+inside each database.
+
+The proposed-engine values describe the benchmark revision recorded in
+Appendix~\ref{app:provenance}.  The Oracle and Trino values were retained from the earlier
+unordered campaign under the same one-core, 32\,GB, five-warmup,
+twenty-run protocol.  As in the main benchmark, the systems ran
+sequentially.
 
 \begin{figure}[htbp]
   \centering
@@ -1423,50 +1468,60 @@ sort alone: Scenario~A (ordered) is the best case, Scenario~B
 \end{figure}
 
 Each pair is a system's ordered (A) and shuffled (B) average; the
-number above is the B/A slowdown.  The two scenarios were measured
-together as one controlled pair, under one engine version and one
-procedure, so A's absolute times differ slightly from the main matrix;
-every comparison here is strictly A against B.  Three things stand
-out.  The engine takes the largest hit ($1.34\times$) because it is
-the only system that skipped sorting before---widest where matching is
-cheap (\texttt{simple\_sequence} $1.56\times$, \texttt{quantified}
-$1.48\times$), narrowest on \texttt{complex\_nested} ($1.20\times$),
-where the automaton walk dominates.  The databases slow far less
-($1.13$--$1.16\times$) because they sort in \emph{both} scenarios.
-Most important, the ranking holds: at 2.22\,M rows the engine is still
-about $4.2\times$ faster than Oracle and $8.1\times$ than Trino under
-shuffled input (against $4.8\times$ and $9.6\times$ ordered).  So the
+number above is the B/A slowdown.  Scenario~A is the main matrix and
+Scenario~B repeats it with every input shuffled.  Each A/B comparison
+uses the same logical rows and query, but the changed physical layout
+can also affect caching and compression.  The engine shows the largest
+slowdown ($1.43\times$):
+$1.70\times$ for \texttt{simple\_sequence}, $1.69\times$ for
+\texttt{quantified}, and $1.19\times$ for
+\texttt{complex\_nested}.  Oracle and Trino change by
+$1.04$--$1.11\times$.  Their internal plans were not profiled, so this
+smaller change is reported without assuming that they used the same
+sort plan in both scenarios.  Most important, the ranking holds: at
+2.22\,M rows the engine is still
+about $4.5\times$ faster than Oracle and $8.8\times$ than Trino under
+shuffled input (against $6.2\times$ and $11.2\times$ ordered).  So the
 advantage is not an artifact of the ordered shortcut---it survives when
-everyone must sort
+the engine must sort
 (Tables~\ref{tab:ordering_scenarios}--\ref{tab:ordering_by_size}).
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_sort_cost_scaling.png}
-  \caption[Ordering-step cost of the proposed engine]{Engine time on
+  \caption[Ordered and shuffled engine time]{Engine time on
     ordered vs shuffled input, across sizes.}
   \label{fig:sort_cost_scaling}
 \end{figure}
 
-Figure~\ref{fig:sort_cost_scaling} isolates the step: the two lines are
+Figure~\ref{fig:sort_cost_scaling} compares
 the engine on ordered (no sort) and shuffled (forced sort) input.  Both
 grow close to linearly over these six sizes---exactly what the reading
 note of Section~\ref{subsec:eval-complexity} predicts, since the log
-factor barely moves over this range.  The shaded gap---the ordering
-cost---stays a small slice of the total (0.50\,s versus 0.68\,s at
-2.22\,M rows), and per $n\log_2 n$ it stays flat
-(Table~\ref{tab:sort_cost_by_size}).  Sorting never comes to
-dominate.
+factor barely moves over this range.  The shaded gap is the extra
+latency associated with shuffled input, including the engine's sort.
+It is 0.20\,s at 2.22\,M rows (0.43\,s ordered versus 0.63\,s
+shuffled), and its normalization by $n\log_2 n$ stays within the same
+order of magnitude
+(Table~\ref{tab:sort_cost_by_size}).  Over this measured range, the
+shuffled-input penalty remains smaller than the total latency.
 
-\paragraph{Worst case 2: a state-dependent predicate.}
-Sorting keeps the engine on its row-local fast path, where it still
-wins.  The real limit is a pattern it cannot vectorize.  To show it,
+\paragraph{Sensitivity case 2: a state-dependent predicate.}
+Shuffling changes ordering work but leaves the predicates row-local.
+A state-dependent predicate cannot use the same row-local
+Boolean matrix.  To show this boundary,
 the \texttt{simple\_sequence} query's \texttt{DEFINE} becomes
 \texttt{B AS category='B' AND price > AVG(A.price)}---a running
-aggregate.  The engine drops onto its exact backtracking searcher
-(Section~\ref{subsec:meth-exec-backtracking}), while Trino and Oracle
-evaluate it natively.  All three produce identical output (verified),
-so the comparison is fair.
+aggregate that depends on the match so far.  Trino and Oracle evaluate
+it natively.  All three produce identical output, so the semantic
+comparison is valid.
+
+The repetition counts differ from the main matrix.  The recorded
+engine values use five warmups and twenty measured runs per size.  The retained
+Trino and Oracle values use one warmup and two measured runs per size.
+The systems ran sequentially.  This test therefore shows the
+performance boundary, but its database means have less repetition than
+the main benchmark.
 
 \begin{figure}[htbp]
   \centering
@@ -1476,25 +1531,28 @@ so the comparison is fair.
   \label{fig:worstcase_coverage}
 \end{figure}
 
-Here the ranking \emph{reverses}: the engine, $2.8$--$14.5\times$
-faster on the row-local benchmark, is now the \emph{slowest} at every
-size---Oracle about $23$--$41\times$ faster, Trino about
-$2$--$7\times$.  The cause is the specialization argument from the
-other side: the engine's speed comes from compiling row-local
-predicates to array operations, and \texttt{AVG(A.price)} cannot be
-written that way, so it falls back to per-row search while the
-databases run it natively.  For scale, the same-shaped fast-path query
-takes $0.02$\,s at 100\,K rows; this one takes $1.66$\,s---about
-$80\times$ slower on its own worst case.  An explicit depth-first stack
-(not recursion) with a fixed exploration budget still lets the engine
-finish the full range---about $64$\,s at $2.22$\,M rows versus Oracle's
-$2.3$\,s and Trino's $8.7$\,s, with identical output
-(Table~\ref{tab:worstcase_coverage}).
+An earlier recorded run reversed the ranking.  The engine was the
+\emph{slowest} system at every size---64.41\,s at 2.22\,M rows---because
+the generic exact evaluator repeatedly recomputed
+\texttt{AVG(A.price)} as the tentative match grew.  The exact matcher
+now compiles this form into an incremental plan.  It updates the
+\texttt{A} prefix state on append and rollback instead of recomputing
+the aggregate.  This evaluated query is linear, but it is not a
+row-local vectorized predicate.  It takes $1.28$\,s at 2.22\,M rows,
+about $50\times$ faster than the earlier $64.41$\,s result, with identical output
+($181{,}147$ matches).  The engine is now fastest here
+too---$1.2$--$1.8\times$ ahead of Oracle and $5.0$--$15.9\times$ ahead
+of Trino (Table~\ref{tab:worstcase_coverage}).
 
-So the picture is complete: the engine is optimal $\Theta(n)$ and
-fastest on the ordered row-local workload, still fastest through the
-$O(n\log n)$ sorting worst case, and clearly slowest on the
-pattern-driven worst case---where a database is the better tool.
+This is one compiled incremental form, not a general solution for all
+state-dependent expressions.  Supported forms outside the compiled
+plans still use the generic exact evaluator, whose search can be
+exponential and can stop with an explicit resource-limit error.
+
+The result is therefore scoped.  The fixed compiled row-local benchmark
+is $\Theta(n)$ when ordered and $O(n\log n)$ when sorting is required.
+The tested running-\texttt{AVG} query is also linear after incremental
+compilation.  No linear bound is claimed for generic exact search.
 
 % ................................................................
 \subsection{Scalability}
@@ -1503,22 +1561,27 @@ pattern-driven worst case---where a database is the better tool.
 
 Everything so far lives inside the range all three systems handle
 comfortably; this section asks how far each scales.  The input is the
-real Amazon Reviews~2023 corpus, taken as nested prefixes of 5, 10, 20,
+real Amazon Reviews~2023 corpus.  It uses nested prefixes of 5, 10, 20,
 40, 80, 160, and 227.9~million rows---about $100\times$ the main
-dataset---with the five pattern families re-run on each.  For fairness
-at scale, all three share one budget (one CPU core, 58\,GB) and each
-reads the data in its own scalable mode: the engine in RAM, Trino from a
-disk-backed Hive/Parquet table, and Oracle~21c Enterprise Edition from a
-native heap loaded by direct path.  A query over the 600\,s per-query
+dataset---with the five pattern families re-run on each.  All three
+share one envelope at scale: one CPU core and 58\,GB of RAM.  Each reads the data
+in its own scalable mode.  The engine uses RAM, Trino a disk-backed
+Hive/Parquet table, and Oracle~21c Enterprise Edition a native heap
+loaded by direct path.  A query over the 600\,s per-query
 budget is recorded as a wall; every completed database cell matched the
-engine's output.  Figures~\ref{fig:stress_volume}
+engine's output.  Each stress-test cell uses two warmups and five
+measured runs.  The proposed-engine values describe the benchmark
+revision recorded in Appendix~\ref{app:provenance}.  The Oracle and Trino measurements were
+retained from the earlier campaign under the same one-core, 58\,GB,
+two-warmup, five-run protocol.  The systems ran sequentially.
+Figures~\ref{fig:stress_volume}
 and~\ref{fig:stress_patterns} carry the results; full values are in
 Tables~\ref{tab:stress_volume}--\ref{tab:stress_mem}
 (Appendix~\ref{app:benchmark-tables}).
 
 \paragraph{Time and throughput.}
 Execution time is close to linear in $n$ over the measured range.
-The per-pattern regressions give $R^2=0.9980$--$0.9999$ for the
+The per-pattern regressions give $R^2=0.9966$--$0.9998$ for the
 engine, $0.9824$--$0.9992$ for Oracle, and
 $0.9912$--$0.9999$ for Trino.  Trino's
 \texttt{complex\_nested} fit uses its five completed sizes because the
@@ -1530,36 +1593,50 @@ Section~\ref{subsec:eval-complexity}.
   \centering
   \includegraphics[width=\textwidth]{images/viz_stress_volume.png}
   \caption[Volume scaling on real data to 227.9M rows]{Volume scaling
-    on real data: time (left) and peak memory (right).}
+    on real data: time (left) and absolute peak memory (right), averaged
+    over the four families completed at every size by all systems.}
   \label{fig:stress_volume}
 \end{figure}
 
-Left is execution time, right peak resident memory, each the mean over
-the five families.  The engine is fastest on every completed
-cell---about $3$--$5\times$ ahead of Oracle~EE and $6$--$8\times$
-ahead of Trino on the size averages---and finishes the full corpus on
-every pattern
-(43.6\,s for \texttt{simple\_sequence}, 124.5\,s for
-\texttt{complex\_nested}); Oracle~EE finishes every cell too, while
-Trino's \texttt{complex\_nested} crosses the 600\,s budget from 160\,M
-rows.  On memory the roles swap: the engine holds data in RAM and is
-dearest at the top (52.8\,GB), Oracle~EE stays leanest
-(up to $\approx$27\,GB), and Trino sits behind a high JVM floor
+Left is execution time and right is absolute peak memory.  Each size
+average uses the same four families completed by all three systems at
+all seven sizes.  The engine is fastest on every completed
+cell---about $5.1$--$10.1\times$ ahead of Oracle~EE and
+$11.4$--$13.8\times$
+ahead of Trino on the size averages.  It also finishes the full corpus
+on every pattern: 27.8\,s for \texttt{simple\_sequence}, 106.0\,s for
+\texttt{complex\_nested}.  The engine and Oracle~EE each complete
+35/35 cells.  Trino completes 33/35: \texttt{complex\_nested} crosses
+the 600\,s time budget at 160\,M and 227{,}899{,}533 rows.  Because Trino
+stops completing that family there, every size
+average in this section is taken over the four families all three
+systems finished at every size.  Otherwise the composition of the mean
+would change along the axis.
+
+Total resident memory tells a different story from the per-query figure
+below.  The engine starts far leaner than either database---0.7\,GB
+at 5\,M rows against 13.4\,GB for Trino and 15.5\,GB for Oracle.  The
+database footprints include their resident JVM or SGA baselines.  The
+engine stays the leanest of the three up to 160\,M.  Only at the full corpus
+does its resident data pass Oracle: 31.9\,GB against Oracle~EE's
+27.1\,GB, still well under Trino's 42.3\,GB
 (Tables~\ref{tab:stress_volume}--\ref{tab:stress_mem}).
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=0.82\textwidth]{images/viz_stress_throughput.png}
   \caption[Throughput scaling on real data]{Throughput scaling on real
-    data.}
+    data, averaged over the same four common families.}
   \label{fig:stress_throughput}
 \end{figure}
 
-Figure~\ref{fig:stress_throughput} plots throughput, the mean over
-families.  The engine holds 4.0--4.6\,M\,rows/s across the whole range
-(from 1.8\,M on \texttt{complex\_nested} up to 7.8\,M on
-\texttt{alternation} per pattern), against 0.8--1.4\,M for Oracle~EE
-and 0.6--0.8\,M for Trino.  Oracle~EE drifts down as its fixed budgets
+Figure~\ref{fig:stress_throughput} plots throughput, again averaged
+over the same four common families.  The engine holds
+7.1--8.0\,M\,rows/s across the whole range.
+At the full size its patterns range from 2.2\,M\,rows/s on
+\texttt{complex\_nested} to 9.2\,M\,rows/s on
+\texttt{alternation}.  Oracle~EE records 0.8--1.6\,M\,rows/s
+and 0.7--0.8\,M for Trino.  Oracle~EE drifts down as its fixed budgets
 spread over more data, while Trino stays near-flat, so the two converge
 at the full corpus.  The per-pattern curves remain
 close to linear for all three (Figure~\ref{fig:stress_time_grid}), and every
@@ -1567,8 +1644,9 @@ completed cell returned identical match counts
 (Tables~\ref{tab:stress_thr}, \ref{tab:stress_matches}).
 
 \paragraph{Ranking.}
-At the full corpus the order is engine, then Oracle~EE, then
-Trino---but not uniformly.
+At the full corpus, the four-family average ranks the engine first,
+Oracle~EE second, and Trino third.  The order is not the same for every
+pattern.
 
 \begin{figure}[htbp]
   \centering
@@ -1579,13 +1657,13 @@ Trino---but not uniformly.
 \end{figure}
 
 The engine leads on all five patterns.  Oracle~EE beats Trino on the
-three heavy families (\texttt{quantified} 372\,s versus 554\,s) and is
-the only database to finish \texttt{complex\_nested} (498\,s); Trino
-wins only on the cheapest family (\texttt{alternation}, 154\,s versus
-183\,s) and time-walls on \texttt{complex\_nested} (marked).  So the
-engine's vectorized matcher dominates, Oracle~EE is the more robust
-database, and Trino is first to hit a time wall
-(Table~\ref{tab:stress_volume}).
+three heavy families; for \texttt{quantified}, the times are 372\,s
+and 554\,s.  Oracle is also the only database to finish
+\texttt{complex\_nested}, at 498\,s.  Trino wins only on the cheapest
+family, \texttt{alternation}, at 154\,s versus 183\,s.  It reaches the
+time wall on \texttt{complex\_nested}.  Thus the compiled engine leads,
+Oracle~EE is the more robust database in this stress test, and Trino is
+the first to reach the time wall (Table~\ref{tab:stress_volume}).
 
 \paragraph{Memory.}
 The systems trade speed for memory in opposite directions.
@@ -1593,32 +1671,27 @@ The systems trade speed for memory in opposite directions.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_stress_memory.png}
-  \caption[Per-query working memory on real data]{Per-query working
-    memory: engine versus the databases' own counters.}
+  \caption[Diagnostic query-memory counters on real data]{Diagnostic
+    query-memory view: the engine's cgroup increment and each database's
+    native counter.  The accounting boundaries differ.}
   \label{fig:stress_memory}
 \end{figure}
 
-Figure~\ref{fig:stress_memory} shows per-query working memory---the
-engine's cgroup incremental peak against the databases' own counters
-(Oracle's PGA, Trino's \texttt{peakMemoryBytes}).  The engine towers, its mean over families
-rising to about 23\,GB (33.8\,GB on the heaviest) at 227.9\,M rows
-because it keeps the working set resident, while both databases stay
-under 4\,GB (Oracle near 0.5\,GB, Trino up to 3.8\,GB) as they stream
-from disk.  The databases' large \emph{total} footprint in
-Figure~\ref{fig:stress_volume} is fixed SGA/JVM baseline, not query
-cost---so the engine's memory is the price of residency, not matcher
-overhead (Tables~\ref{tab:stress_incmem}--\ref{tab:stress_native}).
-
-\paragraph{Why the engine is scalable.}
-Its time and memory grow close to linearly over the tested range, and
-no internal size ceiling was reached.  The practical limit is machine
-RAM, approached near the 58\,GB budget.  The engine stays about
-$3$--$5\times$ faster than Oracle~EE and $6$--$8\times$ faster than
-Trino on one core through 227.9\,M
-rows.  Oracle~EE completes the full range; Trino reaches the time limit
-on \texttt{complex\_nested} from 160\,M.  This maps the tested operating
-range, not universal superiority.  The engine gains speed but is the
-first system likely to exhaust memory.
+Figure~\ref{fig:stress_memory} is a diagnostic view, not a
+same-instrument comparison.  It places the engine's cgroup incremental
+peak beside the database-native counters (Oracle PGA and Trino
+\texttt{peakMemoryBytes}).  Each series is averaged over the same four
+common families.  The engine reaches about 15\,GB on average and
+18.5\,GB on the largest single cell at 227.9\,M rows.  Oracle stays
+near 0.5\,GB and Trino below 4\,GB according to their own counters.
+These counters have different accounting boundaries, so their
+magnitudes should not be read as an exact memory ratio.  The
+same-instrument deployment comparison is the absolute cgroup footprint
+in Figure~\ref{fig:stress_volume}
+(Tables~\ref{tab:stress_incmem}--\ref{tab:stress_native}).
+The largest observed engine footprint was 35.7\,GB on one pattern,
+below the 58\,GB limit.  The experiment does not establish an exact
+maximum beyond this range.
 
 % ................................................................
 \subsection{Evaluation Validity}
@@ -1626,33 +1699,32 @@ first system likely to exhaust memory.
 % ................................................................
 
 A cross-system comparison only means something if the advantage cannot
-be an artifact of the measurement.  Six guards make it trustworthy.
+be an artifact of the measurement.  Six checks define how the results
+should be read.
 
 \emph{Correctness first.}  Times are compared only where the systems
 return the same answer; every cell was checked for row-level equality
-(Table~\ref{tab:cross_system_correctness}), so the 30/30 agreement is a
-precondition, not a result.
+(Table~\ref{tab:cross_system_correctness}).  The 30/30 agreement is a
+correctness result and a precondition for comparing execution time.
 
-\emph{The timer favours the databases.}  Trino is timed JIT-warm and
-database load time is excluded, so the margin survives handicaps that
-help the databases.
+\emph{Timer scope.}  Initial data loading is excluded for all systems.
+Query execution and result materialization are included, including
+database result transfer to the client.  In the main matrix, five
+warmups reduce cold-start and JIT effects.  The values are end-to-end
+query latencies, not isolated matcher-kernel times.
 
-\emph{Stable over twenty runs.}  Each cell is the IQR-filtered mean of
-twenty runs; the coefficient of variation is 1.6\% (engine), 2.3\%
-(Oracle), and 3.8\% (Trino).  A stable mean is not a fluke.
+\emph{Stable main matrix.}  Each main-matrix cell is the IQR-filtered
+mean of twenty runs.  The median coefficient of variation is 3.5\%
+(engine), 2.3\% (Oracle), and 3.8\% (Trino).  This supports the
+stability of the main-matrix means.
 
-\emph{The losing case is shown.}  We report the ordered best case, the
-shuffled worst case, and the one pattern where the engine \emph{loses}
-to both databases (Section~\ref{subsec:eval-worst-cases}).  Nothing is
-cherry-picked.
-
-\emph{A known cause.}  The speedup is attributed to the compiled fast
-paths, found by profiling---not guessed from timings.
 
 \emph{Narrow scope.}  The claim is only that the engine is faster
 \emph{on this workload}---one partition, in-memory input, the supported
-subset---on one machine.  The databases ran at default settings, so
-expert tuning could narrow the gap.
+subset---on one machine.  The systems had the same outer CPU and
+memory limits in the main matrix, while Oracle XE's internal cap
+remained in effect.  Their execution models and measured process
+boundaries also differ.  Database tuning could change the gap.
 
 % ................................................................
 \subsection{Key Findings}
@@ -1661,10 +1733,10 @@ expert tuning could narrow the gap.
 
 The main findings are as follows.
 
-\emph{Speed.}  The engine was fastest on all 30 cross-system cells
-(0.20\,s mean versus Oracle 1.04\,s and warm Trino 1.98\,s) and stayed
-$3$--$5\times$ ahead of Oracle~EE and $6$--$8\times$ ahead of Trino on
-real data to 227.9\,M rows.
+\emph{Speed.}  The engine was fastest on all 30 cross-system cells, and
+it stayed $5.1$--$10.1\times$ ahead of Oracle~EE and
+$11.4$--$13.8\times$ ahead of Trino on the four common stress-test
+families to 227.9\,M rows.
 
 \emph{Why it is faster on this workload.}  The engine is specialized
 for in-process DataFrame matching.  It avoids database planning,
@@ -1676,42 +1748,53 @@ skip sorting, although Section~\ref{subsec:eval-ordering} shows that
 it remains fastest when sorting is forced.  This advantage applies to
 the supported single-node workload, not to every pattern or deployment.
 
-\emph{Correctness.}  Every completed database cell matched the engine
-row for row, so the timings compare systems computing the same answer.
+\emph{Correctness.}  All 30 main pattern--size combinations matched
+across the three systems.  Every completed stress database cell also
+matched the engine.  The engine and Oracle completed 35/35 stress
+cells; Trino completed 33/35.
 
-\emph{Scalability.}  Time and memory were close to linear over the
-tested range, and the engine finished the full 227.9\,M-row corpus.
-Its practical boundary was RAM.  Oracle~EE also reached the full size;
-Trino's hardest pattern exceeded the time budget from 160\,M rows.
+\emph{Scalability.}  Execution time was close to linear for all three
+systems over the tested range.  The engine's measured memory was also
+close to linear, and it finished the full 227.9\,M-row corpus.  It did
+not reach an internal size or memory limit; RAM remains the likely
+boundary for larger in-memory inputs.  Oracle~EE also reached the full
+size; Trino's hardest pattern exceeded the time budget at 160\,M and
+227.9\,M rows.
 
-\emph{The trade-off.}  Speed costs memory: the engine keeps data in
-RAM, so its per-query peak is the highest and grows with $n$---the
-price of residency, not overhead.
+\emph{The trade-off.}  The engine keeps its DataFrame in RAM and builds
+whole-column working arrays.  The input is already part of the memory
+baseline, while the incremental peak measures additional query-time
+growth.  Its total footprint is lower than
+the resident database containers in the main benchmark, but that
+relationship reverses against Oracle at the largest stress-test size.
 
-\emph{Honest limits.}  The lead is not universal: on a state-dependent
-pattern both databases beat the engine.  The study maps where each
-system's usable region lies; it does not crown a universal winner.
+\emph{Honest limits.}  The lead is bounded by what the compiler can
+turn into column operations.  The state-dependent \texttt{DEFINE} that
+once made both databases faster now uses a compiled incremental plan.
+This solves one aggregate form, not the full class.
+Other state-dependent or ambiguous forms can still use the generic
+exact evaluator and may reach its explicit work limit.  At scale, the
+resident DataFrame makes RAM a likely boundary.  The study maps where
+each system's usable region lies; it does not crown a universal winner.
+
+\emph{Protocol.}  Across the aligned records, the systems used the same
+host, logical queries, input rows, CPU allocation, and outer memory
+limit.  Measurements were collected sequentially in separate
+campaigns.  The main benchmark used a 32\,GB limit and resident inputs;
+Oracle XE's internal cap remained in effect.  The stress study used a
+58\,GB limit and system-appropriate scalable storage.
 
 % ----------------------------------------------------------------
 \section{Chapter Summary}
 \label{sec:eval-summary}
 % ----------------------------------------------------------------
 
-This chapter evaluated the implementation through correctness,
-coverage, complexity, performance, scalability, and memory analysis:
-five pattern families, six sizes up to the full 2{,}222{,}742 rows, 90
-cross-system cells against Trino~473 and Oracle~XE~21c under one
-resource budget, plus a scalability test on real data to 227.9\,M
-rows.
-
-All three systems returned identical result sets in every cell.  The
-engine sustained roughly 5.0\,M~rows/s with near-linear scaling and
-the lowest average time (0.20\,s versus 1.04\,s for Oracle and
-1.98\,s for a fully-warmed Trino), at the cost of the highest
-per-query incremental memory of the three, while its operational
-footprint stayed far below the resident database containers.  At
-scale it stayed $3$--$5\times$ ahead of Oracle~EE and $6$--$8\times$
-ahead of Trino to 227.9\,M rows, bounded by RAM rather than by any
-internal limit.  The
-next chapter summarizes contributions, limitations, and future
-work.
+This chapter evaluated correctness, coverage, complexity, usability,
+performance, scalability, and memory.  All three systems agreed in the
+30 main pattern--size combinations, and every completed stress database
+cell matched the engine.  The engine and Oracle completed all 35 stress
+cells; Trino completed 33.  The engine recorded the lowest time on the
+evaluated workload and scaled close to linearly, while its query-time
+memory grew with the input.  These findings apply to the supported
+single-node workload and stated resource limits.  The next chapter
+summarizes the contributions, limitations, and future work.
