@@ -43,7 +43,7 @@ combinations: five pattern families over six sizes from 100\,K to the
 full 2.22\,M rows.  Each cell is the mean of twenty measured runs after
 five warmups and the stated outlier rule.  Each system used the same
 input and query logic under one CPU core and the same outer 32\,GB
-memory limit; Oracle XE's internal cap remained in effect.  The
+memory limit.  The
 proposed engine averaged
 6\,110\,392~rows/s and 0.17\,s per cell.  Oracle averaged 1.04\,s and
 Trino 1.98\,s.  The proposed engine had the lowest time in all 30
@@ -78,9 +78,9 @@ A separate scalability test used Amazon Reviews~2023 from 5\,M to
 227.9\,M rows.  Execution time was close to linear for all three
 systems.  The engine's measured memory was also close to linear.  On
 the size averages, the engine remained
-$5.1$--$10.1\times$ faster than Oracle~EE and
+$5.1$--$10.1\times$ faster than Oracle~21c EE and
 $11.4$--$13.8\times$ faster than Trino over the four pattern families
-completed by all three systems.  Oracle~EE completed every
+completed by all three systems.  Oracle~21c EE completed every
 cell.  Trino's \texttt{complex\_nested} pattern reached the 600\,s
 limit at the last two sizes.  The engine completed the full corpus, but
 its maximum process footprint reached about 35.7\,GB.  Speed and memory

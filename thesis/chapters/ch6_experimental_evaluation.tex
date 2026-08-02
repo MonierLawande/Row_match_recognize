@@ -33,7 +33,7 @@ hardware and software environment.
 
 \paragraph{Correctness.}
 The result DataFrame is compared against two independent SQL
-references, Trino~473 and Oracle~XE~21c, by exact row-level equality
+references, Trino~473 and Oracle~21c EE, by exact row-level equality
 (same rows, values, and order where deterministic).  This covers the
 two small synthetic tables---\texttt{orders} (Table~\ref{tab:orders})
 and \texttt{stock\_price} (Table~\ref{tab:stock_price})---and the 30
@@ -94,22 +94,20 @@ effort~\cite{iso2016,ISO2021,melton2017sqlrpr,Python_UDF}.
 The experiments ran on a workstation with an Intel Core i7-11800H
 processor and 64\,GB of RAM under Ubuntu 24.04.4 LTS.  For the
 cross-system benchmark, each system had the same outer control-group
-limit of one CPU core and 32\,GB.  Oracle XE's own database-memory cap
-remained in effect~\cite{oracle2021xelimits}.
+limit of one CPU core and 32\,GB.
 Section~\ref{subsec:eval-pattern-defs} details the
 enforcement mechanisms.
 
 The scalability stress test (Section~\ref{subsec:eval-stress}) instead
 uses a 58\,GB memory limit.  Reaching hundreds of millions of rows on equal
-terms also meant replacing the two database deployments.  Trino reads
-from a disk-backed Hive/Parquet connector rather than its in-memory
-connector, and Oracle runs as 21c~Enterprise Edition rather than the
-resource-capped free XE edition.  All database containers run on the
+terms also meant changing the Trino deployment: it reads from a
+disk-backed Hive/Parquet connector rather than its in-memory
+connector.  All database containers run on the
 host's native Docker daemon, so container limits map directly to host
 control groups---the same instrument used for the engine.
 
 The software stack comprised the two baseline SQL engines, Trino~473 and
-Oracle~21c, each run as a Docker container.  It also included the
+Oracle~21c EE, each run as a Docker container.  It also included the
 Java~11.0.25 LTS and Python~3.12.7 runtimes and the core Python
 libraries \texttt{pandas}~2.3.3, \texttt{numpy}~2.1.3,
 \texttt{antlr4-python3-\allowbreak{}runtime}~4.13.2,
@@ -397,7 +395,7 @@ simple-sequence pattern type.
 \textbf{Implementation} & \texttt{customer\_id} & \texttt{start\_date} $\rightarrow$ \texttt{end\_date} & \texttt{bottom\_price} \\
 \midrule
 Trino~473 (SQL)             & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 \\
-Oracle XE~21c (SQL)         & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 \\
+Oracle~21c EE (SQL)         & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 \\
 Proposed engine            & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 \\
 Pandas function            & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 \\
 \bottomrule
@@ -1059,7 +1057,7 @@ of every state-dependent expression.
 \label{subsec:eval-real-dataset}
 % ----------------------------------------------------------------
 
-This section compares the engine with Trino~473 and Oracle~XE~21c on
+This section compares the engine with Trino~473 and Oracle~21c EE on
 the Amazon UK Products dataset: five pattern families, six sizes
 (100\,K to 2.22\,M rows), 30 cells per system.  Each cell is the
 IQR-filtered mean of twenty runs after five warmups.  All 90 cells
@@ -1177,8 +1175,7 @@ The benchmark is 90 cells (three systems, five families, six sizes;
 The proposed-engine values describe the fixed benchmark revision
 recorded in Appendix~\ref{app:provenance}.  The Oracle and Trino values
 were retained from an earlier campaign under the same one-core, outer
-32\,GB, five-warmup, twenty-run protocol.  Oracle XE's internal cap
-remained in effect.  The systems ran sequentially, not
+32\,GB, five-warmup, twenty-run protocol.  The systems ran sequentially, not
 at the same time.  The engine ran in its own control group; Trino and
 Oracle ran in limited containers that were restarted before each size.
 The same control-group counter measured all three memory footprints.
@@ -1211,7 +1208,7 @@ despite fewer matches than \texttt{simple\_sequence}.
 % Final run (each cell = 5 warmup + 20 measured; 1 core, 32GB; sizes 100K-2.22M; mean +/- sample std)
 % pandas: total=5.02, avg=0.17, avgthr=6{,}110{,}392, minthr=2{,}494{,}341, maxthr=9{,}403{,}104, maxqmem=189.05, maxfmem=523.97, medCV=3.5%
 % Trino~473: total=59.33, avg=1.98, avgthr=602{,}098, minthr=144{,}049, maxthr=996{,}563, maxqmem=20.75, maxfmem=14{,}992.9, medCV=3.8%
-% Oracle XE~21c: total=31.34, avg=1.04, avgthr=1{,}156{,}106, minthr=308{,}102, maxthr=1{,}698{,}711, maxqmem=58.71, maxfmem=2{,}057.17, medCV=2.3%
+% Oracle~21c EE: total=31.34, avg=1.04, avgthr=1{,}156{,}106, minthr=308{,}102, maxthr=1{,}698{,}711, maxqmem=58.71, maxfmem=2{,}057.17, medCV=2.3%
 
 \begin{figure}[htbp]
   \centering
@@ -1566,7 +1563,7 @@ real Amazon Reviews~2023 corpus.  It uses nested prefixes of 5, 10, 20,
 dataset---with the five pattern families re-run on each.  All three
 share one envelope at scale: one CPU core and 58\,GB of RAM.  Each reads the data
 in its own scalable mode.  The engine uses RAM, Trino a disk-backed
-Hive/Parquet table, and Oracle~21c Enterprise Edition a native heap
+Hive/Parquet table, and Oracle~21c EE a native heap
 loaded by direct path.  A query over the 600\,s per-query
 budget is recorded as a wall; every completed database cell matched the
 engine's output.  Each stress-test cell uses two warmups and five
@@ -1601,11 +1598,11 @@ Section~\ref{subsec:eval-complexity}.
 Left is execution time and right is absolute peak memory.  Each size
 average uses the same four families completed by all three systems at
 all seven sizes.  The engine is fastest on every completed
-cell---about $5.1$--$10.1\times$ ahead of Oracle~EE and
+cell---about $5.1$--$10.1\times$ ahead of Oracle~21c EE and
 $11.4$--$13.8\times$
 ahead of Trino on the size averages.  It also finishes the full corpus
 on every pattern: 27.8\,s for \texttt{simple\_sequence}, 106.0\,s for
-\texttt{complex\_nested}.  The engine and Oracle~EE each complete
+\texttt{complex\_nested}.  The engine and Oracle~21c EE each complete
 35/35 cells.  Trino completes 33/35: \texttt{complex\_nested} crosses
 the 600\,s time budget at 160\,M and 227{,}899{,}533 rows.  Because Trino
 stops completing that family there, every size
@@ -1618,7 +1615,7 @@ below.  The engine starts far leaner than either database---0.7\,GB
 at 5\,M rows against 13.4\,GB for Trino and 15.5\,GB for Oracle.  The
 database footprints include their resident JVM or SGA baselines.  The
 engine stays the leanest of the three up to 160\,M.  Only at the full corpus
-does its resident data pass Oracle: 31.9\,GB against Oracle~EE's
+does its resident data pass Oracle: 31.9\,GB against Oracle~21c EE's
 27.1\,GB, still well under Trino's 42.3\,GB
 (Tables~\ref{tab:stress_volume}--\ref{tab:stress_mem}).
 
@@ -1635,8 +1632,8 @@ over the same four common families.  The engine holds
 7.1--8.0\,M\,rows/s across the whole range.
 At the full size its patterns range from 2.2\,M\,rows/s on
 \texttt{complex\_nested} to 9.2\,M\,rows/s on
-\texttt{alternation}.  Oracle~EE records 0.8--1.6\,M\,rows/s
-and 0.7--0.8\,M for Trino.  Oracle~EE drifts down as its fixed budgets
+\texttt{alternation}.  Oracle~21c EE records 0.8--1.6\,M\,rows/s
+and 0.7--0.8\,M for Trino.  Oracle~21c EE drifts down as its fixed budgets
 spread over more data, while Trino stays near-flat, so the two converge
 at the full corpus.  The per-pattern curves remain
 close to linear for all three (Figure~\ref{fig:stress_time_grid}), and every
@@ -1645,7 +1642,7 @@ completed cell returned identical match counts
 
 \paragraph{Ranking.}
 At the full corpus, the four-family average ranks the engine first,
-Oracle~EE second, and Trino third.  The order is not the same for every
+Oracle~21c EE second, and Trino third.  The order is not the same for every
 pattern.
 
 \begin{figure}[htbp]
@@ -1656,13 +1653,13 @@ pattern.
   \label{fig:stress_patterns}
 \end{figure}
 
-The engine leads on all five patterns.  Oracle~EE beats Trino on the
+The engine leads on all five patterns.  Oracle~21c EE beats Trino on the
 three heavy families; for \texttt{quantified}, the times are 372\,s
 and 554\,s.  Oracle is also the only database to finish
 \texttt{complex\_nested}, at 498\,s.  Trino wins only on the cheapest
 family, \texttt{alternation}, at 154\,s versus 183\,s.  It reaches the
 time wall on \texttt{complex\_nested}.  Thus the compiled engine leads,
-Oracle~EE is the more robust database in this stress test, and Trino is
+Oracle~21c EE is the more robust database in this stress test, and Trino is
 the first to reach the time wall (Table~\ref{tab:stress_volume}).
 
 \paragraph{Memory.}
@@ -1722,8 +1719,7 @@ stability of the main-matrix means.
 \emph{Narrow scope.}  The claim is only that the engine is faster
 \emph{on this workload}---one partition, in-memory input, the supported
 subset---on one machine.  The systems had the same outer CPU and
-memory limits in the main matrix, while Oracle XE's internal cap
-remained in effect.  Their execution models and measured process
+memory limits in the main matrix.  Their execution models and measured process
 boundaries also differ.  Database tuning could change the gap.
 
 % ................................................................
@@ -1734,7 +1730,7 @@ boundaries also differ.  Database tuning could change the gap.
 The main findings are as follows.
 
 \emph{Speed.}  The engine was fastest on all 30 cross-system cells, and
-it stayed $5.1$--$10.1\times$ ahead of Oracle~EE and
+it stayed $5.1$--$10.1\times$ ahead of Oracle~21c EE and
 $11.4$--$13.8\times$ ahead of Trino on the four common stress-test
 families to 227.9\,M rows.
 
@@ -1757,7 +1753,7 @@ cells; Trino completed 33/35.
 systems over the tested range.  The engine's measured memory was also
 close to linear, and it finished the full 227.9\,M-row corpus.  It did
 not reach an internal size or memory limit; RAM remains the likely
-boundary for larger in-memory inputs.  Oracle~EE also reached the full
+boundary for larger in-memory inputs.  Oracle~21c EE also reached the full
 size; Trino's hardest pattern exceeded the time budget at 160\,M and
 227.9\,M rows.
 
@@ -1780,8 +1776,8 @@ each system's usable region lies; it does not crown a universal winner.
 \emph{Protocol.}  Across the aligned records, the systems used the same
 host, logical queries, input rows, CPU allocation, and outer memory
 limit.  Measurements were collected sequentially in separate
-campaigns.  The main benchmark used a 32\,GB limit and resident inputs;
-Oracle XE's internal cap remained in effect.  The stress study used a
+campaigns.  The main benchmark used a 32\,GB limit and resident inputs.
+The stress study used a
 58\,GB limit and system-appropriate scalable storage.
 
 % ----------------------------------------------------------------

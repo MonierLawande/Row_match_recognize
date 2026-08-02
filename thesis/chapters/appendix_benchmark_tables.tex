@@ -28,8 +28,7 @@ The evaluation used four fixed protocols:
 
 \begin{itemize}
   \item \textbf{Cross-system matrix.} One CPU core, an outer 32\,GB memory
-    limit, five warm-up runs, and twenty measured runs.  Oracle XE's
-    internal database-memory cap remained in effect.  The input was ordered, and
+    limit, five warm-up runs, and twenty measured runs.  The input was ordered, and
     the warm-up runs preceded measurement.  The matrix contains five patterns and six
     sizes (100\,K--2\,222\,742 rows), giving 30 cells per system.
     All 90 cells completed.  The 30 proposed-engine cells are from the
@@ -133,14 +132,14 @@ time.
 \caption{Performance summary by pattern across the three systems}
 \label{tab:pattern_summary} \\
 \toprule
-& \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
+& \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle~21c EE}} \\
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
 \textbf{Pattern} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} \\
 \midrule
 \endfirsthead
 \caption*{Table~\thetable{} (continued): Pattern performance summary across systems} \\
 \toprule
-& \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
+& \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle~21c EE}} \\
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
 \textbf{Pattern} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} \\
 \midrule
@@ -161,14 +160,14 @@ complex\_nested & 2{,}582{,}321 & 0.34 & 238{,}402 & 5.28 & 505{,}612 & 2.52 \\
 \caption{Performance summary by dataset size across the three systems}
 \label{tab:size_summary} \\
 \toprule
-& \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
+& \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle~21c EE}} \\
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
 \textbf{Size (rows)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} \\
 \midrule
 \endfirsthead
 \caption*{Table~\thetable{} (continued): Performance summary by dataset size across systems} \\
 \toprule
-& \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
+& \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle~21c EE}} \\
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
 \textbf{Size (rows)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} & \textbf{Thr.\ (rows/s)} & \textbf{Time (s)} \\
 \midrule
@@ -207,12 +206,12 @@ runs.
   (seconds; mean $\pm$ sample standard deviation)}
 \label{tab:execution_times} \\
 \toprule
-\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle~21c EE} \\
 \midrule
 \endfirsthead
 \caption*{Table~\thetable{} (continued): Execution time (s, mean $\pm$ std) by pattern, size, and system} \\
 \toprule
-\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle~21c EE} \\
 \midrule
 \endhead
 \bottomrule
@@ -261,12 +260,12 @@ complex\_nested & 2{,}222{,}742 & 0.875 $\pm$ 0.029 & 13.213 $\pm$ 0.050 & 6.411
 \caption{Throughput (rows/s) by pattern, dataset size, and system}
 \label{tab:throughput} \\
 \toprule
-\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle~21c EE} \\
 \midrule
 \endfirsthead
 \caption*{Table~\thetable{} (continued): Throughput (rows/s) by pattern, size, and system} \\
 \toprule
-\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle~21c EE} \\
 \midrule
 \endhead
 \bottomrule
@@ -315,12 +314,12 @@ complex\_nested & 2{,}222{,}742 & 2{,}543{,}994 & 168{,}226 & 346{,}736 \\
 \caption{Incremental query memory by pattern, size, and system (MB)}
 \label{tab:memory_cache} \\
 \toprule
-\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle~21c EE} \\
 \midrule
 \endfirsthead
 \caption*{Table~\thetable{} (continued): Query memory (MB) by pattern, size, and system} \\
 \toprule
-\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle~21c EE} \\
 \midrule
 \endhead
 \bottomrule
@@ -369,12 +368,12 @@ complex\_nested & 2{,}222{,}742 & 159.30 & 2.17 & 58.61 \\
 \caption{Absolute footprint memory by pattern, size, and system (MB)}
 \label{tab:memory_footprint} \\
 \toprule
-\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle~21c EE} \\
 \midrule
 \endfirsthead
 \caption*{Table~\thetable{} (continued): Footprint memory (MB) by pattern, size, and system} \\
 \toprule
-\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle~21c EE} \\
 \midrule
 \endhead
 \bottomrule
@@ -434,7 +433,7 @@ and~\ref{tab:avg_footprint_by_size}.
 \midrule
 Proposed engine & 30 & 5.02 & 0.17 & 6{,}110{,}392 & 2{,}494{,}341--9{,}403{,}104 & 189.05 & 523.97 \\
 Trino~473 & 30 & 59.33 & 1.98 & 602{,}098 & 144{,}049--996{,}563 & 20.75 & 14{,}992.90 \\
-Oracle XE~21c & 30 & 31.34 & 1.04 & 1{,}156{,}106 & 308{,}102--1{,}698{,}711 & 58.71 & 2{,}057.17 \\
+Oracle~21c EE & 30 & 31.34 & 1.04 & 1{,}156{,}106 & 308{,}102--1{,}698{,}711 & 58.71 & 2{,}057.17 \\
 \bottomrule
 \end{tabular}}
 \end{table}
@@ -451,7 +450,7 @@ those 30 cell means.  Average throughput is the arithmetic mean of the
 \label{tab:avg_memory_by_size}
 \begin{tabular}{rrrr}
 \toprule
-\textbf{Size (rows)} & \textbf{Proposed (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle XE~21c (MB)} \\
+\textbf{Size (rows)} & \textbf{Proposed (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle~21c EE (MB)} \\
 \midrule
 100{,}000 & 6.94 & 0.72 & 2.71 \\
 200{,}000 & 15.07 & 0.63 & 5.42 \\
@@ -470,7 +469,7 @@ those 30 cell means.  Average throughput is the arithmetic mean of the
 \label{tab:avg_footprint_by_size}
 \begin{tabular}{rrrr}
 \toprule
-\textbf{Size (rows)} & \textbf{Proposed (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle XE~21c (MB)} \\
+\textbf{Size (rows)} & \textbf{Proposed (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle~21c EE (MB)} \\
 \midrule
 100{,}000 & 86.95 & 8{,}675.59 & 1{,}981.98 \\
 200{,}000 & 106.00 & 9{,}167.22 & 1{,}964.75 \\
@@ -489,7 +488,7 @@ those 30 cell means.  Average throughput is the arithmetic mean of the
 \label{tab:cross_system_correctness}
 \begin{tabular}{>{\ttfamily}lccc}
 \toprule
-\textbf{Pattern} & \textbf{Proposed engine} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
+\textbf{Pattern} & \textbf{Proposed engine} & \textbf{Trino~473} & \textbf{Oracle~21c EE} \\
 \midrule
 simple\_sequence & reference result & 6/6 identical & 6/6 identical \\
 alternation & reference result & 6/6 identical & 6/6 identical \\
@@ -518,7 +517,7 @@ better.
 \label{tab:relative_comparison}
 \begin{tabular}{lrr}
 \toprule
-\textbf{Metric} & \textbf{vs.\ Trino~473} & \textbf{vs.\ Oracle XE~21c} \\
+\textbf{Metric} & \textbf{vs.\ Trino~473} & \textbf{vs.\ Oracle~21c EE} \\
 \midrule
 Execution time & $-92\%$ & $-84\%$ \\
 Throughput & $+915\%$ & $+429\%$ \\
@@ -550,7 +549,7 @@ system--pattern--size cells.
 \midrule
 Proposed engine & 0.167 & 0.240 & $1.43\times$ \\
 Trino~473 & 1.978 & 2.193 & $1.11\times$ \\
-Oracle XE~21c & 1.045 & 1.083 & $1.04\times$ \\
+Oracle~21c EE & 1.045 & 1.083 & $1.04\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -567,7 +566,7 @@ Oracle XE~21c & 1.045 & 1.083 & $1.04\times$ \\
 \toprule
 & \multicolumn{3}{c}{\textbf{Proposed engine}}
 & \multicolumn{3}{c}{\textbf{Trino~473}}
-& \multicolumn{3}{c}{\textbf{Oracle XE~21c}} \\
+& \multicolumn{3}{c}{\textbf{Oracle~21c EE}} \\
 \cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}
 \textbf{Size (rows)} & \textbf{ord} & \textbf{shuf} & \textbf{slow}
 & \textbf{ord} & \textbf{shuf} & \textbf{slow}
@@ -623,7 +622,7 @@ execution.
 \begin{tabular}{rrrr}
 \toprule
 \textbf{Size (rows)} & \textbf{Proposed engine (s)}
-  & \textbf{Trino~473 (s)} & \textbf{Oracle XE~21c (s)} \\
+  & \textbf{Trino~473 (s)} & \textbf{Oracle~21c EE (s)} \\
 \midrule
 100{,}000 & 0.060 & 0.713 & 0.073 \\
 200{,}000 & 0.107 & 0.535 & 0.133 \\
@@ -649,7 +648,7 @@ The stress test in Section~\ref{subsec:eval-stress} uses real Amazon
 Reviews~2023 data from 5\,M to 227.9\,M rows.  Within this campaign,
 the three systems use equivalent queries and logical rows. The storage representations also differ.  The
 proposed engine holds a DataFrame in RAM.  Trino scans a Hive/Parquet
-table.  Oracle~21c Enterprise Edition scans a native table.  Loading
+table.  Oracle~21c EE scans a native table.  Loading
 time is excluded.  Every completed database result was checked against
 the engine output.  The recorded proposed-engine measurements and
 retained database measurements were collected in separate campaigns

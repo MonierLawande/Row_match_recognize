@@ -6,7 +6,7 @@ Scenario A ordered and Scenario B shuffled measured together as one campaign,
 same engine version and procedure) and renders:
   * viz_ordering_scenarios.png -- avg time A(ordered) vs B(shuffled) per system.
   * viz_sort_cost_scaling.png  -- engine time on ordered vs shuffled input
-    across sizes; the gap is the isolated ordering cost.
+    across sizes; the gap shows sensitivity to physical input order.
 NOTE: do not mix Scenario A from a different campaign (e.g. the v3 main
 matrix) with Scenario B -- the engine changed between campaigns, so
 cross-campaign ratios are contaminated (complex_nested would show B/A < 1).
@@ -17,35 +17,46 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PAIR = os.path.join(HERE, "unordered_scenario",
                     "comparison_ordered_vs_unordered.csv")
 IMG = os.path.abspath(os.path.join(HERE, "..", "thesis", "images"))
 
-SYSKEY = {"Engine": "proposed_pandas_engine", "Oracle": "oracle_xe_21c",
-          "Trino": "trino_473"}
-SYS_COLOR = {"Engine": "#2a78d6", "Oracle": "#199e70", "Trino": "#e3942f"}
-ORDER = ["Engine", "Oracle", "Trino"]
+SYSKEY = {"Proposed engine": "proposed_pandas_engine",
+          "Oracle 21c EE": "oracle_21c_ee",
+          "Trino 473": "trino_473"}
+SYS_COLOR = {"Proposed engine": "#2a78d6", "Oracle 21c EE": "#199e70",
+             "Trino 473": "#e3942f"}
+ORDER = ["Proposed engine", "Oracle 21c EE", "Trino 473"]
 SIZES = [100000, 200000, 400000, 800000, 1600000, 2222742]
 C_ORD, C_SHUF = "#2a78d6", "#e34948"
 
 plt.rcParams.update({
-    "font.family": "serif", "font.size": 9,
+    "font.family": "Tinos", "font.size": 9,
     "axes.titlesize": 10, "axes.labelsize": 9,
     "axes.edgecolor": "#888888", "axes.linewidth": 0.7,
-    "grid.color": "#dddddd", "grid.linewidth": 0.6, "savefig.dpi": 200,
+    "grid.color": "#dddddd", "grid.linewidth": 0.6, "savefig.dpi": 300,
 })
-size_fmt = FuncFormatter(lambda v, _: f"{v/1e6:.1f}M" if v >= 1e6 else f"{int(v/1e3)}K")
+pair = None
+o = None
+u = None
 
-pair = pd.read_csv(PAIR)
-o = {k: pair[pair.system == v].rename(
-        columns={"ordered_time_s": "execution_time_seconds"})
-     for k, v in SYSKEY.items()}
-u = {k: pair[pair.system == v].rename(
-        columns={"unordered_time_s": "execution_time_seconds"})
-     for k, v in SYSKEY.items()}
+
+def load_pair():
+    """Load the paired campaign without doing file I/O during import."""
+    data = pd.read_csv(PAIR)
+    ordered = {
+        k: data[data.system == v].rename(
+            columns={"ordered_time_s": "execution_time_seconds"})
+        for k, v in SYSKEY.items()
+    }
+    shuffled = {
+        k: data[data.system == v].rename(
+            columns={"unordered_time_s": "execution_time_seconds"})
+        for k, v in SYSKEY.items()
+    }
+    return data, ordered, shuffled
 
 
 def ordering_scenarios():
@@ -60,6 +71,7 @@ def ordering_scenarios():
                 edgecolor="white", linewidth=0.6, zorder=3)
     ax.set_xticks(x)
     ax.set_xticklabels(ORDER, fontsize=9)
+    ax.set_xlabel("System")
     ax.set_ylabel("Average execution time (s)")
     ax.set_ylim(0, max(B) * 1.22)
     ax.grid(True, axis="y", zorder=0)
@@ -75,7 +87,7 @@ def ordering_scenarios():
                         textcoords="offset points", xytext=(0, 1.5),
                         ha="center", fontsize=6.8, color="#555555")
     ax.legend(frameon=False, fontsize=8.5, loc="upper left")
-    ax.set_title("Slowdown from forcing a genuine sort (B/A shown above bars)",
+    ax.set_title("Ordered versus shuffled input (B/A shown above bars)",
                  fontsize=9)
     fig.tight_layout()
     fig.savefig(os.path.join(IMG, "viz_ordering_scenarios.png"), bbox_inches="tight")
@@ -84,19 +96,24 @@ def ordering_scenarios():
 
 
 def sort_cost_scaling():
-    # Intuitive view: the engine's execution time with ordered input (A, no
-    # sort) and with shuffled input (B, must sort), across sizes.  Both grow
-    # linearly; the shaded gap between them IS the ordering cost, and it stays a
-    # small, roughly constant slice of the total as data scales.
+    # Paired engine times with and without a required sort.  The shaded region
+    # is the observed end-to-end difference.  It can also include cache and
+    # row-layout effects, so the figure does not label it as isolated sort time.
     xlab = ["100K", "200K", "400K", "800K", "1.6M", "2.2M"]
-    A = np.array([o["Engine"][o["Engine"].dataset_size == sz]
+    A = np.array([o["Proposed engine"][o["Proposed engine"].dataset_size == sz]
                   .execution_time_seconds.mean() for sz in SIZES])
-    B = np.array([u["Engine"][u["Engine"].dataset_size == sz]
+    B = np.array([u["Proposed engine"][u["Proposed engine"].dataset_size == sz]
                   .execution_time_seconds.mean() for sz in SIZES])
     fig, ax = plt.subplots(figsize=(7.6, 4.4))
     xi = np.arange(len(SIZES))
-    ax.fill_between(xi, A, B, color="#e34948", alpha=0.15, zorder=1,
-                    label="ordering cost (the gap)")
+    gap = B - A
+    ax.fill_between(xi, A, B, where=gap >= 0, color="#e34948", alpha=0.15,
+                    interpolate=True, zorder=1,
+                    label="observed shuffled-input gap")
+    if np.any(gap < 0):
+        ax.fill_between(xi, A, B, where=gap < 0, color="#888888", alpha=0.12,
+                        interpolate=True, zorder=1,
+                        label="measurement variation")
     ax.plot(xi, A, color="#2a78d6", marker="o", markersize=6, linewidth=2,
             markeredgecolor="white", markeredgewidth=0.7, zorder=3,
             label="A: ordered input (no sort needed)")
@@ -111,8 +128,8 @@ def sort_cost_scaling():
     ax.set_xlim(-0.3, len(SIZES) - 0.7)
     ax.set_ylim(0, max(B) * 1.2)
     ax.set_xlabel("Dataset size (rows)")
-    ax.set_ylabel("Engine execution time (s)")
-    ax.set_title("Cost of sorting: engine on ordered vs shuffled input",
+    ax.set_ylabel("Proposed engine execution time (s)")
+    ax.set_title("Proposed engine sensitivity to physical input order",
                  fontsize=10)
     ax.grid(True, zorder=0)
     ax.legend(frameon=False, fontsize=8.5, loc="upper left")
@@ -122,6 +139,13 @@ def sort_cost_scaling():
     print("wrote viz_sort_cost_scaling.png")
 
 
-ordering_scenarios()
-sort_cost_scaling()
-print("done")
+def main():
+    global pair, o, u
+    pair, o, u = load_pair()
+    ordering_scenarios()
+    sort_cost_scaling()
+    print("done")
+
+
+if __name__ == "__main__":
+    main()

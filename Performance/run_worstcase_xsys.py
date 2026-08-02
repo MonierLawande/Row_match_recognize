@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Cross-system pattern-driven worst case (Axis 2).
+"""Cross-system state-dependent-predicate scenario (Axis 2).
 
 Runs a single state-dependent query -- the simple_sequence pattern with a
 running aggregate added to B's DEFINE (price > AVG(A.price)) -- on all three
-systems, on ORDERED input (so the sort is not involved; this isolates the
-matching / pattern-driven axis, not the ordering axis).  For the proposed
-engine this predicate cannot be vectorised and drops onto the bounded
-backtracking searcher; Trino and Oracle run it on their native engines.  The
-harness's per-system runners, memory sampling, and correctness checks are
-reused unchanged.  Output goes to Performance/worstcase_xsys/.
+systems, on ordered input.  The proposed engine recognizes this running
+average form and uses a compiled incremental path.  Other state-dependent
+forms may use the general evaluator or exact search.  The harness's
+per-system runners, memory sampling, and correctness checks are reused
+unchanged.
 """
 import argparse
 import sys
@@ -40,6 +39,9 @@ STATE_DEP = {
 
 
 def main() -> None:
+    # Use the same isolated cgroup as the canonical matrix so the engine
+    # footprint is not mixed with unrelated processes in the user session.
+    m.ensure_dedicated_cgroup()
     p = argparse.ArgumentParser()
     p.add_argument("--systems", nargs="+",
                    choices=["pandas", "trino", "oracle"],
@@ -52,7 +54,7 @@ def main() -> None:
     p.add_argument("--measured-runs", type=int, default=3)
     p.add_argument("--chunk-size", type=int, default=20000)
     p.add_argument("--oracle-password", default="Oracle_12345")
-    p.add_argument("--oracle-dsn", default="localhost:1521/XEPDB1")
+    p.add_argument("--oracle-dsn", default="localhost:1521/ORCLPDB1")
     args = p.parse_args()
 
     # single state-dependent pattern; ordered input (no shuffle)

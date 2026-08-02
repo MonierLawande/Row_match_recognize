@@ -5,7 +5,7 @@ Sequential equal-resource cross-system benchmark matrix.
 Systems:
 - proposed pandas MATCH_RECOGNIZE engine
 - Trino 473
-- Oracle XE 21c
+- Oracle 21c EE
 
 Benchmark matrix:
 - sizes: 50K, 100K, 200K, 400K, 800K, 1M, 1.5M, 2M
@@ -998,7 +998,7 @@ def run_oracle_pattern(
     # 'session pga memory max' is a per-session high-water mark, so every
     # measured run uses a fresh session: otherwise earlier runs would already
     # have raised the mark and the delta would read as zero.
-    sampler = MemorySampler(container="oracle-free")
+    sampler = MemorySampler(container="oracle-21c-ee")
     try:
         measurements: list[Measurement] = []
         for i in range(measured_runs):
@@ -1034,7 +1034,7 @@ def system_file_prefix(system_label: str) -> str:
         return "pandas"
     if system_label == "trino_473":
         return "trino"
-    if system_label == "oracle_xe_21c":
+    if system_label == "oracle_21c_ee":
         return "oracle"
     return system_label
 
@@ -1061,7 +1061,7 @@ def write_system_results(system_label: str, results: list[RunResult]) -> None:
 
 def run_pandas_system(sizes: list[int], warmup_runs: int, measured_runs: int) -> tuple[list[RunResult], dict[tuple[int, str], pd.DataFrame]]:
     print("\n=== Running pandas system ===")
-    docker_stop("trino-473", "oracle-free")
+    docker_stop("trino-473", "oracle-21c-ee")
     all_results: list[RunResult] = []
     expected: dict[tuple[int, str], pd.DataFrame] = {}
 
@@ -1147,7 +1147,7 @@ def run_trino_system(
     memory_gb: int,
 ) -> list[RunResult]:
     print("\n=== Running Trino system ===")
-    docker_stop("oracle-free")
+    docker_stop("oracle-21c-ee")
     all_results: list[RunResult] = []
 
     for size in sizes:
@@ -1253,11 +1253,11 @@ def run_oracle_system(
         df = load_input(size)
         print(f"  Oracle size={size:,}")
         # Fresh instance per size, same rationale as the Trino runner.
-        docker_stop("oracle-free")
-        docker_update("oracle-free", cpu_count, memory_gb)
-        docker_start("oracle-free")
+        docker_stop("oracle-21c-ee")
+        docker_update("oracle-21c-ee", cpu_count, memory_gb)
+        docker_start("oracle-21c-ee")
         wait_for_oracle(password, dsn, 900)
-        print("    restarted oracle-free (clean instance state)")
+        print("    restarted oracle-21c-ee (clean instance state)")
         conn = connect_oracle(password, dsn)
         cur = conn.cursor()
         load_oracle_table(df, password, dsn, chunk_size)
@@ -1273,7 +1273,7 @@ def run_oracle_system(
                 correct = normalized.equals(expected.get((size, pattern_name), pd.DataFrame()))
                 all_results.append(
                     RunResult(
-                        system="oracle_xe_21c",
+                        system="oracle_21c_ee",
                         dataset_size=size,
                         pattern_name=pattern_name,
                         pattern=info["pattern"],
@@ -1302,11 +1302,11 @@ def run_oracle_system(
                         outliers_excluded_inc_peak=stats["inc_excl"],
                     )
                 )
-                write_system_results("oracle_xe_21c", all_results)
+                write_system_results("oracle_21c_ee", all_results)
             except Exception as exc:
                 all_results.append(
                     RunResult(
-                        system="oracle_xe_21c",
+                        system="oracle_21c_ee",
                         dataset_size=size,
                         pattern_name=pattern_name,
                         pattern=info["pattern"],
@@ -1326,8 +1326,8 @@ def run_oracle_system(
                         error=str(exc),
                     )
                 )
-                write_system_results("oracle_xe_21c", all_results)
-    docker_stop("oracle-free")
+                write_system_results("oracle_21c_ee", all_results)
+    docker_stop("oracle-21c-ee")
     return all_results
 
 
@@ -1390,7 +1390,7 @@ def main() -> None:
                         help="measured executions per cell; the mean time is reported")
     parser.add_argument("--chunk-size", type=int, default=20000)
     parser.add_argument("--oracle-password", default="Oracle_12345")
-    parser.add_argument("--oracle-dsn", default="localhost:1521/XEPDB1")
+    parser.add_argument("--oracle-dsn", default="localhost:1521/ORCLPDB1")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

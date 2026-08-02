@@ -5,15 +5,17 @@ the cross_system_matrix result CSVs (pandas/trino/oracle_results.csv).
 Prints delimited blocks (@@@BEGIN name ... @@@END name) containing the table
 body rows exactly in the format used by the thesis tables, plus a
 prose_numbers block with every inline statistic quoted in the chapters.
-Run from anywhere; paths are absolute.
+Run from anywhere; paths are resolved relative to this script.
 """
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
-BASE = "/home/monierashraf/Desktop/llm/Row_match_recognize/Performance/cross_system_matrix"
-P = pd.read_csv(f"{BASE}/pandas_results.csv")
-T = pd.read_csv(f"{BASE}/trino_results.csv")
-O = pd.read_csv(f"{BASE}/oracle_results.csv")
+BASE = Path(__file__).resolve().parent / "results_1core_5w20_unified"
+P = pd.read_csv(BASE / "pandas_results.csv")
+T = pd.read_csv(BASE / "trino_results.csv")
+O = pd.read_csv(BASE / "oracle_results.csv")
 
 PATTERNS = ["simple_sequence", "alternation", "quantified", "optional_pattern", "complex_nested"]
 SIZES = [100000, 200000, 400000, 800000, 1600000, 2222742]
@@ -22,6 +24,16 @@ SYS = [("Pandas", P), ("Trino", T), ("Oracle", O)]
 
 def texnum(n):
     return f"{n:,}".replace(",", "{,}")
+
+
+def texnum2(v):
+    """Thousands-separated with exactly two decimals.
+
+    ``texnum(round(v, 2))`` silently drops a trailing zero for values
+    >= 1000 (1993.00 -> "1,993.0"), which left mixed decimal widths in
+    the same column.  This keeps every cell at two decimals.
+    """
+    return f"{v:,.2f}".replace(",", "{,}")
 
 
 def texpat(p):
@@ -51,7 +63,7 @@ for i, pat in enumerate(PATTERNS):
         for _, df in SYS:
             m = cell(df, pat, size, "execution_time_seconds")
             s = cell(df, pat, size, "execution_time_std_seconds")
-            vals.append(f"{m:.2f} $\\pm$ {s:.2f}")
+            vals.append(f"{m:.3f} $\\pm$ {s:.3f}")
         lines.append(f"{texpat(pat)} & {texnum(size)} & {vals[0]} & {vals[1]} & {vals[2]} \\\\")
 block("execution_times", lines)
 
@@ -84,7 +96,7 @@ for i, pat in enumerate(PATTERNS):
         vals = []
         for _, df in SYS:
             v = cell(df, pat, size, "footprint_memory_mb")
-            vals.append(texnum(round(v, 2)) if v >= 1000 else f"{v:.2f}")
+            vals.append(texnum2(v) if v >= 1000 else f"{v:.2f}")
         lines.append(f"{texpat(pat)} & {texnum(size)} & {vals[0]} & {vals[1]} & {vals[2]} \\\\")
 block("memory_footprint", lines)
 
@@ -106,20 +118,20 @@ SP, ST, SO = sysstats(P), sysstats(T), sysstats(O)
 
 # ---- comment stats (ch6 comment block above tab:execution_times) ----
 lines = []
-for label, s in [("pandas", SP), ("Trino~473", ST), ("Oracle XE~21c", SO)]:
+for label, s in [("pandas", SP), ("Trino~473", ST), ("Oracle~21c EE", SO)]:
     lines.append(
         f"% {label}: total={s['total']:.2f}, avg={s['avg']:.2f}, avgthr={texnum(round(s['avgthr']))}, "
         f"minthr={texnum(round(s['minthr']))}, maxthr={texnum(round(s['maxthr']))}, "
-        f"maxqmem={s['maxq']:.2f}, maxfmem={texnum(round(s['maxf'], 2))}, medCV={s['medcv']:.1f}%"
+        f"maxqmem={s['maxq']:.2f}, maxfmem={texnum2(s['maxf'])}, medCV={s['medcv']:.1f}%"
     )
 block("comment_stats", lines)
 
 # ---- tab:overall_stats ----
 lines = []
-for label, s in [("Proposed Pandas engine", SP), ("Trino~473", ST), ("Oracle XE~21c", SO)]:
+for label, s in [("Proposed engine", SP), ("Trino~473", ST), ("Oracle~21c EE", SO)]:
     lines.append(
         f"{label} & 30 & {s['total']:.2f} & {s['avg']:.2f} & {texnum(round(s['avgthr']))} & "
-        f"{texnum(round(s['minthr']))}--{texnum(round(s['maxthr']))} & {s['maxq']:.2f} & {texnum(round(s['maxf'], 2))} \\\\"
+        f"{texnum(round(s['minthr']))}--{texnum(round(s['maxthr']))} & {s['maxq']:.2f} & {texnum2(s['maxf'])} \\\\"
     )
 block("overall_stats", lines)
 
@@ -154,7 +166,7 @@ for size in SIZES:
     vals = []
     for _, df in SYS:
         v = df[df.dataset_size == size].footprint_memory_mb.mean()
-        vals.append(texnum(round(v, 2)) if v >= 1000 else f"{v:.2f}")
+        vals.append(texnum2(v) if v >= 1000 else f"{v:.2f}")
     lines.append(f"{texnum(size)} & {vals[0]} & {vals[1]} & {vals[2]} \\\\")
 block("avg_footprint_by_size", lines)
 
@@ -209,6 +221,190 @@ for size in SIZES:
         parts.append(texnum(int(cell(P, pat, size, "result_rows"))))
     lines.append(" & ".join(parts) + " \\\\")
 block("match_counts", lines)
+
+# ---- appendix ordered vs shuffled input ----
+PERF = BASE.parent.parent
+UNORDERED = pd.read_csv(
+    PERF / "unordered_scenario" / "matrix_1cpu_32gb_summary.csv"
+)
+WORST = pd.read_csv(
+    PERF / "worstcase_xsys" / "matrix_1cpu_32gb_summary.csv"
+)
+STRESS = pd.read_csv(
+    PERF / "stress_test" / "volume" / "matrix_1cpu_58gb_summary.csv"
+)
+
+SYSTEM_KEYS = [
+    ("Proposed engine", "proposed_pandas_engine", P),
+    ("Trino~473", "trino_473", T),
+    ("Oracle~21c EE", "oracle_21c_ee", O),
+]
+
+lines = []
+for label, key, ordered in SYSTEM_KEYS:
+    shuffled = UNORDERED[UNORDERED.system == key]
+    a = ordered.execution_time_seconds.mean()
+    b = shuffled.execution_time_seconds.mean()
+    lines.append(f"{label} & {a:.3f} & {b:.3f} & ${b/a:.2f}\\times$ \\\\")
+block("ordering_scenarios", lines)
+
+lines = []
+for size in SIZES:
+    parts = [texnum(size)]
+    for _, key, ordered in SYSTEM_KEYS:
+        a = ordered[ordered.dataset_size == size].execution_time_seconds.mean()
+        shuffled = UNORDERED[
+            (UNORDERED.system == key) & (UNORDERED.dataset_size == size)
+        ]
+        b = shuffled.execution_time_seconds.mean()
+        parts.extend([f"{a:.3f}", f"{b:.3f}", f"{b/a:.2f}$\\times$"])
+    lines.append(" & ".join(parts) + " \\\\")
+block("ordering_by_size", lines)
+
+lines = []
+shuffled_engine = UNORDERED[UNORDERED.system == "proposed_pandas_engine"]
+for size in SIZES:
+    a = P[P.dataset_size == size].execution_time_seconds.mean()
+    b = shuffled_engine[
+        shuffled_engine.dataset_size == size
+    ].execution_time_seconds.mean()
+    delta = b - a
+    delta_ms = delta * 1e3
+    ns_per_row = delta * 1e9 / size
+    ns_per_nlogn = delta * 1e9 / (size * np.log2(size))
+    lines.append(
+        f"{texnum(size)} & {a:.3f} & {b:.3f} & {delta_ms:.1f} & "
+        f"{ns_per_row:.1f} & {ns_per_nlogn:.2f} \\\\"
+    )
+block("sort_cost_by_size", lines)
+
+# ---- appendix state-dependent aggregate comparison ----
+lines = []
+for size in SIZES:
+    vals = []
+    for key in ("proposed_pandas_engine", "trino_473", "oracle_21c_ee"):
+        row = WORST[(WORST.system == key) & (WORST.dataset_size == size)]
+        assert len(row) == 1, (key, size)
+        vals.append(f"{row.iloc[0].execution_time_seconds:.3f}")
+    lines.append(
+        f"{texnum(size)} & {vals[0]} & {vals[1]} & {vals[2]} \\\\"
+    )
+block("worstcase_coverage", lines)
+
+# ---- appendix stress-test matrices ----
+STRESS_SIZES = sorted(int(s) for s in STRESS.dataset_size.unique())
+STRESS_SYSTEMS = [
+    ("Proposed engine", "proposed_pandas_engine"),
+    ("Oracle~21c EE", "oracle_21c_ee"),
+    ("Trino~473 (disk connector)", "trino_473"),
+]
+
+
+def stress_row(system, pattern, size):
+    row = STRESS[
+        (STRESS.system == system)
+        & (STRESS.pattern_name == pattern)
+        & (STRESS.dataset_size == size)
+    ]
+    assert len(row) == 1, (system, pattern, size)
+    return row.iloc[0]
+
+
+def stress_blocks(metric, formatter):
+    lines = []
+    for system_label, system_key in STRESS_SYSTEMS:
+        lines.append(
+            rf"\multicolumn{{6}}{{@{{}}l}}{{\textit{{{system_label}}}}}\\*"
+        )
+        for size in STRESS_SIZES:
+            vals = []
+            for pattern in PATTERNS:
+                row = stress_row(system_key, pattern, size)
+                vals.append(formatter(row, metric))
+            lines.append(f"{texnum(size)} & " + " & ".join(vals) + r" \\")
+        if system_key != STRESS_SYSTEMS[-1][1]:
+            lines.append(r"\addlinespace[3pt]")
+    return lines
+
+
+def fmt_stress_time(row, _metric):
+    if not bool(row.success):
+        return r"\textit{wall}"
+    return (
+        f"{row.execution_time_seconds:.2f}\\,$\\pm$\\,"
+        f"{row.execution_time_std_seconds:.2f}"
+    )
+
+
+def fmt_stress_gb(row, metric):
+    if not bool(row.success):
+        return r"\textit{wall}"
+    return f"{getattr(row, metric) / 1024:.2f}"
+
+
+def fmt_stress_inc_gb(row, metric):
+    if not bool(row.success):
+        return r"\textit{wall}"
+    return f"{getattr(row, metric) / 1024:.3f}"
+
+
+def fmt_stress_thr(row, metric):
+    if not bool(row.success):
+        return r"\textit{wall}"
+    return f"{getattr(row, metric) / 1e6:.2f}"
+
+
+block("stress_volume", stress_blocks("execution_time_seconds", fmt_stress_time))
+block("stress_mem", stress_blocks("footprint_memory_mb", fmt_stress_gb))
+block(
+    "stress_throughput",
+    stress_blocks("throughput_rows_per_second", fmt_stress_thr),
+)
+block(
+    "stress_incremental_memory",
+    stress_blocks("query_memory_mb", fmt_stress_inc_gb),
+)
+
+lines = []
+for system_label, system_key in STRESS_SYSTEMS[1:]:
+    lines.append(
+        rf"\multicolumn{{6}}{{@{{}}l}}{{\textit{{{system_label}}}}}\\*"
+    )
+    for size in STRESS_SIZES:
+        vals = []
+        for pattern in PATTERNS:
+            row = stress_row(system_key, pattern, size)
+            vals.append(fmt_stress_inc_gb(row, "native_query_memory_mb"))
+        lines.append(f"{texnum(size)} & " + " & ".join(vals) + r" \\")
+    if system_key != STRESS_SYSTEMS[-1][1]:
+        lines.append(r"\addlinespace[3pt]")
+block("stress_native_memory", lines)
+
+lines = []
+stress_engine = STRESS[STRESS.system == "proposed_pandas_engine"]
+for size in STRESS_SIZES:
+    parts = [texnum(size)]
+    for pattern in PATTERNS:
+        row = stress_engine[
+            (stress_engine.pattern_name == pattern)
+            & (stress_engine.dataset_size == size)
+        ]
+        assert len(row) == 1, (pattern, size)
+        parts.append(texnum(int(row.iloc[0].result_rows)))
+    lines.append(" & ".join(parts) + " \\\\")
+block("stress_match_counts", lines)
+
+lines = []
+for label, df in (
+    ("main", pd.concat([P, T, O], ignore_index=True)),
+    ("unordered", UNORDERED),
+    ("worst", WORST),
+    ("stress", STRESS),
+):
+    completed = int(df.success.sum())
+    attempted = len(df)
+    lines.append(f"{label}: {completed}/{attempted} successful")
+block("appendix_coverage", lines)
 
 # ---- prose numbers ----
 lines = []

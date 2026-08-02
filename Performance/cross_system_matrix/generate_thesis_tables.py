@@ -7,7 +7,7 @@ pd.set_option('display.width', 220)
 pd.set_option('display.max_columns', 25)
 pd.set_option('display.max_rows', 200)
 
-BASE = 'Performance/cross_system_matrix'
+BASE = 'Performance/cross_system_matrix/results_1core_5w20_unified'
 
 pandas_df = pd.read_csv(f'{BASE}/pandas_results.csv')
 trino_df = pd.read_csv(f'{BASE}/trino_results.csv')
@@ -19,12 +19,24 @@ for df, name in [(pandas_df, 'pandas'), (trino_df, 'trino'), (oracle_df, 'oracle
 all_df = pd.concat([pandas_df, trino_df, oracle_df], ignore_index=True)
 
 PATTERNS = ['simple_sequence', 'alternation', 'quantified', 'optional_pattern', 'complex_nested']
-SIZES = [50000, 100000, 200000, 400000, 800000, 1000000, 1500000, 2000000]
+# Derive the size axis from the measured data instead of a hardcoded list.
+# A stale hardcoded list (old runner defaults 50k/1M/1.5M/2M) made
+# df[df.dataset_size == size] empty for never-measured sizes, so .mean()
+# returned NaN and round(NaN) raised "cannot convert float NaN to integer".
+SIZES = sorted(int(s) for s in all_df.dataset_size.unique())
 
 def fmt_int(n):
-    return f"{n:,}"
+    """Thousands-separated integer. Unavailable groups (NaN / empty selection)
+    render as 'N/A' so a missing or time-walled cell can never be silently
+    coerced to an integer (guards the NaN->int ValueError at its source)."""
+    if pd.isna(n):
+        return "N/A"
+    return f"{round(n):,}"
 
 def fmt(n, dec=2):
+    """Fixed-decimal float; unavailable (NaN / empty) values render as 'N/A'."""
+    if pd.isna(n):
+        return "N/A"
     return f"{n:,.{dec}f}"
 
 print("="*80)
@@ -36,7 +48,7 @@ for pat in PATTERNS:
         sub = df[df.pattern_name == pat]
         avg_thr = sub.throughput_rows_per_second.mean()
         avg_time = sub.execution_time_seconds.mean()
-        row.append(f"{sysname}: thr={fmt_int(round(avg_thr))} time={fmt(avg_time)}")
+        row.append(f"{sysname}: thr={fmt_int(avg_thr)} time={fmt(avg_time)}")
     print(pat, '|', ' || '.join(row[1:]))
 
 print()
@@ -49,7 +61,7 @@ for size in SIZES:
         sub = df[df.dataset_size == size]
         avg_thr = sub.throughput_rows_per_second.mean()
         avg_time = sub.execution_time_seconds.mean()
-        row.append(f"{sysname}: thr={fmt_int(round(avg_thr))} time={fmt(avg_time)}")
+        row.append(f"{sysname}: thr={fmt_int(avg_thr)} time={fmt(avg_time)}")
     print(size, '|', ' || '.join(row[1:]))
 
 print()
@@ -73,7 +85,7 @@ for pat in PATTERNS:
         vals = []
         for sysname, df in [('pandas', pandas_df), ('trino', trino_df), ('oracle', oracle_df)]:
             v = df[(df.pattern_name == pat) & (df.dataset_size == size)].throughput_rows_per_second.values
-            vals.append(fmt_int(round(v[0])) if len(v) else 'NA')
+            vals.append(fmt_int(v[0]) if len(v) else 'NA')
         print(f"{pat:20s} {size:>9,} : pandas={vals[0]:>10} trino={vals[1]:>10} oracle={vals[2]:>10}")
 
 print()
@@ -114,7 +126,7 @@ for sysname, df in [('pandas', pandas_df), ('trino', trino_df), ('oracle', oracl
     max_thr = df.throughput_rows_per_second.max()
     max_query_mem = df.query_memory_mb.max()
     max_footprint_mem = df.footprint_memory_mb.max()
-    print(f"{sysname}: total_time={fmt(total_time)} avg_time={fmt(avg_time)} avg_thr={fmt_int(round(avg_thr))} min_thr={fmt_int(round(min_thr))} max_thr={fmt_int(round(max_thr))} max_query_mem={fmt(max_query_mem)} max_footprint_mem={fmt(max_footprint_mem)} tests={len(df)}")
+    print(f"{sysname}: total_time={fmt(total_time)} avg_time={fmt(avg_time)} avg_thr={fmt_int(avg_thr)} min_thr={fmt_int(min_thr)} max_thr={fmt_int(max_thr)} max_query_mem={fmt(max_query_mem)} max_footprint_mem={fmt(max_footprint_mem)} tests={len(df)}")
 
 print()
 print("="*80)
@@ -131,7 +143,7 @@ for sysname, df in [('pandas', pandas_df), ('trino', trino_df), ('oracle', oracl
         correct_str = 'baseline'
     else:
         correct_str = f"{(correct == True).sum()}/{n} match"
-    print(f"{sysname}: n={n} avg_time={fmt(avg_time)} avg_thr={fmt_int(round(avg_thr))} max_query_mem={fmt(max_query_mem)} max_footprint_mem={fmt(max_footprint_mem)} correctness={correct_str}")
+    print(f"{sysname}: n={n} avg_time={fmt(avg_time)} avg_thr={fmt_int(avg_thr)} max_query_mem={fmt(max_query_mem)} max_footprint_mem={fmt(max_footprint_mem)} correctness={correct_str}")
 
 print()
 print("="*80)
@@ -189,4 +201,4 @@ for pat in PATTERNS:
 print()
 print("Overall min/max throughput per system (for prose):")
 for sysname, df in [('pandas', pandas_df), ('trino', trino_df), ('oracle', oracle_df)]:
-    print(sysname, 'min', fmt_int(round(df.throughput_rows_per_second.min())), 'max', fmt_int(round(df.throughput_rows_per_second.max())))
+    print(sysname, 'min', fmt_int(df.throughput_rows_per_second.min()), 'max', fmt_int(df.throughput_rows_per_second.max()))

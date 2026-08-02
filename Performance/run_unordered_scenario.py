@@ -3,19 +3,15 @@
 
 The canonical matrix (Scenario A, ``run_cross_system_matrix.py``) orders by an
 already-sorted ``seq_id``, so the proposed engine detects monotonic input and
-skips ``sort_values`` entirely (the O(n) path).  That is realistic for
-append-ordered DataFrames but flatters the engine relative to the two database
-systems, which have no guaranteed table order and therefore sort on every
-query regardless.
+skips ``sort_values``.  This is realistic for append-ordered DataFrames.
 
 This script reruns the identical 90-cell matrix with the SAME queries, sizes,
 resource policy, and sampling, but with the physical row order of every input
-SHUFFLED (deterministically, per size).  ``ORDER BY seq_id`` then forces a real
-sort in all three systems.  Because the logical order after sorting is
-identical to Scenario A, the match results and counts are identical; only the
-sort cost is added.  This isolates exactly one variable -- input orderedness --
-and gives the honest picture of how the engine compares when the data is not
-pre-sorted.
+shuffled deterministically.  ``ORDER BY seq_id`` then requires the engine to
+order the DataFrame.  The logical order and expected result remain unchanged.
+The measured gap estimates the extra work associated with unordered physical
+input; it is not a query-plan proof that sorting is the only changed runtime
+cost.
 
 The harness machinery (pattern definitions, per-system runners, memory
 sampling, aggregation) is reused unchanged via monkeypatching; only
@@ -44,8 +40,7 @@ def load_input_shuffled(size: int) -> pd.DataFrame:
 
     Deterministic per size, so every system in this run receives byte-identical
     shuffled input for a given size.  ``seq_id`` is left intact but is no longer
-    monotonic in row order, so the engine's ordered-input shortcut does not fire
-    and ``ORDER BY seq_id`` forces a genuine sort.
+    monotonic in row order, so the engine's ordered-input shortcut does not fire.
     """
     path = _orig_create_shared_dataset(size)
     df = pd.read_csv(path)
@@ -54,6 +49,10 @@ def load_input_shuffled(size: int) -> pd.DataFrame:
 
 
 def main() -> None:
+    # Match the canonical matrix protocol.  Without this re-entry, the
+    # process-level sampler can read the shared user cgroup and attribute
+    # unrelated processes to the engine footprint.
+    m.ensure_dedicated_cgroup()
     parser = argparse.ArgumentParser(description="Run the unordered-input benchmark scenario.")
     parser.add_argument("--systems", nargs="+", choices=["pandas", "trino", "oracle"],
                         default=["pandas", "trino", "oracle"])
@@ -64,7 +63,7 @@ def main() -> None:
     parser.add_argument("--measured-runs", type=int, default=20)
     parser.add_argument("--chunk-size", type=int, default=20000)
     parser.add_argument("--oracle-password", default="Oracle_12345")
-    parser.add_argument("--oracle-dsn", default="localhost:1521/XEPDB1")
+    parser.add_argument("--oracle-dsn", default="localhost:1521/ORCLPDB1")
     args = parser.parse_args()
 
     # Redirect all output into the separate scenario directory and swap in the
