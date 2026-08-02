@@ -14,6 +14,14 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    # pip prints "A new release of pip is available" on stderr, and GitHub
+    # renders any stderr line from a step as an "Error:" annotation.  On the
+    # Python 3.8 runners this fires inside setup-python's own pip upgrade, so
+    # a green job still reports an error.  The notice carries no information
+    # we act on: the next step upgrades pip anyway.
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
     steps:
       - uses: actions/checkout@v5
 
