@@ -385,9 +385,8 @@ simple-sequence pattern type.
 
 \begin{table}[H]
 \centering
-\caption{Dip-pattern result on the \texttt{orders} dataset: the Trino
-  SQL query, the proposed engine, the Pandas function, and Oracle all
-  return the identical match~\cite{monierashraf2025rowmatch}}
+\caption[Dip-pattern result]{Dip-pattern result: all four systems return the identical
+  match~\cite{monierashraf2025rowmatch}}
 \label{tab:sql-match-recognize-examples}
 {\small
 \begin{tabular}{lllr}
@@ -547,9 +546,8 @@ implicit \texttt{DEFINE}, \texttt{PREV} navigation,
 
 \begin{table}[H]
 \centering
-\caption{Stock-price result on the \texttt{stock\_price} dataset: the
-  Trino SQL query, the proposed engine, the Pandas function, and Oracle all
-  return these three identical matches~\cite{petkovic2022rpr,monierashraf2025oracle}}
+\caption[Stock-price result]{Stock-price result: all four systems return these three identical
+  matches~\cite{petkovic2022rpr,monierashraf2025oracle}}
 \label{tab:stock-results}
 {\small
 \begin{tabular}{rlrrr}
@@ -684,9 +682,8 @@ handling agrees with the reference engines.
 
 \begin{table}[H]
 \centering
-\caption{V-shape result on the \texttt{stock\_price} dataset: the
-  Trino SQL query, the proposed engine, the Pandas function, and Oracle all
-  return these three identical matches~\cite{petkovic2022rpr,monierashraf2025oracle}}
+\caption[V-shape result]{V-shape result: all four systems return these three identical
+  matches~\cite{petkovic2022rpr,monierashraf2025oracle}}
 \label{tab:vshape-results}
 {\small
 \begin{tabular}{rlrrr}
@@ -717,11 +714,7 @@ gap widens with pattern complexity.
 
 \begin{table}[H]
 \centering
-\caption{Lines-of-code comparison for the three worked examples.  Both
-  columns count detection logic only---the \texttt{MATCH\_RECOGNIZE}
-  statement against the Pandas detection function---in non-blank,
-  non-comment lines.  Shared data setup, imports, and printing are
-  excluded from both.}
+\caption{Lines-of-code comparison for the three worked examples.}
 \label{tab:loc_comparison}
 {\small
 \setlength{\tabcolsep}{4pt}
@@ -835,7 +828,7 @@ exercises it and produces output identical to the reference systems.
 
 \begin{table}[H]
 \centering
-\caption{Pattern-type coverage, with a regex example and a simple use
+\caption[Pattern-type coverage]{Pattern-type coverage, with a regex example and a simple use
   case for each type}
 \label{tab:pattern_type_coverage}
 {\small
@@ -1009,9 +1002,7 @@ Figure~\ref{fig:complexity_bigO} draws the two cases.
     \draw[arrow] (sort) -- (scan2);
     \draw[arrow] (scan2) -- (total2);
   \end{tikzpicture}
-  \caption[Data-size complexity of the compiled benchmark path]{Data-size
-    complexity for a fixed compiled row-local pattern.  The final simplified
-    bounds assume fixed $d$ and output size $k\ell=O(n)$.}
+  \caption[Data-size complexity of the compiled benchmark path]{Data-size complexity for a fixed compiled row-local pattern.}
   \label{fig:complexity_bigO}
 \end{figure}
 
@@ -1242,9 +1233,7 @@ Table~\ref{tab:size_summary}.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/execution_times.png}
-  \caption[Execution time by pattern, size, and system]{Execution time
-    by pattern, size, and system.  Each panel uses an independent linear
-    scale starting at zero.  Each series is labeled at the largest size.}
+  \caption[Execution time by pattern, size, and system]{Execution time by pattern, size, and system.}
   \label{fig:execution_times}
 \end{figure}
 
@@ -1262,9 +1251,7 @@ rows while the engine stays near-linear
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_throughput.png}
-  \caption[Throughput by pattern, size, and system]{Throughput by
-    pattern, size, and system.  Each panel is scaled to its own family and
-    every series is labeled with its value at the largest size.}
+  \caption[Throughput by pattern, size, and system]{Throughput by pattern, size, and system.}
   \label{fig:throughput}
 \end{figure}
 
@@ -1317,11 +1304,7 @@ high-water delta, which serve as cross-checks below.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_query_memory.png}
-  \caption[Query memory by pattern, size, and system]{Query memory
-    (incremental peak) by pattern, size, and system.  Each family panel
-    uses its own scale, and each series is labeled at the largest size.
-    The common counter measures growth above each runtime's resident
-    baseline.}
+  \caption[Query memory by pattern, size, and system]{Query memory (incremental peak) by pattern, size, and system.}
   \label{fig:query_memory}
 \end{figure}
 
@@ -1341,10 +1324,7 @@ the common footprint comparison.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_footprint_memory.png}
-  \caption[Footprint memory by pattern, size, and system]{Footprint
-    memory (absolute peak) by pattern, size, and system.  Each panel is
-    scaled to its own family and every series is labeled with its value at
-    the largest size.}
+  \caption[Footprint memory by pattern, size, and system]{Footprint memory (absolute peak) by pattern, size, and system.}
   \label{fig:footprint_memory}
 \end{figure}
 
@@ -1589,9 +1569,7 @@ Section~\ref{subsec:eval-complexity}.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_stress_volume.png}
-  \caption[Volume scaling on real data to 227.9M rows]{Volume scaling
-    on real data: time (left) and absolute peak memory (right), averaged
-    over the four families completed at every size by all systems.}
+  \caption[Volume scaling on real data to 227.9M rows]{Volume scaling on real data: time (left) and peak memory (right).}
   \label{fig:stress_volume}
 \end{figure}
 
@@ -1622,8 +1600,7 @@ does its resident data pass Oracle: 31.9\,GB against Oracle~21c EE's
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=0.82\textwidth]{images/viz_stress_throughput.png}
-  \caption[Throughput scaling on real data]{Throughput scaling on real
-    data, averaged over the same four common families.}
+  \caption[Throughput scaling on real data]{Throughput scaling on real data.}
   \label{fig:stress_throughput}
 \end{figure}
 
@@ -1668,9 +1645,7 @@ The systems trade speed for memory in opposite directions.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_stress_memory.png}
-  \caption[Diagnostic query-memory counters on real data]{Diagnostic
-    query-memory view: the engine's cgroup increment and each database's
-    native counter.  The accounting boundaries differ.}
+  \caption[Diagnostic query-memory counters on real data]{Diagnostic query-memory counters; the accounting boundaries differ.}
   \label{fig:stress_memory}
 \end{figure}
 

@@ -282,9 +282,7 @@ Figure~\ref{fig:system-architecture}.
     \draw[exampledata] (exdata) -- (exrun);
     \draw[exampledata] (exrun) -- (exoutput);
   \end{tikzpicture}
-  \caption{Worked \texttt{orders} pipeline from
-    Listing~\ref{lst:orders-mr}.  The query is processed in
-    Stages~1--4; the DataFrame joins at Stage~5 and produces one match.}
+  \caption{Worked \texttt{orders} pipeline.}
   \label{fig:orders-pipeline}
 \end{figure}
 
@@ -626,8 +624,7 @@ output row; \textsc{Final} sees the complete match.
                        mixed/aggregate, aggregate/fallback}
       \draw[arrow] (\a) -- node[no]{no} (\b);
   \end{tikzpicture}
-  \caption{Priority rules for resolving \texttt{RUNNING} and
-    \texttt{FINAL} measure semantics.}
+  \caption{Resolving \texttt{RUNNING} and \texttt{FINAL} semantics.}
   \label{fig:measure-sem-resolution}
 \end{figure}
 
