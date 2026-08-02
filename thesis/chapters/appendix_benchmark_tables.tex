@@ -7,77 +7,104 @@
 \chapter{Detailed Benchmark Tables}
 \label{app:benchmark-tables}
 
-This appendix collects the detailed cross-system benchmark tables
-referenced in Chapter~\ref{chap:evaluation}.  They are reproduced here
-for completeness and reproducibility, while the summary tables and the
-key findings stay in the chapter body.  Unless a table says otherwise,
-the figures come from the Amazon UK Products benchmark under the
-cross-system protocol set out below.
+This appendix presents the detailed benchmark tables used in
+Chapter~\ref{chap:evaluation}.  The chapter explains the main results,
+while this appendix keeps the full values for verification.  Unless
+stated otherwise, the tables use the Amazon UK Products benchmark and
+the cross-system protocol below.
 
 \section{Measurement Provenance and Reproducibility}
 \label{app:provenance}
 
-\paragraph{Engine under test.}
-Every engine figure in this thesis comes from one build of the
-implementation, left unmodified across all four campaigns.  Its
-regression suite collects and passes \textbf{702} tests.
+All systems ran sequentially, one at a time.  No two systems ran
+together, so they never competed for the same CPU core or memory.
+Proposed-engine runs were refreshed on revision \texttt{179c286}.  Trino and
+Oracle values were retained from protocol-aligned earlier campaigns;
+the state-dependent repetition difference is disclosed below.  The
+final regression run passed 709 tests.
 
 \paragraph{Benchmark protocols.}
-Four campaigns, each with a fixed protocol:
+The evaluation used four fixed protocols:
 
 \begin{itemize}
-  \item \textbf{Cross-system matrix} --- 1 CPU, 32\,GB, 5 warm-up and
-    20 measured runs, 1.5$\times$ IQR filtering, ordered input,
-    warm cache; 5 pattern families $\times$ 6 sizes (100\,K--2\,222\,742)
-    $=$ 30 engine cells.
-  \item \textbf{Stress} --- dedicated control group, 1 CPU, 58\,GB,
-    2 warm-up and 5 measured runs, 600\,s per-query budget, restart per
-    size; 5 families $\times$ 7 sizes (5\,M--227\,899\,533) $=$ 35 cells.
-  \item \textbf{Ordering} --- as the matrix, with each input's physical
-    row order shuffled deterministically
-    (\texttt{random\_state}~$=1234+\text{size}$), forcing a genuine sort.
-  \item \textbf{State-dependent worst case} --- as the matrix, with
-    \texttt{B AS category='B' AND price > AVG(A.price)}, ordered input.
+  \item \textbf{Cross-system matrix.} One CPU core, an outer 32\,GB memory
+    limit, five warm-up runs, and twenty measured runs.  Oracle XE's
+    internal database-memory cap remained in effect.  The input was ordered, and
+    the warm-up runs preceded measurement.  The matrix contains five patterns and six
+    sizes (100\,K--2\,222\,742 rows), giving 30 cells per system.
+    All 90 cells completed.  The 30 proposed-engine cells are from the
+    recorded engine campaign.  The 60 database cells are retained results.
+  \item \textbf{Stress test.} One CPU core, a 58\,GB memory limit, two warm-up runs,
+    and five measured runs.  Each query had a 600\,s limit.  The test
+    contains five patterns and seven sizes (5\,M--227\,899\,533 rows).
+    The proposed engine and Oracle completed 35 of 35 cells.  Trino
+    completed 33 of 35; \texttt{complex\_nested} reached the time
+    limit at 160\,M and 227\,899\,533 rows.
+  \item \textbf{Ordering test.} The matrix protocol was repeated after
+    a deterministic shuffle.  This removed physical pre-ordering while
+    keeping the same logical \texttt{ORDER BY} key.  All 90 shuffled
+    cells completed.
+  \item \textbf{State-dependent test.} One CPU core and a 32\,GB memory limit were
+    used with ordered input and
+    \texttt{B AS category='B' AND price > AVG(A.price)}.  The proposed
+    engine used five warm-up runs and twenty measured runs per size.
+    The retained Trino and Oracle reference values contain two
+    measured runs per size.  Their means are useful for comparison,
+    but provide less evidence about variation.  All 18 cells completed.
 \end{itemize}
 
-Memory is sampled from the control group's \texttt{memory.current} every
-50\,ms; the incremental peak subtracts a five-second pre-query baseline.
-Timing brackets the engine call only.
+Memory was sampled from the control group's cgroup~v2 counter every
+50\,ms.  The incremental peak subtracts a five-second pre-query
+baseline.  Timing includes query execution and result construction or
+retrieval.  For the proposed engine, the absolute peak covers its
+process.  For Trino and Oracle, it covers the full database container.
+Database-native query counters are reported separately where
+available.  Data generation and loading are excluded.
+The scripts divide byte counters by $1024^2$ and $1024^3$; MB and GB in
+the memory tables therefore mean MiB and GiB.
 
+The saved benchmark bundle contains the result tables and provenance
+records for the main matrix, ordering, state-dependent, and stress
+campaigns.
 
 \paragraph{Measurement exclusions.}
-No measurement was excluded from any campaign in this revision.  A run
-may be excluded only with recorded evidence of a wrong source commit,
-incorrect affinity, an overlapping benchmark, host contention, thermal
-throttling, sampler failure, incomplete output, process failure, or an
-incorrect resource envelope.
+No complete benchmark cell was omitted.  The stated 1.5$\times$ IQR
+rule could remove individual samples from a cell.  The number removed
+was retained with the measurements.  A complete cell may be rejected
+only when there is recorded evidence of an invalid run, such as a
+wrong revision, incorrect resource limits, host contention, sampler
+failure, process failure, or incomplete output.
 
 \paragraph{Known limitations.}
-The engine is single-node and in-memory, so its ceiling is machine RAM.
-A \texttt{DEFINE} predicate that cannot be expressed as column
-operations takes the slower exact-search path.
+The engine is single-node and in-memory.  Its practical limit depends
+on available RAM, input width, output size, and pattern structure.
+The executor selects among compiled row-local predicates, supported
+incremental aggregate paths, and general exact search.  The selected
+path depends on both the expression and the pattern.  The absence of a
+simple column operation does not by itself imply exact search.
 
 \section{Match Counts}
 \label{app:match-counts}
 
-Because runtime and memory depend on how many matches each pattern
-produces, Table~\ref{tab:match_counts} reports the match count
-(= returned result rows under \texttt{ONE ROW PER MATCH}) for every
-pattern--size combination.  The counts are identical across the three
-systems; \texttt{optional\_pattern} produces the largest output sets
-and \texttt{alternation} the smallest.
+Runtime and memory also depend on output size.
+Table~\ref{tab:match_counts} therefore reports the returned rows under
+\texttt{ONE ROW PER MATCH}.  The counts are identical across the three
+systems.  In this dataset, \texttt{optional\_pattern} produces the
+largest output and \texttt{alternation} the smallest.
 
 {\small
 \begin{table}[H]
 \centering
-\caption{Matches (= returned result rows, \texttt{ONE ROW PER
-  MATCH}) by pattern and dataset size; identical across all three
-  systems}
+\caption{Returned rows by pattern and size under \texttt{ONE ROW PER
+  MATCH}; counts are identical across the three systems}
 \label{tab:match_counts}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{rrrrrr}
 \toprule
-\textbf{Size (rows)} & \textbf{simple\_seq.} & \textbf{alternation} & \textbf{quantified} & \textbf{optional\_pat.} & \textbf{complex\_nested} \\
+\textbf{Size (rows)} & \textbf{\texttt{simple\_sequence}} &
+\textbf{\texttt{alternation}} & \textbf{\texttt{quantified}} &
+\textbf{\texttt{optional\_pattern}} &
+\textbf{\texttt{complex\_nested}} \\
 \midrule
 100{,}000 & 9{,}067 & 1{,}828 & 5{,}643 & 15{,}247 & 9{,}420 \\
 200{,}000 & 16{,}093 & 3{,}692 & 10{,}064 & 27{,}172 & 17{,}759 \\
@@ -93,16 +120,17 @@ and \texttt{alternation} the smallest.
 \section{Performance Summary by Pattern and by Dataset Size}
 \label{app:perf-summaries}
 
-Two views of the same 30 cells.  Table~\ref{tab:pattern_summary}
-averages throughput and execution time over the six dataset sizes, one
-row per pattern family.  Table~\ref{tab:size_summary} averages over the
-five families instead, one row per dataset size.  Both cover all three
-systems.
+Tables~\ref{tab:pattern_summary} and~\ref{tab:size_summary} summarize
+the same 30 cells.  The first groups results by pattern.  The second
+groups them by dataset size.  Each displayed time is an arithmetic
+mean of cell mean times.  Each displayed throughput is an arithmetic
+mean of cell throughputs; it is not recomputed from the displayed mean
+time.
 
 {\scriptsize
 \setlength{\tabcolsep}{4pt}
-\begin{longtable}{lrrrrrr}
-\caption{Pattern performance summary across all three systems (5 patterns $\times$ 6 dataset sizes = 30 tests per system)}
+\begin{longtable}{>{\ttfamily}lrrrrrr}
+\caption{Performance summary by pattern across the three systems}
 \label{tab:pattern_summary} \\
 \toprule
 & \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
@@ -119,18 +147,18 @@ systems.
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 8{,}582{,}225 & 0.10 & 610{,}551 & 1.27 & 1{,}202{,}967 & 0.73 \\
-alternation & 5{,}583{,}264 & 0.15 & 744{,}335 & 1.04 & 1{,}606{,}719 & 0.53 \\
-quantified & 8{,}022{,}635 & 0.10 & 600{,}410 & 1.35 & 1{,}041{,}152 & 0.85 \\
-optional\_pattern & 7{,}007{,}780 & 0.12 & 816{,}795 & 0.95 & 1{,}424{,}079 & 0.59 \\
-complex\_nested & 2{,}763{,}740 & 0.32 & 238{,}402 & 5.28 & 505{,}612 & 2.52 \\
+simple\_sequence & 8{,}134{,}451 & 0.10 & 610{,}551 & 1.27 & 1{,}202{,}967 & 0.73 \\
+alternation & 5{,}445{,}348 & 0.15 & 744{,}335 & 1.04 & 1{,}606{,}719 & 0.53 \\
+quantified & 7{,}751{,}889 & 0.11 & 600{,}410 & 1.35 & 1{,}041{,}152 & 0.85 \\
+optional\_pattern & 6{,}637{,}948 & 0.13 & 816{,}795 & 0.95 & 1{,}424{,}079 & 0.59 \\
+complex\_nested & 2{,}582{,}321 & 0.34 & 238{,}402 & 5.28 & 505{,}612 & 2.52 \\
 \end{longtable}
 }
 
 {\scriptsize
 \setlength{\tabcolsep}{4pt}
 \begin{longtable}{rrrrrrr}
-\caption{Performance summary by dataset size across all three systems (averaged over 5 patterns)}
+\caption{Performance summary by dataset size across the three systems}
 \label{tab:size_summary} \\
 \toprule
 & \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Trino~473}} & \multicolumn{2}{c}{\textbf{Oracle XE~21c}} \\
@@ -147,26 +175,36 @@ complex\_nested & 2{,}763{,}740 & 0.32 & 238{,}402 & 5.28 & 505{,}612 & 2.52 \\
 \endhead
 \bottomrule
 \endfoot
-100{,}000 & 4{,}808{,}313 & 0.02 & 402{,}647 & 0.26 & 1{,}078{,}819 & 0.10 \\
-200{,}000 & 5{,}963{,}517 & 0.04 & 555{,}411 & 0.38 & 1{,}206{,}014 & 0.18 \\
-400{,}000 & 6{,}654{,}397 & 0.07 & 618{,}312 & 0.72 & 1{,}175{,}201 & 0.38 \\
-800{,}000 & 6{,}981{,}644 & 0.14 & 642{,}407 & 1.89 & 1{,}141{,}999 & 0.99 \\
-1{,}600{,}000 & 7{,}108{,}438 & 0.28 & 683{,}152 & 3.82 & 1{,}165{,}356 & 2.00 \\
-2{,}222{,}742 & 6{,}835{,}263 & 0.39 & 710{,}662 & 4.79 & 1{,}169{,}247 & 2.62 \\
+100{,}000 & 5{,}029{,}576 & 0.02 & 402{,}647 & 0.26 & 1{,}078{,}819 & 0.10 \\
+200{,}000 & 5{,}843{,}626 & 0.04 & 555{,}411 & 0.38 & 1{,}206{,}014 & 0.18 \\
+400{,}000 & 6{,}015{,}052 & 0.08 & 618{,}312 & 0.72 & 1{,}175{,}201 & 0.38 \\
+800{,}000 & 6{,}608{,}913 & 0.15 & 642{,}407 & 1.89 & 1{,}141{,}999 & 0.99 \\
+1{,}600{,}000 & 6{,}886{,}390 & 0.29 & 683{,}152 & 3.82 & 1{,}165{,}356 & 2.00 \\
+2{,}222{,}742 & 6{,}278{,}793 & 0.43 & 710{,}662 & 4.79 & 1{,}169{,}247 & 2.62 \\
 \end{longtable}
 }
 
 \section{Detailed Cross-System Benchmark Matrices}
 \label{app:benchmark-matrices}
 
-This section holds the full per-cell benchmark matrices whose visual summaries appear in Chapter~\ref{chap:evaluation} (Figures~\ref{fig:execution_times}--\ref{fig:relative_comparison}).  Each table gives the exact numbers behind the corresponding chapter figure; the two share a single source of truth.
+This section gives the full values behind the benchmark figures in
+Chapter~\ref{chap:evaluation}.  Execution time includes result
+construction or retrieval.  For each measured run, throughput is input
+size divided by that run's time.  Cell throughput is the arithmetic
+mean of the retained per-run rates after applying the same
+1.5$\times$ IQR rule independently to throughput.  It is not input
+size divided by the cell's mean time.  Query memory is the incremental
+cgroup peak above the five-second baseline.  Footprint memory is the
+absolute cgroup peak.  Time and memory are also filtered independently
+and reported as means of the retained samples from twenty measured
+runs.
 
 % --- execution-time matrix (mean $\pm$ std) ---
 {\scriptsize
 \setlength{\tabcolsep}{3pt}
-\begin{longtable}{llrrr}
-\caption{Execution time (s), mean $\pm$ sample standard deviation
-  over the twenty measured runs, by pattern, dataset size, and system}
+\begin{longtable}{>{\ttfamily}llrrr}
+\caption{Execution time by pattern, size, and system
+  (seconds; mean $\pm$ sample standard deviation)}
 \label{tab:execution_times} \\
 \toprule
 \textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
@@ -179,47 +217,47 @@ This section holds the full per-cell benchmark matrices whose visual summaries a
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 100{,}000 & 0.02 $\pm$ 0.00 & 0.29 $\pm$ 0.04 & 0.09 $\pm$ 0.00 \\
-simple\_sequence & 200{,}000 & 0.03 $\pm$ 0.00 & 0.37 $\pm$ 0.03 & 0.15 $\pm$ 0.00 \\
-simple\_sequence & 400{,}000 & 0.05 $\pm$ 0.00 & 0.67 $\pm$ 0.04 & 0.36 $\pm$ 0.00 \\
-simple\_sequence & 800{,}000 & 0.08 $\pm$ 0.00 & 1.17 $\pm$ 0.03 & 0.68 $\pm$ 0.01 \\
-simple\_sequence & 1{,}600{,}000 & 0.17 $\pm$ 0.00 & 2.22 $\pm$ 0.14 & 1.30 $\pm$ 0.01 \\
-simple\_sequence & 2{,}222{,}742 & 0.24 $\pm$ 0.00 & 2.89 $\pm$ 0.12 & 1.82 $\pm$ 0.01 \\
+simple\_sequence & 100{,}000 & 0.015 $\pm$ 0.001 & 0.288 $\pm$ 0.040 & 0.088 $\pm$ 0.004 \\
+simple\_sequence & 200{,}000 & 0.025 $\pm$ 0.001 & 0.366 $\pm$ 0.033 & 0.151 $\pm$ 0.004 \\
+simple\_sequence & 400{,}000 & 0.049 $\pm$ 0.002 & 0.675 $\pm$ 0.040 & 0.358 $\pm$ 0.004 \\
+simple\_sequence & 800{,}000 & 0.093 $\pm$ 0.007 & 1.166 $\pm$ 0.029 & 0.678 $\pm$ 0.012 \\
+simple\_sequence & 1{,}600{,}000 & 0.170 $\pm$ 0.004 & 2.225 $\pm$ 0.144 & 1.298 $\pm$ 0.011 \\
+simple\_sequence & 2{,}222{,}742 & 0.269 $\pm$ 0.015 & 2.887 $\pm$ 0.117 & 1.816 $\pm$ 0.015 \\
 \midrule
-alternation & 100{,}000 & 0.02 $\pm$ 0.00 & 0.23 $\pm$ 0.03 & 0.07 $\pm$ 0.01 \\
-alternation & 200{,}000 & 0.04 $\pm$ 0.00 & 0.33 $\pm$ 0.03 & 0.13 $\pm$ 0.01 \\
-alternation & 400{,}000 & 0.07 $\pm$ 0.00 & 0.52 $\pm$ 0.01 & 0.24 $\pm$ 0.01 \\
-alternation & 800{,}000 & 0.13 $\pm$ 0.00 & 0.95 $\pm$ 0.02 & 0.48 $\pm$ 0.01 \\
-alternation & 1{,}600{,}000 & 0.26 $\pm$ 0.00 & 1.80 $\pm$ 0.02 & 0.95 $\pm$ 0.01 \\
-alternation & 2{,}222{,}742 & 0.37 $\pm$ 0.00 & 2.41 $\pm$ 0.01 & 1.31 $\pm$ 0.01 \\
+alternation & 100{,}000 & 0.023 $\pm$ 0.001 & 0.230 $\pm$ 0.027 & 0.073 $\pm$ 0.006 \\
+alternation & 200{,}000 & 0.040 $\pm$ 0.001 & 0.333 $\pm$ 0.026 & 0.129 $\pm$ 0.006 \\
+alternation & 400{,}000 & 0.072 $\pm$ 0.001 & 0.521 $\pm$ 0.013 & 0.244 $\pm$ 0.009 \\
+alternation & 800{,}000 & 0.141 $\pm$ 0.009 & 0.950 $\pm$ 0.016 & 0.477 $\pm$ 0.006 \\
+alternation & 1{,}600{,}000 & 0.265 $\pm$ 0.005 & 1.800 $\pm$ 0.024 & 0.947 $\pm$ 0.011 \\
+alternation & 2{,}222{,}742 & 0.373 $\pm$ 0.006 & 2.409 $\pm$ 0.015 & 1.309 $\pm$ 0.013 \\
 \midrule
-quantified & 100{,}000 & 0.02 $\pm$ 0.00 & 0.24 $\pm$ 0.02 & 0.10 $\pm$ 0.01 \\
-quantified & 200{,}000 & 0.03 $\pm$ 0.00 & 0.35 $\pm$ 0.02 & 0.18 $\pm$ 0.01 \\
-quantified & 400{,}000 & 0.05 $\pm$ 0.00 & 0.66 $\pm$ 0.03 & 0.37 $\pm$ 0.01 \\
-quantified & 800{,}000 & 0.09 $\pm$ 0.00 & 1.27 $\pm$ 0.03 & 0.79 $\pm$ 0.01 \\
-quantified & 1{,}600{,}000 & 0.17 $\pm$ 0.00 & 2.36 $\pm$ 0.05 & 1.53 $\pm$ 0.02 \\
-quantified & 2{,}222{,}742 & 0.25 $\pm$ 0.00 & 3.20 $\pm$ 0.06 & 2.12 $\pm$ 0.01 \\
+quantified & 100{,}000 & 0.016 $\pm$ 0.001 & 0.242 $\pm$ 0.019 & 0.105 $\pm$ 0.006 \\
+quantified & 200{,}000 & 0.028 $\pm$ 0.001 & 0.347 $\pm$ 0.015 & 0.183 $\pm$ 0.008 \\
+quantified & 400{,}000 & 0.053 $\pm$ 0.004 & 0.659 $\pm$ 0.030 & 0.369 $\pm$ 0.009 \\
+quantified & 800{,}000 & 0.089 $\pm$ 0.001 & 1.272 $\pm$ 0.032 & 0.788 $\pm$ 0.008 \\
+quantified & 1{,}600{,}000 & 0.178 $\pm$ 0.004 & 2.360 $\pm$ 0.049 & 1.534 $\pm$ 0.017 \\
+quantified & 2{,}222{,}742 & 0.281 $\pm$ 0.020 & 3.202 $\pm$ 0.060 & 2.121 $\pm$ 0.014 \\
 \midrule
-optional\_pattern & 100{,}000 & 0.02 $\pm$ 0.00 & 0.19 $\pm$ 0.01 & 0.08 $\pm$ 0.01 \\
-optional\_pattern & 200{,}000 & 0.03 $\pm$ 0.00 & 0.29 $\pm$ 0.01 & 0.15 $\pm$ 0.01 \\
-optional\_pattern & 400{,}000 & 0.05 $\pm$ 0.00 & 0.50 $\pm$ 0.03 & 0.28 $\pm$ 0.01 \\
-optional\_pattern & 800{,}000 & 0.10 $\pm$ 0.00 & 0.89 $\pm$ 0.05 & 0.53 $\pm$ 0.02 \\
-optional\_pattern & 1{,}600{,}000 & 0.21 $\pm$ 0.00 & 1.62 $\pm$ 0.02 & 1.03 $\pm$ 0.03 \\
-optional\_pattern & 2{,}222{,}742 & 0.30 $\pm$ 0.00 & 2.23 $\pm$ 0.03 & 1.46 $\pm$ 0.04 \\
+optional\_pattern & 100{,}000 & 0.018 $\pm$ 0.001 & 0.195 $\pm$ 0.011 & 0.085 $\pm$ 0.008 \\
+optional\_pattern & 200{,}000 & 0.031 $\pm$ 0.001 & 0.287 $\pm$ 0.010 & 0.149 $\pm$ 0.007 \\
+optional\_pattern & 400{,}000 & 0.063 $\pm$ 0.003 & 0.498 $\pm$ 0.026 & 0.283 $\pm$ 0.012 \\
+optional\_pattern & 800{,}000 & 0.110 $\pm$ 0.005 & 0.892 $\pm$ 0.046 & 0.528 $\pm$ 0.016 \\
+optional\_pattern & 1{,}600{,}000 & 0.218 $\pm$ 0.003 & 1.617 $\pm$ 0.019 & 1.031 $\pm$ 0.027 \\
+optional\_pattern & 2{,}222{,}742 & 0.331 $\pm$ 0.011 & 2.231 $\pm$ 0.035 & 1.455 $\pm$ 0.041 \\
 \midrule
-complex\_nested & 100{,}000 & 0.04 $\pm$ 0.00 & 0.33 $\pm$ 0.03 & 0.14 $\pm$ 0.01 \\
-complex\_nested & 200{,}000 & 0.07 $\pm$ 0.00 & 0.58 $\pm$ 0.03 & 0.28 $\pm$ 0.01 \\
-complex\_nested & 400{,}000 & 0.13 $\pm$ 0.00 & 1.27 $\pm$ 0.03 & 0.65 $\pm$ 0.01 \\
-complex\_nested & 800{,}000 & 0.30 $\pm$ 0.01 & 5.18 $\pm$ 0.18 & 2.47 $\pm$ 0.02 \\
-complex\_nested & 1{,}600{,}000 & 0.58 $\pm$ 0.01 & 11.11 $\pm$ 0.09 & 5.19 $\pm$ 0.03 \\
-complex\_nested & 2{,}222{,}742 & 0.81 $\pm$ 0.02 & 13.21 $\pm$ 0.05 & 6.41 $\pm$ 0.04 \\
+complex\_nested & 100{,}000 & 0.040 $\pm$ 0.001 & 0.332 $\pm$ 0.025 & 0.138 $\pm$ 0.010 \\
+complex\_nested & 200{,}000 & 0.076 $\pm$ 0.002 & 0.579 $\pm$ 0.027 & 0.281 $\pm$ 0.006 \\
+complex\_nested & 400{,}000 & 0.152 $\pm$ 0.005 & 1.271 $\pm$ 0.026 & 0.653 $\pm$ 0.010 \\
+complex\_nested & 800{,}000 & 0.317 $\pm$ 0.018 & 5.180 $\pm$ 0.177 & 2.466 $\pm$ 0.023 \\
+complex\_nested & 1{,}600{,}000 & 0.604 $\pm$ 0.013 & 11.108 $\pm$ 0.094 & 5.193 $\pm$ 0.032 \\
+complex\_nested & 2{,}222{,}742 & 0.875 $\pm$ 0.029 & 13.213 $\pm$ 0.050 & 6.411 $\pm$ 0.045 \\
 \end{longtable}
 }
 
 % --- throughput matrix ---
 {\scriptsize
 \setlength{\tabcolsep}{3pt}
-\begin{longtable}{llrrr}
+\begin{longtable}{>{\ttfamily}llrrr}
 \caption{Throughput (rows/s) by pattern, dataset size, and system}
 \label{tab:throughput} \\
 \toprule
@@ -233,52 +271,48 @@ complex\_nested & 2{,}222{,}742 & 0.81 $\pm$ 0.02 & 13.21 $\pm$ 0.05 & 6.41 $\pm
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 100{,}000 & 6{,}283{,}531 & 345{,}160 & 1{,}139{,}312 \\
-simple\_sequence & 200{,}000 & 7{,}849{,}829 & 550{,}642 & 1{,}326{,}602 \\
-simple\_sequence & 400{,}000 & 8{,}869{,}577 & 594{,}845 & 1{,}117{,}414 \\
-simple\_sequence & 800{,}000 & 9{,}561{,}907 & 686{,}654 & 1{,}177{,}723 \\
-simple\_sequence & 1{,}600{,}000 & 9{,}648{,}576 & 714{,}822 & 1{,}232{,}833 \\
-simple\_sequence & 2{,}222{,}742 & 9{,}279{,}933 & 771{,}181 & 1{,}223{,}919 \\
+simple\_sequence & 100{,}000 & 6{,}548{,}744 & 345{,}160 & 1{,}139{,}312 \\
+simple\_sequence & 200{,}000 & 8{,}011{,}331 & 550{,}642 & 1{,}326{,}602 \\
+simple\_sequence & 400{,}000 & 8{,}052{,}822 & 594{,}845 & 1{,}117{,}414 \\
+simple\_sequence & 800{,}000 & 8{,}559{,}369 & 686{,}654 & 1{,}177{,}723 \\
+simple\_sequence & 1{,}600{,}000 & 9{,}403{,}104 & 714{,}822 & 1{,}232{,}833 \\
+simple\_sequence & 2{,}222{,}742 & 8{,}231{,}338 & 771{,}181 & 1{,}223{,}919 \\
 \midrule
-alternation & 100{,}000 & 4{,}240{,}665 & 439{,}363 & 1{,}374{,}150 \\
-alternation & 200{,}000 & 5{,}258{,}273 & 604{,}704 & 1{,}555{,}973 \\
-alternation & 400{,}000 & 5{,}733{,}770 & 767{,}586 & 1{,}644{,}350 \\
-alternation & 800{,}000 & 6{,}056{,}037 & 842{,}631 & 1{,}677{,}404 \\
-alternation & 1{,}600{,}000 & 6{,}163{,}553 & 888{,}861 & 1{,}689{,}728 \\
-alternation & 2{,}222{,}742 & 6{,}047{,}286 & 922{,}867 & 1{,}698{,}711 \\
+alternation & 100{,}000 & 4{,}400{,}765 & 439{,}363 & 1{,}374{,}150 \\
+alternation & 200{,}000 & 4{,}977{,}878 & 604{,}704 & 1{,}555{,}973 \\
+alternation & 400{,}000 & 5{,}573{,}944 & 767{,}586 & 1{,}644{,}350 \\
+alternation & 800{,}000 & 5{,}709{,}821 & 842{,}631 & 1{,}677{,}404 \\
+alternation & 1{,}600{,}000 & 6{,}046{,}363 & 888{,}861 & 1{,}689{,}728 \\
+alternation & 2{,}222{,}742 & 5{,}963{,}317 & 922{,}867 & 1{,}698{,}711 \\
 \midrule
-quantified & 100{,}000 & 5{,}723{,}937 & 414{,}663 & 959{,}927 \\
-quantified & 200{,}000 & 7{,}273{,}340 & 577{,}203 & 1{,}095{,}056 \\
-quantified & 400{,}000 & 8{,}285{,}912 & 608{,}481 & 1{,}085{,}087 \\
-quantified & 800{,}000 & 8{,}925{,}818 & 629{,}296 & 1{,}015{,}188 \\
-quantified & 1{,}600{,}000 & 9{,}186{,}919 & 678{,}342 & 1{,}043{,}489 \\
-quantified & 2{,}222{,}742 & 8{,}739{,}883 & 694{,}474 & 1{,}048{,}168 \\
+quantified & 100{,}000 & 6{,}119{,}628 & 414{,}663 & 959{,}927 \\
+quantified & 200{,}000 & 7{,}046{,}915 & 577{,}203 & 1{,}095{,}056 \\
+quantified & 400{,}000 & 7{,}462{,}262 & 608{,}481 & 1{,}085{,}087 \\
+quantified & 800{,}000 & 8{,}955{,}091 & 629{,}296 & 1{,}015{,}188 \\
+quantified & 1{,}600{,}000 & 8{,}990{,}669 & 678{,}342 & 1{,}043{,}489 \\
+quantified & 2{,}222{,}742 & 7{,}936{,}771 & 694{,}474 & 1{,}048{,}168 \\
 \midrule
-optional\_pattern & 100{,}000 & 5{,}232{,}197 & 511{,}386 & 1{,}190{,}721 \\
-optional\_pattern & 200{,}000 & 6{,}623{,}613 & 698{,}482 & 1{,}340{,}712 \\
-optional\_pattern & 400{,}000 & 7{,}382{,}190 & 805{,}792 & 1{,}416{,}523 \\
-optional\_pattern & 800{,}000 & 7{,}658{,}400 & 898{,}860 & 1{,}515{,}186 \\
-optional\_pattern & 1{,}600{,}000 & 7{,}779{,}822 & 989{,}684 & 1{,}552{,}628 \\
-optional\_pattern & 2{,}222{,}742 & 7{,}370{,}455 & 996{,}563 & 1{,}528{,}702 \\
+optional\_pattern & 100{,}000 & 5{,}584{,}402 & 511{,}386 & 1{,}190{,}721 \\
+optional\_pattern & 200{,}000 & 6{,}542{,}233 & 698{,}482 & 1{,}340{,}712 \\
+optional\_pattern & 400{,}000 & 6{,}353{,}474 & 805{,}792 & 1{,}416{,}523 \\
+optional\_pattern & 800{,}000 & 7{,}287{,}498 & 898{,}860 & 1{,}515{,}186 \\
+optional\_pattern & 1{,}600{,}000 & 7{,}341{,}539 & 989{,}684 & 1{,}552{,}628 \\
+optional\_pattern & 2{,}222{,}742 & 6{,}718{,}543 & 996{,}563 & 1{,}528{,}702 \\
 \midrule
-complex\_nested & 100{,}000 & 2{,}561{,}236 & 302{,}662 & 729{,}985 \\
-complex\_nested & 200{,}000 & 2{,}812{,}530 & 346{,}023 & 711{,}728 \\
-complex\_nested & 400{,}000 & 3{,}000{,}536 & 314{,}855 & 612{,}631 \\
-complex\_nested & 800{,}000 & 2{,}706{,}055 & 154{,}594 & 324{,}492 \\
-complex\_nested & 1{,}600{,}000 & 2{,}763{,}321 & 144{,}049 & 308{,}102 \\
-complex\_nested & 2{,}222{,}742 & 2{,}738{,}760 & 168{,}226 & 346{,}736 \\
+complex\_nested & 100{,}000 & 2{,}494{,}341 & 302{,}662 & 729{,}985 \\
+complex\_nested & 200{,}000 & 2{,}639{,}771 & 346{,}023 & 711{,}728 \\
+complex\_nested & 400{,}000 & 2{,}632{,}758 & 314{,}855 & 612{,}631 \\
+complex\_nested & 800{,}000 & 2{,}532{,}787 & 154{,}594 & 324{,}492 \\
+complex\_nested & 1{,}600{,}000 & 2{,}650{,}277 & 144{,}049 & 308{,}102 \\
+complex\_nested & 2{,}222{,}742 & 2{,}543{,}994 & 168{,}226 & 346{,}736 \\
 \end{longtable}
 }
 
 % --- query-memory matrix ---
 {\scriptsize
 \setlength{\tabcolsep}{3pt}
-\begin{longtable}{llrrr}
-\caption{Query memory (MB) by pattern, dataset size, and system:
-  incremental peak of cgroup~v2 \texttt{memory.current} over a
-  five-second pre-query baseline, sampled every 50\,ms; IQR-filtered
-  mean of the twenty measured runs.  Trino's values sit at the JVM
-  floor discussed in Section~\ref{subsec:eval-memory}.}
+\begin{longtable}{>{\ttfamily}llrrr}
+\caption{Incremental query memory by pattern, size, and system (MB)}
 \label{tab:memory_cache} \\
 \toprule
 \textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
@@ -291,52 +325,48 @@ complex\_nested & 2{,}222{,}742 & 2{,}738{,}760 & 168{,}226 & 346{,}736 \\
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 100{,}000 & 4.80 & 1.05 & 3.14 \\
-simple\_sequence & 200{,}000 & 14.91 & 0.73 & 5.32 \\
-simple\_sequence & 400{,}000 & 29.24 & 0.79 & 10.91 \\
-simple\_sequence & 800{,}000 & 55.14 & 0.71 & 22.88 \\
-simple\_sequence & 1{,}600{,}000 & 118.31 & 20.75 & 43.45 \\
-simple\_sequence & 2{,}222{,}742 & 155.11 & 7.20 & 58.65 \\
+simple\_sequence & 100{,}000 & 5.87 & 1.05 & 3.14 \\
+simple\_sequence & 200{,}000 & 14.94 & 0.73 & 5.32 \\
+simple\_sequence & 400{,}000 & 28.68 & 0.79 & 10.91 \\
+simple\_sequence & 800{,}000 & 59.37 & 0.71 & 22.88 \\
+simple\_sequence & 1{,}600{,}000 & 115.20 & 20.75 & 43.45 \\
+simple\_sequence & 2{,}222{,}742 & 161.89 & 7.20 & 58.65 \\
 \midrule
-alternation & 100{,}000 & 6.33 & 0.64 & 2.42 \\
-alternation & 200{,}000 & 12.38 & 0.49 & 5.22 \\
-alternation & 400{,}000 & 22.56 & 0.56 & 11.62 \\
-alternation & 800{,}000 & 46.86 & 0.73 & 21.03 \\
-alternation & 1{,}600{,}000 & 92.36 & 2.20 & 42.12 \\
-alternation & 2{,}222{,}742 & 98.24 & 3.05 & 58.41 \\
+alternation & 100{,}000 & 6.06 & 0.64 & 2.42 \\
+alternation & 200{,}000 & 13.38 & 0.49 & 5.22 \\
+alternation & 400{,}000 & 24.22 & 0.56 & 11.62 \\
+alternation & 800{,}000 & 48.40 & 0.73 & 21.03 \\
+alternation & 1{,}600{,}000 & 90.12 & 2.20 & 42.12 \\
+alternation & 2{,}222{,}742 & 119.05 & 3.05 & 58.41 \\
 \midrule
-quantified & 100{,}000 & 6.61 & 0.68 & 2.65 \\
-quantified & 200{,}000 & 17.21 & 0.68 & 5.65 \\
-quantified & 400{,}000 & 33.56 & 0.73 & 10.69 \\
-quantified & 800{,}000 & 65.75 & 1.55 & 21.13 \\
-quantified & 1{,}600{,}000 & 131.43 & 2.42 & 42.21 \\
-quantified & 2{,}222{,}742 & 189.26 & 2.33 & 58.71 \\
+quantified & 100{,}000 & 6.83 & 0.68 & 2.65 \\
+quantified & 200{,}000 & 17.07 & 0.68 & 5.65 \\
+quantified & 400{,}000 & 33.31 & 0.73 & 10.69 \\
+quantified & 800{,}000 & 65.55 & 1.55 & 21.13 \\
+quantified & 1{,}600{,}000 & 129.68 & 2.42 & 42.21 \\
+quantified & 2{,}222{,}742 & 189.05 & 2.33 & 58.71 \\
 \midrule
-optional\_pattern & 100{,}000 & 6.11 & 0.53 & 2.72 \\
-optional\_pattern & 200{,}000 & 16.56 & 0.57 & 5.49 \\
-optional\_pattern & 400{,}000 & 32.99 & 0.71 & 10.62 \\
-optional\_pattern & 800{,}000 & 65.29 & 1.12 & 20.88 \\
-optional\_pattern & 1{,}600{,}000 & 125.68 & 0.86 & 41.76 \\
-optional\_pattern & 2{,}222{,}742 & 200.96 & 1.59 & 58.26 \\
+optional\_pattern & 100{,}000 & 8.45 & 0.53 & 2.72 \\
+optional\_pattern & 200{,}000 & 16.17 & 0.57 & 5.49 \\
+optional\_pattern & 400{,}000 & 32.35 & 0.71 & 10.62 \\
+optional\_pattern & 800{,}000 & 64.51 & 1.12 & 20.88 \\
+optional\_pattern & 1{,}600{,}000 & 126.43 & 0.86 & 41.76 \\
+optional\_pattern & 2{,}222{,}742 & 186.24 & 1.59 & 58.26 \\
 \midrule
-complex\_nested & 100{,}000 & 7.12 & 0.71 & 2.63 \\
-complex\_nested & 200{,}000 & 14.16 & 0.70 & 5.42 \\
-complex\_nested & 400{,}000 & 27.84 & 0.71 & 10.84 \\
-complex\_nested & 800{,}000 & 59.79 & 1.75 & 21.07 \\
-complex\_nested & 1{,}600{,}000 & 116.99 & 1.92 & 42.33 \\
-complex\_nested & 2{,}222{,}742 & 159.36 & 2.17 & 58.61 \\
+complex\_nested & 100{,}000 & 7.50 & 0.71 & 2.63 \\
+complex\_nested & 200{,}000 & 13.77 & 0.70 & 5.42 \\
+complex\_nested & 400{,}000 & 28.52 & 0.71 & 10.84 \\
+complex\_nested & 800{,}000 & 57.29 & 1.75 & 21.07 \\
+complex\_nested & 1{,}600{,}000 & 107.09 & 1.92 & 42.33 \\
+complex\_nested & 2{,}222{,}742 & 159.30 & 2.17 & 58.61 \\
 \end{longtable}
 }
 
 % --- footprint-memory matrix ---
 {\scriptsize
 \setlength{\tabcolsep}{3pt}
-\begin{longtable}{llrrr}
-\caption{Footprint memory (MB) by pattern, dataset size, and system:
-  absolute peak of cgroup~v2 \texttt{memory.current} during the
-  measured run (engine process for Pandas; whole container for
-  Trino/Oracle, restarted before each dataset size); IQR-filtered
-  mean of the twenty measured runs}
+\begin{longtable}{>{\ttfamily}llrrr}
+\caption{Absolute footprint memory by pattern, size, and system (MB)}
 \label{tab:memory_footprint} \\
 \toprule
 \textbf{Pattern} & \textbf{Size (rows)} & \textbf{Proposed} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
@@ -349,102 +379,70 @@ complex\_nested & 2{,}222{,}742 & 159.36 & 2.17 & 58.61 \\
 \endhead
 \bottomrule
 \endfoot
-simple\_sequence & 100{,}000 & 83.30 & 8{,}439.12 & 1{,}988.23 \\
-simple\_sequence & 200{,}000 & 103.34 & 8{,}832.13 & 1{,}938.77 \\
-simple\_sequence & 400{,}000 & 139.09 & 9{,}567.85 & 1{,}939.79 \\
-simple\_sequence & 800{,}000 & 204.14 & 10{,}999.08 & 1{,}993.00 \\
-simple\_sequence & 1{,}600{,}000 & 343.48 & 13{,}124.03 & 2{,}000.77 \\
-simple\_sequence & 2{,}222{,}742 & 462.43 & 14{,}882.81 & 2{,}048.95 \\
+simple\_sequence & 100{,}000 & 84.69 & 8{,}439.12 & 1{,}988.23 \\
+simple\_sequence & 200{,}000 & 105.82 & 8{,}832.13 & 1{,}938.77 \\
+simple\_sequence & 400{,}000 & 142.06 & 9{,}567.85 & 1{,}939.79 \\
+simple\_sequence & 800{,}000 & 219.85 & 10{,}999.08 & 1{,}993.00 \\
+simple\_sequence & 1{,}600{,}000 & 363.39 & 13{,}124.03 & 2{,}000.77 \\
+simple\_sequence & 2{,}222{,}742 & 492.84 & 14{,}882.81 & 2{,}048.95 \\
 \midrule
-alternation & 100{,}000 & 83.00 & 8{,}585.77 & 1{,}991.35 \\
-alternation & 200{,}000 & 97.61 & 9{,}243.71 & 1{,}953.46 \\
-alternation & 400{,}000 & 124.75 & 9{,}826.87 & 1{,}978.45 \\
-alternation & 800{,}000 & 181.93 & 11{,}007.22 & 2{,}013.57 \\
-alternation & 1{,}600{,}000 & 290.16 & 13{,}266.95 & 2{,}037.13 \\
-alternation & 2{,}222{,}742 & 365.18 & 14{,}958.94 & 2{,}049.51 \\
+alternation & 100{,}000 & 84.35 & 8{,}585.77 & 1{,}991.35 \\
+alternation & 200{,}000 & 101.29 & 9{,}243.71 & 1{,}953.46 \\
+alternation & 400{,}000 & 129.50 & 9{,}826.87 & 1{,}978.45 \\
+alternation & 800{,}000 & 190.33 & 11{,}007.22 & 2{,}013.57 \\
+alternation & 1{,}600{,}000 & 298.20 & 13{,}266.95 & 2{,}037.13 \\
+alternation & 2{,}222{,}742 & 397.95 & 14{,}958.94 & 2{,}049.51 \\
 \midrule
-quantified & 100{,}000 & 84.21 & 8{,}778.67 & 1{,}992.95 \\
-quantified & 200{,}000 & 105.04 & 9{,}248.96 & 1{,}988.29 \\
-quantified & 400{,}000 & 141.03 & 9{,}842.49 & 2{,}011.17 \\
-quantified & 800{,}000 & 209.01 & 11{,}023.44 & 2{,}001.70 \\
-quantified & 1{,}600{,}000 & 346.77 & 13{,}277.69 & 2{,}040.85 \\
-quantified & 2{,}222{,}742 & 480.23 & 14{,}969.31 & 2{,}055.91 \\
+quantified & 100{,}000 & 86.84 & 8{,}778.67 & 1{,}992.95 \\
+quantified & 200{,}000 & 107.49 & 9{,}248.96 & 1{,}988.29 \\
+quantified & 400{,}000 & 143.42 & 9{,}842.49 & 2{,}011.17 \\
+quantified & 800{,}000 & 219.66 & 11{,}023.44 & 2{,}001.70 \\
+quantified & 1{,}600{,}000 & 363.83 & 13{,}277.69 & 2{,}040.85 \\
+quantified & 2{,}222{,}742 & 507.62 & 14{,}969.31 & 2{,}055.91 \\
 \midrule
-optional\_pattern & 100{,}000 & 85.00 & 8{,}785.11 & 1{,}975.58 \\
-optional\_pattern & 200{,}000 & 105.70 & 9{,}253.51 & 1{,}976.71 \\
-optional\_pattern & 400{,}000 & 142.81 & 9{,}851.34 & 1{,}983.32 \\
-optional\_pattern & 800{,}000 & 214.25 & 11{,}037.41 & 1{,}959.17 \\
-optional\_pattern & 1{,}600{,}000 & 351.82 & 13{,}284.68 & 2{,}010.72 \\
-optional\_pattern & 2{,}222{,}742 & 505.71 & 14{,}980.42 & 2{,}037.57 \\
+optional\_pattern & 100{,}000 & 89.03 & 8{,}785.11 & 1{,}975.58 \\
+optional\_pattern & 200{,}000 & 107.90 & 9{,}253.51 & 1{,}976.71 \\
+optional\_pattern & 400{,}000 & 146.19 & 9{,}851.34 & 1{,}983.32 \\
+optional\_pattern & 800{,}000 & 228.40 & 11{,}037.41 & 1{,}959.17 \\
+optional\_pattern & 1{,}600{,}000 & 363.50 & 13{,}284.68 & 2{,}010.72 \\
+optional\_pattern & 2{,}222{,}742 & 523.97 & 14{,}980.42 & 2{,}037.57 \\
 \midrule
-complex\_nested & 100{,}000 & 86.72 & 8{,}789.27 & 1{,}961.78 \\
-complex\_nested & 200{,}000 & 105.21 & 9{,}257.82 & 1{,}966.53 \\
-complex\_nested & 400{,}000 & 140.45 & 9{,}864.07 & 1{,}979.70 \\
-complex\_nested & 800{,}000 & 214.57 & 11{,}054.94 & 1{,}960.23 \\
-complex\_nested & 1{,}600{,}000 & 356.40 & 13{,}309.19 & 2{,}030.26 \\
-complex\_nested & 2{,}222{,}742 & 480.64 & 14{,}992.90 & 2{,}057.17 \\
+complex\_nested & 100{,}000 & 89.84 & 8{,}789.27 & 1{,}961.78 \\
+complex\_nested & 200{,}000 & 107.47 & 9{,}257.82 & 1{,}966.53 \\
+complex\_nested & 400{,}000 & 146.49 & 9{,}864.07 & 1{,}979.70 \\
+complex\_nested & 800{,}000 & 229.89 & 11{,}054.94 & 1{,}960.23 \\
+complex\_nested & 1{,}600{,}000 & 366.45 & 13{,}309.19 & 2{,}030.26 \\
+complex\_nested & 2{,}222{,}742 & 507.50 & 14{,}992.90 & 2{,}057.17 \\
 \end{longtable}
 }
+
+The engine footprint is its process peak.  The Trino and Oracle
+footprints cover their full containers.  This difference matters when
+reading the absolute values in Tables~\ref{tab:overall_stats}
+and~\ref{tab:avg_footprint_by_size}.
 
 % --- overall statistics by system ---
 \begin{table}[H]
 \centering
-\caption{Overall benchmark test statistics by system.  Memory values
-  use the unified cgroup~v2 instrument: maximum incremental peak
-  (query memory) and maximum absolute peak (footprint), where the
-  footprint boundary is the engine process for Pandas and the whole
-  container for Trino/Oracle
-  (Section~\ref{subsec:eval-memory}).}
+\caption{Overall benchmark statistics by system}
 \label{tab:overall_stats}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{lrrrrrrr}
 \toprule
-\textbf{System} & \textbf{Tests} & \textbf{Sum of Mean} & \textbf{Avg Time} & \textbf{Avg Thr.} & \textbf{Thr. Range} & \textbf{Max Query} & \textbf{Max Footpr.} \\
-& & \textbf{Times (s)} & \textbf{(s)} & \textbf{(rows/s)} & \textbf{(rows/s)} & \textbf{Mem.\ (MB)} & \textbf{Mem.\ (MB)} \\
+\textbf{System} & \textbf{Cells} & \textbf{Cell-Mean Time} & \textbf{Avg Time} & \textbf{Avg Thr.} & \textbf{Thr. Range} & \textbf{Max Query} & \textbf{Max Footpr.} \\
+& & \textbf{Total (s)} & \textbf{(s)} & \textbf{(rows/s)} & \textbf{(rows/s)} & \textbf{Mem.\ (MB)} & \textbf{Mem.\ (MB)} \\
 \midrule
-Proposed engine & 30 & 4.72 & 0.16 & 6{,}391{,}929 & 2{,}561{,}236--9{,}648{,}576 & 200.96 & 505.71 \\
+Proposed engine & 30 & 5.02 & 0.17 & 6{,}110{,}392 & 2{,}494{,}341--9{,}403{,}104 & 189.05 & 523.97 \\
 Trino~473 & 30 & 59.33 & 1.98 & 602{,}098 & 144{,}049--996{,}563 & 20.75 & 14{,}992.90 \\
 Oracle XE~21c & 30 & 31.34 & 1.04 & 1{,}156{,}106 & 308{,}102--1{,}698{,}711 & 58.71 & 2{,}057.17 \\
 \bottomrule
 \end{tabular}}
 \end{table}
 
-% --- average time by pattern ---
-\begin{table}[H]
-\centering
-\caption{Average execution time by pattern, all three systems}
-\label{tab:avg_time_by_pattern}
-\begin{tabular}{lrrr}
-\toprule
-\textbf{Pattern} & \textbf{Pandas (s)} & \textbf{Trino~473 (s)} & \textbf{Oracle XE~21c (s)} \\
-\midrule
-simple\_sequence & 0.10 & 1.27 & 0.73 \\
-alternation & 0.15 & 1.04 & 0.53 \\
-quantified & 0.10 & 1.35 & 0.85 \\
-optional\_pattern & 0.12 & 0.95 & 0.59 \\
-complex\_nested & 0.32 & 5.28 & 2.52 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-% --- average time by dataset size ---
-\begin{table}[H]
-\centering
-\caption{Average execution time by dataset size, all three systems}
-\label{tab:avg_time_by_size}
-\begin{tabular}{rrrr}
-\toprule
-\textbf{Size (rows)} & \textbf{Pandas (s)} & \textbf{Trino~473 (s)} & \textbf{Oracle XE~21c (s)} \\
-\midrule
-100{,}000 & 0.02 & 0.26 & 0.10 \\
-200{,}000 & 0.04 & 0.38 & 0.18 \\
-400{,}000 & 0.07 & 0.72 & 0.38 \\
-800{,}000 & 0.14 & 1.89 & 0.99 \\
-1{,}600{,}000 & 0.28 & 3.82 & 2.00 \\
-2{,}222{,}742 & 0.39 & 4.79 & 2.62 \\
-\bottomrule
-\end{tabular}
-\end{table}
+The cell-mean time total adds the 30 cell mean times; it is not the
+duration of one workload run.  Average time is the arithmetic mean of
+those 30 cell means.  Average throughput is the arithmetic mean of the
+30 cell throughputs defined above.
 
 % --- average query memory by dataset size ---
 \begin{table}[H]
@@ -453,14 +451,14 @@ complex\_nested & 0.32 & 5.28 & 2.52 \\
 \label{tab:avg_memory_by_size}
 \begin{tabular}{rrrr}
 \toprule
-\textbf{Size (rows)} & \textbf{Pandas (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle XE~21c (MB)} \\
+\textbf{Size (rows)} & \textbf{Proposed (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle XE~21c (MB)} \\
 \midrule
-100{,}000 & 6.19 & 0.72 & 2.71 \\
-200{,}000 & 15.04 & 0.63 & 5.42 \\
-400{,}000 & 29.24 & 0.70 & 10.93 \\
-800{,}000 & 58.57 & 1.17 & 21.40 \\
-1{,}600{,}000 & 116.95 & 5.63 & 42.37 \\
-2{,}222{,}742 & 160.58 & 3.27 & 58.53 \\
+100{,}000 & 6.94 & 0.72 & 2.71 \\
+200{,}000 & 15.07 & 0.63 & 5.42 \\
+400{,}000 & 29.42 & 0.70 & 10.93 \\
+800{,}000 & 59.02 & 1.17 & 21.40 \\
+1{,}600{,}000 & 113.70 & 5.63 & 42.37 \\
+2{,}222{,}742 & 163.11 & 3.27 & 58.53 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -472,14 +470,14 @@ complex\_nested & 0.32 & 5.28 & 2.52 \\
 \label{tab:avg_footprint_by_size}
 \begin{tabular}{rrrr}
 \toprule
-\textbf{Size (rows)} & \textbf{Pandas (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle XE~21c (MB)} \\
+\textbf{Size (rows)} & \textbf{Proposed (MB)} & \textbf{Trino~473 (MB)} & \textbf{Oracle XE~21c (MB)} \\
 \midrule
-100{,}000 & 84.45 & 8{,}675.59 & 1{,}981.98 \\
-200{,}000 & 103.38 & 9{,}167.22 & 1{,}964.75 \\
-400{,}000 & 137.63 & 9{,}790.52 & 1{,}978.49 \\
-800{,}000 & 204.78 & 11{,}024.42 & 1{,}985.53 \\
-1{,}600{,}000 & 337.73 & 13{,}252.51 & 2{,}023.95 \\
-2{,}222{,}742 & 458.84 & 14{,}956.88 & 2{,}049.82 \\
+100{,}000 & 86.95 & 8{,}675.59 & 1{,}981.98 \\
+200{,}000 & 106.00 & 9{,}167.22 & 1{,}964.75 \\
+400{,}000 & 141.53 & 9{,}790.52 & 1{,}978.49 \\
+800{,}000 & 217.63 & 11{,}024.42 & 1{,}985.53 \\
+1{,}600{,}000 & 351.08 & 13{,}252.51 & 2{,}023.95 \\
+2{,}222{,}742 & 485.97 & 14{,}956.88 & 2{,}049.82 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -487,38 +485,45 @@ complex\_nested & 0.32 & 5.28 & 2.52 \\
 % --- cross-system correctness ---
 \begin{table}[H]
 \centering
-\caption{Cross-system correctness by pattern (6 dataset sizes each)}
+\caption{Cross-system correctness by pattern across six dataset sizes}
 \label{tab:cross_system_correctness}
-\begin{tabular}{lccc}
+\begin{tabular}{>{\ttfamily}lccc}
 \toprule
 \textbf{Pattern} & \textbf{Proposed engine} & \textbf{Trino~473} & \textbf{Oracle XE~21c} \\
 \midrule
-simple\_sequence & proposed output & 6/6 identical & 6/6 identical \\
-alternation & proposed output & 6/6 identical & 6/6 identical \\
-quantified & proposed output & 6/6 identical & 6/6 identical \\
-optional\_pattern & proposed output & 6/6 identical & 6/6 identical \\
-complex\_nested & proposed output & 6/6 identical & 6/6 identical \\
+simple\_sequence & reference result & 6/6 identical & 6/6 identical \\
+alternation & reference result & 6/6 identical & 6/6 identical \\
+quantified & reference result & 6/6 identical & 6/6 identical \\
+optional\_pattern & reference result & 6/6 identical & 6/6 identical \\
+complex\_nested & reference result & 6/6 identical & 6/6 identical \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 % --- relative comparison ---
+For each metric, the relative value is the ratio of the two
+arithmetic means across the 30 cells:
+\[
+100\left(\frac{\overline{x}_{\mathrm{proposed}}}
+{\overline{x}_{\mathrm{reference}}}-1\right).
+\]
+It is not the arithmetic mean of 30 cell-wise percentage differences.
+Lower execution time and memory are better.  Higher throughput is
+better.
+
 \begin{table}[H]
 \centering
-\caption{Proposed engine relative to each SQL engine, averaged over
-  the 30 benchmark cells (a positive value means the proposed engine
-  is higher on that metric, a negative value lower).  Lower is better
-  for execution time and both memory metrics; higher is better for
-  throughput.}
+\caption{Relative difference between the proposed engine and each SQL
+  engine, based on arithmetic means across 30 cells}
 \label{tab:relative_comparison}
 \begin{tabular}{lrr}
 \toprule
 \textbf{Metric} & \textbf{vs.\ Trino~473} & \textbf{vs.\ Oracle XE~21c} \\
 \midrule
-Execution time & $-92\%$ & $-85\%$ \\
-Throughput & $+962\%$ & $+453\%$ \\
-Query memory & $+3087\%$ & $+173\%$ \\
-Operational footprint & $-98\%$ & $-89\%$ \\
+Execution time & $-92\%$ & $-84\%$ \\
+Throughput & $+915\%$ & $+429\%$ \\
+Query memory & $+3093\%$ & $+174\%$ \\
+Operational footprint & $-98\%$ & $-88\%$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -527,30 +532,25 @@ Operational footprint & $-98\%$ & $-89\%$ \\
 \section{Ordered vs.\ Shuffled Input (Sorting Scenarios)}
 \label{app:sorting-scenarios}
 
-These tables give the per-cell numbers behind the sorting-scenario
-analysis of Section~\ref{subsec:eval-ordering}
-(Figures~\ref{fig:ordering_scenarios} and~\ref{fig:sort_cost_scaling}).
-Scenario~A orders an already-monotonic \texttt{seq\_id}, so the
-proposed engine skips \texttt{sort\_values}; Scenario~B shuffles the
-physical row order, forcing a genuine sort in all three systems.  The
-logical order after sorting is unchanged, so match counts are
-byte-identical between the two scenarios (verified for all 90 cells);
-only the sort cost is added.
+These tables support the ordering analysis in
+Section~\ref{subsec:eval-ordering}.  Scenario~A uses input that is
+already ordered by \texttt{seq\_id}.  Scenario~B shuffles the physical
+rows before the same logical ordering request.  The logical order and
+match counts remain unchanged in all 90
+system--pattern--size cells.
 
 \begin{table}[H]
 \centering
-\caption{Average execution time under ordered (Scenario~A) and
-  shuffled (Scenario~B) input, over all 30 pattern--size cells per
-  system.  Scenario~B forces a genuine sort in every system.}
+\caption{Average execution time for ordered and shuffled input}
 \label{tab:ordering_scenarios}
 \begin{tabular}{lrrr}
 \toprule
 \textbf{System} & \textbf{A ordered (s)} & \textbf{B shuffled (s)}
   & \textbf{Slowdown} \\
 \midrule
-Proposed engine & 0.16 & 0.23 & $1.44\times$ \\
-Trino~473              & 1.98 & 2.19 & $1.11\times$ \\
-Oracle XE~21c          & 1.04 & 1.08 & $1.04\times$ \\
+Proposed engine & 0.167 & 0.240 & $1.43\times$ \\
+Trino~473 & 1.978 & 2.193 & $1.11\times$ \\
+Oracle XE~21c & 1.045 & 1.083 & $1.04\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -559,12 +559,8 @@ Oracle XE~21c          & 1.04 & 1.08 & $1.04\times$ \\
 \setlength{\tabcolsep}{4pt}
 \begin{table}[H]
 \centering
-\caption{Average execution time by dataset size under ordered
-  (Scenario~A, ``ord'') and shuffled (Scenario~B, ``shuf'') input, and
-  the per-size slowdown, for each system (averaged over the five
-  pattern families).  Cells near 0.1\,s are noisy; Oracle's 100\,K
-  reading ($0.88\times$) is run-to-run variance, not a real speedup
-  from shuffling.}
+\caption{Execution time and slowdown by size for ordered
+  (``ord'') and shuffled (``shuf'') input}
 \label{tab:ordering_by_size}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{rrrrrrrrrr}
@@ -577,12 +573,12 @@ Oracle XE~21c          & 1.04 & 1.08 & $1.04\times$ \\
 & \textbf{ord} & \textbf{shuf} & \textbf{slow}
 & \textbf{ord} & \textbf{shuf} & \textbf{slow} \\
 \midrule
-100{,}000 & 0.02 & 0.03 & 1.29$\times$ & 0.26 & 0.28 & 1.10$\times$ & 0.10 & 0.09 & 0.88$\times$ \\
-200{,}000 & 0.04 & 0.05 & 1.32$\times$ & 0.38 & 0.40 & 1.05$\times$ & 0.18 & 0.17 & 0.93$\times$ \\
-400{,}000 & 0.07 & 0.10 & 1.36$\times$ & 0.72 & 0.78 & 1.07$\times$ & 0.38 & 0.38 & 0.99$\times$ \\
-800{,}000 & 0.14 & 0.19 & 1.38$\times$ & 1.89 & 1.97 & 1.04$\times$ & 0.99 & 0.99 & 1.00$\times$ \\
-1{,}600{,}000 & 0.28 & 0.40 & 1.45$\times$ & 3.82 & 4.18 & 1.09$\times$ & 2.00 & 2.08 & 1.04$\times$ \\
-2{,}222{,}742 & 0.39 & 0.59 & 1.48$\times$ & 4.79 & 5.55 & 1.16$\times$ & 2.62 & 2.81 & 1.07$\times$ \\
+100{,}000 & 0.022 & 0.028 & 1.25$\times$ & 0.257 & 0.283 & 1.10$\times$ & 0.098 & 0.086 & 0.88$\times$ \\
+200{,}000 & 0.040 & 0.052 & 1.30$\times$ & 0.382 & 0.402 & 1.05$\times$ & 0.178 & 0.166 & 0.93$\times$ \\
+400{,}000 & 0.078 & 0.098 & 1.26$\times$ & 0.725 & 0.775 & 1.07$\times$ & 0.381 & 0.377 & 0.99$\times$ \\
+800{,}000 & 0.150 & 0.207 & 1.38$\times$ & 1.892 & 1.973 & 1.04$\times$ & 0.987 & 0.986 & 1.00$\times$ \\
+1{,}600{,}000 & 0.287 & 0.426 & 1.48$\times$ & 3.822 & 4.180 & 1.09$\times$ & 2.001 & 2.077 & 1.04$\times$ \\
+2{,}222{,}742 & 0.426 & 0.627 & 1.47$\times$ & 4.788 & 5.546 & 1.16$\times$ & 2.622 & 2.810 & 1.07$\times$ \\
 \bottomrule
 \end{tabular}}
 \end{table}
@@ -590,121 +586,137 @@ Oracle XE~21c          & 1.04 & 1.08 & $1.04\times$ \\
 
 \begin{table}[H]
 \centering
-\caption{Incremental sorting cost of the proposed engine by dataset
-  size: Scenario~A (ordered) and~B (shuffled) times, their difference
-  (the isolated sort cost), the same cost per row, and that cost
-  normalised by $n\log_2 n$.  The per-row cost drifts upward while the
-  $n\log_2 n$-normalised cost stays within a narrow band, consistent
-  with an $O(n\log n)$ ordering step whose logarithmic factor changes
-  little over these sizes.}
+\caption{Observed ordered--shuffled time difference for the proposed
+  engine by dataset size}
 \label{tab:sort_cost_by_size}
 \begin{tabular}{rrrrrr}
 \toprule
 \textbf{Size (rows)} & \textbf{A (s)} & \textbf{B (s)}
-  & \textbf{Sort (ms)} & \textbf{ns/row} & \textbf{ns/$(n\log_2 n)$} \\
+  & \textbf{$\Delta t$ (ms)} & \textbf{$\Delta t/n$ (ns)}
+  & \textbf{$\Delta t/(n\log_2 n)$ (ns)} \\
 \midrule
-100{,}000 & 0.023 & 0.030 & 6.7 & 67.4 & 4.06 \\
-200{,}000 & 0.038 & 0.051 & 12.2 & 61.2 & 3.48 \\
-400{,}000 & 0.070 & 0.096 & 25.6 & 64.0 & 3.44 \\
-800{,}000 & 0.141 & 0.195 & 53.8 & 67.3 & 3.43 \\
-1{,}600{,}000 & 0.277 & 0.400 & 123.2 & 77.0 & 3.74 \\
-2{,}222{,}742 & 0.395 & 0.586 & 191.2 & 86.0 & 4.08 \\
+100{,}000 & 0.022 & 0.028 & 5.6 & 56.0 & 3.37 \\
+200{,}000 & 0.040 & 0.052 & 12.2 & 61.0 & 3.46 \\
+400{,}000 & 0.078 & 0.098 & 20.5 & 51.2 & 2.75 \\
+800{,}000 & 0.150 & 0.207 & 56.6 & 70.8 & 3.61 \\
+1{,}600{,}000 & 0.287 & 0.426 & 138.9 & 86.8 & 4.21 \\
+2{,}222{,}742 & 0.426 & 0.627 & 201.5 & 90.7 & 4.30 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+The difference between Scenarios~A and~B estimates the extra cost
+associated with shuffled input.  Ordering is the main added operation
+in the proposed engine, but cache and row-layout effects may also
+contribute.  The difference per row rises slightly, while the value
+divided by $n\log_2 n$ stays in a narrow range.  This is consistent
+with comparison-based sorting over the tested sizes; it does not prove
+the asymptotic bound.  The Oracle value below one at 100\,K rows is
+within small-run variation and does not show that shuffling improves
+execution.
+
 \begin{table}[htbp]
 \centering
-\caption{Pattern-driven worst case: average execution time on a
-  state-dependent \texttt{DEFINE} query (\texttt{price > AVG(A.price)}),
-  which the databases evaluate natively and which the engine now
-  compiles into a single $O(n)$ running-aggregate pass rather than
-  falling back to its backtracking searcher.  Ordered input (no sort);
-  all three systems produce identical output.  Plotted in
-  Figure~\ref{fig:worstcase_coverage}.}
+\caption{Mean execution time for the state-dependent aggregate
+  pattern (twenty proposed-engine runs and two SQL-engine runs)}
 \label{tab:worstcase_coverage}
 \begin{tabular}{rrrr}
 \toprule
 \textbf{Size (rows)} & \textbf{Proposed engine (s)}
   & \textbf{Trino~473 (s)} & \textbf{Oracle XE~21c (s)} \\
 \midrule
-100{,}000 & 0.06 & 0.71 & 0.07 \\
-200{,}000 & 0.11 & 0.53 & 0.13 \\
-400{,}000 & 0.22 & 3.65 & 0.35 \\
-800{,}000 & 0.43 & 5.14 & 0.67 \\
-1{,}600{,}000 & 0.85 & 6.43 & 1.63 \\
-2{,}222{,}742 & 1.19 & 8.67 & 2.32 \\
+100{,}000 & 0.060 & 0.713 & 0.073 \\
+200{,}000 & 0.107 & 0.535 & 0.133 \\
+400{,}000 & 0.229 & 3.649 & 0.349 \\
+800{,}000 & 0.463 & 5.136 & 0.666 \\
+1{,}600{,}000 & 0.921 & 6.432 & 1.630 \\
+2{,}222{,}742 & 1.279 & 8.665 & 2.324 \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+This pattern uses \texttt{price > AVG(A.price)} in \texttt{DEFINE}.
+For this supported form, the engine evaluates the running aggregate
+incrementally in one scan.  Ordered input lets it skip sorting after
+checking the order.  All three systems return the same output.
 
 % ----------------------------------------------------------------
 \section{Stress-Test Results}
 \label{app:stress-tables}
 % ----------------------------------------------------------------
 
-The stress test (Section~\ref{subsec:eval-stress}) applies the unified
-measurement instrument to real Amazon Reviews~2023 data, from 5\,M to
-227.9\,M rows, under the stress protocol listed above.  One thing
-differs between the systems, and it has to: each reads the data in the
-only mode that scales for it.  The engine holds it in RAM, Trino reads a
-disk-backed Hive/Parquet table, and Oracle~21c Enterprise Edition reads
-a native heap bulk-loaded by direct path.  Every completed database cell
-was checked against the engine's output.
+The stress test in Section~\ref{subsec:eval-stress} uses real Amazon
+Reviews~2023 data from 5\,M to 227.9\,M rows.  Within this campaign,
+the three systems use equivalent queries and logical rows. The storage representations also differ.  The
+proposed engine holds a DataFrame in RAM.  Trino scans a Hive/Parquet
+table.  Oracle~21c Enterprise Edition scans a native table.  Loading
+time is excluded.  Every completed database result was checked against
+the engine output.  The recorded proposed-engine measurements and
+retained database measurements were collected in separate campaigns
+under the same stress-test protocol.  In total, 103 of 105 cells
+completed: 35 proposed-engine cells, 35 Oracle cells, and 33 Trino
+cells.  The two incomplete Trino cells reached the stated time limit.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{images/viz_stress_time_grid.png}
-  \caption[Per-pattern execution-time scaling]{Per-pattern
-    execution-time scaling on real data under a one-CPU and 58\,GB
-    resource budget, with one panel per pattern family.  Completed runs
-    remain close to linear over the evaluated sizes, although Oracle
-    shows some super-linear drift.  The engine records the lowest
-    execution time in every completed comparison.  Trino's
-    \texttt{complex\_nested} runs reach the 600-second time limit at
-    160~million and 227.9~million rows, shown by red $\times$ symbols.}
+  \caption[Per-pattern execution-time scaling]{Execution-time scaling
+    by pattern under one CPU core and a 58\,GB memory limit.  Red $\times$ symbols mark
+    Trino runs that reached the 600-second limit.}
   \label{fig:stress_time_grid}
 \end{figure}
 
+Execution time is reported as the mean and sample standard deviation
+of retained samples from five measured runs.  Stress-test throughput
+is the arithmetic mean of the retained per-run rates, using the same
+independent 1.5$\times$ IQR rule.  \textit{wall} means that the query
+reached the 600\,s limit.  Absolute memory includes the idle engine or
+database baseline.  It covers the proposed-engine process or the full
+database container.  Incremental memory subtracts that baseline.
+Oracle's native value is its session PGA high-water mark.  Trino's
+native value is its reported query peak.  A small incremental Trino
+value can therefore mean that memory was already reserved by the JVM;
+it does not mean that the server had no memory footprint.
+
 \begin{table}[htbp]
 \centering
-\caption{Stress-test execution time (seconds, mean\,$\pm$\,std over five
-  measured runs) for the three systems under identical conditions
-  (1 CPU core, 58\,GB, real Amazon Reviews~2023 data, 5\,M--227.9\,M rows).
-  \textit{wall} marks a query stopped at the 600\,s per-query time budget.
-  Every completed database cell matched the engine's output row-for-row.}
+\caption{Stress-test execution time (seconds; mean\,$\pm$\,sample
+  standard deviation of retained samples from five measured runs)}
 \label{tab:stress_volume}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}rccccc@{}}
 \toprule
-\textbf{Size (rows)} & \textbf{simple} & \textbf{altern.} & \textbf{quant.} & \textbf{optional} & \textbf{complex} \\
+\textbf{Size (rows)} & \textbf{\texttt{simple\_sequence}} &
+\textbf{\texttt{alternation}} & \textbf{\texttt{quantified}} &
+\textbf{\texttt{optional\_pattern}} &
+\textbf{\texttt{complex\_nested}} \\
 \midrule
 \multicolumn{6}{@{}l}{\textit{Proposed engine}}\\*
-5{,}000{,}000 & 0.6\,$\pm$\,0.0 & 0.7\,$\pm$\,0.0 & 0.6\,$\pm$\,0.0 & 0.6\,$\pm$\,0.0 & 2.2\,$\pm$\,0.0 \\
-10{,}000{,}000 & 1.4\,$\pm$\,0.0 & 1.3\,$\pm$\,0.0 & 1.5\,$\pm$\,0.0 & 1.8\,$\pm$\,0.0 & 4.6\,$\pm$\,0.1 \\
-20{,}000{,}000 & 3.0\,$\pm$\,0.0 & 2.6\,$\pm$\,0.0 & 3.1\,$\pm$\,0.0 & 3.6\,$\pm$\,0.0 & 9.3\,$\pm$\,0.1 \\
-40{,}000{,}000 & 5.9\,$\pm$\,0.0 & 5.3\,$\pm$\,0.0 & 6.2\,$\pm$\,0.0 & 7.2\,$\pm$\,0.0 & 19.0\,$\pm$\,0.1 \\
-80{,}000{,}000 & 10.5\,$\pm$\,0.6 & 9.1\,$\pm$\,0.0 & 11.1\,$\pm$\,0.4 & 13.3\,$\pm$\,0.6 & 36.9\,$\pm$\,0.6 \\
-160{,}000{,}000 & 20.8\,$\pm$\,0.2 & 17.9\,$\pm$\,0.0 & 23.7\,$\pm$\,0.1 & 28.0\,$\pm$\,0.0 & 74.6\,$\pm$\,1.3 \\
-227{,}899{,}533 & 30.9\,$\pm$\,0.1 & 24.7\,$\pm$\,0.0 & 33.5\,$\pm$\,0.1 & 40.1\,$\pm$\,0.0 & 102.6\,$\pm$\,2.8 \\
+5{,}000{,}000 & 0.60\,$\pm$\,0.01 & 0.67\,$\pm$\,0.00 & 0.60\,$\pm$\,0.01 & 0.70\,$\pm$\,0.01 & 2.34\,$\pm$\,0.02 \\
+10{,}000{,}000 & 1.30\,$\pm$\,0.00 & 1.36\,$\pm$\,0.01 & 1.37\,$\pm$\,0.02 & 1.57\,$\pm$\,0.00 & 4.81\,$\pm$\,0.09 \\
+20{,}000{,}000 & 2.67\,$\pm$\,0.02 & 2.73\,$\pm$\,0.02 & 2.72\,$\pm$\,0.03 & 3.11\,$\pm$\,0.02 & 9.54\,$\pm$\,0.06 \\
+40{,}000{,}000 & 5.26\,$\pm$\,0.01 & 5.29\,$\pm$\,0.01 & 5.44\,$\pm$\,0.05 & 6.19\,$\pm$\,0.07 & 19.50\,$\pm$\,0.38 \\
+80{,}000{,}000 & 9.97\,$\pm$\,0.14 & 9.36\,$\pm$\,0.02 & 10.09\,$\pm$\,0.25 & 11.62\,$\pm$\,0.09 & 38.78\,$\pm$\,1.38 \\
+160{,}000{,}000 & 19.49\,$\pm$\,0.02 & 19.04\,$\pm$\,0.27 & 20.87\,$\pm$\,0.19 & 23.94\,$\pm$\,0.06 & 77.03\,$\pm$\,2.24 \\
+227{,}899{,}533 & 27.79\,$\pm$\,0.04 & 24.81\,$\pm$\,0.15 & 29.34\,$\pm$\,0.08 & 33.76\,$\pm$\,0.06 & 105.99\,$\pm$\,2.28 \\
 \addlinespace[3pt]
 \multicolumn{6}{@{}l}{\textit{Oracle~21c EE}}\\*
-5{,}000{,}000 & 4.3\,$\pm$\,0.0 & 1.9\,$\pm$\,0.0 & 4.8\,$\pm$\,0.0 & 3.1\,$\pm$\,0.0 & 7.4\,$\pm$\,0.0 \\
-10{,}000{,}000 & 8.8\,$\pm$\,0.0 & 3.7\,$\pm$\,0.0 & 10.0\,$\pm$\,0.1 & 6.2\,$\pm$\,0.0 & 15.3\,$\pm$\,0.1 \\
-20{,}000{,}000 & 18.1\,$\pm$\,0.1 & 7.2\,$\pm$\,0.0 & 20.5\,$\pm$\,0.0 & 12.6\,$\pm$\,0.1 & 31.2\,$\pm$\,0.1 \\
-40{,}000{,}000 & 48.9\,$\pm$\,0.4 & 23.5\,$\pm$\,0.6 & 54.5\,$\pm$\,0.7 & 36.0\,$\pm$\,0.4 & 78.8\,$\pm$\,0.7 \\
-80{,}000{,}000 & 100.6\,$\pm$\,1.2 & 46.1\,$\pm$\,1.3 & 112.0\,$\pm$\,1.2 & 71.7\,$\pm$\,1.1 & 160.3\,$\pm$\,1.4 \\
-160{,}000{,}000 & 226.6\,$\pm$\,2.0 & 103.4\,$\pm$\,3.8 & 243.3\,$\pm$\,4.4 & 153.3\,$\pm$\,3.4 & 335.5\,$\pm$\,4.4 \\
-227{,}899{,}533 & 355.6\,$\pm$\,8.9 & 183.5\,$\pm$\,9.1 & 371.8\,$\pm$\,8.0 & 255.9\,$\pm$\,7.6 & 498.0\,$\pm$\,9.5 \\
+5{,}000{,}000 & 4.27\,$\pm$\,0.05 & 1.88\,$\pm$\,0.01 & 4.83\,$\pm$\,0.02 & 3.10\,$\pm$\,0.02 & 7.42\,$\pm$\,0.03 \\
+10{,}000{,}000 & 8.78\,$\pm$\,0.00 & 3.65\,$\pm$\,0.02 & 9.95\,$\pm$\,0.11 & 6.22\,$\pm$\,0.01 & 15.25\,$\pm$\,0.12 \\
+20{,}000{,}000 & 18.05\,$\pm$\,0.08 & 7.22\,$\pm$\,0.02 & 20.55\,$\pm$\,0.05 & 12.55\,$\pm$\,0.05 & 31.18\,$\pm$\,0.12 \\
+40{,}000{,}000 & 48.89\,$\pm$\,0.41 & 23.54\,$\pm$\,0.63 & 54.54\,$\pm$\,0.66 & 35.98\,$\pm$\,0.45 & 78.75\,$\pm$\,0.72 \\
+80{,}000{,}000 & 100.55\,$\pm$\,1.16 & 46.08\,$\pm$\,1.26 & 111.99\,$\pm$\,1.15 & 71.67\,$\pm$\,1.11 & 160.26\,$\pm$\,1.43 \\
+160{,}000{,}000 & 226.56\,$\pm$\,2.02 & 103.42\,$\pm$\,3.83 & 243.30\,$\pm$\,4.42 & 153.30\,$\pm$\,3.38 & 335.53\,$\pm$\,4.38 \\
+227{,}899{,}533 & 355.62\,$\pm$\,8.88 & 183.46\,$\pm$\,9.08 & 371.81\,$\pm$\,8.03 & 255.91\,$\pm$\,7.55 & 498.04\,$\pm$\,9.54 \\
 \addlinespace[3pt]
 \multicolumn{6}{@{}l}{\textit{Trino~473 (disk connector)}}\\*
-5{,}000{,}000 & 10.6\,$\pm$\,0.2 & 4.2\,$\pm$\,0.2 & 10.9\,$\pm$\,0.3 & 7.2\,$\pm$\,0.1 & 16.0\,$\pm$\,0.0 \\
-10{,}000{,}000 & 19.2\,$\pm$\,0.2 & 8.0\,$\pm$\,0.1 & 22.7\,$\pm$\,0.5 & 14.2\,$\pm$\,0.1 & 32.7\,$\pm$\,0.3 \\
-20{,}000{,}000 & 39.7\,$\pm$\,0.4 & 15.9\,$\pm$\,0.1 & 45.5\,$\pm$\,0.1 & 29.0\,$\pm$\,0.1 & 70.3\,$\pm$\,0.1 \\
-40{,}000{,}000 & 79.3\,$\pm$\,0.5 & 29.8\,$\pm$\,0.1 & 95.0\,$\pm$\,0.5 & 58.3\,$\pm$\,0.2 & 144.5\,$\pm$\,2.8 \\
-80{,}000{,}000 & 163.4\,$\pm$\,0.9 & 57.1\,$\pm$\,0.1 & 191.8\,$\pm$\,0.4 & 116.0\,$\pm$\,0.2 & 287.8\,$\pm$\,0.5 \\
-160{,}000{,}000 & 364.6\,$\pm$\,2.0 & 111.2\,$\pm$\,0.7 & 423.3\,$\pm$\,1.0 & 253.0\,$\pm$\,6.5 & \textit{wall} \\
-227{,}899{,}533 & 483.8\,$\pm$\,17.3 & 154.0\,$\pm$\,0.9 & 553.6\,$\pm$\,2.8 & 310.9\,$\pm$\,1.6 & \textit{wall} \\
+5{,}000{,}000 & 10.58\,$\pm$\,0.17 & 4.15\,$\pm$\,0.18 & 10.90\,$\pm$\,0.32 & 7.20\,$\pm$\,0.09 & 16.05\,$\pm$\,0.05 \\
+10{,}000{,}000 & 19.17\,$\pm$\,0.17 & 8.00\,$\pm$\,0.14 & 22.70\,$\pm$\,0.51 & 14.19\,$\pm$\,0.10 & 32.72\,$\pm$\,0.34 \\
+20{,}000{,}000 & 39.75\,$\pm$\,0.39 & 15.89\,$\pm$\,0.08 & 45.53\,$\pm$\,0.15 & 29.04\,$\pm$\,0.09 & 70.32\,$\pm$\,0.06 \\
+40{,}000{,}000 & 79.35\,$\pm$\,0.49 & 29.75\,$\pm$\,0.06 & 94.96\,$\pm$\,0.47 & 58.31\,$\pm$\,0.22 & 144.54\,$\pm$\,2.84 \\
+80{,}000{,}000 & 163.39\,$\pm$\,0.86 & 57.13\,$\pm$\,0.14 & 191.85\,$\pm$\,0.39 & 115.97\,$\pm$\,0.24 & 287.75\,$\pm$\,0.55 \\
+160{,}000{,}000 & 364.58\,$\pm$\,2.02 & 111.17\,$\pm$\,0.65 & 423.30\,$\pm$\,1.02 & 253.00\,$\pm$\,6.50 & \textit{wall} \\
+227{,}899{,}533 & 483.85\,$\pm$\,17.26 & 154.04\,$\pm$\,0.90 & 553.56\,$\pm$\,2.83 & 310.91\,$\pm$\,1.58 & \textit{wall} \\
 \addlinespace[3pt]
 \bottomrule
 \end{tabular}}
@@ -712,44 +724,42 @@ was checked against the engine's output.
 
 \begin{table}[htbp]
 \centering
-\caption{Stress-test peak resident memory (GB, cgroup~v2 absolute peak
-  during the query) for the three systems, same run as
-  Table~\ref{tab:stress_volume}.  The engine holds data in RAM (rising to
-  35.9\,GB on the heaviest family at 227.9\,M rows); Oracle~EE and Trino
-  stream from disk behind a fixed working-memory floor.  \textit{wall} is
-  as in Table~\ref{tab:stress_volume}.}
+\caption{Stress-test absolute peak memory (GB)}
 \label{tab:stress_mem}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}rccccc@{}}
 \toprule
-\textbf{Size (rows)} & \textbf{simple} & \textbf{altern.} & \textbf{quant.} & \textbf{optional} & \textbf{complex} \\
+\textbf{Size (rows)} & \textbf{\texttt{simple\_sequence}} &
+\textbf{\texttt{alternation}} & \textbf{\texttt{quantified}} &
+\textbf{\texttt{optional\_pattern}} &
+\textbf{\texttt{complex\_nested}} \\
 \midrule
 \multicolumn{6}{@{}l}{\textit{Proposed engine}}\\*
-5{,}000{,}000 & 0.66 & 0.57 & 0.72 & 0.78 & 0.75 \\
-10{,}000{,}000 & 1.3 & 1.3 & 1.4 & 1.5 & 1.5 \\
-20{,}000{,}000 & 2.6 & 2.5 & 2.9 & 3.1 & 3.1 \\
-40{,}000{,}000 & 5.0 & 4.8 & 5.6 & 6.0 & 6.0 \\
-80{,}000{,}000 & 9.5 & 9.0 & 10.8 & 11.6 & 9.9 \\
-160{,}000{,}000 & 18.7 & 17.5 & 21.1 & 22.7 & 19.3 \\
-227{,}899{,}533 & 30.3 & 28.6 & 33.7 & 35.9 & 31.1 \\
+5{,}000{,}000 & 0.66 & 0.59 & 0.75 & 0.80 & 0.77 \\
+10{,}000{,}000 & 1.26 & 1.21 & 1.44 & 1.52 & 1.47 \\
+20{,}000{,}000 & 2.53 & 2.45 & 2.84 & 3.06 & 3.03 \\
+40{,}000{,}000 & 4.93 & 4.78 & 5.57 & 6.00 & 5.97 \\
+80{,}000{,}000 & 9.51 & 9.03 & 10.75 & 11.64 & 9.90 \\
+160{,}000{,}000 & 18.92 & 17.97 & 21.49 & 23.06 & 19.71 \\
+227{,}899{,}533 & 30.08 & 28.36 & 33.40 & 35.67 & 30.89 \\
 \addlinespace[3pt]
 \multicolumn{6}{@{}l}{\textit{Oracle~21c EE}}\\*
-5{,}000{,}000 & 15.5 & 15.5 & 15.5 & 15.5 & 15.5 \\
-10{,}000{,}000 & 15.2 & 15.3 & 15.3 & 15.3 & 15.3 \\
-20{,}000{,}000 & 15.7 & 15.7 & 15.8 & 15.7 & 15.9 \\
-40{,}000{,}000 & 17.2 & 17.2 & 17.4 & 17.4 & 17.4 \\
-80{,}000{,}000 & 19.8 & 19.9 & 20.0 & 19.9 & 20.0 \\
-160{,}000{,}000 & 25.6 & 25.6 & 25.6 & 25.7 & 25.7 \\
-227{,}899{,}533 & 27.0 & 26.9 & 27.0 & 27.7 & 27.7 \\
+5{,}000{,}000 & 15.49 & 15.49 & 15.50 & 15.50 & 15.50 \\
+10{,}000{,}000 & 15.25 & 15.28 & 15.28 & 15.28 & 15.26 \\
+20{,}000{,}000 & 15.74 & 15.73 & 15.76 & 15.72 & 15.88 \\
+40{,}000{,}000 & 17.18 & 17.19 & 17.36 & 17.39 & 17.40 \\
+80{,}000{,}000 & 19.78 & 19.94 & 19.99 & 19.93 & 19.99 \\
+160{,}000{,}000 & 25.63 & 25.63 & 25.63 & 25.70 & 25.69 \\
+227{,}899{,}533 & 27.02 & 26.87 & 26.98 & 27.72 & 27.71 \\
 \addlinespace[3pt]
 \multicolumn{6}{@{}l}{\textit{Trino~473 (disk connector)}}\\*
-5{,}000{,}000 & 13.3 & 13.4 & 13.4 & 13.4 & 13.4 \\
-10{,}000{,}000 & 13.6 & 13.6 & 13.6 & 13.6 & 13.8 \\
-20{,}000{,}000 & 13.9 & 13.9 & 13.9 & 14.1 & 16.2 \\
-40{,}000{,}000 & 19.0 & 20.5 & 21.4 & 22.9 & 27.2 \\
-80{,}000{,}000 & 25.3 & 30.1 & 38.4 & 47.5 & 47.5 \\
-160{,}000{,}000 & 30.6 & 39.2 & 47.9 & 48.0 & \textit{wall} \\
-227{,}899{,}533 & 37.8 & 47.5 & 47.5 & 36.4 & \textit{wall} \\
+5{,}000{,}000 & 13.32 & 13.35 & 13.38 & 13.39 & 13.40 \\
+10{,}000{,}000 & 13.59 & 13.60 & 13.61 & 13.62 & 13.83 \\
+20{,}000{,}000 & 13.88 & 13.90 & 13.92 & 14.12 & 16.23 \\
+40{,}000{,}000 & 18.99 & 20.48 & 21.45 & 22.86 & 27.20 \\
+80{,}000{,}000 & 25.31 & 30.07 & 38.40 & 47.51 & 47.55 \\
+160{,}000{,}000 & 30.60 & 39.23 & 47.87 & 47.97 & \textit{wall} \\
+227{,}899{,}533 & 37.83 & 47.46 & 47.48 & 36.42 & \textit{wall} \\
 \addlinespace[3pt]
 \bottomrule
 \end{tabular}}
@@ -757,21 +767,24 @@ was checked against the engine's output.
 
 \begin{table}[htbp]
 \centering
-\caption{Stress-test throughput (million rows per second, size/mean-time) for the three systems, same run as Table~\ref{tab:stress_volume}.  Higher is better; the engine's size averages hold 6.6--8.1\,M\,rows/s over the four families every system completed, spanning 2.2\,M (\texttt{complex\_nested}) to 8.2\,M (\texttt{alternation}) per pattern.  \textit{wall} is as in Table~\ref{tab:stress_volume}.}
+\caption{Stress-test throughput (million rows/s)}
 \label{tab:stress_thr}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}rccccc@{}}
 \toprule
-\textbf{Size (rows)} & \textbf{simple} & \textbf{altern.} & \textbf{quant.} & \textbf{optional} & \textbf{complex} \\
+\textbf{Size (rows)} & \textbf{\texttt{simple\_sequence}} &
+\textbf{\texttt{alternation}} & \textbf{\texttt{quantified}} &
+\textbf{\texttt{optional\_pattern}} &
+\textbf{\texttt{complex\_nested}} \\
 \midrule
 \multicolumn{6}{@{}l}{\textit{Proposed engine}}\\*
-5{,}000{,}000 & 8.44 & 7.52 & 8.71 & 7.72 & 2.26 \\
-10{,}000{,}000 & 6.96 & 7.52 & 6.58 & 5.51 & 2.16 \\
-20{,}000{,}000 & 6.76 & 7.70 & 6.49 & 5.56 & 2.16 \\
-40{,}000{,}000 & 6.82 & 7.59 & 6.46 & 5.53 & 2.11 \\
-80{,}000{,}000 & 7.66 & 8.75 & 7.25 & 6.03 & 2.17 \\
-160{,}000{,}000 & 7.70 & 8.95 & 6.75 & 5.72 & 2.14 \\
-227{,}899{,}533 & 7.37 & 9.24 & 6.80 & 5.69 & 2.22 \\
+5{,}000{,}000 & 8.33 & 7.43 & 8.31 & 7.16 & 2.14 \\
+10{,}000{,}000 & 7.68 & 7.34 & 7.28 & 6.39 & 2.08 \\
+20{,}000{,}000 & 7.50 & 7.32 & 7.34 & 6.43 & 2.10 \\
+40{,}000{,}000 & 7.60 & 7.56 & 7.36 & 6.47 & 2.05 \\
+80{,}000{,}000 & 8.03 & 8.55 & 7.93 & 6.88 & 2.07 \\
+160{,}000{,}000 & 8.21 & 8.41 & 7.67 & 6.68 & 2.08 \\
+227{,}899{,}533 & 8.20 & 9.19 & 7.77 & 6.75 & 2.15 \\
 \addlinespace[3pt]
 \multicolumn{6}{@{}l}{\textit{Oracle~21c EE}}\\*
 5{,}000{,}000 & 1.17 & 2.66 & 1.03 & 1.62 & 0.67 \\
@@ -797,39 +810,43 @@ was checked against the engine's output.
 
 \begin{table}[htbp]
 \centering
-\caption{Stress-test incremental peak memory (GB): the cgroup~v2 absolute peak minus the five-second pre-query baseline---the per-query working memory on the same instrument for all three systems.  The engine holds the data it scans, so its incremental peak grows with $n$; the databases stream from disk and stay low (Trino's near-zero readings are the pre-committed-JVM-heap floor of Section~\ref{subsec:eval-memory}).  \textit{wall} is as in Table~\ref{tab:stress_volume}.}
+\caption{Stress-test incremental peak memory above the pre-query
+  baseline (GB)}
 \label{tab:stress_incmem}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}rccccc@{}}
 \toprule
-\textbf{Size (rows)} & \textbf{simple} & \textbf{altern.} & \textbf{quant.} & \textbf{optional} & \textbf{complex} \\
+\textbf{Size (rows)} & \textbf{\texttt{simple\_sequence}} &
+\textbf{\texttt{alternation}} & \textbf{\texttt{quantified}} &
+\textbf{\texttt{optional\_pattern}} &
+\textbf{\texttt{complex\_nested}} \\
 \midrule
 \multicolumn{6}{@{}l}{\textit{Proposed engine}}\\*
-5{,}000{,}000 & 0.32 & 0.21 & 0.35 & 0.40 & 0.31 \\
-10{,}000{,}000 & 0.59 & 0.51 & 0.70 & 0.79 & 0.63 \\
-20{,}000{,}000 & 1.2 & 1.0 & 1.5 & 1.6 & 1.4 \\
-40{,}000{,}000 & 2.4 & 2.0 & 2.9 & 3.2 & 2.7 \\
-80{,}000{,}000 & 4.9 & 4.0 & 5.9 & 6.5 & 4.2 \\
-160{,}000{,}000 & 9.8 & 8.0 & 11.8 & 12.9 & 8.4 \\
-227{,}899{,}533 & 14.0 & 11.4 & 16.8 & 18.4 & 12.0 \\
+5{,}000{,}000 & 0.321 & 0.204 & 0.374 & 0.417 & 0.317 \\
+10{,}000{,}000 & 0.582 & 0.468 & 0.711 & 0.787 & 0.620 \\
+20{,}000{,}000 & 1.213 & 1.019 & 1.457 & 1.627 & 1.332 \\
+40{,}000{,}000 & 2.373 & 2.018 & 2.890 & 3.208 & 2.663 \\
+80{,}000{,}000 & 4.915 & 4.023 & 5.876 & 6.532 & 4.246 \\
+160{,}000{,}000 & 9.631 & 7.988 & 11.758 & 12.946 & 8.436 \\
+227{,}899{,}533 & 14.018 & 11.409 & 16.739 & 18.459 & 12.048 \\
 \addlinespace[3pt]
 \multicolumn{6}{@{}l}{\textit{Oracle~21c EE}}\\*
-5{,}000{,}000 & 0.13 & 0.13 & 0.13 & 0.13 & 0.13 \\
-10{,}000{,}000 & 0.26 & 0.26 & 0.26 & 0.26 & 0.26 \\
-20{,}000{,}000 & 0.52 & 0.51 & 0.51 & 0.51 & 0.52 \\
-40{,}000{,}000 & 0.45 & 0.45 & 0.45 & 0.45 & 0.45 \\
-80{,}000{,}000 & 0.46 & 0.45 & 0.46 & 0.45 & 0.46 \\
-160{,}000{,}000 & 0.47 & 0.46 & 0.46 & 0.47 & 0.49 \\
-227{,}899{,}533 & 0.68 & 0.65 & 0.64 & 0.55 & 0.59 \\
+5{,}000{,}000 & 0.127 & 0.128 & 0.128 & 0.128 & 0.128 \\
+10{,}000{,}000 & 0.257 & 0.256 & 0.256 & 0.256 & 0.260 \\
+20{,}000{,}000 & 0.516 & 0.512 & 0.514 & 0.512 & 0.524 \\
+40{,}000{,}000 & 0.448 & 0.452 & 0.448 & 0.449 & 0.449 \\
+80{,}000{,}000 & 0.463 & 0.455 & 0.460 & 0.452 & 0.458 \\
+160{,}000{,}000 & 0.468 & 0.455 & 0.463 & 0.472 & 0.487 \\
+227{,}899{,}533 & 0.676 & 0.648 & 0.641 & 0.546 & 0.588 \\
 \addlinespace[3pt]
 \multicolumn{6}{@{}l}{\textit{Trino~473 (disk connector)}}\\*
 5{,}000{,}000 & 0.007 & 0.003 & 0.004 & 0.002 & 0.004 \\
 10{,}000{,}000 & 0.006 & 0.008 & 0.004 & 0.008 & 0.005 \\
-20{,}000{,}000 & 0.006 & 0.006 & 0.006 & 0.004 & 0.36 \\
-40{,}000{,}000 & 0.73 & 0.007 & 0.45 & 0.02 & 0.72 \\
-80{,}000{,}000 & 1.5 & 0.02 & 1.5 & 0.01 & 0.01 \\
-160{,}000{,}000 & 1.6 & 2.6 & 0.03 & 0.01 & \textit{wall} \\
-227{,}899{,}533 & 2.7 & 1.4 & 0.78 & 1.5 & \textit{wall} \\
+20{,}000{,}000 & 0.006 & 0.006 & 0.006 & 0.004 & 0.357 \\
+40{,}000{,}000 & 0.729 & 0.007 & 0.451 & 0.020 & 0.719 \\
+80{,}000{,}000 & 1.540 & 0.016 & 1.532 & 0.011 & 0.013 \\
+160{,}000{,}000 & 1.605 & 2.630 & 0.029 & 0.015 & \textit{wall} \\
+227{,}899{,}533 & 2.658 & 1.374 & 0.776 & 1.545 & \textit{wall} \\
 \addlinespace[3pt]
 \bottomrule
 \end{tabular}}
@@ -837,30 +854,33 @@ was checked against the engine's output.
 
 \begin{table}[htbp]
 \centering
-\caption{Databases' own per-query memory counters (GB): Oracle's session PGA high-water mark and Trino's reported \texttt{peakMemoryBytes}.  These confirm the small per-query working sets behind the fixed SGA/JVM baselines (the engine has no separate counter---it is the measured process).  \textit{wall} is as in Table~\ref{tab:stress_volume}.}
+\caption{Database-native per-query memory counters (GB)}
 \label{tab:stress_native}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}rccccc@{}}
 \toprule
-\textbf{Size (rows)} & \textbf{simple} & \textbf{altern.} & \textbf{quant.} & \textbf{optional} & \textbf{complex} \\
+\textbf{Size (rows)} & \textbf{\texttt{simple\_sequence}} &
+\textbf{\texttt{alternation}} & \textbf{\texttt{quantified}} &
+\textbf{\texttt{optional\_pattern}} &
+\textbf{\texttt{complex\_nested}} \\
 \midrule
 \multicolumn{6}{@{}l}{\textit{Oracle~21c EE}}\\*
-5{,}000{,}000 & 0.13 & 0.13 & 0.13 & 0.13 & 0.13 \\
-10{,}000{,}000 & 0.26 & 0.26 & 0.26 & 0.26 & 0.26 \\
-20{,}000{,}000 & 0.52 & 0.52 & 0.52 & 0.52 & 0.52 \\
-40{,}000{,}000 & 0.45 & 0.45 & 0.45 & 0.45 & 0.45 \\
-80{,}000{,}000 & 0.45 & 0.45 & 0.45 & 0.45 & 0.45 \\
-160{,}000{,}000 & 0.45 & 0.45 & 0.45 & 0.46 & 0.46 \\
-227{,}899{,}533 & 0.45 & 0.45 & 0.45 & 0.46 & 0.46 \\
+5{,}000{,}000 & 0.129 & 0.129 & 0.129 & 0.129 & 0.129 \\
+10{,}000{,}000 & 0.260 & 0.260 & 0.260 & 0.260 & 0.260 \\
+20{,}000{,}000 & 0.522 & 0.522 & 0.522 & 0.522 & 0.522 \\
+40{,}000{,}000 & 0.453 & 0.453 & 0.453 & 0.453 & 0.453 \\
+80{,}000{,}000 & 0.453 & 0.453 & 0.453 & 0.453 & 0.453 \\
+160{,}000{,}000 & 0.453 & 0.453 & 0.453 & 0.460 & 0.460 \\
+227{,}899{,}533 & 0.453 & 0.453 & 0.453 & 0.460 & 0.460 \\
 \addlinespace[3pt]
 \multicolumn{6}{@{}l}{\textit{Trino~473 (disk connector)}}\\*
-5{,}000{,}000 & 0.09 & 0.09 & 0.09 & 0.09 & 0.09 \\
-10{,}000{,}000 & 0.19 & 0.19 & 0.19 & 0.19 & 0.19 \\
-20{,}000{,}000 & 0.33 & 0.33 & 0.33 & 0.33 & 0.33 \\
-40{,}000{,}000 & 0.71 & 0.71 & 0.71 & 0.71 & 0.71 \\
-80{,}000{,}000 & 1.5 & 1.5 & 1.5 & 1.5 & 1.5 \\
-160{,}000{,}000 & 2.6 & 2.6 & 2.6 & 2.6 & \textit{wall} \\
-227{,}899{,}533 & 3.8 & 3.8 & 3.8 & 3.8 & \textit{wall} \\
+5{,}000{,}000 & 0.091 & 0.091 & 0.091 & 0.091 & 0.091 \\
+10{,}000{,}000 & 0.195 & 0.194 & 0.194 & 0.194 & 0.194 \\
+20{,}000{,}000 & 0.334 & 0.333 & 0.334 & 0.333 & 0.333 \\
+40{,}000{,}000 & 0.708 & 0.708 & 0.708 & 0.708 & 0.708 \\
+80{,}000{,}000 & 1.510 & 1.509 & 1.509 & 1.509 & 1.509 \\
+160{,}000{,}000 & 2.601 & 2.600 & 2.601 & 2.604 & \textit{wall} \\
+227{,}899{,}533 & 3.799 & 3.798 & 3.798 & 3.798 & \textit{wall} \\
 \addlinespace[3pt]
 \bottomrule
 \end{tabular}}
@@ -868,12 +888,16 @@ was checked against the engine's output.
 
 \begin{table}[htbp]
 \centering
-\caption{Match counts (\texttt{ONE ROW PER MATCH} output rows) per pattern and size.  All three systems returned identical counts and passed row-level equality against the engine at every completed cell, so a single column per cell suffices.}
+\caption{Stress-test returned rows by pattern and size under
+  \texttt{ONE ROW PER MATCH}}
 \label{tab:stress_matches}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}rccccc@{}}
 \toprule
-\textbf{Size (rows)} & \textbf{simple} & \textbf{altern.} & \textbf{quant.} & \textbf{optional} & \textbf{complex} \\
+\textbf{Size (rows)} & \textbf{\texttt{simple\_sequence}} &
+\textbf{\texttt{alternation}} & \textbf{\texttt{quantified}} &
+\textbf{\texttt{optional\_pattern}} &
+\textbf{\texttt{complex\_nested}} \\
 \midrule
 5{,}000{,}000 & 591{,}476 & 103{,}496 & 323{,}805 & 309{,}050 & 351{,}661 \\
 10{,}000{,}000 & 1{,}150{,}566 & 193{,}114 & 631{,}723 & 605{,}909 & 681{,}288 \\

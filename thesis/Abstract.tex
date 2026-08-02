@@ -1,35 +1,37 @@
 SQL:2016 introduced the \texttt{MATCH\_RECOGNIZE} clause to search
 ordered rows for user-defined patterns.  It is useful when the
 important information is a sequence rather than one isolated row.  It
-can express shapes such as V, W, and U, and repeated behaviour.  Uses include fraud detection, IoT sensor monitoring, market
-analysis, and e-commerce clickstreams, such as small test charges
-before a large purchase.
-Database systems provide this feature, but Pandas has no native
-equivalent.  Analysts therefore use shifted columns, loops, and custom state
-handling, making the code longer and harder to verify.  This
-thesis addressed that gap by building an in-process engine for an
+can express V-, W-, and U-shaped patterns, repeated behavior, and
+changes over time.  Applications include fraud detection, IoT
+monitoring, market analysis, and e-commerce clickstreams.  Database Systems
+such as Oracle and Trino provide this feature, but Pandas has no native
+equivalent.  Analysts therefore use shifted columns, loops, and custom
+state handling, making the code longer and harder to verify.
+
+This thesis addresses that gap with an in-process engine for an
 evaluated R010-style subset: row pattern recognition in the
 \texttt{FROM} clause.  The engine parses and validates a query,
 compiles its row pattern into finite automata, and executes it over
 ordered DataFrame partitions.  The supported scope includes the main
-clauses, output and skip modes, pattern constructs, navigation, and
-aggregates.  The evaluation covered correctness,
-feature support, usability, performance, and scalability.  All 704 regression
-tests passed.  Trino and Oracle served as
-cross-system references; usability compared the SQL form with
-hand-written Pandas.  The main benchmark used five
-patterns and six Amazon UK Products~2023 sizes from 100\,K to
-2.22 million rows.  All three systems returned the same normalized
-results in all thirty pattern--size combinations.  Under one CPU core
-and a 32\,GB memory limit, mean time across those combinations was
-0.17\,s for the engine, 1.04\,s for Oracle, and 1.98\,s for Trino.
-The scalability study using Amazon Reviews~2023 extended the engine to
-227.9 million rows.  The engine and Oracle completed all 35
-cases; Trino completed 33.  Engine time
-remained close to linear, while its query-time working memory grew
-with the input.  The results show that row-pattern recognition can
-connect declarative SQL with in-process Pandas analysis while keeping
-sequential queries readable.
+clauses, direct-column ordering, output and skip modes, the listed
+pattern constructs, navigation, and selected aggregates.  The
+evaluation covers correctness, feature support, usability,
+performance, and scalability.  All 709 regression tests passed.
+Trino and Oracle served as cross-system references; usability compared
+the SQL form with hand-written Pandas.
+
+The main benchmark used five patterns and six Amazon UK Products~2023
+sizes from 100\,K to 2.22\,million rows.  All three systems returned
+the same normalized results in all thirty pattern--size combinations.
+Under one CPU core and a 32\,GB memory limit, mean time across those
+combinations was 0.17\,s for the engine, 1.04\,s for Oracle, and
+1.98\,s for Trino.  The scalability study using Amazon Reviews~2023
+extended the engine to 227.9\,million rows.  The engine and Oracle
+completed all 35 cases; Trino completed 33.  Engine time remained
+close to linear, while query-time working memory grew with the input.
+The results show that row-pattern recognition can connect declarative
+SQL with in-process Pandas analysis while keeping sequential queries
+readable.
 
 \noindent\textbf{Keywords:} \texttt{MATCH\_RECOGNIZE}; Row Pattern
 Recognition; Pandas; SQL:2016; Finite Automata; Pattern Matching.

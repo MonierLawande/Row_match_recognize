@@ -95,18 +95,13 @@ before matching begins.
   \label{fig:system-architecture}
 \end{figure}
 
-The parser recognizes partitioning, ordering, the pattern, its
-conditions, and the output measures.  Validation and planning then
-resolve the configuration before compilation.  These settings remain
-in the execution context while the pattern is compiled.  The compiler
-converts the pattern into a non-deterministic finite automaton (NFA)
-and then a deterministic finite automaton
-(DFA)~\cite{georgiou2025streaming}.  A
-DFA is returned only after complete determinization.  If a configured
-resource limit prevents this, compilation fails explicitly rather than
-using a partial automaton.  The execution stage partitions and orders
-the DataFrame, finds matches, evaluates measures, and assembles the
-output.  The rest of this chapter covers the first three stages.
+The compiler converts the validated pattern into a non-deterministic
+finite automaton (NFA) and then a complete deterministic finite
+automaton (DFA)~\cite{georgiou2025streaming}.  If complete construction
+exceeds a resource limit, compilation fails explicitly; it never
+executes a partial automaton.  Chapter~\ref{chap:implementation}
+explains compilation and DataFrame execution in detail.  After the
+worked example, the remaining sections focus on the first three stages.
 
 % ................................
 \subsection{Worked Pipeline Example}
@@ -195,7 +190,10 @@ Figure~\ref{fig:system-architecture}.
     \node[font=\scriptsize]
       at ([xshift=2.55cm,yshift=-0.42cm]excompile.center) {$\{1,8,9\}$};
     \node[font=\scriptsize]
-      at ([yshift=-0.91cm]excompile.center)
+      at ([yshift=-0.77cm]excompile.center)
+      {braced numbers are internal NFA state identifiers};
+    \node[font=\scriptsize]
+      at ([yshift=-1.02cm]excompile.center)
       {$D_3$ accepts; a missing transition rejects the candidate};
 
     % Stage 5 is deliberately compact; the adjacent tables carry the data.
@@ -291,9 +289,8 @@ Figure~\ref{fig:system-architecture}.
 \end{figure}
 
 The input table accounts for all eight rows.  Stage~4 shows the four
-reachable DFA states produced by the current compiler; the sets below
-them are the corresponding NFA-state subsets.  The transition labels
-use the predicates validated in Stage~2.  During execution,
+reachable DFA states produced for this pattern.  Each transition is
+guarded by the predicate of its labeled variable.  During execution,
 \texttt{cust\_1} satisfies $A\rightarrow B\rightarrow C$ with prices
 $200>100>50$ and produces the output row.  The \texttt{cust\_2}
 candidate fails at $C$ because $6<4$ is false.
@@ -308,11 +305,12 @@ row-pattern language.  It has eight sub-clauses and, inside
 \texttt{PATTERN}, its own grammar of quantifiers, alternation,
 grouping, anchors, exclusions, and \texttt{PERMUTE}.  The parser must
 understand both.  Listing~\ref{lst:mr-full-syntax} summarizes the
-syntax the engine supports.
+clause structure accepted by the core path.
 
 \begin{lstlisting}[
     language   = {},
-    caption    = {Syntax of a \texttt{MATCH\_RECOGNIZE} query},
+    caption    = {Clause structure used by the supported
+                  \texttt{MATCH\_RECOGNIZE} path},
     label      = {lst:mr-full-syntax},
     basicstyle = \ttfamily\footnotesize
 ]
@@ -320,7 +318,8 @@ SELECT <expression> [, ...]
 FROM   <table>
 MATCH_RECOGNIZE (
   [ PARTITION BY <column> [, ...] ]
-  [ ORDER BY <column> [ASC|DESC] [, ...] ]
+  [ ORDER BY <column> [ASC|DESC]
+      [NULLS FIRST|NULLS LAST] [, ...] ]
   [ MEASURES <expression> AS <alias> [, ...] ]
   [ ONE ROW PER MATCH
   | ALL ROWS PER MATCH
@@ -345,11 +344,11 @@ inside a top-level \texttt{SELECT}, with an optional outer
 independent clauses over self-contained inline relations.  It is not a
 general relational planner.  The \texttt{DEFINE} clause is optional,
 and a pattern variable without a predicate is treated as always true.
-The evaluated pattern-order path uses ascending order for the listed
-columns.  The parser records direction and null-position modifiers,
-but the matching path does not apply them.  Full CTE rewriting,
-set-operation planning, and general nested subqueries remain outside
-the supported path.
+Direct ordering keys support per-key \texttt{ASC}/\texttt{DESC}
+direction and \texttt{NULLS FIRST}/\texttt{NULLS LAST}; omitted null
+placement defaults to \texttt{NULLS LAST}.  General ordering
+expressions, full CTE rewriting, set-operation planning, and general
+nested subqueries remain outside the supported path.
 
 \paragraph{Choosing a parser.}
 The requirement is a typed tree for both languages at once.  At the
@@ -392,27 +391,26 @@ typed AST.  Its root holds the outer \texttt{SELECT}/\texttt{FROM} and
 one \texttt{MatchRecognizeClause}.  Each sub-clause has a typed
 dataclass for its resolved fields.  Later stages can dispatch on node
 type instead of reading the raw SQL again.
-
-One exception is deliberate.  The predicates in \texttt{DEFINE} and
-the expressions in \texttt{MEASURES} remain as text after extraction.
-This keeps the internal AST compact, but those expressions still need a
-separate safe evaluator.
+Expression leaves remain textual by design.  \texttt{DEFINE}
+predicates and \texttt{MEASURES} expressions are extracted as strings
+and parsed later by the restricted evaluator.  This keeps the outer
+query AST compact.
 
 \paragraph{Safe expression evaluation.}
 Those strings come from the user, so the engine never runs them as
 Python code.  It reads each one into a small tree of operations and
-walks that tree itself.The walk uses
+walks that tree itself.  The walk uses
 an \emph{allowlist}: an operation is evaluated only when the engine has
 a handler for it.  Safety therefore comes from the evaluator design,
 not from blocking unsafe cases one at a time.
 
-The allowlist covers comparisons, Boolean and arithmetic operators,
+The allowlist includes comparisons, Boolean and arithmetic operators,
 literals, \texttt{IN} lists, conditional expressions, qualified
 references such as \texttt{A.price}, navigation functions,
-\texttt{CLASSIFIER}, and the supported aggregates.  Imports,
-assignments, and access to Python built-ins are not evaluated.  An
-expression sees only its row context: the current row, ordered rows,
-and pattern-variable bindings.
+\texttt{CLASSIFIER}, \texttt{MATCH\_NUMBER}, and the supported
+aggregates.  Imports, assignments, and access to Python built-ins are
+not evaluated.  An expression sees only its explicit evaluation
+context: ordered rows, pattern bindings, and match metadata.
 
 The front end is exercised by dedicated tests.  They include
 adversarial inputs---undefined variables, prohibited function forms,
@@ -427,10 +425,10 @@ parser and evaluator changes.
 \label{sec:meth-semantic}
 % ----------------------------------------------------------------
 
-Parsing proves a query is well formed.  It does not prove the query
-means anything.  \texttt{PATTERN (A B)} with \texttt{DEFINE B AS
-B.price > Q.price} parses cleanly, but \texttt{Q} is a variable the
-pattern never declares, so the condition compares against nothing.
+Parsing proves that a query is well formed, but not that it is
+semantically valid.  For example, \texttt{PATTERN (A B)} with
+\texttt{DEFINE B AS B.price > Q.price} parses correctly, but
+\texttt{Q} is not declared by the pattern.
 
 A validation pass runs while the AST is completed and before any
 automaton is built.  It rejects invalid references and unsupported
@@ -438,7 +436,7 @@ clause combinations.  The next stage then supplies defaults and builds
 the execution configuration.  At this point no input row has been
 matched, so errors can still identify the clause that caused them.
 
-\emph{Every name must refer to something.}  This is ordinary \emph{name
+\emph{Every reference must resolve.}  This is ordinary \emph{name
 resolution}, with the pattern as its scope.  For ordinary patterns, the
 front end checks qualified references in \texttt{DEFINE} and
 \texttt{MEASURES} against the pattern variables and \texttt{SUBSET}
@@ -478,8 +476,8 @@ construction (Section~\ref{sec:meth-logical}).
 The logical plan is a resolved execution configuration.  It collects
 the typed AST fields pulled from the \texttt{MatchRecognizeClause} that compilation and matching need
 (Table~\ref{tab:logical-plan}).  Later stages do not reparse the full
-SQL query.  Pattern, predicate, and measure text remain available
-because their dedicated compilers and evaluators still need them.
+SQL query.  Pattern, predicate, and measure text remain available to
+their dedicated compilers and evaluators.
 
 \begin{table}[htbp]
   \centering
@@ -495,7 +493,12 @@ because their dedicated compilers and evaluators still need them.
       & Columns for DataFrame partitioning; empty means a single
         global partition \\[4pt]
     \texttt{order\_by}       & \texttt{List[str]}
-      & Columns for the ascending intra-partition sort order \\[4pt]
+      & Direct columns used for intra-partition ordering \\[4pt]
+    \texttt{order\_ascending} & \texttt{List[bool]}
+      & Per-key ascending or descending direction \\[4pt]
+    \texttt{order\_nulls}   & \texttt{List[str]}
+      & Per-key null placement; omitted placement defaults to
+        \texttt{NULLS LAST} \\[4pt]
     \texttt{pattern\_text}   & \texttt{str}
       & Normalized pattern string forwarded to the tokenizer \\[4pt]
     \texttt{define}          & \texttt{Dict[str, str]}
@@ -518,29 +521,16 @@ because their dedicated compilers and evaluators still need them.
   \end{tabular}
 \end{table}
 
-Two normalizations matter.  First, a pattern variable absent from
-\texttt{DEFINE} remains marked as implicit true.  The matcher can
-classify its rows without compiling a predicate.  Second, every measure
-is tagged \textsc{Running} or \textsc{Final}.  An explicit prefix has
-the highest priority.  Under \texttt{ONE ROW PER MATCH}, an unprefixed
-measure is \textsc{Final}.  Under \texttt{ALL ROWS PER MATCH},
-the leading function decides first: an expression beginning with
-\texttt{FIRST}, \texttt{PREV}, or \texttt{NEXT} is \textsc{Final},
-and one beginning with \texttt{LAST} is \textsc{Running}.  Only when
-the expression begins with neither is it examined for a nested
-\texttt{FIRST}, \texttt{PREV}, or \texttt{NEXT} (\textsc{Final}) or
-\texttt{LAST} (\textsc{Running}).  If any measure has an explicit
-prefix, an unprefixed measure that is still unresolved is
-\textsc{Final}.  The earlier navigation rules keep their priority.
-For example, an unprefixed \texttt{LAST} expression remains
-\textsc{Running}.  If no measure has an explicit prefix, measures
-beginning with \texttt{COUNT}, \texttt{SUM}, \texttt{ARRAY\_AGG},
-\texttt{MAX\_BY}, \texttt{MIN\_BY}, \texttt{STRING\_AGG},
-\texttt{COUNT\_IF}, \texttt{SUM\_IF}, or \texttt{AVG\_IF} are
-\textsc{Running}.  Other expressions are \textsc{Final}.
-Figure~\ref{fig:measure-sem-resolution} shows this order.
+Two defaults matter.  A variable without \texttt{DEFINE} uses an
+implicit true predicate.  Measure semantics follow the priority rules
+in Figure~\ref{fig:measure-sem-resolution}.  An explicit
+\texttt{RUNNING} or \texttt{FINAL} prefix wins.
+\texttt{ONE ROW PER MATCH} uses final values.  Under
+\texttt{ALL ROWS PER MATCH}, navigation rules are resolved before
+aggregate defaults.  \textsc{Running} sees rows through the current
+output row; \textsc{Final} sees the complete match.
 
-\begin{figure}[htbp]
+\begin{figure}[H]
   \centering
   \begin{tikzpicture}[
     node distance=0.30cm and 0.62cm,
@@ -580,7 +570,8 @@ Figure~\ref{fig:measure-sem-resolution} shows this order.
 
     \node[mstest, below=of current] (explicit)
       {1.\ Does $m$ have an explicit \texttt{RUNNING} or \texttt{FINAL} prefix?};
-    \node[msdeclared, right=of explicit] (stated) {declared mode};
+    \node[msdeclared, right=of explicit] (stated)
+      {use declared mode};
 
     \node[mstest, below=of explicit] (one)
       {2.\ Does the query return one row per match?};
@@ -654,4 +645,4 @@ construction resolves the execution configuration, including output,
 skip, and measure modes.  The design reuses the Trino ANTLR4 grammar
 and evaluates user expressions through a restricted AST evaluator.
 Chapter~\ref{chap:implementation} continues with automata compilation,
-Pandas execution, and optimization.
+\texttt{pandas} execution, and optimization.

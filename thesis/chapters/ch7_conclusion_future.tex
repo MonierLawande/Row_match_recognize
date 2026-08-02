@@ -38,11 +38,12 @@ statement.  That lowers developer effort, makes the pattern easier to
 read, and travels between notebook analysis and SQL workflows---as long
 as the query stays inside the supported subset.
 
-The Performance benchmark contained 30 pattern--size
+The performance benchmark contained 30 pattern--size
 combinations: five pattern families over six sizes from 100\,K to the
 full 2.22\,M rows.  Each cell is the mean of twenty measured runs after
 five warmups and the stated outlier rule.  Each system used the same
-input and query logic under one CPU core and a 32\,GB memory limit.  The
+input and query logic under one CPU core and the same outer 32\,GB
+memory limit; Oracle XE's internal cap remained in effect.  The
 proposed engine averaged
 6\,110\,392~rows/s and 0.17\,s per cell.  Oracle averaged 1.04\,s and
 Trino 1.98\,s.  The proposed engine had the lowest time in all 30
@@ -54,16 +55,18 @@ Memory shows the trade-off.  Across the main benchmark, the maximum
 incremental query peaks were 189.05\,MB for the engine, 58.71\,MB for
 Oracle, and 20.75\,MB for Trino.  The maximum total footprints showed
 the reverse order: 523.97\,MB, 2{,}057.17\,MB, and
-14{,}992.90\,MB, respectively.  All six values use the same
-cgroup-based metric.  Vendor-native counters have different scopes and
-are not treated as equivalent measurements.
+14{,}992.90\,MB, respectively.  All six values use the same cgroup-based
+metric, but the process boundaries differ: one engine process versus a
+complete database container.  Vendor-native counters have different
+scopes and are not treated as equivalent measurements.
 
 This result has a clear boundary.  The engine is specialized for one
 in-process DataFrame workload.  It avoids database planning, storage,
 and client-transfer layers, and it compiles supported conditions to
 column operations.  The evaluated running-average predicate is also
-updated incrementally.  Unsupported expressions use the general
-evaluator.  State-dependent conditions and some ambiguous pattern
+updated incrementally.  Supported expressions outside a compiled form
+use the general evaluator; unsupported forms are rejected.
+State-dependent conditions and some ambiguous pattern
 choices may require exact search.  In the separate state-dependent
 test, the engine processed the full 2.22\,M rows in 1.28\,s and
 preserved the reference output.  These results describe the tested
@@ -72,35 +75,28 @@ subset on one machine.  They are not a general ranking of SQL systems
 \ref{subsec:eval-worst-cases}).
 
 A separate scalability test used Amazon Reviews~2023 from 5\,M to
-227.9\,M rows.  The measured time and memory trends stayed close to
-linear.  On the size averages, the engine remained
+227.9\,M rows.  Execution time was close to linear for all three
+systems.  The engine's measured memory was also close to linear.  On
+the size averages, the engine remained
 $5.1$--$10.1\times$ faster than Oracle~EE and
 $11.4$--$13.8\times$ faster than Trino over the four pattern families
 completed by all three systems.  Oracle~EE completed every
 cell.  Trino's \texttt{complex\_nested} pattern reached the 600\,s
 limit at the last two sizes.  The engine completed the full corpus, but
 its maximum process footprint reached about 35.7\,GB.  Speed and memory
-residency must therefore be read together.  The latest engine sweep and
-the retained Oracle and Trino measurements came from separate campaigns
+residency must therefore be read together.  The engine values describe
+the fixed benchmark revision recorded in Appendix~\ref{app:provenance}.
+The retained Oracle and Trino measurements came from separate campaigns
 under the same stated protocol.  They were not run simultaneously.
 
 The architecture separates parsing, validation, logical planning,
-automata construction, matching, and output assembly.  This separation
-made each stage testable and gives future work clear extension points.
-
-
-The optimization layer is also scoped.  It includes row-local condition
-masks, compact DFA and run-length plans, compiled measures, fused output,
-bounded caches, lazy row access, and conservative output projection.
-The current partition loop is sequential.  The study therefore
-evaluates a single-node \texttt{pandas} engine, not a distributed or
-broadly parallel SQL system.  Trino and Oracle retain wider SQL
-coverage, mature optimizers, and production execution infrastructure.
-
-The central finding is scoped.  The supported row-pattern semantics can
-be compiled and run directly over DataFrames.  The evaluated scenarios
-agree with the reference systems, and performance scales predictably
-over the measured ranges.
+automata construction, matching, and output assembly.  The optimized
+paths use row-local masks, compact DFA and run-length plans, compiled
+measures, fused output, bounded caches, lazy row access, and conservative
+output projection.  Partition processing remains sequential.  The
+study therefore evaluates a single-node \texttt{pandas} engine, not a
+distributed SQL system.  Trino and Oracle retain wider SQL coverage,
+mature optimizers, and production execution infrastructure.
 
 % ----------------------------------------------------------------
 \section{Validation of Chapter Claims}
@@ -133,13 +129,15 @@ thesis claims, supporting evidence, and scope boundaries} \\
 \endfoot
 Correctness &
 Selected comparisons with Trino, Oracle, and hand-written
-\texttt{pandas}~\ref{chap:evaluation}. &
+\texttt{pandas} reported in Chapter~\ref{chap:evaluation}. &
 The reported reference queries produce the same rows and measure
 values across the compared systems. &
 Selected supported scenarios only. \\
 \midrule
 Feature support &
-Clause, pattern, output modes, skip modes, navigation, and aggregate ~\ref{chap:methodology} and~\ref{chap:implementation}. &
+The coverage tables and reference tests in
+Chapter~\ref{chap:evaluation}, supported by the design in
+Chapters~\ref{chap:methodology} and~\ref{chap:implementation}. &
 The system supports a practical row-pattern subset suitable for
 DataFrame-centered analysis. &
 This is not full SQL:2016 or vendor coverage. \\
@@ -174,10 +172,11 @@ Three validity limits remain.  \emph{Internal validity} depends on the
 reference outputs and their normalization.  \emph{Construct validity}
 depends on row equality, time, throughput, memory, and line count
 representing the claims made from them.  \emph{External validity} is
-limited by one workstation, two datasets, and the selected patterns.
+limited by one workstation, two performance datasets, and the selected
+patterns.
 The main benchmark uses twenty measured runs per cell; the larger
-sweep uses five.  Its latest engine results and preserved database
-results were not collected in one simultaneous rerun.  Trino and
+sweep uses five.  Its recorded engine and retained database results
+were not collected in one simultaneous rerun.  Trino and
 Oracle were not expert-tuned, so other configurations may narrow the
 measured gaps.
 
@@ -224,12 +223,13 @@ The measure evaluator supports common functions---\texttt{SUM},
 and collection/string aggregates, conditional aggregates, and supported
 \texttt{RUNNING}/\texttt{FINAL} forms.  Arbitrary user-defined
 aggregates and every possible expression combination remain out of
-scope---a natural limit of an in-memory prototype with its own
+scope---a natural limit of an in-memory engine with its own
 expression evaluator rather than a full SQL engine.
 
 \textbf{Performance boundaries.}
 The core benchmark is predictable from 100\,K to 2.22\,M rows, and a
-separate sweep confirms near-linear time and memory to 227.9\,M rows,
+separate sweep confirms near-linear execution time to 227.9\,M rows.
+Measured engine memory also increased close to linearly
 on one workstation and one CPU core.  Wider schemas, many small
 partitions, and highly ambiguous patterns were not tested at that
 scale.  For large row-local scans, available RAM is the practical
@@ -316,8 +316,8 @@ The automata pipeline can gain from stronger state pruning, guard
 pushdown, better selectivity estimates, and a faster exact search for
 state-dependent forms not covered by compiled plans.  This remains a
 performance boundary (Section~\ref{subsec:eval-worst-cases}).  Better
-explain output, match traces, and per-pattern counters would make each
-execution path easier to verify.
+\texttt{EXPLAIN} output, match traces, and per-pattern counters would
+make each execution path easier to verify.
 
 \textbf{Usability and integration.}
 Clearer error messages, notebook-friendly visualizations, reusable test

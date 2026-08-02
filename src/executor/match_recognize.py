@@ -1626,7 +1626,11 @@ def _iter_dataframe_partitions(
         return (df,), 1
 
     group_key = partition_by[0] if len(partition_by) == 1 else partition_by
-    grouped = df.groupby(group_key, sort=True)
+    # SQL groups all NULL partition keys into one partition.  pandas drops
+    # NA-keyed groups by default, which would silently remove input rows from
+    # MATCH_RECOGNIZE.  Keep the existing sorted group order while retaining
+    # the NULL partition.
+    grouped = df.groupby(group_key, sort=True, dropna=False)
     partition_count = grouped.ngroups
     return (group for _key, group in grouped), partition_count
 

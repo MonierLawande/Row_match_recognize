@@ -967,6 +967,35 @@ class TestRowPatternMatching:
             assert result.iloc[i]['val'] == val
             assert result.iloc[i]['label'] == label
 
+    def test_partition_by_keeps_null_key_rows(self):
+        """NULL partition keys form a partition instead of dropping rows."""
+        df = pd.DataFrame({
+            'part': ['p1', None, 'p1', None],
+            'id': [2, 1, 4, 3],
+        })
+        query = """
+        SELECT *
+        FROM data
+        MATCH_RECOGNIZE (
+            PARTITION BY part
+            ORDER BY id
+            MEASURES
+                FIRST(A.id) AS first_id,
+                LAST(A.id) AS last_id
+            ONE ROW PER MATCH
+            PATTERN (A+)
+            DEFINE A AS true
+        ) AS m
+        """
+
+        result = match_recognize(query, df)
+
+        assert len(result) == 2
+        non_null = result[result['part'].notna()].iloc[0]
+        null_key = result[result['part'].isna()].iloc[0]
+        assert (non_null['first_id'], non_null['last_id']) == (2, 4)
+        assert (null_key['first_id'], null_key['last_id']) == (1, 3)
+
     def test_order_by_direction_controls_first_and_last(self):
         """ASC and DESC must define the row sequence used by measures."""
         df = pd.DataFrame({'id': [1, 2, 3, 4, 5, 6]})
