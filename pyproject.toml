@@ -64,6 +64,11 @@ pandas_match_recognize = ["**/*"]
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
+# Performance/ holds benchmark runners, not tests.  One of them is named
+# run_stress_test.py, which matches pytest's default *_test.py discovery
+# pattern, so pytest imported it and failed on its pyarrow import -- a
+# collection error that aborts the whole run on a clean CI machine.
+norecursedirs = ["Performance", ".git", "build", "dist", "thesis"]
 markers = [
     "aggregation_args: aggregation arguments and expression handling",
     "advanced_stats: advanced statistical aggregation scenarios",
