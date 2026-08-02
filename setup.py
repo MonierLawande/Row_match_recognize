@@ -51,7 +51,7 @@ def read_readme():
 
 setup(
     name="pandas_match_recognize",
-    version="0.2.3", 
+    version="0.2.4", 
     description="SQL MATCH_RECOGNIZE for Pandas DataFrames",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
