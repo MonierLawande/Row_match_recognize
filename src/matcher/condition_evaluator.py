@@ -1803,16 +1803,7 @@ class ConditionEvaluator(ast.NodeVisitor):
                 args.append(self._build_navigation_expr(arg))
             else:
                 # Complex expression
-                try:
-                    if hasattr(ast, 'unparse'):
-                        args.append(ast.unparse(arg).strip())
-                    else:
-                        # For Python versions < 3.9 that don't have ast.unparse
-                        import astunparse
-                        args.append(astunparse.unparse(arg).strip())
-                except (ImportError, AttributeError):
-                    # Fallback
-                    args.append(str(arg))
+                args.append(_unparse_node(arg, str(arg)).strip())
                 
         # Combine into navigation expression
         return f"{func_name}({', '.join(args)})"
@@ -3856,6 +3847,24 @@ def _compile_condition_node(
     return evaluate_condition
 
 
+def _unparse_node(node, fallback=""):
+    """Render an AST node back to source text.
+
+    ``ast.unparse`` only exists from Python 3.9.  On 3.8 this falls back to
+    ``astunparse`` when that optional package is present, and finally to the
+    caller's own source string.  The result is attached to the compiled
+    callable for diagnostics and is never executed, so an approximate
+    rendering on the oldest supported interpreter is acceptable.
+    """
+    if hasattr(ast, "unparse"):
+        return ast.unparse(node)
+    try:
+        import astunparse
+        return astunparse.unparse(node).strip()
+    except Exception:
+        return fallback
+
+
 def compile_condition_ast(condition_node, source_condition, evaluation_mode='DEFINE'):
     """Compile a trusted normalized AST node using the standard evaluator.
 
@@ -3863,7 +3872,7 @@ def compile_condition_ast(condition_node, source_condition, evaluation_mode='DEF
     the node from the normal SQL-to-Python parser, rather than constructing a
     separate expression language.
     """
-    python_condition = ast.unparse(condition_node)
+    python_condition = _unparse_node(condition_node, source_condition)
     try:
         compiled_expression = _compile_fast_condition_expression(condition_node)
     except _FastConditionUnsupported:
