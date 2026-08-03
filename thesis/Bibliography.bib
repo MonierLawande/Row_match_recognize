@@ -205,13 +205,16 @@
   publisher = {Foundation of Computer Science (FCS), NY, USA}
 }
 
-@misc{Zhu2023rowpattern,
-  author = {Zhu, Erkang and Huang, Silu and Chaudhuri, Surajit},
-  title  = {High-Performance Row Pattern Recognition Using Joins},
-  year   = {2023},
-  issn   = {2150-8097},
-  url    = {https://doi.org/10.14778/3579075.3579090},
-  doi    = {10.14778/3579075.3579090}
+@article{Zhu2023rowpattern,
+  author  = {Zhu, Erkang and Huang, Silu and Chaudhuri, Surajit},
+  title   = {High-Performance Row Pattern Recognition Using Joins},
+  journal = {Proceedings of the VLDB Endowment},
+  volume  = {16},
+  number  = {5},
+  pages   = {1181--1194},
+  year    = {2023},
+  issn    = {2150-8097},
+  doi     = {10.14778/3579075.3579090}
 }
 
 % ================================================================
@@ -326,12 +329,68 @@
   note    = {PostgreSQL General Mailing List, Message-ID: 7e495cb8-ca03-4e3e-aa7e-45bf75212da8@Spark}
 }
 
+@misc{postgresql18unsupported,
+  author  = {{PostgreSQL Global Development Group}},
+  title   = {Unsupported Features},
+  year    = {2025},
+  url     = {https://www.postgresql.org/docs/18/unsupported-features-sql-standard.html},
+  urldate = {2026-07-21},
+  note    = {PostgreSQL 18 documentation}
+}
+
+@misc{duckdb2026roadmap,
+  author  = {{DuckDB Foundation}},
+  title   = {Development Roadmap},
+  year    = {2026},
+  url     = {https://duckdb.org/roadmap},
+  urldate = {2026-07-21}
+}
+
+@misc{duckdb2026pandas,
+  author  = {{DuckDB Foundation}},
+  title   = {{SQL} on Pandas},
+  year    = {2026},
+  url     = {https://duckdb.org/docs/current/guides/python/sql_on_pandas},
+  urldate = {2026-07-21},
+  note    = {DuckDB documentation}
+}
+
+@misc{bigquery2025matchrecognize,
+  author  = {{Google Cloud}},
+  title   = {{MATCH\_RECOGNIZE} Clause in {GoogleSQL}},
+  year    = {2025},
+  url     = {https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#match_recognize_clause},
+  urldate = {2026-07-21},
+  note    = {BigQuery documentation}
+}
+
+@misc{databricks2026matchrecognize,
+  author  = {{Databricks}},
+  title   = {{Databricks SQL} Release Notes 2026},
+  year    = {2026},
+  url     = {https://docs.databricks.com/gcp/en/sql/release-notes/2026#match-recognize-is-now-in-beta},
+  urldate = {2026-07-21},
+  note    = {{MATCH\_RECOGNIZE} beta in Databricks SQL and Runtime 19.0}
+}
+
 @misc{findling2025bringing,
   title  = {Bringing Row Pattern Recognition to {DuckDB}:
-            Translating {MATCH\_RECOGNIZE} to {WITH RECURSIVE}},
+            Translating {MATCH\_\allowbreak{}RECOGNIZE} to {WITH RECURSIVE}},
   author = {Findling, Tim},
   year   = {2025},
   note   = {Bachelor's thesis, Eberhard Karls Universit\"{a}t T\"{u}bingen}
+}
+
+@article{lambrecht2025democratize,
+  author  = {Lambrecht, Louisa and Findling, Tim and Heid, Samuel and
+             Kn\"{u}deler, Marcel and Grust, Torsten},
+  title   = {Democratize {MATCH\_RECOGNIZE}!},
+  journal = {Proceedings of the VLDB Endowment},
+  volume  = {18},
+  number  = {12},
+  pages   = {5251--5254},
+  year    = {2025},
+  doi     = {10.14778/3750601.3750644}
 }
 
 @inproceedings{raasveldt2019duckdb,
@@ -358,6 +417,15 @@
 % ================================================================
 %  Python / Pandas / Data Processing
 % ================================================================
+
+@misc{pandas233api,
+  author  = {{The pandas development team}},
+  title   = {{pandas 2.3.3 API Reference}},
+  year    = {2025},
+  url     = {https://pandas.pydata.org/pandas-docs/version/2.3/reference/index.html},
+  urldate = {2026-07-22},
+  note    = {Official pandas documentation}
+}
 
 @inproceedings{McKinney2010,
   author    = {Wes McKinney},
@@ -473,6 +541,17 @@
                   (accessed 2025-07-16)}
 }
 
+@misc{hou2024amazonreviews,
+  author       = {Hou, Yupeng and Li, Jiacheng and He, Zhankui and Yan, An
+                  and Chen, Xiusi and McAuley, Julian},
+  title        = {{Bridging Language and Items for Retrieval and
+                  Recommendation}},
+  howpublished = {Amazon Reviews 2023 dataset, McAuley Lab, UC San Diego},
+  year         = {2024},
+  note         = {\url{https://amazon-reviews-2023.github.io/}
+                  (accessed 2026-07-19)}
+}
+
 % ================================================================
 %  Research Projects & Related Theses
 % ================================================================
@@ -506,11 +585,19 @@
 %  This Work
 % ================================================================
 
+@misc{monierashraf2025tests,
+  author = {{MonierAshraf}},
+  title  = {Row\_match\_recognize: Regression Test Suite},
+  year   = {2025},
+  url    = {https://github.com/MonierLawande/Row_match_recognize/tree/master/tests},
+  note   = {GitHub repository}
+}
+
 @misc{monierashraf2025rowmatch,
   author = {{MonierAshraf}},
   title  = {Row\_match\_recognize},
   year   = {2025},
-  url    = {https://github.com/MonierAshraf/Row_match_recognize/blob/5d58e8de6b1143e8c1d77cd7017e37c7a8bae421/Examples%20Match_reocginze/Examples.ipynb},
+  url    = {https://github.com/MonierLawande/Row_match_recognize/blob/master/Examples%20Match_reocginze/Examples.ipynb},
   note   = {GitHub repository}
 }
 
@@ -518,7 +605,7 @@
   author = {Monier Ashraf},
   title  = {Oracle {MATCH\_RECOGNIZE} --- Stock Price Examples},
   year   = {2025},
-  url    = {https://github.com/MonierAshraf/Row_match_recognize/blob/master/Examples%20Match_reocginze/Oracle_data_tables.sql},
+  url    = {https://github.com/MonierLawande/Row_match_recognize/blob/master/Examples%20Match_reocginze/Oracle_data_tables.sql},
   note   = {GitHub repository}
 }
 
@@ -543,7 +630,7 @@
 @misc{Python_UDF,
   author = {Monier Ashraf},
   title  = {Python UDF Example for Row Pattern Recognition},
-  url    = {https://github.com/MonierAshraf/Row_match_recognize/blob/master/Python_Examples/python_udf.ipynb},
+  url    = {https://github.com/MonierLawande/Row_match_recognize/blob/master/Python_Examples/python_udf.ipynb},
   year   = {2025},
   note   = {GitHub repository}
 }
@@ -693,3 +780,4 @@
   year         = {2026},
   note         = {Accessed: 25 June 2026}
 }
+
