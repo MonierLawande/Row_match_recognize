@@ -6,6 +6,7 @@ import re
 import time
 import itertools
 import copy
+import operator
 import ast as python_ast
 import importlib.util
 from collections import OrderedDict
@@ -1424,6 +1425,199 @@ def _sort_item_options(sort_items) -> Tuple[List[str], List[bool], List[str]]:
     return columns, ascending, nulls_position
 
 
+class OrderExpressionError(ValueError):
+    """An ORDER BY item is neither a column nor a supported expression."""
+
+
+def _order_expr_series(values, index):
+    """Return ``values`` as a Series aligned to ``index``.
+
+    Constants fold to a full-length Series so that string accessors and
+    per-element functions work uniformly on literals and columns alike.
+    """
+    if isinstance(values, pd.Series):
+        return values
+    if np.isscalar(values) or values is None:
+        return pd.Series([values] * len(index), index=index)
+    return pd.Series(values, index=index)
+
+
+def _order_expr_round(values, digits=0):
+    return np.round(values, int(digits))
+
+
+def _order_expr_coalesce(*args):
+    if not args:
+        raise OrderExpressionError("COALESCE requires at least one argument")
+    result = args[0]
+    for candidate in args[1:]:
+        if isinstance(result, pd.Series):
+            result = result.where(result.notna(), candidate)
+        elif result is None or (np.isscalar(result) and pd.isna(result)):
+            result = candidate
+    return result
+
+
+# Vectorized ORDER BY functions.  Each entry maps a SQL name onto a NumPy or
+# pandas operation that evaluates a whole column at once, so building a sort
+# key costs one pass instead of one Python call per row.
+_ORDER_EXPR_FUNCTIONS = {
+    "ABS": np.abs,
+    "CEIL": np.ceil,
+    "CEILING": np.ceil,
+    "FLOOR": np.floor,
+    "ROUND": _order_expr_round,
+    "TRUNC": np.trunc,
+    "TRUNCATE": np.trunc,
+    "SQRT": np.sqrt,
+    "EXP": np.exp,
+    "LN": np.log,
+    "LOG10": np.log10,
+    "SIGN": np.sign,
+    "POWER": np.power,
+    "POW": np.power,
+    "MOD": np.mod,
+    "GREATEST": np.maximum,
+    "LEAST": np.minimum,
+    "COALESCE": _order_expr_coalesce,
+}
+
+# String functions need the pandas ``.str`` accessor, so they receive the
+# evaluation index to fold scalars into a Series first.
+_ORDER_EXPR_STR_FUNCTIONS = {
+    "UPPER": lambda s: s.str.upper(),
+    "LOWER": lambda s: s.str.lower(),
+    "LENGTH": lambda s: s.str.len(),
+    "TRIM": lambda s: s.str.strip(),
+}
+
+_ORDER_EXPR_BINOPS = {
+    python_ast.Add: operator.add,
+    python_ast.Sub: operator.sub,
+    python_ast.Mult: operator.mul,
+    python_ast.Div: operator.truediv,
+    python_ast.FloorDiv: operator.floordiv,
+    python_ast.Mod: operator.mod,
+    python_ast.Pow: operator.pow,
+}
+
+_ORDER_EXPR_UNARYOPS = {
+    python_ast.UAdd: operator.pos,
+    python_ast.USub: operator.neg,
+}
+
+# An ORDER BY key is evaluated once per partition, and partitions are
+# disjoint, so every input row is evaluated exactly once per query.
+_ORDER_EXPR_MAX_LENGTH = 1000
+
+
+def _order_expr_column(df: pd.DataFrame, name: str) -> pd.Series:
+    """Resolve an identifier to a column, tolerating case differences."""
+    if name in df.columns:
+        return df[name]
+    lowered = name.lower()
+    for column in df.columns:
+        if isinstance(column, str) and column.lower() == lowered:
+            return df[column]
+    raise OrderExpressionError(f"Unknown column in ORDER BY: {name}")
+
+
+def _eval_order_expr_node(node, df: pd.DataFrame):
+    """Evaluate one node of an ORDER BY expression over whole columns."""
+    if isinstance(node, python_ast.Name):
+        return _order_expr_column(df, node.id)
+
+    if isinstance(node, python_ast.Constant):
+        if isinstance(node.value, (int, float, str, bool)) or node.value is None:
+            return node.value
+        raise OrderExpressionError(
+            f"Unsupported literal in ORDER BY: {node.value!r}"
+        )
+
+    if isinstance(node, python_ast.BinOp):
+        handler = _ORDER_EXPR_BINOPS.get(type(node.op))
+        if handler is None:
+            raise OrderExpressionError(
+                f"Unsupported operator in ORDER BY: {type(node.op).__name__}"
+            )
+        left = _eval_order_expr_node(node.left, df)
+        right = _eval_order_expr_node(node.right, df)
+        return handler(left, right)
+
+    if isinstance(node, python_ast.UnaryOp):
+        handler = _ORDER_EXPR_UNARYOPS.get(type(node.op))
+        if handler is None:
+            raise OrderExpressionError(
+                f"Unsupported unary operator in ORDER BY: "
+                f"{type(node.op).__name__}"
+            )
+        return handler(_eval_order_expr_node(node.operand, df))
+
+    if isinstance(node, python_ast.Call):
+        if not isinstance(node.func, python_ast.Name):
+            raise OrderExpressionError("Only named functions are allowed in ORDER BY")
+        if node.keywords:
+            raise OrderExpressionError("Keyword arguments are not allowed in ORDER BY")
+        name = node.func.id.upper()
+        args = [_eval_order_expr_node(arg, df) for arg in node.args]
+
+        if name in _ORDER_EXPR_STR_FUNCTIONS:
+            if len(args) != 1:
+                raise OrderExpressionError(f"{name} takes exactly one argument")
+            return _ORDER_EXPR_STR_FUNCTIONS[name](
+                _order_expr_series(args[0], df.index)
+            )
+
+        handler = _ORDER_EXPR_FUNCTIONS.get(name)
+        if handler is None:
+            raise OrderExpressionError(f"Unsupported function in ORDER BY: {name}")
+        try:
+            return handler(*args)
+        except OrderExpressionError:
+            raise
+        except Exception as exc:
+            raise OrderExpressionError(f"Error evaluating {name} in ORDER BY: {exc}")
+
+    raise OrderExpressionError(
+        f"Unsupported expression in ORDER BY: {type(node).__name__}"
+    )
+
+
+def _evaluate_order_expression(df: pd.DataFrame, expression: str) -> pd.Series:
+    """Compile an ORDER BY expression into a vectorized sort key.
+
+    Only column references, literals, arithmetic, and a whitelist of scalar
+    functions are accepted.  Attribute access, subscripts, comprehensions, and
+    every other construct are rejected, so the evaluator cannot reach outside
+    the DataFrame.
+    """
+    if len(expression) > _ORDER_EXPR_MAX_LENGTH:
+        raise OrderExpressionError("ORDER BY expression is too long")
+    try:
+        tree = python_ast.parse(expression, mode="eval")
+    except SyntaxError as exc:
+        raise OrderExpressionError(
+            f"Cannot parse ORDER BY expression {expression!r}: {exc.msg}"
+        )
+    return _order_expr_series(_eval_order_expr_node(tree.body, df), df.index)
+
+
+def _resolve_order_key(df: pd.DataFrame, name: str) -> pd.Series:
+    """Return the sort key for one ORDER BY item.
+
+    Plain column references take a dictionary lookup and no evaluation, so the
+    common case keeps its original cost.
+    """
+    if name in df.columns:
+        return df[name]
+    return _evaluate_order_expression(df, name)
+
+
+def _order_by_needs_expression(df: pd.DataFrame, order_by: List[str]) -> bool:
+    """True when at least one ORDER BY item is not a plain column."""
+    return any(name not in df.columns for name in order_by)
+
+
 def _is_already_ordered(
     df: pd.DataFrame,
     order_by: List[str],
@@ -1445,8 +1639,12 @@ def _is_already_ordered(
         return True
 
     try:
-        missing_columns = [column for column in order_by if column not in df.columns]
-        if missing_columns:
+        # An item that is not a column is an ORDER BY expression; resolving it
+        # here keeps the "already ordered" fast path available for expressions
+        # too, so a frame that is already in expression order skips the sort.
+        try:
+            resolved_keys = [_resolve_order_key(df, column) for column in order_by]
+        except OrderExpressionError:
             return False
 
         ascending_values, null_values = _normalize_order_options(
@@ -1456,7 +1654,7 @@ def _is_already_ordered(
         )
 
         if len(order_by) == 1:
-            values = df[order_by[0]]
+            values = resolved_keys[0]
             null_mask = values.isna()
             if null_mask.any():
                 null_count = int(null_mask.sum())
@@ -1486,15 +1684,15 @@ def _is_already_ordered(
         # Compare adjacent rows lexicographically.  A pair remains unresolved
         # only while all keys seen so far are equal.  This keeps the check O(n)
         # and supports mixed ASC/DESC directions and per-key null placement.
-        for column, is_ascending, null_position in zip(
-            order_by,
+        for key, is_ascending, null_position in zip(
+            resolved_keys,
             ascending_values,
             null_values,
         ):
             if not unresolved.any():
                 return True
 
-            values = df[column].reset_index(drop=True)
+            values = key.reset_index(drop=True)
             left = values.iloc[:-1].reset_index(drop=True)
             right = values.iloc[1:].reset_index(drop=True)
             left_null = left.isna().to_numpy(dtype=bool)
@@ -1541,6 +1739,15 @@ def _stable_sort_dataframe(
         ascending,
         nulls_position,
     )
+
+    if _order_by_needs_expression(frame, order_by):
+        return _stable_sort_by_expression_keys(
+            frame,
+            order_by,
+            ascending_values,
+            null_values,
+        )
+
     ordered = frame
     # Stable least-significant-key-first passes preserve peer order and allow
     # NULLS FIRST/LAST to differ between individual ORDER BY items.
@@ -1554,6 +1761,39 @@ def _stable_sort_dataframe(
             kind="mergesort",
         )
     return ordered
+
+
+def _stable_sort_by_expression_keys(
+    frame: pd.DataFrame,
+    order_by: List[str],
+    ascending_values: List[bool],
+    null_values: List[str],
+) -> pd.DataFrame:
+    """Sort by ORDER BY keys where at least one item is an expression.
+
+    Each key is evaluated once, then the sort runs over a narrow key-only frame
+    and is applied to ``frame`` positionally.  The evaluated keys never become
+    columns of the returned partition, so the expression stays invisible to
+    matching, MEASURES, and ALL ROWS PER MATCH output.
+    """
+    keys = {}
+    for position, name in enumerate(order_by):
+        key = _resolve_order_key(frame, name)
+        keys[f"__mr_key_{position}"] = key.reset_index(drop=True)
+
+    key_frame = pd.DataFrame(keys)
+    key_frame["__mr_pos"] = np.arange(len(frame))
+
+    for position in reversed(range(len(order_by))):
+        key_frame = key_frame.sort_values(
+            by=f"__mr_key_{position}",
+            ascending=ascending_values[position],
+            na_position=null_values[position],
+            kind="mergesort",
+        )
+
+    # Positional selection is immune to duplicate index labels.
+    return frame.iloc[key_frame["__mr_pos"].to_numpy()]
 
 
 def _order_partition_if_needed(

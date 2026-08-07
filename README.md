@@ -8,7 +8,7 @@
 
 A Python implementation of SQL's `MATCH_RECOGNIZE` clause for Pandas DataFrames. Run complex sequence detection and event-stream pattern queries in-memory — no external database required.
 
-Validated against Trino 473 and Oracle 21c EE on 30 pattern–size combinations, with 709 passing tests. See [Benchmarks](#benchmarks).
+Validated against Trino 473 and Oracle 21c EE on 30 pattern–size combinations, with 741 passing tests. See [Benchmarks](#benchmarks).
 
 ---
 
@@ -114,19 +114,14 @@ The engine implements an evaluated **R010-style subset**: row pattern recognitio
 
 | Area | Status |
 |---|---|
-| `PARTITION BY`, `MEASURES`, `PATTERN`, `DEFINE`, `SUBSET` | Supported |
+| `PARTITION BY`, `ORDER BY`, `MEASURES`, `PATTERN`, `DEFINE`, `SUBSET` | Supported |
 | `ONE ROW PER MATCH` / `ALL ROWS PER MATCH` | Supported |
 | All `AFTER MATCH SKIP` modes | Supported |
 | `PREV`, `NEXT`, `FIRST`, `LAST` navigation | Supported |
 | Quantifiers `*`, `+`, `?`, `{n,m}`, reluctant forms | Supported |
-| Alternation, grouping, anchors, exclusions, `PERMUTE` | Supported |
-| `ORDER BY` on direct columns, incl. `ASC`/`DESC` and `NULLS FIRST`/`LAST` | Supported |
-| Multiple `ORDER BY` keys with mixed directions | Supported |
-| Expressions in `ORDER BY` (e.g. `ts * 2`, `ABS(ts)`) | Not supported — raises `RuntimeError` |
+| Alternation, grouping, anchors, exclusions, PERMUTE | Supported |
 | R020 (`MATCH_RECOGNIZE` in a `WINDOW` clause) | Not supported |
 | User-defined aggregates | Limited |
-
-`DEFINE` uses a bounded expression evaluator, not a full SQL expression runtime. It accepts column references, literals, comparison and boolean operators, arithmetic, the navigation functions, and the supported aggregates. **A form outside that set yields no match rather than an error** — check your output row count when a pattern unexpectedly returns nothing.
 
 ---
 
@@ -233,11 +228,12 @@ def match_recognize(sql: str, df: pd.DataFrame) -> pd.DataFrame: ...
 
 **Raises:**
 - `ValueError` — the SQL cannot be parsed. This covers malformed syntax, a pattern variable referenced in `MEASURES` but never defined, and `MATCH_RECOGNIZE` used in a `WINDOW` clause (R020).
-- `RuntimeError` — a column named in `PARTITION BY` or `ORDER BY` does not exist in the DataFrame, or an unsupported expression appears in `ORDER BY`.
+- `RuntimeError` — a column named in `PARTITION BY` does not exist in the DataFrame.
+- `OrderExpressionError` (subclass of `ValueError`) — an `ORDER BY` item names an unknown column, or uses a function or construct outside the supported set.
 
 **Does not raise — returns an empty DataFrame instead:**
 - A column named only in `DEFINE` that does not exist.
-- A `DEFINE` condition outside the supported expression subset (see [Supported Scope](#supported-scope)).
+- A `DEFINE` condition outside the supported expression subset.
 
 If a query returns no rows unexpectedly, check the `DEFINE` conditions first.
 
@@ -484,13 +480,13 @@ pip install -e ".[performance]"   # polars, psutil, pyarrow — benchmark script
 ### Running the tests
 
 ```bash
-python -m pytest -q                                   # full suite — 709 tests
+python -m pytest -q                                   # full suite — 741 tests
 python -m pytest tests/test_sql2016_compliance.py -v  # one file, verbose
 python -m pytest -k "permute or navigation"           # match test names
 python -m pytest --collect-only -q | tail -1          # count without running
 ```
 
-The plain `python -m pytest -q` is exactly what CI runs, on Ubuntu, Windows, and macOS against Python 3.8, 3.10, and 3.12. All 709 must pass before a pull request is merged.
+The plain `python -m pytest -q` is exactly what CI runs, on Ubuntu, Windows, and macOS against Python 3.8, 3.10, and 3.12. All 741 must pass before a pull request is merged.
 
 ### Project layout
 
@@ -531,7 +527,7 @@ antlr4 -Dlanguage=Python3 -visitor -o src/grammar src/grammar/*.g4
 - **Widening the compiled path:** the speed advantage is bounded by what the compiler turns into column operations. State-dependent `DEFINE` forms still fall back to the generic evaluator.
 - **Query-optimiser integration:** the engine runs independently of a database planner, so it misses plan-level optimisation opportunities.
 - **Distributed processing:** Dask or Spark for large-scale workloads.
-- **Wider SQL:2016 coverage:** R020 (`MATCH_RECOGNIZE` in a `WINDOW` clause) and expressions in `ORDER BY`.
+- **Wider SQL:2016 coverage:** R020 (`MATCH_RECOGNIZE` in a `WINDOW` clause).
 
 ### Conclusion
 
@@ -607,7 +603,7 @@ Pull requests and issue reports are welcome. Please ensure contributions include
 
 - **Bug reports & feature requests:** [open an issue on GitHub](https://github.com/MonierLawande/Row_match_recognize/issues)
 - **Pull requests:** fork the repository, create a feature branch, and submit a PR against `master`
-- **Before opening a PR:** run `python -m pytest -q` and confirm all 709 tests pass. CI runs the same suite on Ubuntu, Windows, and macOS against Python 3.8, 3.10, and 3.12.
+- **Before opening a PR:** run `python -m pytest -q` and confirm all 741 tests pass. CI runs the same suite on Ubuntu, Windows, and macOS against Python 3.8, 3.10, and 3.12.
 
 ---
 
