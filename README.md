@@ -1,6 +1,6 @@
 # SQL MATCH\_RECOGNIZE on Pandas
 
-[![PyPI version](https://badge.fury.io/py/pandas-match-recognize.svg)](https://pypi.org/project/pandas-match-recognize/)
+[![PyPI version](https://img.shields.io/pypi/v/pandas-match-recognize.svg)](https://pypi.org/project/pandas-match-recognize/)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub](https://img.shields.io/badge/GitHub-source-black?logo=github)](https://github.com/MonierLawande/Row_match_recognize)
