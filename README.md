@@ -272,7 +272,7 @@ pip install --upgrade pandas-match-recognize
 ### Install a specific version
 
 ```bash
-pip install "pandas-match-recognize==0.2.3"  # replace with your target version
+pip install "pandas-match-recognize==0.2.5"  # replace with your target version
 ```
 
 To list all available versions:
