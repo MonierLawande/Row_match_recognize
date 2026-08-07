@@ -3,9 +3,12 @@
 [![PyPI version](https://badge.fury.io/py/pandas-match-recognize.svg)](https://pypi.org/project/pandas-match-recognize/)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GitHub](https://img.shields.io/badge/GitHub-source-black?logo=github)](https://github.com/MonierAshraf/Row_match_recognize)
+[![GitHub](https://img.shields.io/badge/GitHub-source-black?logo=github)](https://github.com/MonierLawande/Row_match_recognize)
+[![Tests](https://github.com/MonierLawande/Row_match_recognize/actions/workflows/cross-platform-tests.yml/badge.svg)](https://github.com/MonierLawande/Row_match_recognize/actions/workflows/cross-platform-tests.yml)
 
 A Python implementation of SQL's `MATCH_RECOGNIZE` clause for Pandas DataFrames. Run complex sequence detection and event-stream pattern queries in-memory — no external database required.
+
+Validated against Trino 473 and Oracle 21c EE on 30 pattern–size combinations, with 709 passing tests. See [Benchmarks](#benchmarks).
 
 ---
 
@@ -15,6 +18,8 @@ A Python implementation of SQL's `MATCH_RECOGNIZE` clause for Pandas DataFrames.
 - [Motivation](#motivation)
 - [Key Features](#key-features)
 - [Architecture](#architecture)
+- [Benchmarks](#benchmarks)
+- [Supported Scope](#supported-scope)
 - [Example SQL Query](#example-sql-query)
 - [Quick Start](#quick-start)
 - [API Reference](#api-reference)
@@ -22,10 +27,9 @@ A Python implementation of SQL's `MATCH_RECOGNIZE` clause for Pandas DataFrames.
 - [Uninstallation](#uninstallation)
 - [Testing Functionality](#testing-functionality)
 - [Development Setup](#development-setup)
-- [Publishing a New Version](#publishing-a-new-version)
-- [Troubleshooting](#troubleshooting)
 - [Conclusion and Future Work](#conclusion-and-future-work)
 - [References](#references)
+- [About This Work](#about-this-work)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -79,6 +83,50 @@ flowchart TD
 
     SQL --> Parse --> AST --> Tokenize --> NFA --> DFA --> Executor --> Output
 ```
+
+---
+
+## Benchmarks
+
+The engine was measured against Trino 473 and Oracle 21c EE on the Amazon UK Products 2023 dataset: five pattern families across six sizes from 100 K to 2.22 M rows. Each system ran under the same limits — one CPU core and 32 GB — one system at a time. Every cell used five warm-ups and twenty measured runs, with outliers removed by the 1.5×IQR rule.
+
+**All three systems returned the same results in all 30 pattern–size combinations.**
+
+| | Proposed engine | Oracle 21c EE | Trino 473 |
+|---|---:|---:|---:|
+| Mean execution time | **0.17 s** | 1.04 s | 1.98 s |
+| Relative to engine | 1× | 6.2× | 11.8× |
+| Mean resident footprint | **232 MB** | 1 997 MB | 11 145 MB |
+| Relative to engine | 1× | 8.6× | 48.1× |
+| Peak query-time memory | 64.5 MB | 23.6 MB | 2.0 MB |
+
+The last row is the trade-off, not a win. The compiled path builds whole-column masks and intermediate arrays, so its incremental query memory is the highest of the three — about 2.7× Oracle's. It buys the speed and the far smaller total footprint.
+
+**Scalability.** A separate study on Amazon Reviews 2023 ran to 227.9 M rows under a 58 GB limit. The engine and Oracle completed all 35 cases; Trino completed 33. Execution time stayed close to linear across the range (R² = 0.9904–0.9997).
+
+**Scope of the claim.** These numbers describe one workload — a single partition, in-memory input, and the supported subset below — on one machine. The systems have different execution models and measured process boundaries. Database tuning could change the gap.
+
+---
+
+## Supported Scope
+
+The engine implements an evaluated **R010-style subset**: row pattern recognition in the `FROM` clause. Knowing the edges matters more than the feature list:
+
+| Area | Status |
+|---|---|
+| `PARTITION BY`, `MEASURES`, `PATTERN`, `DEFINE`, `SUBSET` | Supported |
+| `ONE ROW PER MATCH` / `ALL ROWS PER MATCH` | Supported |
+| All `AFTER MATCH SKIP` modes | Supported |
+| `PREV`, `NEXT`, `FIRST`, `LAST` navigation | Supported |
+| Quantifiers `*`, `+`, `?`, `{n,m}`, reluctant forms | Supported |
+| Alternation, grouping, anchors, exclusions, `PERMUTE` | Supported |
+| `ORDER BY` on direct columns, incl. `ASC`/`DESC` and `NULLS FIRST`/`LAST` | Supported |
+| Multiple `ORDER BY` keys with mixed directions | Supported |
+| Expressions in `ORDER BY` (e.g. `ts * 2`, `ABS(ts)`) | Not supported — raises `RuntimeError` |
+| R020 (`MATCH_RECOGNIZE` in a `WINDOW` clause) | Not supported |
+| User-defined aggregates | Limited |
+
+`DEFINE` uses a bounded expression evaluator, not a full SQL expression runtime. It accepts column references, literals, comparison and boolean operators, arithmetic, the navigation functions, and the supported aggregates. **A form outside that set yields no match rather than an error** — check your output row count when a pattern unexpectedly returns nothing.
 
 ---
 
@@ -184,8 +232,14 @@ def match_recognize(sql: str, df: pd.DataFrame) -> pd.DataFrame: ...
 **Returns:** `pd.DataFrame` — rows matching the specified pattern, projected and formatted according to the `MEASURES` clause and the selected output mode (`ONE ROW PER MATCH` or `ALL ROWS PER MATCH`).
 
 **Raises:**
-- `ValueError` — malformed SQL or undefined pattern variable referenced in `DEFINE` or `MEASURES`.
-- `KeyError` — a column name referenced in the query does not exist in the DataFrame.
+- `ValueError` — the SQL cannot be parsed. This covers malformed syntax, a pattern variable referenced in `MEASURES` but never defined, and `MATCH_RECOGNIZE` used in a `WINDOW` clause (R020).
+- `RuntimeError` — a column named in `PARTITION BY` or `ORDER BY` does not exist in the DataFrame, or an unsupported expression appears in `ORDER BY`.
+
+**Does not raise — returns an empty DataFrame instead:**
+- A column named only in `DEFINE` that does not exist.
+- A `DEFINE` condition outside the supported expression subset (see [Supported Scope](#supported-scope)).
+
+If a query returns no rows unexpectedly, check the `DEFINE` conditions first.
 
 ---
 
@@ -193,10 +247,13 @@ def match_recognize(sql: str, df: pd.DataFrame) -> pd.DataFrame: ...
 
 ### Requirements
 
-- Python 3.8+
-- pandas ≥ 1.0
-- numpy ≥ 1.18
-- antlr4-python3-runtime ≥ 4.9
+- Python ≥ 3.8
+- pandas ≥ 1.0.0, < 3.0
+- numpy ≥ 1.18.0, < 2.2
+- antlr4-python3-runtime ≥ 4.9.0
+- psutil ≥ 5.8.0
+
+All four packages are installed automatically by `pip`. The upper bounds on pandas and numpy are deliberate — they are the versions the test suite is verified against.
 
 ### Install from PyPI (recommended)
 
@@ -232,7 +289,7 @@ pip index versions pandas-match-recognize
 Use this when you want source changes to take effect immediately without reinstalling:
 
 ```bash
-git clone https://github.com/MonierAshraf/Row_match_recognize.git
+git clone https://github.com/MonierLawande/Row_match_recognize.git
 cd Row_match_recognize
 pip install -e .
 ```
@@ -255,22 +312,7 @@ python -c "from pandas_match_recognize import match_recognize; print('Installati
 python -c "import pandas_match_recognize; print(pandas_match_recognize.__version__)"
 ```
 
-For a more thorough check:
-
-```python
-# Run from outside the project directory to avoid local-file interference
-
-try:
-    from pandas_match_recognize import match_recognize
-    print("pandas_match_recognize import: OK")
-except ImportError as e:
-    print(f"pandas_match_recognize import: FAILED — {e}")
-
-import pandas as pd
-df = pd.DataFrame({'a': [1, 2, 3], 'b': ['x', 'y', 'z']})
-print("pandas integration: OK")
-print("All checks passed — package is ready to use.")
-```
+Run this from **outside** the project directory, so Python cannot pick up the local source folder instead of the installed package.
 
 ### Installation troubleshooting
 
@@ -317,85 +359,53 @@ pip cache purge
 
 ### Complete cleanup (mixed or stubborn installs)
 
-If the package persists after the steps above, locate and remove it from site-packages manually:
+If the package survives the steps above, a copy is still sitting in `site-packages`. Locate it first:
 
 ```bash
-# Find installation paths
-python -c "
-import site, os, glob
-site_packages = site.getsitepackages()[0]
-patterns = [
-    os.path.join(site_packages, 'pandas_match_recognize'),
-    os.path.join(site_packages, 'pandas_match_recognize-*.dist-info'),
-]
-for pattern in patterns:
-    for path in glob.glob(pattern):
-        print(f'Found: {path}')
-"
-# Remove the directories printed above, for example:
-# rm -rf /path/to/site-packages/pandas_match_recognize
-# rm -rf /path/to/site-packages/pandas_match_recognize-*.dist-info
+# Where is it installed from?
+pip show -f pandas-match-recognize | grep -i location
+
+# Or ask Python directly
+python -c "import pandas_match_recognize as m; print(m.__file__)"
 ```
 
-**Remove local build artefacts:**
+Remove the package folder and its metadata sibling, then clear local build artefacts:
+
 ```bash
-rm -rf build/ dist/ *.egg-info/ __pycache__/ .pytest_cache/
+SITE=$(python -c "import site; print(site.getsitepackages()[0])")
+
+rm -rf "$SITE"/pandas_match_recognize
+rm -rf "$SITE"/pandas_match_recognize-*.dist-info
+
+# In the project directory
+rm -rf build/ dist/ *.egg-info/ .pytest_cache/
 ```
+
+> On Windows, use `rmdir /s /q` instead of `rm -rf`, and read the path from `pip show` above.
 
 ### Verify removal
 
-Always test from outside the project directory to avoid picking up local source files:
+Always check from **outside** the project directory — inside it, Python finds the local source folder and the package looks installed when it is not:
 
 ```bash
 cd /tmp
-python -c "
-try:
-    from pandas_match_recognize import match_recognize
-    print('Package is still installed')
-except ImportError:
-    print('Package successfully removed')
-"
+
+pip show pandas-match-recognize          # expect: Package(s) not found
+
+python -c "import pandas_match_recognize" 2>/dev/null \
+  && echo "Still installed" \
+  || echo "Successfully removed"
 ```
 
 ### Uninstall troubleshooting
 
-**"Can't uninstall. No files were found to uninstall."**
-
-This is the most common issue with mixed installations (wheel + editable). Resolution:
-
-```bash
-# 1. Remove local development files from the project directory
-rm -rf pandas_match_recognize.egg-info/ build/ dist/
-
-# 2. Locate and remove from site-packages (see Complete Cleanup above)
-
-# 3. Confirm removal
-pip show pandas-match-recognize    # should print "Package(s) not found"
-
-# 4. Test from outside the project directory
-cd /tmp
-python -c "from pandas_match_recognize import match_recognize" 2>/dev/null \
-  && echo "Still installed" || echo "Successfully removed"
-```
-
-**Import works in the project directory but not elsewhere**
-
-This is expected when no package is installed — Python finds the local `pandas_match_recognize/` folder. Test from `/tmp` or any other directory to confirm the installed package state.
-
-**Package shows in pip list but can't be uninstalled**
-
-```bash
-pip show pandas-match-recognize
-# If Location points to your project directory, it is a development install.
-# Follow the "Remove an editable install" steps above.
-```
-
-**Multiple Python environments**
-
-```bash
-conda list | grep pandas-match-recognize      # Conda environments
-pip list --user | grep pandas-match-recognize # User-level installs
-```
+| Symptom | Cause | Fix |
+|---|---|---|
+| *"No files were found to uninstall"* | Mixed wheel + editable install | `rm -rf build/ dist/ *.egg-info/` then `pip uninstall pandas-match-recognize -y` |
+| Import works in the project dir, fails elsewhere | Nothing is installed — Python is finding the local folder | Expected. Verify from `/tmp` |
+| Shows in `pip list`, will not uninstall | `pip show` *Location* points at your project → editable install | `pip uninstall pandas-match-recognize -y`, then delete `*.egg-info/` |
+| Removed, but still importable | Another environment still has it | `conda list \| grep pandas-match-recognize`<br>`pip list --user \| grep pandas-match-recognize` |
+| Old version keeps coming back | Cached wheel | `pip cache purge` then reinstall with `--no-cache-dir` |
 
 ---
 
@@ -429,141 +439,82 @@ MATCH_RECOGNIZE (
 try:
     result = match_recognize(sql, df)
     print(f"Basic functionality test: PASSED (result shape: {result.shape})")
+    print(result)
 except Exception as e:
     print(f"Basic functionality test: FAILED — {e}")
 ```
+
+**Expected output:**
+```
+Basic functionality test: PASSED (result shape: (5, 2))
+   id       value
+0   1         10
+1   1         20
+2   1         15
+3   2          5
+4   2          8
+```
+
+`PATTERN (A)` matches a single row at a time, so every row that satisfies `DEFINE` becomes its own match — five rows in, five matches out.
+
+
 
 ---
 
 ## Development Setup
 
+Fork the repository on GitHub, then set up a working copy:
+
 ```bash
-# 1. Fork the repository on GitHub, then clone your fork
 git clone https://github.com/YOUR_USERNAME/Row_match_recognize.git
 cd Row_match_recognize
 
-# 2. Create an isolated virtual environment
 python -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
 
-# 3. Install in editable mode with test dependencies
-pip install -e .
-pip install -r test_requirements.txt
-
-# 4. Run the full test suite
-python -m pytest \
-  tests/test_anchor_patterns.py \
-  tests/test_back_reference.py \
-  tests/test_case_sensitivity.py \
-  tests/test_complete_java_reference.py \
-  tests/test_empty_cycle.py \
-  tests/test_empty_matches.py \
-  tests/test_exponential_protection.py \
-  tests/test_fixed_failing_cases.py \
-  tests/test_in_predicate.py \
-  tests/test_match_recognize.py \
-  tests/test_missing_critical_cases.py \
-  tests/test_multiple_match_recognize.py \
-  tests/test_navigation_and_conditions.py \
-  tests/test_output_layout.py \
-  tests/test_pattern_cache.py \
-  tests/test_pattern_tokenizer.py \
-  tests/test_permute_patterns.py \
-  tests/test_production_aggregates.py \
-  tests/test_scalar_functions.py \
-  tests/test_sql2016_compliance.py \
-  tests/test_subqueries.py \
-  --tb=short
+pip install -e ".[dev]"        # editable install + test tools
 ```
 
----
+**Optional extras:**
 
-## Publishing a New Version
+```bash
+pip install -e ".[performance]"   # polars, psutil, pyarrow — benchmark scripts only
+```
 
-#### 1. Bump the version
+### Running the tests
 
-Update the version string consistently in all four files:
+```bash
+python -m pytest -q                                   # full suite — 709 tests
+python -m pytest tests/test_sql2016_compliance.py -v  # one file, verbose
+python -m pytest -k "permute or navigation"           # match test names
+python -m pytest --collect-only -q | tail -1          # count without running
+```
 
-- `setup.py` → `version="X.Y.Z"`
-- `pyproject.toml` → `version = "X.Y.Z"`
-- `pandas_match_recognize/__init__.py` → `__version__ = "X.Y.Z"`
-- `match_recognize/__init__.py` → `__version__ = "X.Y.Z"`
+The plain `python -m pytest -q` is exactly what CI runs, on Ubuntu, Windows, and macOS against Python 3.8, 3.10, and 3.12. All 709 must pass before a pull request is merged.
 
-Follow [Semantic Versioning](https://semver.org/):
+### Project layout
 
-| Change type | Example |
+| Path | Contents |
 |---|---|
-| Bug fix / patch | `0.2.1` → `0.2.2` |
-| New feature (backwards-compatible) | `0.2.1` → `0.3.0` |
-| Breaking change | `0.2.1` → `1.0.0` |
+| `src/parser/` | ANTLR4 grammar and the `MATCH_RECOGNIZE` extractor |
+| `src/ast_nodes/` | AST node definitions |
+| `src/pattern/` | Pattern tokenizer, NFA/DFA construction, `PERMUTE` handling |
+| `src/matcher/` | Condition evaluation and the matching engine |
+| `src/executor/` | Partitioning, ordering, and result assembly |
+| `tests/` | 37 test files |
+| `Performance/` | Benchmark harness and plotting scripts |
 
-#### 2. Build and upload
+### Working on the grammar
 
-```bash
-# Remove previous build artefacts
-rm -rf build/ dist/ *.egg-info/
-
-# Build the distribution
-python -m build
-
-# (Optional) test locally before publishing
-pip install dist/*.whl --force-reinstall
-
-# Upload to PyPI
-python -m twine upload dist/*
-```
-
-#### 3. Users upgrade
+Changes under `src/grammar/` are generated from the ANTLR4 `.g4` sources. Regenerate them rather than editing the Python files by hand:
 
 ```bash
-pip install --upgrade pandas-match-recognize
+pip install antlr4-tools
+antlr4 -Dlanguage=Python3 -visitor -o src/grammar src/grammar/*.g4
 ```
 
 ---
 
-## Troubleshooting
-
-**Import syntax — correct vs incorrect:**
-
-```python
-# Correct — use underscores in Python imports
-from pandas_match_recognize import match_recognize
-
-# Incorrect — hyphens are not valid Python identifiers
-from pandas-match-recognize import match_recognize  # SyntaxError
-```
-
-**`ModuleNotFoundError` during development:**
-
-```python
-# If the package is not installed and you are running from the project root,
-# add the source directory to the path as a temporary workaround:
-import sys, os
-sys.path.append(os.path.join(os.getcwd(), 'src'))
-from executor.match_recognize import match_recognize
-
-# The recommended approach is to install in editable mode instead:
-# pip install -e .
-# Then use: from pandas_match_recognize import match_recognize
-```
-
-**Performance issues on large datasets:**
-
-- Use a `PARTITION BY` clause to limit the number of rows processed per partition.
-- Avoid deeply nested patterns with multiple unbounded quantifiers (e.g., `(A+B*)+`), which can cause exponential automata growth.
-- Target datasets up to ~1 000 rows per partition for optimal throughput.
-
-**Memory usage:**
-
-```bash
-pip install psutil   # optional monitoring library
-```
-```python
-import psutil
-print(f"Memory usage: {psutil.virtual_memory().percent}%")
-```
-
-Patterns with many variables and complex quantifiers generate large automata. Use bounded quantifiers (`{n,m}`) where possible.
 
 ---
 
@@ -571,35 +522,82 @@ Patterns with many variables and complex quantifiers generate large automata. Us
 
 ### Current Limitations
 
-Despite the system's comprehensive capabilities, several limitations remain.
-
-**Complex pattern and quantifier interactions:** although the system supports concatenation, alternation, grouping, and standard quantifiers (`*`, `+`, `?`, `{n,m}`), certain combinations — particularly multiple greedy quantifiers nested within groups (e.g., `(A+B*)+C?`) — can trigger exponential state-space growth during automata construction. This issue primarily arises with three or more levels of nesting combined with unbounded quantifiers; simpler patterns and bounded quantifiers behave efficiently.
-
-**Limited support for user-defined aggregate functions:** while a wide range of built-in aggregates (including conditional and statistical functions) is supported, the current implementation offers only limited support for user-defined aggregate functions.
+- **Nested greedy quantifiers:** combinations such as `(A+B*)+C?` can trigger exponential state-space growth during automata construction. This appears with three or more levels of nesting plus unbounded quantifiers; simpler patterns and bounded quantifiers behave efficiently.
+- **User-defined aggregates:** a wide range of built-in aggregates is supported, including conditional and statistical ones, but user-defined aggregates only partially.
 
 ### Future Work
 
-- **Performance on large datasets:** the system performs efficiently on moderate-sized datasets but may require additional optimisations for very large inputs.
-- **Memory usage for large patterns:** patterns with many variables and complex quantifiers generate large automata, increasing memory consumption.
-- **Integration with query optimisers:** because the pattern-matching engine currently operates independently of database query optimisers, it may miss plan-level optimisation opportunities.
-- **Distributed processing:** integration with Dask or Spark for large-scale workloads.
-- **Extended SQL:2016 clause coverage.**
+- **Memory at scale:** the input DataFrame stays resident, so RAM is the practical boundary. The engine reached 227.9 M rows without hitting an internal size limit, but the working set grows with the input.
+- **Widening the compiled path:** the speed advantage is bounded by what the compiler turns into column operations. State-dependent `DEFINE` forms still fall back to the generic evaluator.
+- **Query-optimiser integration:** the engine runs independently of a database planner, so it misses plan-level optimisation opportunities.
+- **Distributed processing:** Dask or Spark for large-scale workloads.
+- **Wider SQL:2016 coverage:** R020 (`MATCH_RECOGNIZE` in a `WINDOW` clause) and expressions in `ORDER BY`.
 
 ### Conclusion
 
-We presented a SQL-in-Pandas engine for executing `MATCH_RECOGNIZE` queries over DataFrames. This provides SQL:2016 `MATCH_RECOGNIZE` functionality for Pandas DataFrames, bridging the gap between the expressiveness of relational queries and the flexibility of in-memory analytics — bringing SQL pattern matching capabilities directly to Python data science workflows.
-
-`MATCH_RECOGNIZE` allows data scientists and analysts to use powerful pattern-matching semantics within their familiar Pandas environment, without the need for complex Python code or external SQL engine dependencies. This reduces development complexity and enhances productivity for sequential data analysis across domains including financial analysis, log processing, and time-series pattern detection.
-
-By addressing the identified limitations and implementing the planned enhancements, the goal is a more adaptable and efficient solution capable of handling complex pattern-matching scenarios across a variety of data processing environments.
+This engine brings SQL:2016 `MATCH_RECOGNIZE` to Pandas DataFrames, bridging the expressiveness of relational queries with the flexibility of in-memory analytics. Analysts get pattern-matching semantics in their familiar environment, without hand-written state machines or an external SQL engine — which lowers development effort for sequential analysis in financial data, log processing, and time-series detection.
 
 ---
 
 ## References
 
+- ISO/IEC 9075-2:2016 — *Information technology — Database languages — SQL — Part 2: Foundation*, which introduced row pattern recognition (features R010 and R020).
 - [Oracle MATCH\_RECOGNIZE documentation](https://docs.oracle.com/cd/E29542_01/apirefs.1111/e12048/pattern_recog.htm#CQLLR1531)
 - [Flink SQL MATCH\_RECOGNIZE](https://nightlies.apache.org/flink/flink-docs-release-1.15/docs/dev/table/sql/queries/match_recognize/)
 - [Trino Row Pattern Recognition](https://trino.io/docs/current/sql/match-recognize.html)
+
+---
+
+## About This Work
+
+This engine is the implementation behind a Master's thesis at Nile University, in the School of Information Technology and Computer Science.
+
+The work was carried out under the supervision of **Prof. Mohamed El-Helw** and **Prof. Ahmed Awad**.
+
+I owe a particular debt to Prof. Ahmed Awad, whose academic and technical guidance ran through every stage of this project — from the early design decisions to the shape of the final evaluation. He gave it a great deal of his time, and the engine is a good deal better for it.
+
+I am also grateful to Prof. Mohamed El-Helw for his guidance and his steady support throughout, especially through the more difficult stretches of the work. Both supervisors shaped this project, and I am thankful to them.
+
+### Our publications
+
+The first paper on this work appeared at MELECON 2026:
+
+> M. Lawande, M. El-helw, and A. Awad, "Row Pattern Recognition for Pandas: Bringing MATCH\_RECOGNIZE to Python DataFrames," in *2026 IEEE 23rd Mediterranean Electrotechnical Conference (MELECON)*, IEEE, 2026. doi: [10.1109/MELECON64486.2026.11418885](https://doi.org/10.1109/MELECON64486.2026.11418885)
+
+```bibtex
+@inproceedings{lawande2026rpr,
+  title     = {Row Pattern Recognition for Pandas: Bringing
+               {MATCH\_RECOGNIZE} to Python DataFrames},
+  author    = {Lawande, Monier and El-helw, Mohamed and Awad, Ahmed},
+  booktitle = {2026 IEEE 23rd Mediterranean Electrotechnical
+               Conference (MELECON)},
+  year      = {2026},
+  publisher = {IEEE},
+  doi       = {10.1109/MELECON64486.2026.11418885}
+}
+```
+
+A second manuscript extending this work has been submitted to *Scientific Reports* and is currently **under review**. It carries the full cross-system evaluation against Trino and Oracle, the memory analysis, and the scalability study reported above. Details will be added here once it is published.
+
+### Reference details
+
+The full evaluation — cross-system correctness, the benchmarks above, and the scalability study — is documented in the thesis:
+
+```bibtex
+@mastersthesis{lawande2026rowmatch,
+  author  = {Lawande, Monier},
+  title   = {Row Pattern Matching Analytics: Bringing SQL
+             {MATCH\_RECOGNIZE} to Pandas DataFrames},
+  school  = {Nile University},
+  address = {Giza, Egypt},
+  year    = {2026},
+  type    = {{MSc} thesis},
+  note    = {School of Information Technology and Computer Science},
+  url     = {https://github.com/MonierLawande/Row_match_recognize}
+}
+```
+
+If this engine turns out to be useful in your own work, the MELECON paper above is the reference for it. For the software release itself, see [`pandas-match-recognize`](https://pypi.org/project/pandas-match-recognize/) on PyPI.
 
 ---
 
@@ -607,8 +605,9 @@ By addressing the identified limitations and implementing the planned enhancemen
 
 Pull requests and issue reports are welcome. Please ensure contributions include tests and a brief description of the change.
 
-- **Bug reports & feature requests:** [open an issue on GitHub](https://github.com/MonierAshraf/Row_match_recognize/issues)
-- **Pull requests:** fork the repository, create a feature branch, and submit a PR against `main`
+- **Bug reports & feature requests:** [open an issue on GitHub](https://github.com/MonierLawande/Row_match_recognize/issues)
+- **Pull requests:** fork the repository, create a feature branch, and submit a PR against `master`
+- **Before opening a PR:** run `python -m pytest -q` and confirm all 709 tests pass. CI runs the same suite on Ubuntu, Windows, and macOS against Python 3.8, 3.10, and 3.12.
 
 ---
 
