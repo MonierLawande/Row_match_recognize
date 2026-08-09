@@ -212,7 +212,10 @@
 
 % ---- Bibliography ----
 \usepackage{csquotes}
-\usepackage[backend=bibtex, style=ieee, sorting=none]{biblatex}
+% backend=biber, not the legacy bibtex backend: with TeX Live 2026's
+% biblatex 3.21 the bibtex backend silently truncates the bibliography
+% (6 pages and ~1400 words lost).  biber reproduces the full 111 pages.
+\usepackage[backend=biber, style=ieee, sorting=none]{biblatex}
 \addbibresource{Bibliography.bib}
 \AtEveryCite{\small}
 % Long repository URLs in the bibliography have no natural break point and
