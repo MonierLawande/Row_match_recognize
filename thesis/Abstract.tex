@@ -1,37 +1,33 @@
-SQL:2016 introduced the \texttt{MATCH\_RECOGNIZE} clause to search
-ordered rows for user-defined patterns.  It is useful when the
-important information is a sequence rather than one isolated row.  It
-can express V-, W-, and U-shaped patterns, repeated behavior, and
-changes over time.  Applications include fraud detection, IoT
-monitoring, market analysis, and e-commerce clickstreams.  Database Systems
-such as Oracle and Trino provide this feature, but Pandas has no native
-equivalent.  Analysts therefore use shifted columns, loops, and custom
-state handling, making the code longer and harder to verify.
+SQL:2016 introduced the \texttt{MATCH\_RECOGNIZE} clause to search ordered
+rows for user-defined patterns.  It is useful when the information is a
+sequence, not one isolated row, and expresses V-, W-, and U-shaped patterns
+and repeated behavior, as in fraud detection, IoT monitoring, and clickstreams.
+Oracle and Trino provide it, but Pandas does not, so analysts fall back on
+shifted columns, loops, and state handling that are harder to verify.
 
-This thesis addresses that gap with an in-process engine for an
-evaluated R010-style subset: row pattern recognition in the
-\texttt{FROM} clause.  The engine parses and validates a query,
-compiles its row pattern into finite automata, and executes it over
-ordered DataFrame partitions.  The supported scope includes the main
-clauses, direct-column ordering, output and skip modes, the listed
-pattern constructs, navigation, and selected aggregates.  The
-evaluation covers correctness, feature support, usability,
-performance, and scalability.  All 709 regression tests passed.
-Trino and Oracle served as cross-system references; usability compared
-the SQL form with hand-written Pandas.
+The standard defines row-pattern recognition as three independent optional
+features rather than required behavior: R010 places the clause in
+the \texttt{FROM} clause, so a pattern reads like a table; R020 and R030 cover
+window placement and aggregates.  A vendor may implement any or none, so
+support differs widely.
 
-The main benchmark used five patterns and six Amazon UK Products~2023
-sizes from 100\,K to 2.22\,million rows.  All three systems returned
-the same normalized results in all thirty pattern--size combinations.
-Under one CPU core and a 32\,GB memory limit, mean time across those
-combinations was 0.17\,s for the engine, 1.04\,s for Oracle, and
-1.98\,s for Trino.  The scalability study using Amazon Reviews~2023
-extended the engine to 227.9\,million rows.  The engine and Oracle
-completed all 35 cases; Trino completed 33.  Engine time remained
-close to linear, while query-time working memory grew with the input.
-The results show that row-pattern recognition can connect declarative
-SQL with in-process Pandas analysis while keeping sequential queries
-readable.
+This thesis addresses that gap with an in-process engine for an evaluated
+subset of R010: the clause forms the engine implements and the evaluation
+tests.  The engine parses a query,
+compiles its row pattern into finite automata, and executes it over ordered
+DataFrame partitions.  The evaluation covers correctness, feature
+support, usability, performance, and scalability against Trino and Oracle.
+All 709 regression tests passed.
+
+The main benchmark ran five patterns over six Amazon UK Products~2023 sizes,
+100\,K to 2.22\,million rows (30 cases per system), and all three agreed on
+every result.  Under one core and 32\,GB, mean time was
+0.17\,s for the engine, 1.04\,s for Oracle, and 1.98\,s for Trino.  A scalability study on Amazon Reviews~2023 ran the same five patterns over
+seven sizes to 227.9\,million rows (35 cases per system) under one core and
+58\,GB; the engine and Oracle completed all 35, Trino 33.
+Engine time stayed close to linear, while query-time memory grew with input size.
+Row-pattern recognition can therefore connect declarative SQL with in-process
+Pandas analysis while keeping sequential queries readable.
 
 \noindent\textbf{Keywords:} \texttt{MATCH\_RECOGNIZE}; Row Pattern
 Recognition; Pandas; SQL:2016; Finite Automata; Pattern Matching.

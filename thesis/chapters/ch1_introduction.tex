@@ -27,8 +27,8 @@ addresses.
 A row pattern describes a shape that appears across several consecutive
 rows.  Building one takes three steps.
 
-First, the rows are divided into independent groups --- one customer, one
-sensor, one bank card --- and each group is put in order, usually by time.
+First, the rows are divided into independent groups (one customer, one sensor,
+one bank card), and each group is put in order, usually by time.
 Second, each kind of row that matters is given a name, and that name is
 given a meaning by a condition.  A row whose price is lower than the row
 before it can be called \textsc{down}; a row whose price is higher can be
@@ -92,8 +92,6 @@ the order and in the relationship between neighbors, so the information
 disappears the moment the rows are treated as an unordered
 set~\cite{melton2017sqlrpr}.
 
-\subsection{The Shape Vocabulary}
-\label{subsec:intro-shapes}
 Analysts often name these patterns by the outline they trace when the
 measured value is plotted against time.  Three names recur, and
 Figure~\ref{fig:intro-shapes} shows them side by side.
@@ -196,8 +194,6 @@ what turns an ordered table into an explanation of what
 happened~\cite{petkovic2022rpr}.  The same reasoning extends beyond these
 three outlines to trends, repeated behavior, and recovery after a failure.
 
-\subsection{Ways to Express a Sequential Pattern}
-\label{subsec:intro-approaches}
 Sequential patterns are not new, and several families of languages already
 describe them.  They differ in how directly the pattern can be stated, and
 in what has to be deployed to run it.
@@ -225,8 +221,7 @@ for an analyst holding a finished table.
 
 \emph{Row-pattern recognition in SQL} takes the regular-expression idea and
 applies it to rows.  The pattern is written once, as a pattern, next to the
-data it queries.  SQL:2016 standardized this as the
-\texttt{MATCH\_RECOGNIZE} clause~\cite{iso2016,ISO2021}, and it is the
+data it queries.  This is the \texttt{MATCH\_RECOGNIZE} clause, and it is the
 approach this thesis follows.  Consider a card that a thief first tests with
 small charges and then empties.  A fraud analyst writes that sequence
 directly as the shape it is:
@@ -400,10 +395,10 @@ judged against it.
 
   \item \textbf{Define the supported subset and verify its correctness.}
     A partial implementation is only useful if its edges are known.  The
-    second objective is to state the evaluated R010-style subset precisely
-    --- the main clauses, output and skip modes, navigation and aggregate
+    second objective is to state the evaluated R010-style subset precisely: the
+    main clauses, the output and skip modes, navigation and aggregate
     functions, and the pattern constructs from quantifiers and alternation to
-    exclusions and \texttt{PERMUTE} --- and then to establish that its results
+    exclusions and \texttt{PERMUTE}.  It is then to establish that its results
     agree with independent production implementations, rather than with the
     engine's own expectations.
 
