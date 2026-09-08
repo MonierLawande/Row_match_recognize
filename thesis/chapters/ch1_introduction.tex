@@ -11,11 +11,243 @@ relationships that span several events.  It can detect shapes such as V, W,
 and U, as well as trends and repeated behavior.  These patterns support
 analysis in many domains.  Examples include money-laundering
 transaction chains~\cite{petkovic2022fraud}, failures in IoT sensor data, and
-user journeys through e-commerce clickstreams.  Unlike an ordinary SQL
-filter, which evaluates one row at a time, a row pattern uses event order and
-relationships between rows.  Its syntax resembles a regular expression
-applied to rows rather than characters.  Analysts can therefore describe and
-extract meaningful sequences from ordered partitions.
+user journeys through e-commerce clickstreams.
+
+This chapter starts from the idea itself.  Section~\ref{sec:intro-rowpatterns}
+explains what a row pattern is, what the V, W, and U shapes mean, and how the
+existing families of languages express such patterns.
+Section~\ref{sec:intro-problem} then states the problem this thesis
+addresses.
+
+
+% ----------------------------------------------------------------
+\section{Row Patterns in Ordered Data}
+\label{sec:intro-rowpatterns}
+% ----------------------------------------------------------------
+A row pattern describes a shape that appears across several consecutive
+rows.  Building one takes three steps.
+
+First, the rows are divided into independent groups --- one customer, one
+sensor, one bank card --- and each group is put in order, usually by time.
+Second, each kind of row that matters is given a name, and that name is
+given a meaning by a condition.  A row whose price is lower than the row
+before it can be called \textsc{down}; a row whose price is higher can be
+called \textsc{up}.  Third, a pattern says in which order those names may
+appear.
+
+The third step is the same idea used to search text.  A search for a word
+followed by any digits does not look for one fixed string; it describes a
+shape that many different strings can take.  A row pattern does this for
+rows instead of characters~\cite{winand_match_recognize,zemke2007pattern}.
+Table~\ref{tab:intro-rowlabels} shows the idea on six days of one
+customer's prices.
+
+\begin{table}[H]
+\centering
+\caption{Six ordered rows, each labelled by a condition.}
+\label{tab:intro-rowlabels}
+{\small
+\begin{tabular}{clll}
+\toprule
+\textbf{Day} & \textbf{Price} & \textbf{Label} & \textbf{Why} \\
+\midrule
+1 & 100 & \textsc{start} & the row the shape starts from \\
+2 &  80 & \textsc{down}  & lower than day 1 \\
+3 &  60 & \textsc{down}  & lower than day 2 \\
+4 &  55 & \textsc{down}  & lower than day 3 \\
+5 &  70 & \textsc{up}    & higher than day 4 \\
+6 &  90 & \textsc{up}    & higher than day 5 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\noindent
+The price falls for three days and then rises for two.  In words: one
+\textsc{start} row, then one or more \textsc{down} rows, then one or more
+\textsc{up} rows.  That sentence is written as a pattern like this:
+
+\begin{lstlisting}[language=SQL]
+PATTERN (START DOWN+ UP+)
+\end{lstlisting}
+
+Each name in the line is a label from Table~\ref{tab:intro-rowlabels}, and
+the order of the names is the order the rows must appear in.  The symbol
+\texttt{+} after a name means \emph{one or more rows of that kind}.  So
+\texttt{START} matches day~1, \texttt{DOWN+} matches days~2 to~4, and
+\texttt{UP+} matches days~5 and~6.
+
+Because \texttt{+} does not fix a number, the same line also matches a fall
+lasting two days or ten.  It describes the shape rather than one exact
+length, which is what makes it a pattern.  This is the V of
+Figure~\ref{fig:intro-shapes}.  Writing \texttt{DOWN\{3\}} instead would
+demand exactly three falling days, and \texttt{DOWN?} would make the fall
+optional.
+
+The difference from an ordinary filter is the unit of interest.  A filter
+asks a question about one row: is this price below ten?  A row pattern asks
+a question about a run of rows: does the price fall three times and then
+recover?  No single row answers the second question.  The answer lives in
+the order and in the relationship between neighbors, so the information
+disappears the moment the rows are treated as an unordered
+set~\cite{melton2017sqlrpr}.
+
+\subsection{The Shape Vocabulary}
+\label{subsec:intro-shapes}
+Analysts often name these patterns by the outline they trace when the
+measured value is plotted against time.  Three names recur, and
+Figure~\ref{fig:intro-shapes} shows them side by side.
+
+\begin{figure}[htbp]
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+      x=1cm, y=1cm,
+      axisline/.style={draw=black!45, line width=0.6pt,
+                       -{Stealth[length=1.7mm]}},
+      curve/.style={draw=blue!55!black, line width=1.15pt,
+                    line join=round},
+      trough/.style={circle, fill=blue!55!black, inner sep=0pt,
+                     minimum size=2.6pt},
+      guide/.style={draw=black!30, line width=0.5pt, densely dotted},
+      shapename/.style={font=\small\bfseries, text=black!85},
+      caption/.style={font=\scriptsize, text=black!70, align=center,
+                      text width=3.3cm}
+    ]
+
+    % ---------- panel 1: V ----------
+    \begin{scope}[shift={(0,0)}]
+      \draw[axisline] (0,0) -- (3.3,0);
+      \draw[axisline] (0,0) -- (0,2.15);
+      \node[font=\scriptsize, text=black!60, anchor=north] at (1.65,-0.08) {time};
+      \node[font=\scriptsize, text=black!60, rotate=90, anchor=south]
+           at (-0.16,1.05) {value};
+      \draw[guide] (1.5,0) -- (1.5,0.35);
+      \draw[curve] (0.15,1.75) -- (0.75,1.15) -- (1.15,0.62)
+                -- (1.5,0.35) -- (1.85,0.62) -- (2.35,1.2) -- (3.05,1.8);
+      \node[trough] at (1.5,0.35) {};
+      \node[shapename] at (1.65,-0.78) {V shape};
+      \node[caption]  at (1.65,-1.42)
+           {one low point:\\ a dip and a recovery};
+    \end{scope}
+
+    % ---------- panel 2: W ----------
+    \begin{scope}[shift={(4.35,0)}]
+      \draw[axisline] (0,0) -- (3.3,0);
+      \draw[axisline] (0,0) -- (0,2.15);
+      \node[font=\scriptsize, text=black!60, anchor=north] at (1.65,-0.08) {time};
+      \draw[guide] (0.85,0) -- (0.85,0.42);
+      \draw[guide] (2.35,0) -- (2.35,0.42);
+      \draw[curve] (0.15,1.8) -- (0.55,0.95) -- (0.85,0.42)
+                -- (1.2,0.95) -- (1.6,1.3) -- (2.0,0.95)
+                -- (2.35,0.42) -- (2.7,1.0) -- (3.05,1.8);
+      \node[trough] at (0.85,0.42) {};
+      \node[trough] at (2.35,0.42) {};
+      \node[shapename] at (1.65,-0.78) {W shape};
+      \node[caption]  at (1.65,-1.42)
+           {two low points:\\ the level is tested twice};
+    \end{scope}
+
+    % ---------- panel 3: U ----------
+    \begin{scope}[shift={(8.7,0)}]
+      \draw[axisline] (0,0) -- (3.3,0);
+      \draw[axisline] (0,0) -- (0,2.15);
+      \node[font=\scriptsize, text=black!60, anchor=north] at (1.65,-0.08) {time};
+      \draw[guide] (0.95,0) -- (0.95,0.42);
+      \draw[guide] (2.2,0) -- (2.2,0.42);
+      \draw[curve] (0.15,1.8) -- (0.6,0.95) -- (0.95,0.42)
+                -- (1.55,0.38) -- (2.2,0.42) -- (2.6,0.98) -- (3.05,1.8);
+      \node[trough] at (0.95,0.42) {};
+      \node[trough] at (2.2,0.42) {};
+      \node[shapename] at (1.65,-0.78) {U shape};
+      \node[caption]  at (1.65,-1.42)
+           {a flat trough:\\ the low level persists};
+    \end{scope}
+  \end{tikzpicture}
+  }
+  \caption{The V, W, and U shapes.}
+  \label{fig:intro-shapes}
+\end{figure}
+
+\begin{description}
+  \item[V shape.] The value falls to a single low point and then rises
+    again.  It marks a dip followed by a recovery: a share price that drops
+    and rebounds, a temperature that falls and returns, or a customer whose
+    spending declines for a few months and then picks up.  The V is the
+    smallest interesting shape, because it already needs two opposite
+    trends and the turning point between them.
+
+  \item[W shape.] Two V shapes in sequence.  The value falls, recovers only
+    partly, falls a second time, and then rises.  In market analysis this
+    double bottom is read as a stronger signal than one dip, since the
+    level was tested twice.  In monitoring it often means a fault that was
+    not really fixed the first time.
+
+  \item[U shape.] The value falls, stays low for a while, and then rises.
+    The trough is flat rather than sharp.  The distinction from a V matters
+    in practice: a V is a brief disturbance, whereas a U is a sustained
+    condition such as an outage, a seasonal lull, or a slow recovery.
+\end{description}
+
+The shapes matter because they carry meaning that summary statistics lose.
+An average price hides whether the series dipped once, twice, or stayed
+low.  Detecting the shape, and reporting where it started and ended, is
+what turns an ordered table into an explanation of what
+happened~\cite{petkovic2022rpr}.  The same reasoning extends beyond these
+three outlines to trends, repeated behavior, and recovery after a failure.
+
+\subsection{Ways to Express a Sequential Pattern}
+\label{subsec:intro-approaches}
+Sequential patterns are not new, and several families of languages already
+describe them.  They differ in how directly the pattern can be stated, and
+in what has to be deployed to run it.
+
+\emph{Procedural code} keeps the data in the host language.  An analyst
+writes a loop, or shifts columns and combines Boolean masks, and inspects
+the rows directly.  Nothing new has to be installed, and any condition can
+be expressed.  The cost is that the pattern is never written down as such:
+it is spread across index arithmetic, bounds checks, and overlap handling,
+where a single off-by-one silently changes the result~\cite{Python_UDF}.
+
+\emph{Window functions and self-joins} stay inside SQL.  A query can reach
+the previous or next row with \texttt{LAG} and \texttt{LEAD}, or join a
+table to itself once per step.  This is declarative and portable.  But the
+pattern must be re-encoded as fixed offsets, so the query grows with the
+length of the sequence, a variable-length repetition is awkward to express,
+and the plan may scan the table several
+times~\cite{cao2012optimizationanalyticwindowfunctions}.
+
+\emph{Complex-event-processing languages} were designed for this problem in
+streams.  Systems such as Apache Flink provide pattern operators over
+unbounded event sequences~\cite{flink}.  They are expressive, but they
+assume a streaming runtime and a separate deployment, which is a large step
+for an analyst holding a finished table.
+
+\emph{Row-pattern recognition in SQL} takes the regular-expression idea and
+applies it to rows.  The pattern is written once, as a pattern, next to the
+data it queries.  SQL:2016 standardized this as the
+\texttt{MATCH\_RECOGNIZE} clause~\cite{iso2016,ISO2021}, and it is the
+approach this thesis follows.  Consider a card that a thief first tests with
+small charges and then empties.  A fraud analyst writes that sequence
+directly as the shape it is:
+
+\begin{lstlisting}[language=SQL]
+PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)
+\end{lstlisting}
+
+It is built the same way as \texttt{PATTERN (START DOWN+ UP+)} above, with
+two additions.  \texttt{PROBE+} again means one or more test charges.  The
+bar in \texttt{(TRANSFER | WITHDRAW)} means \emph{or}, so that row may be
+either kind, and \texttt{\{2,5\}} allows between two and five of them.
+\texttt{DRAIN} matches the final large movement.  As in Table~\ref{tab:intro-rowlabels}, the names are not
+keywords of the language: the analyst invents them and gives each one a
+meaning through a condition, so \texttt{PROBE} might mean an amount below a
+small threshold.  Chapter~\ref{chap:background} presents the full
+clause and its sub-clauses.
+
+The cost of this approach is scope: the clause is optional in the standard,
+and the systems that implement it do so to different degrees, which
+Chapter~\ref{chap:related} examines in detail.
 
 % ----------------------------------------------------------------
 \section{Problem Statement}
@@ -40,9 +272,10 @@ This gap matters because many analytical workflows begin in Python.  Users
 prepare data, test hypotheses, and build models before moving to a larger
 database or cloud platform.  For data that already fits in memory, a separate
 SQL engine adds deployment, integration, and data-transfer work.  This thesis
-does not aim to replace an enterprise database.  It brings a practical subset
-of declarative row-pattern recognition to the Pandas environment where these
-workflows often begin.
+does not aim to replace an enterprise database.  Its main objective is to
+bring a practical subset of declarative row-pattern recognition to the Pandas
+environment where these workflows often begin.  Section~\ref{sec:intro-objectives}
+states that objective precisely and breaks it into three parts.
 
 Without this declarative primitive, SQL users must combine window functions,
 self-joins, or loops outside the database.  Beyond two or three steps, the
@@ -141,45 +374,51 @@ sub-clauses of \texttt{MATCH\_RECOGNIZE}.
 \section{Research Objectives and Contributions}
 \label{sec:intro-objectives}
 % ----------------------------------------------------------------
-This thesis brings a practical R010-style subset of SQL:2016 row-pattern
-recognition into Pandas.  It connects relational pattern queries with
-in-memory analytics and asks whether they can run without a database
-server.  Three objectives guide the work.
+\paragraph{Main objective.}
+To bring a practical R010-style subset of SQL:2016 row-pattern recognition to
+Pandas, so that a declarative pattern query runs directly on a DataFrame
+without a database server.
 
-\paragraph{Research objectives.}
+This connects relational pattern queries with in-memory analytics.  It also
+asks a question that the rest of the thesis answers: whether such queries can
+run in process, correctly and fast enough to be useful.  Three specific
+objectives follow from it.
+
+\paragraph{Specific objectives.}
+Three objectives follow.  Each one is stated so that the thesis can be
+judged against it.
 
 \begin{enumerate}
-  \item \textbf{Build a Pandas-native engine.}  The engine parses a
-    \texttt{MATCH\_RECOGNIZE} query, compiles its row pattern, and runs it
-    directly on a DataFrame.  It works alongside Pandas and needs no separate
-    database or cloud service.  It replaces procedural code such as
-    Listing~\ref{lst:ch1-udf} with the declarative call in
-    Listing~\ref{lst:ch1-mr}.
+  \item \textbf{Determine whether the subset can run in process.}
+    The standard defines row-pattern recognition for a database engine, which
+    owns its storage, planner, and execution operators.  A DataFrame runtime
+    owns none of these.  The first objective is to design and realize an
+    engine that parses a \texttt{MATCH\_RECOGNIZE} query, compiles its pattern
+    into automata, and executes it over an ordered DataFrame with no database
+    server, and so to show whether the standard's execution model survives
+    that move.
 
-  \item \textbf{Support and verify useful row-pattern semantics.}  The
-    target is the evaluated R010-style subset.  It includes the evaluated
-    forms of the main clauses, output and skip modes, and navigation
-    and aggregate functions.  Its pattern constructs include
-    quantifiers (\texttt{*}, \texttt{+},
-    \texttt{?}, and \texttt{\{n,m\}}), alternation (\texttt{|}), grouping,
-    anchors, exclusions (\texttt{\{-\ldots-\}}), and \texttt{PERMUTE}.
-    Automated and cross-system tests verify the supported behavior.
+  \item \textbf{Define the supported subset and verify its correctness.}
+    A partial implementation is only useful if its edges are known.  The
+    second objective is to state the evaluated R010-style subset precisely
+    --- the main clauses, output and skip modes, navigation and aggregate
+    functions, and the pattern constructs from quantifiers and alternation to
+    exclusions and \texttt{PERMUTE} --- and then to establish that its results
+    agree with independent production implementations, rather than with the
+    engine's own expectations.
 
-    For example, a fraud analyst can express a probe-and-drain sequence as:
-\begin{lstlisting}[language=SQL]
-PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)
-\end{lstlisting}
-
-  \item \textbf{Evaluate the system.}  The study assesses the five criteria
-    defined in Chapter~\ref{chap:evaluation}: correctness, SQL feature
-    coverage, usability, performance, and scalability.  It measures output
-    agreement, developer effort, execution time, throughput,
-    memory, and time-versus-size $R^2$.  The main evaluation uses Amazon UK
-    Products~2023~\cite{asaniczka2023amazon}, which contains about
-    2.2~million e-commerce product records.  A separate scalability test uses
-    Amazon Reviews~2023 up to 227.9~million
-    rows~\cite{hou2024amazonreviews}.
+  \item \textbf{Characterize the cost and the limits.}
+    Feasibility alone does not justify the approach.  The third objective is
+    to measure execution time, throughput, and memory against established
+    engines under equal resource limits, and to test how the engine scales as
+    the input grows.
 \end{enumerate}
+
+Objective~1 is addressed by the design in Chapter~\ref{chap:methodology} and
+the implementation in Chapter~\ref{chap:implementation}.  Objectives~2
+and~3 are answered by the five evaluation criteria of
+Chapter~\ref{chap:evaluation}: correctness and feature coverage for the
+second, and usability, performance, and scalability for the third.
 
 \paragraph{Contributions.}
 Together, these objectives produce three contributions: an in-process
@@ -200,17 +439,24 @@ All 90 system--pattern--size cells completed.  For each of the 30
 pattern--size combinations, all three systems returned the same normalized
 result set.  Under the shared one-core, 32\,GB memory limit, mean time was
 0.17\,s for the engine, 1.04\,s for Oracle, and 1.98\,s for Trino.
-Engine time grew almost linearly.  Its measured query-time memory was
-higher than either database, but its process footprint was lower.
+Engine time grew almost linearly.  Its measured query-time memory was higher
+than either database, because the compiled path builds whole-column masks and
+intermediate arrays instead of evaluating row by row.  Its total footprint was
+nevertheless lower, because it runs as a single Python process rather than a
+resident server that holds the table in a JVM heap or an SGA.
 
 The larger Amazon Reviews test extends the range to 227.9~million rows,
 about $100\times$ the main dataset.  Under a shared one-core, 58\,GB
 memory limit, the engine and Oracle~21c Enterprise Edition completed all
 35 cases.  Trino~473 completed 33.  Its complex nested cases at 160 and
 227.9~million rows reached the 600\,s limit.  Engine time remained close to linear.
-Across the four pattern families completed by all three systems,
-Oracle's per-size mean time was $5.1$--$10.1\times$ the engine's.
-Trino's was $11.4$--$13.8\times$ the engine's.
+Four pattern families were completed by all three systems at every size.
+Averaging those four at each size, Oracle's mean time was
+$5.1$--$10.1\times$ the engine's and Trino's was $11.4$--$13.8\times$ the
+engine's.  Oracle's multiple grew with the input, while Trino's stayed
+roughly flat.  At the largest size the
+four-family means were 28.9\,s for the engine, 291.7\,s for Oracle, and
+375.6\,s for Trino.
 Chapter~\ref{chap:evaluation} reports the complete method, trade-offs, and
 limits.
 
