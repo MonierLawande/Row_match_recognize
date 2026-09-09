@@ -209,8 +209,11 @@ abstraction, rather than down to machine
 code~\cite{mogensen2024compiler}.  Here both sides are SQL.  The input
 is a \texttt{MATCH\_RECOGNIZE} query, and the output is SQL that
 DuckDB already runs.  Their transpiler produces non-recursive and
-recursive common table expressions and then executes the translated
-SQL in DuckDB.
+recursive common table expressions (CTEs) and then executes the
+translated SQL in DuckDB.  A CTE is a named temporary result set,
+written with \texttt{WITH} at the start of a query and referenced
+later in the same statement.  A recursive CTE may also refer to
+itself, which is how plain SQL can walk a row sequence step by step.
 This approach expresses pattern variables, ordering, skip behavior,
 and measures without adding a native operator to DuckDB.  It still
 requires translation and execution through a second engine.

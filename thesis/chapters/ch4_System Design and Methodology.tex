@@ -33,6 +33,12 @@ references and supported clause combinations while the tree is built.
 \emph{execution} combines the compiled pattern with the input and
 builds the result.
 
+The second stage is about meaning, not shape.  The grammar has already
+proved the text well formed, so what remains is whether every
+reference resolves and whether the requested clauses may be combined.
+\texttt{AFTER MATCH SKIP TO LAST Z} over \texttt{PATTERN (A B)} parses
+correctly, but \texttt{Z} is not a pattern variable.
+
 These stages are design boundaries.  They do not require five separate
 runtime objects: parsing and validation share one traversal, and the
 logical plan is a group of resolved attributes.  The separation still
@@ -97,9 +103,13 @@ before matching begins.
 
 The compiler converts the validated pattern into a non-deterministic
 finite automaton (NFA) and then a complete deterministic finite
-automaton (DFA)~\cite{georgiou2025streaming}.  If complete construction
-exceeds a resource limit, compilation fails explicitly; it never
-executes a partial automaton.  Chapter~\ref{chap:implementation}
+automaton (DFA)~\cite{HopcroftUllman}.  An NFA may be in several
+states at once, so it represents alternation, optional parts, and
+repetition directly.  A DFA has exactly one next state for each input,
+so matching becomes a lookup instead of a search.  The conversion
+therefore trades construction cost for a predictable scan.  If
+complete construction exceeds a resource limit, compilation fails
+explicitly; it never executes a partial automaton.  Chapter~\ref{chap:implementation}
 explains compilation and DataFrame execution in detail.  After the
 worked example, the remaining sections focus on the first three stages.
 
@@ -191,7 +201,7 @@ Figure~\ref{fig:system-architecture}.
       at ([xshift=2.55cm,yshift=-0.42cm]excompile.center) {$\{1,8,9\}$};
     \node[font=\scriptsize]
       at ([yshift=-0.77cm]excompile.center)
-      {braced numbers are internal NFA state identifiers};
+      {braces show the NFA states in each DFA state};
     \node[font=\scriptsize]
       at ([yshift=-1.02cm]excompile.center)
       {$D_3$ accepts; a missing transition rejects the candidate};
@@ -293,17 +303,23 @@ guarded by the predicate of its labeled variable.  During execution,
 $200>100>50$ and produces the output row.  The \texttt{cust\_2}
 candidate fails at $C$ because $6<4$ is false.
 
+The next three sections follow stages~1 to~3.
+Section~\ref{sec:meth-compiler} covers parsing,
+Section~\ref{sec:meth-semantic} semantic validation, and
+Section~\ref{sec:meth-logical} logical-plan construction.  Stages~4
+and~5 belong to Chapter~\ref{chap:implementation}.  The figure shows
+all five because the two chapters form one pipeline.
+
 % ----------------------------------------------------------------
 \section{SQL Parsing}
 \label{sec:meth-compiler}
 % ----------------------------------------------------------------
 
-A \texttt{MATCH\_RECOGNIZE} query mixes ordinary SQL with an extended
-row-pattern language.  It has eight sub-clauses and, inside
-\texttt{PATTERN}, its own grammar of quantifiers, alternation,
-grouping, anchors, exclusions, and \texttt{PERMUTE}.  The parser must
-understand both.  Listing~\ref{lst:mr-full-syntax} summarizes the
-clause structure accepted by the core path.
+Section~\ref{subsec:bg-clause-structure} described the clause
+structure.  A \texttt{MATCH\_RECOGNIZE} query mixes ordinary SQL with
+an extended row-pattern language, and the parser must handle both at
+once.  Listing~\ref{lst:mr-full-syntax} gives the form the core path
+accepts.
 
 \begin{lstlisting}[
     language   = {},
@@ -342,11 +358,13 @@ inside a top-level \texttt{SELECT}, with an optional outer
 independent clauses over self-contained inline relations.  It is not a
 general relational planner.  The \texttt{DEFINE} clause is optional,
 and a pattern variable without a predicate is treated as always true.
-Direct ordering keys support per-key \texttt{ASC}/\texttt{DESC}
-direction and \texttt{NULLS FIRST}/\texttt{NULLS LAST}; omitted null
-placement defaults to \texttt{NULLS LAST}.  General ordering
-expressions, full CTE rewriting, set-operation planning, and general
-nested subqueries remain outside the supported path.
+Ordering keys support per-key \texttt{ASC}/\texttt{DESC} direction
+and \texttt{NULLS FIRST}/\texttt{NULLS LAST}; omitted null placement
+defaults to \texttt{NULLS LAST}.  A key may also be an expression over
+the input columns, such as \texttt{ABS(ts)} or \texttt{price + ts}.
+Conditional and subquery ordering keys, rewriting of \texttt{WITH}
+clauses (CTEs), set-operation planning, and general nested subqueries
+remain outside the supported path.
 
 \paragraph{Choosing a parser.}
 The requirement is a typed tree for both languages at once.  At the
