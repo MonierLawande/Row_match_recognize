@@ -397,22 +397,167 @@ large SQL grammar.  Regular expressions also cannot model nested
 pattern groups.
 
 \paragraph{From parse tree to a typed AST.}
-ANTLR4's raw parse tree is a \emph{concrete syntax tree}.  It keeps
-every matched token, including keywords and punctuation that execution
-does not need.  Lowering it to an abstract form follows the
-\emph{Visitor} pattern~\cite{robson2022designpatterns}.  A visitor
-keeps the walk over a tree separate from the classes of its nodes, so
-a new operation can be added without editing them.  That matters here
-because ANTLR4 generates both the node classes and the visitor base
-class.  Choosing the right method takes two steps, because neither
-side alone knows enough: the visitor knows the operation, and the node
-knows its own type.  Each node is therefore handed the visitor and
-calls back the method named for that node's type.  Two cooperating visitors handle the outer query and the
-\texttt{MATCH\_RECOGNIZE} clause.  They produce a compact, typed AST.
-Its root holds the outer \texttt{SELECT}/\texttt{FROM} and
-one \texttt{MatchRecognizeClause}.  Each sub-clause has a typed
-dataclass for its resolved fields.  Later stages can dispatch on node
-type instead of reading the raw SQL again.
+ANTLR4's parse tree is a \emph{concrete syntax tree}.  It contains the
+full grammatical structure, including keywords and punctuation that
+execution does not need.  The engine converts this tree to a simpler
+abstract syntax tree (AST) using the \emph{Visitor}
+pattern~\cite{robson2022designpatterns,Parr2013}.  This behavioral
+design pattern separates an operation from the objects it acts on.
+The same tree can then support different tasks, such as building an
+AST or checking a query, without changing its node classes.
+
+The \emph{client} starts the task.  The \emph{visitor interface}
+defines an operation for each node type.  A \emph{concrete visitor}
+provides the code for those operations.  The \emph{element interface}
+allows a node to accept a visitor.  The \emph{concrete elements} are
+the different node types in the tree, such as query and clause nodes.
+
+The visitor passes itself to a node through an \texttt{accept}
+method.  The node then calls the visitor operation for its own type.
+The node type selects the operation, while the concrete visitor
+determines what that operation does.  This two-part selection is
+called \emph{double dispatch}.
+
+Figure~\ref{fig:visitor-dispatch} shows this process as a pipeline using
+\texttt{SELECT price FROM orders}.  The visitor records
+\texttt{price} as the selected column and \texttt{orders} as the
+source table.  The keywords guide parsing, but are not kept as
+separate token nodes in the AST.  A different visitor could display
+the same query parts instead.  The nodes stay the same; only the
+visitor's task changes.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    every node/.style={font=\small},
+    stage/.style={draw, rounded corners=3pt, line width=0.8pt,
+                  align=center, text width=12.3cm, inner sep=5pt},
+    input/.style={stage, draw=gray!70, fill=gray!8,
+                  minimum height=1.2cm},
+    element/.style={stage, draw=orange!70!black, fill=orange!8,
+                    minimum height=4.2cm},
+    visitor/.style={stage, draw=blue!55!black, fill=blue!7,
+                    minimum height=5.4cm},
+    result/.style={stage, draw=green!45!black, fill=green!8,
+                   minimum height=3.0cm},
+    treenode/.style={draw=orange!70!black, fill=white,
+                     rounded corners=2pt, line width=0.6pt,
+                     align=center, font=\footnotesize,
+                     inner sep=4pt},
+    keyword/.style={treenode, draw=gray!65, fill=gray!8,
+                     text width=1.9cm},
+    identifier/.style={treenode, fill=orange!12, text width=1.9cm},
+    operation/.style={treenode, draw=blue!55!black,
+                       text width=3.25cm, minimum height=1.4cm},
+    astnode/.style={treenode, draw=green!45!black,
+                     text width=3.8cm},
+    flow/.style={-{Latex[length=2.2mm]}, line width=0.85pt,
+                 draw=black!70}
+  ]
+    \node[input] (sql) {
+      \textbf{1. Input SQL query}\\[3pt]
+      \texttt{SELECT price FROM orders}};
+
+    \node[element, below=0.7cm of sql] (element) {};
+    \node[font=\small\bfseries]
+      at ([yshift=1.72cm]element.center) {2. Simplified parse tree};
+    \node[treenode, text width=1.4cm] (queryroot)
+      at ([yshift=1.0cm]element.center) {Query};
+    \node[treenode, text width=2.8cm] (selection)
+      at ([xshift=-3.1cm,yshift=-0.05cm]element.center)
+      {Selection clause};
+    \node[treenode, text width=2.8cm] (source)
+      at ([xshift=3.1cm,yshift=-0.05cm]element.center)
+      {Source clause};
+    \node[keyword] (selectkeyword)
+      at ([xshift=-4.65cm,yshift=-1.25cm]element.center)
+      {Keyword\\\texttt{SELECT}};
+    \node[identifier] (columnname)
+      at ([xshift=-1.55cm,yshift=-1.25cm]element.center)
+      {Column\\\texttt{price}};
+    \node[keyword] (fromkeyword)
+      at ([xshift=1.55cm,yshift=-1.25cm]element.center)
+      {Keyword\\\texttt{FROM}};
+    \node[identifier] (tablename)
+      at ([xshift=4.65cm,yshift=-1.25cm]element.center)
+      {Table\\\texttt{orders}};
+    \draw[draw=orange!70!black, line width=0.7pt]
+      (queryroot.south) -- ++(0,-0.3cm) -| (selection.north);
+    \draw[draw=orange!70!black, line width=0.7pt]
+      (queryroot.south) -- ++(0,-0.3cm) -| (source.north);
+    \draw[draw=orange!70!black, line width=0.7pt]
+      (selection.south) -- ++(0,-0.3cm) -| (selectkeyword.north);
+    \draw[draw=orange!70!black, line width=0.7pt]
+      (selection.south) -- ++(0,-0.3cm) -| (columnname.north);
+    \draw[draw=orange!70!black, line width=0.7pt]
+      (source.south) -- ++(0,-0.3cm) -| (fromkeyword.north);
+    \draw[draw=orange!70!black, line width=0.7pt]
+      (source.south) -- ++(0,-0.3cm) -| (tablename.north);
+
+    \node[visitor, below=0.7cm of element] (visitor) {};
+    \node[font=\small\bfseries]
+      at ([yshift=2.3cm]visitor.center) {3. Visitor processing};
+    \node[font=\footnotesize, align=center, text width=11cm]
+      at ([yshift=1.65cm]visitor.center)
+      {The client starts the visit.  These steps repeat for each clause node.};
+    \node[operation] (accept)
+      at ([xshift=-4.15cm,yshift=0.55cm]visitor.center)
+      {\textbf{a. Accept visitor}\\Node receives\\the visitor.};
+    \node[operation] (dispatch)
+      at ([yshift=0.55cm]visitor.center)
+      {\textbf{b. Call operation}\\Node calls its\\matching operation.};
+    \node[operation] (record)
+      at ([xshift=4.15cm,yshift=0.55cm]visitor.center)
+      {\textbf{c. Record details}\\Visitor keeps\\the needed details.};
+    \draw[flow] (accept) -- (dispatch);
+    \draw[flow] (dispatch) -- (record);
+    \node[font=\footnotesize]
+      at ([yshift=-0.65cm]visitor.center)
+      {Examples of matching operations};
+    \node[operation, text width=4.6cm, minimum height=1.1cm]
+      at ([xshift=-3.1cm,yshift=-1.55cm]visitor.center)
+      {\textbf{Selection operation}\\Record column: \texttt{price}};
+    \node[operation, text width=4.6cm, minimum height=1.1cm]
+      at ([xshift=3.1cm,yshift=-1.55cm]visitor.center)
+      {\textbf{Source operation}\\Record table: \texttt{orders}};
+
+    \node[result, below=0.7cm of visitor] (result) {};
+    \node[font=\small\bfseries]
+      at ([yshift=1.12cm]result.center) {4. Output AST: query structure};
+    \node[astnode, text width=1.4cm] (astroot)
+      at ([yshift=0.45cm]result.center) {Query};
+    \node[astnode] (astcolumn)
+      at ([xshift=-3.1cm,yshift=-0.65cm]result.center)
+      {Selected column\\\texttt{price}};
+    \node[astnode] (asttable)
+      at ([xshift=3.1cm,yshift=-0.65cm]result.center)
+      {Source table\\\texttt{orders}};
+    \draw[draw=green!45!black, line width=0.7pt]
+      (astroot.south) -- ++(0,-0.25cm) -| (astcolumn.north);
+    \draw[draw=green!45!black, line width=0.7pt]
+      (astroot.south) -- ++(0,-0.25cm) -| (asttable.north);
+
+    \draw[flow] (sql) -- node[right, font=\footnotesize]
+      {Parse the query} (element);
+    \draw[flow] (element) -- node[right, font=\footnotesize]
+      {Visit the tree} (visitor);
+    \draw[flow] (visitor) -- node[right, font=\footnotesize]
+      {Build the AST} (result);
+  \end{tikzpicture}
+  \caption[Visitor pipeline: from SQL to an AST]{Pipeline for
+    \texttt{SELECT price FROM orders}.  Steps a and b show double
+    dispatch: the node selects the operation, and the visitor supplies
+    its behavior.  Keyword tokens are not kept as separate AST nodes.
+    The output describes the query; it does not contain query results.}
+  \label{fig:visitor-dispatch}
+\end{figure}
+
+Two visitors build the engine's compact, typed AST.  One handles the
+outer query.  The other handles the row-pattern clause.
+Its root holds the outer \texttt{SELECT} and
+\texttt{FROM} parts and the row-pattern clause.  Each sub-clause is
+stored as a structured record with named fields.  Later stages can
+work with these query parts instead of reading the raw SQL again.
 Expression leaves remain textual by design.  \texttt{DEFINE}
 predicates and \texttt{MEASURES} expressions are extracted as strings
 and parsed later by the restricted evaluator.  This keeps the outer

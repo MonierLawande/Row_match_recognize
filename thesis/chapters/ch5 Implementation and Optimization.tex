@@ -27,8 +27,15 @@ Row-pattern matching is a sequence-recognition problem.  A row may
 satisfy one or more pattern variables.  A match assigns consecutive
 rows to those variables in an order accepted by the pattern.  Finite
 automata provide a natural representation for this ordered
-recognition task~\cite{HopcroftUllman}.  The engine therefore compiles
-the pattern before it scans the data.
+recognition task~\cite{HopcroftUllman}.
+
+A finite automaton is a small machine with a fixed set of states.  It
+starts in one state and reads the rows one at a time.  A row it accepts
+moves it along a transition to another state.  If it arrives at an
+accepting state, the rows it has read form a match.  Nothing else is
+remembered: the current state carries everything the machine knows so
+far.  That is what \emph{finite} means here.  The engine therefore
+compiles the pattern before it scans the data.
 
 \paragraph{From pattern to NFA.}
 The first automaton is a \emph{non-deterministic finite automaton}
@@ -144,8 +151,11 @@ Each token contributes an NFA fragment.  When several continuations are
 possible, transition metadata preserves their pattern order.
 \texttt{PERMUTE} over $n$ variables represents all $n!$ orders.
 Construction is therefore guarded at eight variables and an estimated
-50{,}000 branches.  Exceeding either guard raises an explicit
-complexity error.  Rows inside \texttt{\{-\ \ldots\ -\}} still take
+50{,}000 branches.  The two numbers are one decision: eight is the
+largest $n$ whose $n!$ still fits under the branch ceiling, since
+$8! = 40{,}320$ stays below it while $9! = 362{,}880$ passes it seven
+times over.  Exceeding either guard raises an explicit complexity
+error.  Rows inside \texttt{\{-\ \ldots\ -\}} still take
 part in matching; only their output is excluded.
 
 \paragraph{From NFA to DFA.}
@@ -158,21 +168,24 @@ duplicate DFA states~\cite{HopcroftUllman}.
 The resulting automaton has no $\varepsilon$-transitions.  For eligible
 row-local pattern structures, the matcher can advance through the
 ordered partition without keeping the complete NFA frontier at every
-row.  Predicates or structural choices that depend on tentative
+row, that is, the full set of states the NFA could be in.  Predicates or structural choices that depend on tentative
 assignments use the exact search described in
 Section~\ref{subsec:meth-exec-backtracking}.
 
 Subset construction is exponential in the worst case.  The engine
 therefore applies a memory-aware state budget, an iteration limit, and
-a structural ceiling of 50{,}000 states.  The memory budget may lower
-that ceiling on a constrained system.  Reaching any limit raises a
+a structural ceiling of 50{,}000 states.  This ceiling counts DFA
+states, and it is checked after the construction guards above, so a
+pattern that passes those can still be stopped here.  The memory
+budget may lower that ceiling on a constrained system.  Reaching any limit raises a
 construction error.  The engine never executes or caches a partial DFA,
 and it never truncates an NFA subset.  None of the evaluated patterns
 reached these limits.
 
 After construction, unreachable states are removed and transitions
 are normalized.  The current reduction is conservative; it does not
-perform full DFA minimization.  Transition metadata is preserved so
+perform full DFA minimization, which would also merge states that
+behave identically for every remaining input.  Transition metadata is preserved so
 the runtime can apply the required greedy and leftmost preference.
 
 % ----------------------------------------------------------------
