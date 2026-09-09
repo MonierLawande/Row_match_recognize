@@ -197,11 +197,20 @@ DataFrame directly from SQL~\cite{duckdb2026pandas}.
 
 At the time of review, \texttt{MATCH\_RECOGNIZE} has not yet been
 implemented in DuckDB itself; its roadmap lists the clause as planned
-work~\cite{duckdb2026roadmap}.  Lambrecht et al. instead translate
-row-pattern queries into SQL that DuckDB already supports.  Their
-transpiler rewrites a query into non-recursive and recursive common
-table expressions and then executes the translated SQL in
-DuckDB~\cite{lambrecht2025democratize,findling2025bringing,mogensen2024compiler}.
+work~\cite{duckdb2026roadmap}.  The database group at the University
+of T\"ubingen instead translates row-pattern queries into SQL that
+DuckDB already supports.  Their paper \emph{Democratize
+\texttt{MATCH\_RECOGNIZE}!} presents this route, and a bachelor's
+thesis and further student research projects in the same group develop
+it~\cite{lambrecht2025democratize,findling2025bringing,TURP2,
+tuebingen2025researchprojects}.  A transpiler is a source-to-source
+compiler: it rewrites code into another language at the same level of
+abstraction, rather than down to machine
+code~\cite{mogensen2024compiler}.  Here both sides are SQL.  The input
+is a \texttt{MATCH\_RECOGNIZE} query, and the output is SQL that
+DuckDB already runs.  Their transpiler produces non-recursive and
+recursive common table expressions and then executes the translated
+SQL in DuckDB.
 This approach expresses pattern variables, ordering, skip behavior,
 and measures without adding a native operator to DuckDB.  It still
 requires translation and execution through a second engine.
