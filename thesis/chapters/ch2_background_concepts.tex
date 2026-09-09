@@ -25,9 +25,7 @@ dataset.  A conventional filter tests each row against one or more
 predicates.  A row-pattern query also tests the order and relationships
 between rows.  It returns a group when the rows follow the requested
 sequence.  This makes it possible to find shapes such as V, W, and U,
-as well as repeated or changing behavior.  Common applications include
-security monitoring, stock-price analysis, sensor analysis, fraud
-detection, and complex event processing~\cite{OracleMR}.
+as well as repeated or changing behavior.
 
 The important distinction is that the ``symbols'' in row-pattern
 recognition are not characters in a string.  They are data rows that
@@ -45,14 +43,13 @@ processor, used cursors and temporary tables, or wrote the logic in an
 application.  SQL:2016 introduced row-pattern recognition so that this
 logic could be expressed directly in SQL~\cite{ISO2016SQL}.
 
-% ................................
-\subsection{Real-World Applications}
-\label{subsec:bg-applications}
-% ................................
+Possible applications that benefit from this thesis work span several
+domains~\cite{OracleMR}.  The following examples show where the need
+arises.
 
 \paragraph{Financial Market Analysis.}
-Detecting a V-shaped price pattern---a decline followed by a
-recovery---requires an ordered sequence of price movements.  Successive
+Detecting a V-shaped price pattern, a decline followed by a recovery,
+requires an ordered sequence of price movements.  Successive
 higher troughs, for example, can indicate an upward trend.  The worked
 example later in this chapter applies a V-pattern to ordered price
 records~\cite{OracleMR}.

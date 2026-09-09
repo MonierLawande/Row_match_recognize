@@ -1,6 +1,6 @@
 SQL:2016 introduced the \texttt{MATCH\_RECOGNIZE} clause to search ordered
 rows for user-defined patterns.  It is useful when the information is a
-sequence, not one isolated row, and expresses V-, W-, and U-shaped patterns
+sequence, not one isolated row.  It expresses V-, W-, and U-shaped patterns
 and repeated behavior, as in fraud detection, IoT monitoring, and clickstreams.
 Oracle and Trino provide it, but Pandas does not, so analysts fall back on
 shifted columns, loops, and state handling that are harder to verify.
