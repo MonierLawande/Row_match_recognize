@@ -228,8 +228,10 @@ The evaluated engine implements these forms.
     \item Quantifiers: \texttt{A*} (zero or more), \texttt{A+}
       (one or more), \texttt{A?} (zero or one), \texttt{A\{n\}}
       (exactly $n$), \texttt{A\{n,m\}} (between $n$ and $m$).
-      A trailing question mark gives the reluctant form, such as
-      \texttt{A*?}, \texttt{A+?}, \texttt{A??}, or
+      A quantifier is \emph{greedy} by default: it takes as many rows
+      as it can while the rest of the pattern still matches.  A
+      trailing question mark makes it \emph{reluctant}, so it takes as
+      few as possible: \texttt{A*?}, \texttt{A+?}, \texttt{A??}, or
       \texttt{A\{n,m\}?}.
     \item Grouping: \texttt{(A~B)+} (one or more AB pairs).
     \item Anchors: \texttt{\^{}A~B~C\$} (pattern must span the

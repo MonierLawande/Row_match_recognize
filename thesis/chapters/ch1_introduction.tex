@@ -438,7 +438,9 @@ Engine time grew almost linearly.  Its measured query-time memory was higher
 than either database, because the compiled path builds whole-column masks and
 intermediate arrays instead of evaluating row by row.  Its total footprint was
 nevertheless lower, because it runs as a single Python process rather than a
-resident server that holds the table in a JVM heap or an SGA.
+resident server that keeps the table in its own managed memory: a Java
+Virtual Machine (JVM) heap for Trino, or a System Global Area (SGA) for
+Oracle.
 
 The larger Amazon Reviews test extends the range to 227.9~million rows,
 about $100\times$ the main dataset.  Under a shared one-core, 58\,GB
@@ -476,12 +478,13 @@ work within the row-pattern literature.
 
 \textbf{Chapter~\ref{chap:methodology} --- System Design and Methodology}
 describes the architecture and methodology.  It covers the SQL grammar,
-parser, AST, semantic validation, logical plan, and the design that connects
+parser, abstract syntax tree, semantic validation, logical plan, and the
+design that connects
 a declarative query to automata-based execution.
 
 \textbf{Chapter~\ref{chap:implementation} --- Implementation and Optimization}
-explains NFA and DFA construction, Pandas execution, output construction,
-and measure evaluation.  It also presents the performance layer: vectorized
+explains how a pattern is compiled into automata, how those automata run
+over Pandas partitions, and how output and measures are built.  It also presents the performance layer: vectorized
 conditions, compiled fast paths, pattern caching, compact output
 construction, and memory management.
 
@@ -511,7 +514,8 @@ Pandas: Bringing MATCH\_RECOGNIZE to Python DataFrames''
 \cite{lawande2026rpr}, addresses the lack of native row-pattern recognition
 in Python data-analysis frameworks.  It presents an SQL-in-Pandas engine for
 running \texttt{MATCH\_RECOGNIZE}-style queries directly on DataFrames.  The
-paper describes its supported row-pattern features, NFA-based matching method,
+paper describes its supported row-pattern features, its automaton-based
+matching method,
 and initial tests.  Those tests show that the declarative interface reduces
 procedural Pandas code while preserving the expected results in the studied
 cases.

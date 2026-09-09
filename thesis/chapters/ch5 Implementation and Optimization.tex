@@ -12,7 +12,7 @@
 This chapter shows how the validated logical plan from
 Chapter~\ref{chap:methodology} becomes an executable query.  A pattern
 is compiled into a finite automaton and applied to ordered
-\texttt{pandas} partitions.  Guarded fast paths reduce repeated Python
+Pandas partitions.  Guarded fast paths reduce repeated Python
 work without changing the supported semantics.
 Section~\ref{sec:meth-automata} covers automata compilation,
 Section~\ref{sec:meth-pandas} the DataFrame execution model, and
@@ -180,12 +180,13 @@ the runtime can apply the required greedy and leftmost preference.
 \label{sec:meth-pandas}
 % ----------------------------------------------------------------
 
-\texttt{pandas}~\cite{McKinney2010} stores each DataFrame column as an
-array.  This suits both row-by-row matching and the vectorized fast
-paths in Section~\ref{sec:bg-performance}.  Figure~\ref{fig:system-architecture}
+Pandas~\cite{McKinney2010} stores each DataFrame column as an
+array.  This suits both row-by-row matching and the \emph{vectorized}
+fast paths in Section~\ref{sec:bg-performance}, which test a condition
+on a whole column at once instead of one row at a time.  Figure~\ref{fig:system-architecture}
 shows the system boundary, while Figure~\ref{fig:exec-pipeline} expands
 Stage~5.  Its two inputs are the compiled execution plan and the
-\texttt{pandas} DataFrame.  The SQL query is shown only as the upstream
+Pandas DataFrame.  The SQL query is shown only as the upstream
 source of that plan.  The figure presents five logical execution
 steps: partitioning, ordering, match
 enumeration with predicate evaluation, measure evaluation, and result
@@ -248,7 +249,7 @@ logical flow.
 
     \node[dataframe] (data) at (0,0)
       {\textbf{Input}\\[-1pt]
-       {\scriptsize\texttt{pandas} DataFrame}\\[3pt]
+       {\scriptsize Pandas DataFrame}\\[3pt]
        {\scriptsize
        \begin{tabular}{@{}ccc@{}}
          \texttt{key} & \texttt{t} & \texttt{value} \\
@@ -309,7 +310,7 @@ logical flow.
 
 \paragraph{Preparing the data.}
 A match never crosses a partition boundary, so the DataFrame is first
-split on the \texttt{PARTITION BY} columns---or treated as one partition
+split on the \texttt{PARTITION BY} columns, or treated as one partition
 when there are none.  The engine checks the \texttt{ORDER BY} columns.
 It keeps a partition that already follows the complete ordering
 specification and sorts it otherwise.  Each key may use \texttt{ASC} or

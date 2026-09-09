@@ -21,9 +21,9 @@ conclusion and future work.
 % ----------------------------------------------------------------
 
 The results show that a practical subset of SQL row-pattern recognition
-can run directly on \texttt{pandas} DataFrames.  For the reported
+can run directly on Pandas DataFrames.  For the reported
 correctness queries, the engine agreed with the applicable Trino~473,
-Oracle, and hand-written \texttt{pandas} baselines.
+Oracle, and hand-written Pandas baselines.
 The cases covered partitioning, ordering, implicit \texttt{DEFINE}
 conditions, navigation, match numbering, and measure output.  This
 supports the evaluated subset.  It does not claim full SQL:2016 or
@@ -31,11 +31,11 @@ vendor parity.
 
 The usability comparison gives a second result.  The three SQL examples
 used 14--16 lines of detection logic, compared with 24--32 lines for
-their hand-written \texttt{pandas} versions.  Those functions also needed
+their hand-written Pandas versions.  Those functions also needed
 explicit grouping, shifting, candidate filtering, index tracking, and
 skip handling.  The SQL form keeps this logic in one declarative
 statement.  That lowers developer effort, makes the pattern easier to
-read, and travels between notebook analysis and SQL workflows---as long
+read, and travels between notebook analysis and SQL workflows, as long
 as the query stays inside the supported subset.
 
 The performance benchmark contained 30 pattern--size
@@ -94,7 +94,7 @@ automata construction, matching, and output assembly.  The optimized
 paths use row-local masks, compact DFA and run-length plans, compiled
 measures, fused output, bounded caches, lazy row access, and conservative
 output projection.  Partition processing remains sequential.  The
-study therefore evaluates a single-node \texttt{pandas} engine, not a
+study therefore evaluates a single-node Pandas engine, not a
 distributed SQL system.  Trino and Oracle retain wider SQL coverage,
 mature optimizers, and production execution infrastructure.
 
@@ -129,7 +129,7 @@ thesis claims, supporting evidence, and scope boundaries} \\
 \endfoot
 Correctness &
 Selected comparisons with Trino, Oracle, and hand-written
-\texttt{pandas} reported in Chapter~\ref{chap:evaluation}. &
+Pandas reported in Chapter~\ref{chap:evaluation}. &
 The reported reference queries produce the same rows and measure
 values across the compared systems. &
 Selected supported scenarios only. \\
@@ -164,7 +164,7 @@ Architecture &
 The five-stage design and its automated tests. &
 The implementation separates parsing, planning, compilation, and
 execution concerns. &
-The system remains a \texttt{pandas}-centered prototype. \\
+The system remains a Pandas-centered prototype. \\
 \end{longtable}
 }
 
@@ -218,12 +218,12 @@ exhaustion is reported as an error rather than a changed result
 (Section~\ref{subsec:eval-worst-cases}).
 
 \textbf{Measure and aggregate scope.}
-The measure evaluator supports common functions---\texttt{SUM},
+The measure evaluator supports common functions: \texttt{SUM},
 \texttt{COUNT}, \texttt{MIN}, \texttt{MAX}, \texttt{AVG}, statistical
 and collection/string aggregates, conditional aggregates, and supported
 \texttt{RUNNING}/\texttt{FINAL} forms.  Arbitrary user-defined
 aggregates and every possible expression combination remain out of
-scope---a natural limit of an in-memory engine with its own
+scope.  This is a natural limit of an in-memory engine with its own
 expression evaluator rather than a full SQL engine.
 
 \textbf{Performance boundaries.}
@@ -258,7 +258,7 @@ optimizations that databases offer are simply absent here.
 Pandas has no native row-pattern primitive: detecting a multi-row
 pattern means shifted columns, manual loops, and custom state
 handling, or a round trip through an external SQL engine.  This thesis
-addressed that gap with a SQL-in-\texttt{pandas} implementation that
+addressed that gap with a SQL-in-Pandas implementation that
 runs a supported subset of \texttt{MATCH\_RECOGNIZE} over
 DataFrames.
 
@@ -271,7 +271,7 @@ theoretical and empirical evaluation of correctness, coverage,
 usability, performance, and scalability.
 
 The evidence supports three conclusions.  The selected correctness
-scenarios agree with Trino, Oracle, and hand-written \texttt{pandas}.
+scenarios agree with Trino, Oracle, and hand-written Pandas.
 The declarative examples use less detection code than their procedural
 baselines.  The main and scalability benchmarks show predictable
 growth under the stated protocols, with an increasing in-memory cost.
@@ -279,7 +279,7 @@ growth under the stated protocols, with an increasing in-memory cost.
 The approach is a bridge between SQL row-pattern
 recognition and DataFrame analytics.  It does not replace mature SQL
 engines; it brings a useful slice of their row-pattern power into
-Python workflows where the data already lives in \texttt{pandas}.
+Python workflows where the data already lives in Pandas.
 The conclusion holds within the limits stated in
 Section~\ref{sec:conc-limitations}.
 
@@ -304,7 +304,7 @@ Distributed execution on Dask or Spark would also need a rule for a
 partition split across chunks.
 
 \textbf{Backend abstraction and columnar acceleration.}
-The path is \texttt{pandas}-centered today.  A backend abstraction
+The path is Pandas-centered today.  A backend abstraction
 could target Polars or Apache Arrow, pushing more predicate evaluation
 into compiled vectorized kernels and reducing Python iteration.  An
 out-of-core backend could also reduce the resident-memory limit, but it

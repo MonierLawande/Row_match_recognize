@@ -11,7 +11,7 @@
 
 This chapter describes how the engine turns a
 \texttt{MATCH\_RECOGNIZE} query into an executable plan for a
-\texttt{pandas} DataFrame~\cite{monierashraf2025rowmatch}.  It also
+Pandas DataFrame~\cite{monierashraf2025rowmatch}.  It also
 explains the main design decisions.  The focus is the front end: the
 stages that turn raw SQL into a validated execution configuration for
 the implemented row-pattern subset~\cite{iso2016}.
@@ -23,7 +23,7 @@ execution, and optimization.
 \label{sec:meth-overview}
 % ----------------------------------------------------------------
 
-The engine takes two inputs: an SQL query and a \texttt{pandas}
+The engine takes two inputs: an SQL query and a Pandas
 DataFrame.  It returns a result DataFrame.  The work has five stages
 (Figure~\ref{fig:system-architecture}).  \emph{Parsing} creates an
 abstract syntax tree (AST).  \emph{Semantic validation} checks
@@ -85,7 +85,7 @@ before matching begins.
     \node[input, left=0.68cm of parse] (sqlin)
       {\textbf{Input 1}\\SQL query};
     \node[input, left=0.68cm of run] (dfin)
-      {\textbf{Input 2}\\\texttt{pandas} DataFrame};
+      {\textbf{Input 2}\\Pandas DataFrame};
     \node[output, right=0.68cm of run] (dfout)
       {\textbf{Output}\\Result DataFrame};
 
@@ -248,7 +248,7 @@ usability comparison.
        \begin{tabular}{|l|c|r|}
          \hline
          \multicolumn{3}{|c|}{\cellcolor{gray!12}
-           \textbf{\texttt{pandas} DataFrame: \texttt{orders}}} \\
+           \textbf{Pandas DataFrame: \texttt{orders}}} \\
          \hline
          \rowcolor{gray!20}
          \texttt{customer\_id} & \texttt{order\_date} & \texttt{price} \\
@@ -376,8 +376,9 @@ produces only a shallow token stream.
 but omit constructs such as exclusions, anchors, \texttt{PERMUTE}, and
 bounded quantifiers.  \texttt{pglast}~\cite{pglast_tool} cannot
 parse \texttt{MATCH\_RECOGNIZE} at all.  Rather than extend one of
-these, the engine reuses the community ANTLR4 grammar for the Trino
-SQL dialect~\cite{antlr_trino_sql,Parr2013}.  Its
+these, the engine reuses the community grammar for the Trino SQL
+dialect written for ANTLR4, a parser generator that builds a parser
+from a written grammar~\cite{antlr_trino_sql,Parr2013}.  Its
 \texttt{patternRecognition} rule already covers all eight
 sub-clauses.  ANTLR4 generates the lexer, parser, and traversal
 scaffolding directly from that grammar, so no grammar changes were
@@ -404,8 +405,7 @@ keeps the walk over a tree separate from the classes of its nodes, so
 a new operation can be added without editing them.  That matters here
 because ANTLR4 generates both the node classes and the visitor base
 class.  Two cooperating visitors handle the outer query and the
-\texttt{MATCH\_RECOGNIZE} clause.  They produce a compact,
-typed AST.  Its root holds the outer \texttt{SELECT}/\texttt{FROM} and
+\texttt{MATCH\_RECOGNIZE} clause.  They produce a compact, typed AST.  Its root holds the outer \texttt{SELECT}/\texttt{FROM} and
 one \texttt{MatchRecognizeClause}.  Each sub-clause has a typed
 dataclass for its resolved fields.  Later stages can dispatch on node
 type instead of reading the raw SQL again.
@@ -414,6 +414,7 @@ predicates and \texttt{MEASURES} expressions are extracted as strings
 and parsed later by the restricted evaluator.  This keeps the outer
 query AST compact.  Figure~\ref{fig:meth-ast} shows the tree for the
 worked query.
+
 
 \begin{figure}[htbp]
   \centering
@@ -495,10 +496,12 @@ worked query.
 \paragraph{Safe expression evaluation.}
 Those strings come from the user, so the engine never runs them as
 Python code.  It reads each one into a small tree of operations and
-walks that tree itself.  The walk uses
-an \emph{allowlist}: an operation is evaluated only when the engine has
-a handler for it.  Safety therefore comes from the evaluator design,
-not from blocking unsafe cases one at a time.
+walks that tree itself.  This is the \emph{Interpreter} pattern: a
+parser turns the text into a tree, and an evaluator walks that tree,
+interprets each node, and returns a value.  The walk uses an
+\emph{allowlist}: an operation is evaluated only when the engine has a
+handler for it.  Safety therefore comes from the allowlist itself, not
+from blocking unsafe cases one at a time.
 
 The allowlist includes comparisons, Boolean and arithmetic operators,
 literals, \texttt{IN} lists, conditional expressions, qualified
@@ -741,4 +744,4 @@ construction resolves the execution configuration, including output,
 skip, and measure modes.  The design reuses the Trino ANTLR4 grammar
 and evaluates user expressions through a restricted AST evaluator.
 Chapter~\ref{chap:implementation} continues with automata compilation,
-\texttt{pandas} execution, and optimization.
+Pandas execution, and optimization.

@@ -97,7 +97,8 @@ provide identical SQL semantics.
       Server / cluster & Apache~2.0 \\
     Snowflake & \texttt{FROM}-clause row patterns &
       Cloud service & Proprietary \\
-    Apache Flink & Streaming SQL subset backed by CEP &
+    Apache Flink & Streaming SQL subset over a complex-event-processing
+      engine &
       Streaming cluster & Apache~2.0 \\
     DuckDB & No native clause; external research transpiler &
       In-process & MIT \\
@@ -232,8 +233,9 @@ Zhu et al. study how row-pattern queries over historical relational
 data can be optimized~\cite{Zhu2023rowpattern}.  Their approach finds
 pattern variables whose conditions can be checked independently.  It
 uses relational joins to remove rows that cannot take part in a match,
-then runs the NFA matcher on the smaller input.  Cost estimates for the
-joins and the NFA guide this choice.
+then runs a non-deterministic finite automaton (NFA) matcher on the
+smaller input.  Cost estimates for the joins and the automaton guide
+this choice.
 
 This thesis addresses a different execution environment.  It compiles
 conditions and match plans for in-memory arrays, then uses the general
