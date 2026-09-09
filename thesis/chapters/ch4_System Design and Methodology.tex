@@ -305,9 +305,11 @@ candidate fails at $C$ because $6<4$ is false.
 The next three sections follow stages~1 to~3.
 Section~\ref{sec:meth-compiler} covers parsing,
 Section~\ref{sec:meth-semantic} semantic validation, and
-Section~\ref{sec:meth-logical} logical-plan construction.  Stages~4
-and~5 belong to Chapter~\ref{chap:implementation}.  The figure shows
-all five because the two chapters form one pipeline.
+Section~\ref{sec:meth-logical} logical-plan construction.
+Chapter~\ref{chap:implementation} continues with Stage~4, pattern
+compilation (Section~\ref{sec:meth-automata}), and Stage~5, DataFrame
+execution (Section~\ref{sec:meth-pandas}).  The figure shows all five
+because the two chapters form one pipeline.
 
 % ----------------------------------------------------------------
 \section{SQL Parsing}
@@ -553,9 +555,10 @@ visitor's task changes.
 \end{figure}
 
 Two visitors build the engine's compact, typed AST.  One handles the
-outer query.  The other handles the row-pattern clause.
-Its root holds the outer \texttt{SELECT} and
-\texttt{FROM} parts and the row-pattern clause.  Each sub-clause is
+outer query.  The other handles the row-pattern clause.  This matters
+here because ANTLR4 generates the node classes, so they cannot be
+edited to carry the work.  The AST root holds the outer
+\texttt{SELECT} and \texttt{FROM} parts and the row-pattern clause.  Each sub-clause is
 stored as a structured record with named fields.  Later stages can
 work with these query parts instead of reading the raw SQL again.
 Expression leaves remain textual by design.  \texttt{DEFINE}

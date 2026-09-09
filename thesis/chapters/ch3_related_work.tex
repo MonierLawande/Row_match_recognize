@@ -166,17 +166,17 @@ warehouse size and query workload~\cite{snowflake2025match_recognize}.
 \label{subsec:related-flink}
 % ................................
 
+\begingroup\emergencystretch=3em
 Apache Flink is designed for real-time stream processing.  It exposes
 \texttt{MATCH\_RECOGNIZE} through Flink SQL, backed by its Complex
 Event Processing (CEP) runtime
 library~\cite{flink,vsprem2024building,georgiou2025streaming}.
 Its documented implementation is a SQL subset oriented toward
-streaming use cases.  The current Flink documentation lists
-unsupported features including pattern groups, subsequence
-alternation, \texttt{PERMUTE}, anchors, exclusions,
-\texttt{ALL ROWS PER MATCH}, \texttt{SUBSET}, physical offsets
-(\texttt{PREV}/\texttt{NEXT}), and \texttt{DISTINCT}
-aggregations~\cite{flink}.  Flink fits continuous event streams, but it
+streaming use cases.  The current Flink documentation lists unsupported
+features including pattern groups, subsequence alternation,
+\texttt{PERMUTE}, anchors, exclusions, \texttt{ALL ROWS PER MATCH},
+\texttt{SUBSET}, physical offsets (\texttt{PREV}/\texttt{NEXT}), and
+\texttt{DISTINCT} aggregations~\cite{flink}.\par\endgroup  Flink fits continuous event streams, but it
 assumes a streaming runtime rather than a lightweight, batch-oriented
 DataFrame workflow.
 
@@ -319,6 +319,7 @@ The three objectives in Section~\ref{sec:intro-objectives} lead to
 three connected contributions: the engine and its tested semantics,
 its optimized execution design, and the evaluation.
 
+\begingroup\emergencystretch=2.5em
 \begin{enumerate}
   \item A \textbf{Pandas-native engine} that executes an R010-style
     subset of SQL:2016 \texttt{MATCH\_RECOGNIZE} directly on a
@@ -357,6 +358,7 @@ its optimized execution design, and the evaluation.
     and compares the engine directly with Trino~473 and Oracle~21c EE.
     Chapter~\ref{chap:evaluation} gives the full method and results.
 \end{enumerate}
+\endgroup
 
 % ----------------------------------------------------------------
 \section{Chapter Summary}

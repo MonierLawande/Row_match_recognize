@@ -14,14 +14,20 @@ Chapter~\ref{chap:methodology} becomes an executable query.  A pattern
 is compiled into a finite automaton and applied to ordered
 Pandas partitions.  Guarded fast paths reduce repeated Python
 work without changing the supported semantics.
-Section~\ref{sec:meth-automata} covers automata compilation,
-Section~\ref{sec:meth-pandas} the DataFrame execution model, and
-Section~\ref{sec:bg-performance} the optimization layer.
+Section~\ref{sec:meth-automata} covers Stage~4: pattern compilation.
+Section~\ref{sec:meth-pandas} covers Stage~5: DataFrame execution.
+Section~\ref{sec:bg-performance} explains the optimization layer.
 
 % ----------------------------------------------------------------
 \section{Pattern Compilation with Finite Automata}
 \label{sec:meth-automata}
 % ----------------------------------------------------------------
+
+This section covers Stage~4 of
+Figure~\ref{fig:system-architecture}.  Stage~3 resolves the execution
+settings.  Stage~4 turns the pattern into the automata used for
+matching.  These are separate tasks, completed before the rows are
+scanned in Stage~5.
 
 Row-pattern matching is a sequence-recognition problem.  A row may
 satisfy one or more pattern variables.  A match assigns consecutive
@@ -94,7 +100,7 @@ shown.
     \draw[fragmentline] (3.65,2.00) -- (3.65,2.20);
     \draw[fragmentline] (10.10,2.00) -- (10.10,2.20);
     \node[fragmenttext] at (6.88,2.43)
-      {$B?$ \enspace zero or one \texttt{B} row};
+      {$B?$ \enspace optional: zero or one \texttt{B} row};
 
     \draw[entry] (-1.25,0) -- (q0);
     \draw[consume] (q0) -- node[edgelabel, above]{\texttt{A}} (q1);
@@ -105,7 +111,8 @@ shown.
     \draw[consume] (r) -- node[edgelabel, above]{\texttt{B}} (q2);
 
     \node[role] at (0,-1.30)    {initial};
-    \node[role] at (3.15,-1.30) {accept: zero\\\texttt{B} rows};
+    \node[role] at (3.15,-1.30)
+      {accept without \texttt{B}\\(\texttt{B} is optional)};
     \node[role] at (6.60,-1.30) {ready for\\\texttt{B}};
     \node[role] at (9.75,-1.30) {accept: one\\\texttt{B} row};
 
@@ -122,8 +129,10 @@ shown.
     \node[nfaaccept, minimum size=0.44cm] at (9.25,-2.28) {};
     \node[keytext, anchor=west] at (9.60,-2.28) {accept};
   \end{tikzpicture}
-  \caption[Language-equivalent NFA for $A^{+}\,B?$]{Language-equivalent NFA for $A^{+}\,B?$: $q_1$ accepts with zero
-    \texttt{B} rows, $q_2$ after one.}
+  \caption[Language-equivalent NFA for $A^{+}\,B?$]{Language-equivalent
+    NFA for $A^{+}\,B?$.  The \texttt{B} row is optional: after one or
+    more \texttt{A} rows, $q_1$ accepts without \texttt{B}, while $q_2$
+    accepts after one \texttt{B} row.}
   \label{fig:meth-nfa}
 \end{figure}
 
@@ -154,8 +163,10 @@ Construction is therefore guarded at eight variables and an estimated
 50{,}000 branches.  The two numbers are one decision: eight is the
 largest $n$ whose $n!$ still fits under the branch ceiling, since
 $8! = 40{,}320$ stays below it while $9! = 362{,}880$ passes it seven
-times over.  Exceeding either guard raises an explicit complexity
-error.  Rows inside \texttt{\{-\ \ldots\ -\}} still take
+times over.  Both are checked before any fragment is built: the
+variables are counted, and the branches are estimated from the pattern.
+Exceeding either guard raises an explicit complexity error, so the
+engine never starts a construction it cannot finish.  Rows inside \texttt{\{-\ \ldots\ -\}} still take
 part in matching; only their output is excluded.
 
 \paragraph{From NFA to DFA.}
@@ -193,19 +204,25 @@ the runtime can apply the required greedy and leftmost preference.
 \label{sec:meth-pandas}
 % ----------------------------------------------------------------
 
+This section covers Stage~5.  It uses the execution settings from
+Stage~3 and the compiled pattern from Stage~4
+(Section~\ref{sec:meth-automata}).  Logical planning decides how the
+query should run; pattern compilation prepares the automata; execution
+applies them to the input rows.
+
 Pandas~\cite{McKinney2010} stores each DataFrame column as an
 array.  This suits both row-by-row matching and the \emph{vectorized}
 fast paths in Section~\ref{sec:bg-performance}, which test a condition
 on a whole column at once instead of one row at a time.  Figure~\ref{fig:system-architecture}
 shows the system boundary, while Figure~\ref{fig:exec-pipeline} expands
-Stage~5.  Its two inputs are the compiled execution plan and the
-Pandas DataFrame.  The SQL query is shown only as the upstream
-source of that plan.  The figure presents five logical execution
-steps: partitioning, ordering, match
+Stage~5 and shows the preceding planning and compilation stages.
+Stage~5 takes the execution settings with the compiled pattern and the
+Pandas DataFrame.  Its five logical execution steps are labelled
+5a--5e: partitioning, ordering, match
 enumeration with predicate evaluation, measure evaluation, and result
-materialization.  An
-optimized physical path may fuse some operations without changing this
-logical flow.
+materialization.  They are operations within Stage~5, not another set
+of architecture stages.  An optimized physical path may fuse some
+operations without changing this logical flow.
 
 \begin{figure}[htbp]
   \centering
@@ -242,23 +259,29 @@ logical flow.
       upstreamlabel/.style={font=\footnotesize, text=black!65,
                             fill=white, inner sep=1pt}
     ]
-    % Compile-time control lane.
-    \node[context, minimum width=2.05cm] (sql) at (-0.10,3.02)
+    % Show planning and compilation separately before Stage 5.
+    \node[context, text width=4.8cm] (sql) at (6.00,7.00)
       {\textbf{SQL query}\\[-1pt]
        {\scriptsize\texttt{MATCH\_RECOGNIZE}}};
-    \node[plan, text width=7.20cm] (compiled) at (6.55,3.02)
-      {\textbf{Compiled execution plan}\\[-1pt]
-       {\footnotesize partition/order keys $\cdot$ \texttt{DEFINE}
-        $\cdot$ compiled pattern\\[-1pt]
-        measures $\cdot$ skip policy $\cdot$ output mode}};
+    \node[plan, text width=9.8cm] (logical) at (6.00,5.20)
+      {\textbf{Stage 3 --- Logical-plan construction}\\[2pt]
+       Resolve keys, conditions, measures, skip policy and output mode};
+    \node[plan, text width=9.8cm] (compiled) at (6.00,3.25)
+      {\textbf{Stage 4 --- Pattern compilation}\\[2pt]
+       Pattern tokens $\longrightarrow$ NFA $\longrightarrow$ complete DFA};
     \draw[dataflow] (sql) --
-      node[upstreamlabel, above] {Stages 1--4} (compiled);
+      node[upstreamlabel, right, align=left]
+      {Stages 1--2:\\parsing and validation} (logical);
+    \draw[dataflow] (logical) --
+      node[upstreamlabel, right] {Resolved pattern and settings} (compiled);
 
     % Runtime data lane.
     \draw[phasebar] (1.25,1.56) -- (10.75,1.56);
     \node[stageheader] (exec) at (6.00,1.56)
       {Stage 5 --- DataFrame execution};
-    \draw[controlflow] (compiled.south) -- (exec.north);
+    \draw[controlflow] (compiled.south) --
+      node[upstreamlabel, right, align=left]
+      {Execution settings\\and compiled pattern} (exec.north);
 
     \node[dataframe] (data) at (0,0)
       {\textbf{Input}\\[-1pt]
@@ -270,11 +293,11 @@ logical flow.
          $\cdots$ & $\cdots$ & $\cdots$
        \end{tabular}}};
 
-    \node[station] (s1) at (2.10,0) {1};
-    \node[station] (s2) at (4.00,0) {2};
-    \node[station] (s3) at (5.95,0) {3};
-    \node[station] (s4) at (7.95,0) {4};
-    \node[station] (s5) at (9.85,0) {5};
+    \node[station] (s1) at (2.10,0) {5a};
+    \node[station] (s2) at (4.00,0) {5b};
+    \node[station] (s3) at (5.95,0) {5c};
+    \node[station] (s4) at (7.95,0) {5d};
+    \node[station] (s5) at (9.85,0) {5e};
 
     \node[operation] at (2.10,-0.49)
       {\textbf{Partition rows}\\[-1pt]
@@ -317,7 +340,9 @@ logical flow.
     \draw[dataflow] (s4) -- (s5);
     \draw[dataflow] (s5) -- (result);
   \end{tikzpicture}
-  \caption{Inside the DataFrame execution stage.}
+  \caption[Planning, compilation, and DataFrame execution]{Logical
+    planning (Stage~3), pattern compilation (Stage~4), and DataFrame
+    execution (Stage~5).  Steps 5a--5e are operations within Stage~5.}
   \label{fig:exec-pipeline}
 \end{figure}
 

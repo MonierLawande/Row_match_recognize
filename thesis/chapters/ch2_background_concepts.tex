@@ -206,6 +206,7 @@ The evaluated engine implements these forms.
 
 \item \textbf{AFTER MATCH SKIP.}
   Controls where the matcher resumes after finding a match:
+  \begingroup\emergencystretch=2.5em
   \begin{itemize}
     \item \texttt{SKIP TO NEXT ROW} -- resume from the row after
       match start (maximum overlaps).
@@ -218,6 +219,7 @@ The evaluated engine implements these forms.
       \texttt{FIRST} or \texttt{LAST}, \texttt{SKIP TO} \textit{var}
       means the same thing.
   \end{itemize}
+  \endgroup
 
 \item \textbf{PATTERN.}
   Specifies the sequence using regular-expression-like syntax with
