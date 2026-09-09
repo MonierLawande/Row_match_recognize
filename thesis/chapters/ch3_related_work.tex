@@ -316,10 +316,11 @@ three connected contributions: the engine and its tested semantics,
 its optimized execution design, and the evaluation.
 
 \begin{enumerate}
-  \item A \textbf{Pandas-native engine} for the evaluated SQL:2016
-    R010-style subset.  It supports the evaluated forms of the main
-    clauses, output modes, skip modes, navigation functions, and
-    aggregates.  Its pattern
+  \item A \textbf{Pandas-native engine} that executes an R010-style
+    subset of SQL:2016 \texttt{MATCH\_RECOGNIZE} directly on a
+    DataFrame.  It supports the main clauses, output modes, skip modes,
+    navigation functions, and aggregates in the forms this thesis
+    evaluates.  Its pattern
     constructs include quantifiers, alternation, grouping, anchors,
     exclusions, and \texttt{PERMUTE}.  It runs in-process and needs no
     database server or cloud warehouse.  Chapter~\ref{chap:methodology}

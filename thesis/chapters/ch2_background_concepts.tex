@@ -179,9 +179,9 @@ one partition.
 This determines the row order within each partition.  The matcher
 processes rows in that sequence.  An explicit and deterministic order
 is normally needed for repeatable results.  Several sort keys may be
-combined, each with its own \texttt{ASC} or \texttt{DESC} direction.
-This describes the standard syntax.  The evaluated R010 execution path
-in this thesis is narrower and uses ascending pattern order.
+combined, each with its own \texttt{ASC} or \texttt{DESC} direction
+and its own \texttt{NULLS FIRST} or \texttt{NULLS LAST} placement.
+The evaluated engine implements these forms.
 
 
 \item \textbf{MEASURES.}
