@@ -410,7 +410,85 @@ type instead of reading the raw SQL again.
 Expression leaves remain textual by design.  \texttt{DEFINE}
 predicates and \texttt{MEASURES} expressions are extracted as strings
 and parsed later by the restricted evaluator.  This keeps the outer
-query AST compact.
+query AST compact.  Figure~\ref{fig:meth-ast} shows the tree for the
+worked query.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    astnode/.style={draw=blue!55!black, rounded corners=2.5pt,
+                    line width=0.8pt, fill=blue!6, anchor=west,
+                    inner xsep=4pt, inner ysep=2.6pt,
+                    font=\footnotesize\ttfamily},
+    astroot/.style={astnode, fill=blue!13},
+    astfield/.style={anchor=west, font=\footnotesize, text=black!70},
+    astleaf/.style={draw=orange!65!black, rounded corners=2.5pt,
+                    line width=0.7pt, fill=orange!10, anchor=west,
+                    inner xsep=4pt, inner ysep=2.6pt,
+                    font=\footnotesize\ttfamily},
+    spine/.style={draw=black!55, line width=0.6pt}
+  ]
+    \def\ra{-0.64} \def\cf{4.75} \def\cl{7.30}
+
+    \node[astroot]  (root) at (0,0)            {FullQueryAST};
+    \node[astnode]  (sel)  at (0.45,1*\ra)     {SelectClause};
+    \node[astnode]  (frm)  at (0.45,2*\ra)     {FromClause};
+    \node[astnode]  (mrc)  at (0.45,3*\ra)     {MatchRecognizeClause};
+    \node[astnode]  (prt)  at (1.30,4*\ra)     {PartitionByClause};
+    \node[astnode]  (ord)  at (1.30,5*\ra)     {OrderByClause};
+    \node[astnode]  (mea)  at (1.30,6*\ra)     {MeasuresClause};
+    \node[astnode]  (pat)  at (1.30,9*\ra)     {PatternClause};
+    \node[astnode]  (def)  at (1.30,10*\ra)    {DefineClause};
+
+    \node[astfield] at (\cf,1*\ra)  {\texttt{SelectItem}};
+    \node[astfield] at (\cf,2*\ra)  {\texttt{table}};
+    \node[astfield] at (\cf,4*\ra)  {\texttt{columns}};
+    \node[astfield] at (\cf,5*\ra)  {\texttt{SortItem}};
+    \node[astfield] at (\cf,6*\ra)  {\texttt{Measure}};
+    \node[astfield] at (\cf,7*\ra)  {\texttt{Measure}};
+    \node[astfield] at (\cf,8*\ra)  {\texttt{Measure}};
+    \node[astfield] at (\cf,9*\ra)  {\texttt{pattern}};
+    \node[astfield] at (\cf,10*\ra) {\texttt{Define} B};
+    \node[astfield] at (\cf,11*\ra) {\texttt{Define} C};
+
+    \node[astleaf] at (\cl,1*\ra)  {"customer\_id" \dots\ "bottom\_price"};
+    \node[astleaf] at (\cl,2*\ra)  {"orders"};
+    \node[astleaf] at (\cl,4*\ra)  {"customer\_id"};
+    \node[astleaf] at (\cl,5*\ra)  {"order\_date", ASC};
+    \node[astleaf] at (\cl,6*\ra)  {"A.order\_date" AS start\_date};
+    \node[astleaf] at (\cl,7*\ra)  {"C.order\_date" AS end\_date};
+    \node[astleaf] at (\cl,8*\ra)  {"C.price" AS bottom\_price};
+    \node[astleaf] at (\cl,9*\ra)  {"A B C"};
+    \node[astleaf] at (\cl,10*\ra) {"B.price < A.price"};
+    \node[astleaf] at (\cl,11*\ra) {"C.price < B.price"};
+
+    \draw[spine] (0.22,-0.16) -- (0.22,3*\ra) ;
+    \foreach \y in {1,2,3} \draw[spine] (0.22,\y*\ra) -- (0.45,\y*\ra);
+    \draw[spine] (1.07,3*\ra-0.16) -- (1.07,10*\ra);
+    \foreach \y in {4,5,6,9,10} \draw[spine] (1.07,\y*\ra) -- (1.30,\y*\ra);
+    \foreach \y in {1,2,4,5,6,7,8,9,10,11}
+      \draw[spine, dotted] (\cf-0.12,\y*\ra) -- (\cl-0.06,\y*\ra);
+    \draw[spine] (mea.east) -- (\cf-0.35,6*\ra);
+    \draw[spine] (\cf-0.35,6*\ra) -- (\cf-0.35,8*\ra);
+    \foreach \y in {6,7,8} \draw[spine] (\cf-0.35,\y*\ra) -- (\cf-0.12,\y*\ra);
+    \draw[spine] (def.east) -- (\cf-0.35,10*\ra);
+    \draw[spine] (\cf-0.35,10*\ra) -- (\cf-0.35,11*\ra);
+    \foreach \y in {10,11} \draw[spine] (\cf-0.35,\y*\ra) -- (\cf-0.12,\y*\ra);
+    \draw[spine] (sel.east) -- (\cf-0.12,1*\ra);
+    \draw[spine] (frm.east) -- (\cf-0.12,2*\ra);
+    \draw[spine] (prt.east) -- (\cf-0.12,4*\ra);
+    \draw[spine] (ord.east) -- (\cf-0.12,5*\ra);
+    \draw[spine] (pat.east) -- (\cf-0.12,9*\ra);
+
+    \node[anchor=west, font=\scriptsize, text=black!75]
+      at (0,12*\ra) {Blue nodes are typed dataclasses.  Shaded leaves stay
+                     as strings and are parsed later by the restricted
+                     evaluator.};
+  \end{tikzpicture}
+  \caption{Typed AST for the worked \texttt{orders} query of
+    Figure~\ref{fig:orders-pipeline}.}
+  \label{fig:meth-ast}
+\end{figure}
 
 \paragraph{Safe expression evaluation.}
 Those strings come from the user, so the engine never runs them as
@@ -429,9 +507,10 @@ not evaluated.  An expression sees only its explicit evaluation
 context: ordered rows, pattern bindings, and match metadata.
 
 The front end is exercised by dedicated tests.  They include
-adversarial inputs---undefined variables, prohibited function forms,
-invalid skip targets, and incompatible output-mode combinations---and
-end-to-end scenarios adapted from Trino's row-pattern tests.  General
+adversarial inputs such as undefined variables, prohibited function
+forms, invalid skip targets, and incompatible output-mode
+combinations.  They also include end-to-end scenarios adapted from
+Trino's row-pattern tests.  General
 subquery planning and SQL features outside the supported row-pattern
 subset are not handled by this path.  Vendor extensions may also need
 parser and evaluator changes.
