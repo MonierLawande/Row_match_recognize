@@ -113,14 +113,14 @@ provide identical SQL semantics.
 \label{subsec:related-oracle}
 % ................................
 
-Oracle introduced SQL row-pattern recognition in Database~12c.  Its
-implementation is a main reference for relational
-\texttt{MATCH\_RECOGNIZE} semantics~\cite{OracleMR,
-oracle2021dwhsg,book}.
-The Oracle~21c documentation considered in this thesis places
-\texttt{MATCH\_RECOGNIZE} in a table expression; it does not document
-the R020 window form.  It also prohibits some nesting and
-correlated-subquery forms in \texttt{MEASURES} and \texttt{DEFINE}.
+Oracle introduced SQL row-pattern recognition in
+Database~12c~\cite{OracleMR}.  Oracle~21c, the version used in this
+thesis, is a main reference for relational
+\texttt{MATCH\_RECOGNIZE} semantics~\cite{oracle2021dwhsg,book}.
+Its documentation places \texttt{MATCH\_RECOGNIZE} in a table
+expression; it does not document the R020 window form.  It also
+prohibits some nesting and correlated-subquery forms in
+\texttt{MEASURES} and \texttt{DEFINE}.
 Its documented aggregate support is limited to \texttt{COUNT},
 \texttt{SUM}, \texttt{AVG}, \texttt{MAX}, and \texttt{MIN}, without
 \texttt{DISTINCT}~\cite{oracle2021dwhsg}.
@@ -134,13 +134,14 @@ deployment.  This differs from an in-process, open-source package.
 
 Trino is an open-source distributed query engine designed for
 parallel, federated query execution across large data
-sources~\cite{trino2022,trino2021row}.  Its current documentation
-covers \texttt{MATCH\_RECOGNIZE} in the \texttt{FROM} clause and
-also documents row pattern recognition in window structures.  This
-gives Trino broad documented coverage among the reviewed open-source
-systems.  It is still a query server rather than an in-process
-DataFrame library.  In this thesis, Trino~473 is a semantic reference
-for selected results and a performance baseline.
+sources~\cite{trino2022,trino2021row}.  Trino~473, the version used in
+this thesis, is a semantic reference for selected results and a
+performance baseline.  Its documentation covers
+\texttt{MATCH\_RECOGNIZE} in the \texttt{FROM}
+clause~\cite{trino2022} and also documents row pattern recognition in
+window structures~\cite{TrinoDocumentation}.  This gives Trino broad
+documented coverage among the reviewed open-source systems.  It is
+still a query server rather than an in-process DataFrame library.
 
 % ................................
 \subsection{Snowflake}
@@ -210,6 +211,11 @@ requires translation and execution through a second engine.
 \label{subsec:related-optimization}
 % ................................
 
+Optimization work on row patterns shares one broad goal: reduce
+unnecessary work before or during the automaton scan without changing
+the query result.  The approaches differ in where they place that
+work.
+
 Zhu et al. study how row-pattern queries over historical relational
 data can be optimized~\cite{Zhu2023rowpattern}.  Their approach finds
 pattern variables whose conditions can be checked independently.  It
@@ -219,9 +225,7 @@ joins and the NFA guide this choice.
 
 This thesis addresses a different execution environment.  It compiles
 conditions and match plans for in-memory arrays, then uses the general
-execution path when an optimization does not apply.  Both approaches
-have the same broad goal: reduce unnecessary work before or during the
-automaton scan without changing the query result.
+execution path when an optimization does not apply.
 
 % ................................
 \subsection{Implementation Restrictions Across Systems}
@@ -238,9 +242,11 @@ uniform across implementations.
 
 Oracle, Trino, Snowflake, and Flink also require a database, cluster,
 stream runtime, or cloud service.  That setup is reasonable for
-workloads already in those environments, but it adds friction when
-the data already fits in memory~\cite{8509400,Evaluation,
-in-memory_processing}.
+workloads that already live in those environments.  For a smaller
+dataset that fits in the memory of one machine, it is unnecessary
+cost: the system must be installed and configured, and the data must
+be moved into it before the first pattern query can
+run~\cite{8509400,Evaluation,in-memory_processing}.
 
 % ----------------------------------------------------------------
 \section{Pandas and the Python Ecosystem Gap}
