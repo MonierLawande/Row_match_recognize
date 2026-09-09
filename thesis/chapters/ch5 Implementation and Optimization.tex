@@ -528,44 +528,44 @@ each technique below carries the name used there.
       & \textbf{Activation condition} & \textbf{Primary benefit} \\
     \midrule
     Ordered-input check
-      & Avoid copying
+      & Avoid copies
       & Requested \texttt{ORDER BY} sequence already present
-      & Avoids an unnecessary sort and DataFrame copy \\[4pt]
+      & Avoids an unnecessary sort and DataFrame copy \\ \addlinespace[5pt]
     Vectorized condition masks
-      & Avoid repeated work
+      & Avoid rework
       & Row-local expression, or safe row-local conjuncts in
         a mixed \texttt{AND}
       & Replaces repeated Python evaluation with column operations
-        and exact prefilters \\[4pt]
+        and exact prefilters \\ \addlinespace[5pt]
     Row-local DFA decision tables
-      & Avoid repeated work
+      & Avoid rework
       & All predicates are vectorized, with no empty-match, anchor,
         exclusion, \texttt{PERMUTE}, \texttt{SUBSET}, reluctant, or
         state-dependent requirement
       & Replaces repeated transition dispatch with compact indexing
-        and segment assignments \\[4pt]
+        and segment assignments \\ \addlinespace[5pt]
     Linear run-length plan
-      & Avoid repeated work
+      & Avoid rework
       & Default skip, a plain linear variable sequence, supported
         quantifiers, and row-local masks
-      & Skips complete runs and memoizes failed suffixes \\[4pt]
+      & Skips complete runs and memoizes failed suffixes \\ \addlinespace[5pt]
     Fused output drivers
-      & Avoid copying
+      & Avoid copies
       & Default skip, no unmatched rows, anchors, or empty matches, an
         eligible matcher, and fully compiled measures
-      & Avoids intermediate match and row dictionaries \\[4pt]
+      & Avoids intermediate match and row dictionaries \\ \addlinespace[5pt]
     Compiled measure and prefix plans
-      & Avoid repeated work
+      & Avoid rework
       & Supported direct navigation or aggregate form
       & Reuses prepared array state; avoids repeated prefix
-        aggregation \\[4pt]
+        aggregation \\ \addlinespace[5pt]
     LRU pattern cache
       & Reuse
       & Caching enabled and the complete automaton fits the cache budget
       & Eliminates redundant NFA/DFA construction across repeated
-        queries \\[4pt]
+        queries \\ \addlinespace[5pt]
     Lazy rows and output projection
-      & Avoid copying
+      & Avoid copies
       & Partition path supports lazy access; selected source columns
         can be resolved safely
       & Reduces row copies, retained Python objects, and output width \\
