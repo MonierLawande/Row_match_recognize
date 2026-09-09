@@ -11,19 +11,19 @@ the \texttt{FROM} clause, so a pattern reads like a table; R020 and R030 cover
 window placement and aggregates.  A vendor may implement any or none, so
 support differs widely.
 
-This thesis addresses that gap with an in-process engine for an evaluated
-subset of R010: the clause forms the engine implements and the evaluation
-tests.  The engine parses a query,
+This thesis addresses that gap with an in-process engine for a subset of
+R010 that it defines, implements, and tests.  The engine parses a query,
 compiles its row pattern into finite automata, and executes it over ordered
 DataFrame partitions.  The evaluation covers correctness, feature
 support, usability, performance, and scalability against Trino and Oracle.
 All 709 regression tests passed.
 
 The main benchmark ran five patterns over six Amazon UK Products~2023 sizes,
-100\,K to 2.22\,million rows (30 cases per system), and all three agreed on
+100\,K to 2.22\,million rows (30 pattern--size cells per system), and all
+three agreed on
 every result.  Under one core and 32\,GB, mean time was
 0.17\,s for the engine, 1.04\,s for Oracle, and 1.98\,s for Trino.  A scalability study on Amazon Reviews~2023 ran the same five patterns over
-seven sizes to 227.9\,million rows (35 cases per system) under one core and
+seven sizes to 227.9\,million rows (35 cells per system) under one core and
 58\,GB; the engine and Oracle completed all 35, Trino 33.
 Engine time stayed close to linear, while query-time memory grew with input size.
 Row-pattern recognition can therefore connect declarative SQL with in-process

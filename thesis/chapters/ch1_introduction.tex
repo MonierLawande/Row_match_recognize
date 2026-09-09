@@ -17,7 +17,9 @@ This chapter starts from the idea itself.  Section~\ref{sec:intro-rowpatterns}
 explains what a row pattern is, what the V, W, and U shapes mean, and how the
 existing families of languages express such patterns.
 Section~\ref{sec:intro-problem} then states the problem this thesis
-addresses.
+addresses, and Section~\ref{sec:intro-objectives} turns it into objectives,
+contributions, and the evidence for them.  The remaining sections give the
+structure of the thesis and the publications produced during it.
 
 
 % ----------------------------------------------------------------
@@ -380,8 +382,7 @@ run in process, correctly and fast enough to be useful.  Three specific
 objectives follow from it.
 
 \paragraph{Specific objectives.}
-Three objectives follow.  Each one is stated so that the thesis can be
-judged against it.
+Each one is stated so that the thesis can be judged against it.
 
 \begin{enumerate}
   \item \textbf{Determine whether the subset can run in process.}
@@ -445,7 +446,7 @@ Oracle.
 The larger Amazon Reviews test extends the range to 227.9~million rows,
 about $100\times$ the main dataset.  Under a shared one-core, 58\,GB
 memory limit, the engine and Oracle~21c Enterprise Edition completed all
-35 cases.  Trino~473 completed 33.  Its complex nested cases at 160 and
+35 cells.  Trino~473 completed 33.  Its complex nested cases at 160 and
 227.9~million rows reached the 600\,s limit.  Engine time remained close to linear.
 Four pattern families were completed by all three systems at every size.
 Averaging those four at each size, Oracle's mean time was

@@ -404,8 +404,12 @@ does not need.  Lowering it to an abstract form follows the
 keeps the walk over a tree separate from the classes of its nodes, so
 a new operation can be added without editing them.  That matters here
 because ANTLR4 generates both the node classes and the visitor base
-class.  Two cooperating visitors handle the outer query and the
-\texttt{MATCH\_RECOGNIZE} clause.  They produce a compact, typed AST.  Its root holds the outer \texttt{SELECT}/\texttt{FROM} and
+class.  Choosing the right method takes two steps, because neither
+side alone knows enough: the visitor knows the operation, and the node
+knows its own type.  Each node is therefore handed the visitor and
+calls back the method named for that node's type.  Two cooperating visitors handle the outer query and the
+\texttt{MATCH\_RECOGNIZE} clause.  They produce a compact, typed AST.
+Its root holds the outer \texttt{SELECT}/\texttt{FROM} and
 one \texttt{MatchRecognizeClause}.  Each sub-clause has a typed
 dataclass for its resolved fields.  Later stages can dispatch on node
 type instead of reading the raw SQL again.
@@ -507,18 +511,21 @@ The allowlist includes comparisons, Boolean and arithmetic operators,
 literals, \texttt{IN} lists, conditional expressions, qualified
 references such as \texttt{A.price}, navigation functions,
 \texttt{CLASSIFIER}, \texttt{MATCH\_NUMBER}, and the supported
-aggregates.  Imports, assignments, and access to Python built-ins are
-not evaluated.  An expression sees only its explicit evaluation
-context: ordered rows, pattern bindings, and match metadata.
+aggregates.  Everything else falls outside it: imports, assignments,
+and access to Python built-ins are never evaluated.  An expression sees
+only its explicit evaluation context: ordered rows, pattern bindings,
+and match metadata.
 
 The front end is exercised by dedicated tests.  They include
 adversarial inputs such as undefined variables, prohibited function
 forms, invalid skip targets, and incompatible output-mode
 combinations.  They also include end-to-end scenarios adapted from
-Trino's row-pattern tests.  General
-subquery planning and SQL features outside the supported row-pattern
-subset are not handled by this path.  Vendor extensions may also need
-parser and evaluator changes.
+Trino's row-pattern tests.
+
+\paragraph{Outside this path.}
+General subquery planning and SQL features outside the supported
+row-pattern subset are not handled here.  Vendor extensions may also
+need parser and evaluator changes.
 
 % ----------------------------------------------------------------
 \section{Semantic Validation}
