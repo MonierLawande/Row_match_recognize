@@ -110,19 +110,19 @@ so matching becomes a lookup instead of a search.  The conversion
 therefore trades construction cost for a predictable scan.  If
 complete construction exceeds a resource limit, compilation fails
 explicitly; it never executes a partial automaton.  Chapter~\ref{chap:implementation}
-explains compilation and DataFrame execution in detail.  After the
-worked example, the remaining sections focus on the first three stages.
+explains compilation and DataFrame execution in detail.
 
 % ................................
 \subsection{Worked Pipeline Example}
 \label{subsec:meth-worked-pipeline}
 % ................................
 
-Listing~\ref{lst:orders-mr} applies the architecture to the
-\texttt{orders} example.  Its two inputs are the SQL query and the
-eight-row DataFrame in that listing.  Figure~\ref{fig:orders-pipeline}
-traces both inputs through the architecture in
+Figure~\ref{fig:orders-pipeline} applies the architecture to the
+\texttt{orders} example.  It carries both inputs, an SQL query and an
+eight-row DataFrame, and traces them through the stages of
 Figure~\ref{fig:system-architecture}.
+Chapter~\ref{chap:evaluation} reuses the same example for the
+usability comparison.
 
 \begin{figure}[htbp]
   \centering
@@ -223,8 +223,7 @@ Figure~\ref{fig:system-architecture}.
        \setlength{\tabcolsep}{0pt}
        \renewcommand{\arraystretch}{0.91}
        \begin{tabular}{@{}l@{}}
-         \multicolumn{1}{c}{\normalsize\textbf{SQL query
-           (Listing~\ref{lst:orders-mr})}} \\[2pt]
+         \multicolumn{1}{c}{\normalsize\textbf{SQL query}} \\[2pt]
          \texttt{SELECT customer\_id, start\_date,} \\
          \texttt{\hspace*{2em}end\_date, bottom\_price} \\
          \texttt{FROM orders} \\
@@ -400,9 +399,12 @@ pattern groups.
 ANTLR4's raw parse tree is a \emph{concrete syntax tree}.  It keeps
 every matched token, including keywords and punctuation that execution
 does not need.  Lowering it to an abstract form follows the
-\emph{Visitor} pattern~\cite{robson2022designpatterns}.  ANTLR4 emits
-the visitor base class.  Two cooperating visitors handle the outer
-query and the \texttt{MATCH\_RECOGNIZE} clause.  They produce a compact,
+\emph{Visitor} pattern~\cite{robson2022designpatterns}.  A visitor
+keeps the walk over a tree separate from the classes of its nodes, so
+a new operation can be added without editing them.  That matters here
+because ANTLR4 generates both the node classes and the visitor base
+class.  Two cooperating visitors handle the outer query and the
+\texttt{MATCH\_RECOGNIZE} clause.  They produce a compact,
 typed AST.  Its root holds the outer \texttt{SELECT}/\texttt{FROM} and
 one \texttt{MatchRecognizeClause}.  Each sub-clause has a typed
 dataclass for its resolved fields.  Later stages can dispatch on node
