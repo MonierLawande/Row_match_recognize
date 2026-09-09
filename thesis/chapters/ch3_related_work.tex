@@ -69,10 +69,10 @@ databricks2026matchrecognize}.
 \label{subsec:related-existing-overview}
 % ................................
 
-The SQL standard defines three optional row-pattern
-features---R010 (\texttt{FROM}-clause patterns), R020 (window
-patterns), and R030 (full aggregate
-support)---introduced in Section~\ref{sec:bg-match-recognize}.
+Section~\ref{sec:bg-match-recognize} introduced the three optional
+row-pattern features in the SQL standard: R010 (\texttt{FROM}-clause
+patterns), R020 (window patterns), and R030 (full aggregate
+support).
 In practice, vendor documentation normally
 describes the supported syntax instead of declaring conformance by
 feature code.  Table~\ref{tab:engine-comparison} therefore describes
@@ -277,10 +277,9 @@ error-prone as patterns lengthen, need overlap control, or refer to
 already-matched rows.
 
 The Pandas~2.3.3 API used in this thesis has no native SQL:2016
-\texttt{MATCH\_RECOGNIZE}-style primitive~\cite{pandas233api}.
-Equivalent logic must therefore be assembled from operations such as
-\texttt{groupby}, \texttt{shift}, \texttt{rolling}, and custom
-iteration, or sent to another engine.
+\texttt{MATCH\_RECOGNIZE}-style primitive~\cite{pandas233api}.  The
+logic must therefore be assembled by hand, as above, or sent to
+another engine.
 Other DataFrame libraries, including Dask, Polars, and Modin, are
 outside the Pandas-specific implementation and evaluation scope of
 this thesis~\cite{Evaluation}.
@@ -320,26 +319,37 @@ its optimized execution design, and the evaluation.
     subset of SQL:2016 \texttt{MATCH\_RECOGNIZE} directly on a
     DataFrame.  It supports the main clauses, output modes, skip modes,
     navigation functions, and aggregates in the forms this thesis
-    evaluates.  Its pattern
-    constructs include quantifiers, alternation, grouping, anchors,
+    evaluates.  Its pattern constructs include quantifiers,
+    alternation, grouping, anchors,
     exclusions, and \texttt{PERMUTE}.  It runs in-process and needs no
     database server or cloud warehouse.  Chapter~\ref{chap:methodology}
     presents its five-stage design.
 
-  \item An \textbf{optimized and guarded execution design} with compiled fast paths,
-    vectorized predicate evaluation, compact output construction,
-    bounded caching, and partition-scoped data handling.  Conditions
-    outside a fast path use the general evaluator.
+  \item An \textbf{optimized and guarded execution design} with
+    compiled fast paths, vectorized predicate evaluation, compact
+    output construction, bounded caching, and partition-scoped data
+    handling.  One rule governs the layer: a faster path may never
+    change the answer.  Each path declares an activation condition and
+    runs only when that condition is proven to hold.  Row-local
+    predicates become column masks, an already-ordered input skips the
+    sort, eligible queries fuse matching with output construction, and
+    compiled automata are reused across queries.  Separate budgets
+    bound cache capacity, automaton construction, and exact search.
+    Conditions outside a fast path use the general evaluator, and
+    differential tests compare each eligible fast path with the
+    general path on the same input and output mode.
+    Chapter~\ref{chap:implementation} presents the compilation,
+    execution, and optimization layers.
 
-  \item \textbf{Theoretical and empirical evaluation}.  The
-    theoretical analysis gives time and space bounds for ordering,
+  \item \textbf{Theoretical and empirical evaluation} of the engine.
+    The theoretical analysis gives time and space bounds for ordering,
     matching, output construction, and pattern complexity.  The
-    empirical analysis evaluates correctness, SQL feature coverage,
-    usability, performance, and scalability.  Performance includes
-    execution time, throughput, and memory.  The study uses synthetic
-    reference cases, Amazon UK Products~2023 up to 2.22~million rows,
-    and Amazon Reviews~2023 up to 227.9~million
-    rows~\cite{asaniczka2023amazon,hou2024amazonreviews}.
+    empirical study covers correctness, SQL feature coverage,
+    usability, execution time, throughput, memory, and scalability.
+    It runs on synthetic reference cases, Amazon UK Products~2023 up
+    to 2.22~million rows, and Amazon Reviews~2023 up to
+    227.9~million rows~\cite{asaniczka2023amazon,hou2024amazonreviews},
+    and compares the engine directly with Trino~473 and Oracle~21c EE.
     Chapter~\ref{chap:evaluation} gives the full method and results.
 \end{enumerate}
 
