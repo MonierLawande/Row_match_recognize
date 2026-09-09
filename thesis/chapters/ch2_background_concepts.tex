@@ -141,10 +141,10 @@ requirements of the implemented system.
 % ................................
 The clause works with a table or a derived table.  It is commonly
 described through the eight specifications shown in
-Listing~\ref{lst:mr-syntax}.  \texttt{PATTERN} is required.  In the
-evaluated engine, \texttt{DEFINE} and the other specifications are
-optional.  Together, they control partitioning, order, output, row
-classification, and overlap between matches.
+Listing~\ref{lst:mr-syntax}.  The standard requires \texttt{PATTERN}
+and \texttt{DEFINE}.  The square brackets in the listing mark the
+optional specifications.  Together, they control partitioning, order,
+output, row classification, and overlap between matches.
 
 \begin{lstlisting}[
     language     = SQL,
@@ -161,14 +161,14 @@ MATCH_RECOGNIZE (
     [AFTER MATCH SKIP <option>]        -- 5. Overlap handling
     PATTERN ( <pattern_regex> )        -- 6. Sequence specification
     [SUBSET <union_variable_defs>]     -- 7. Union variables
-    [DEFINE <variable_definitions>]    -- 8. Variable predicates
+    DEFINE <variable_definitions>      -- 8. Variable predicates
 ) [AS <alias>]
 \end{lstlisting}
 
 \begin{enumerate}
 
 \item \textbf{PARTITION BY.}
-If present, this specification splits the input into independent
+Splits the input into independent
 partitions, similar to a window function.  Matching then runs within
 each customer, sensor, or other partition.  Independent partitions may
 also support parallel processing.  If it is omitted, the input forms
@@ -184,7 +184,7 @@ in this thesis is narrower and uses ascending pattern order.
 
 
 \item \textbf{MEASURES.}
-  Optionally defines computed expressions that extract values from
+  Defines computed expressions that extract values from
   matched row sequences using pattern variables and navigation functions
   (\texttt{FIRST}, \texttt{LAST}, \texttt{PREV}, \texttt{NEXT}).
   Each measure expression becomes a column in the output, allowing a
@@ -193,15 +193,14 @@ in this thesis is narrower and uses ascending pattern order.
 \item \textbf{Output options.}
   \begin{itemize}
     \item \texttt{ONE ROW PER MATCH}: one summary row per complete
-      match.
+      match.  This is the default when the option is omitted.
     \item \texttt{ALL ROWS PER MATCH}: one output row for each included
-      row in a match.
-    \item \texttt{SHOW EMPTY MATCHES}: include an output row when a
-      pattern completes without consuming an input row.
-    \item \texttt{OMIT EMPTY MATCHES}: suppress such empty-match rows.
-    \item \texttt{WITH UNMATCHED ROWS}: an
-      \texttt{ALL ROWS PER MATCH} modifier that includes
-      non-matching rows in the result where supported.
+      row in a match.  It takes one optional modifier:
+      \texttt{SHOW EMPTY MATCHES} adds an output row when a pattern
+      completes without consuming an input row,
+      \texttt{OMIT EMPTY MATCHES} suppresses such rows, and
+      \texttt{WITH UNMATCHED ROWS} also returns rows that no match
+      covers.
   \end{itemize}
 
 \item \textbf{AFTER MATCH SKIP.}
@@ -210,11 +209,13 @@ in this thesis is narrower and uses ascending pattern order.
     \item \texttt{SKIP TO NEXT ROW} -- resume from the row after
       match start (maximum overlaps).
     \item \texttt{SKIP PAST LAST ROW} -- resume from the row after
-      match end (non-overlapping matches).
+      match end (non-overlapping matches).  This is the default.
     \item \texttt{SKIP TO FIRST} \textit{var} -- resume from the
       first row classified as \textit{var}.
     \item \texttt{SKIP TO LAST} \textit{var} -- resume from the last
-      row classified as \textit{var}.
+      row classified as \textit{var}.  Written without
+      \texttt{FIRST} or \texttt{LAST}, \texttt{SKIP TO} \textit{var}
+      means the same thing.
   \end{itemize}
 
 \item \textbf{PATTERN.}
@@ -239,21 +240,25 @@ in this thesis is narrower and uses ascending pattern order.
   \end{itemize}
 
 \item \textbf{SUBSET.}
-This optional specification defines a union variable from variables
-already used in \texttt{PATTERN}.  It does not change the match.
+Defines a union variable from variables already used in
+\texttt{PATTERN}.  It does not change the match.
 Instead, it gives one name to rows classified by any of its component
 variables.  It can then be referenced in \texttt{MEASURES},
-\texttt{DEFINE}, and supported skip targets.
+\texttt{DEFINE}, and supported skip targets.  Of the eight
+specifications, it is the one used least often in practice.
 
 
 \item \textbf{DEFINE.}
-This optional specification assigns Boolean predicates to pattern
+Assigns Boolean predicates to pattern
 variables.  The matcher tests a candidate row in the current match
 context to decide whether it can be classified as a variable.
 Predicates may use current-row columns, navigation functions,
 aggregations over matched rows, and Boolean or comparison
 operators~\cite{winand_match_recognize}.  A variable without a
-\texttt{DEFINE} predicate uses the implicit true predicate.
+\texttt{DEFINE} predicate uses the implicit true predicate.  The
+standard still requires the clause itself.  The evaluated engine
+relaxes that point and also accepts a query with no \texttt{DEFINE},
+in which case every pattern variable is true.
 
 \end{enumerate}
 
