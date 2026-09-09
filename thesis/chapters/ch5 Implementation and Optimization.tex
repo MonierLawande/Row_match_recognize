@@ -505,9 +505,82 @@ general path on the same input and output mode.
 
 The techniques remove repeated predicate work, avoid unnecessary
 sorting and materialization, and reuse compiled structures.
-Table~\ref{tab:perf-summary} gives their activation boundaries.
+Table~\ref{tab:perf-summary} gives their activation boundaries, and
+each technique below carries the name used there.
 
-\paragraph{Deciding conditions ahead of time.}
+\begin{table}[htbp]
+  \centering
+  \caption[Performance optimizations, purpose and activation]{Performance
+    optimizations: purpose, activation condition, and benefit.  The
+    technique names match the bold paragraph headings that follow.}
+  \label{tab:perf-summary}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  % narrow columns: ragged right and no hyphenation, so short labels
+  % are not broken across lines ("Avoid copy-ing")
+  \begin{tabularx}{\textwidth}{%
+    >{\raggedright\arraybackslash\hyphenpenalty=10000\exhyphenpenalty=10000}p{2.75cm}%
+    >{\raggedright\arraybackslash\hyphenpenalty=10000}p{2.05cm}%
+    >{\raggedright\arraybackslash}X%
+    >{\raggedright\arraybackslash}X}
+    \toprule
+    \textbf{Technique} & \textbf{Purpose}
+      & \textbf{Activation condition} & \textbf{Primary benefit} \\
+    \midrule
+    Ordered-input check
+      & Avoid copying
+      & Requested \texttt{ORDER BY} sequence already present
+      & Avoids an unnecessary sort and DataFrame copy \\[4pt]
+    Vectorized condition masks
+      & Avoid repeated work
+      & Row-local expression, or safe row-local conjuncts in
+        a mixed \texttt{AND}
+      & Replaces repeated Python evaluation with column operations
+        and exact prefilters \\[4pt]
+    Row-local DFA decision tables
+      & Avoid repeated work
+      & All predicates are vectorized, with no empty-match, anchor,
+        exclusion, \texttt{PERMUTE}, \texttt{SUBSET}, reluctant, or
+        state-dependent requirement
+      & Replaces repeated transition dispatch with compact indexing
+        and segment assignments \\[4pt]
+    Linear run-length plan
+      & Avoid repeated work
+      & Default skip, a plain linear variable sequence, supported
+        quantifiers, and row-local masks
+      & Skips complete runs and memoizes failed suffixes \\[4pt]
+    Fused output drivers
+      & Avoid copying
+      & Default skip, no unmatched rows, anchors, or empty matches, an
+        eligible matcher, and fully compiled measures
+      & Avoids intermediate match and row dictionaries \\[4pt]
+    Compiled measure and prefix plans
+      & Avoid repeated work
+      & Supported direct navigation or aggregate form
+      & Reuses prepared array state; avoids repeated prefix
+        aggregation \\[4pt]
+    LRU pattern cache
+      & Reuse
+      & Caching enabled and the complete automaton fits the cache budget
+      & Eliminates redundant NFA/DFA construction across repeated
+        queries \\[4pt]
+    Lazy rows and output projection
+      & Avoid copying
+      & Partition path supports lazy access; selected source columns
+        can be resolved safely
+      & Reduces row copies, retained Python objects, and output width \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\paragraph{Ordered-input check.}
+Sorting is the one cost that can be removed outright.  Before sorting a
+partition, the engine tests whether it already follows the requested
+\texttt{ORDER BY} sequence.  If it does, the sort and the DataFrame
+copy it would produce are both skipped.  Section~\ref{subsec:eval-ordering}
+measures the engine with and without that shortcut.
+
+\paragraph{Vectorized condition masks.}
 The main cost in the general path is repeated condition evaluation.
 Predicates that depend only on the current row, literals, and eligible
 fixed-offset \texttt{PREV}/\texttt{NEXT} forms can be evaluated as
@@ -531,13 +604,14 @@ quadratic repeated-aggregation cost for that supported form.  It does
 not make every state-dependent predicate vectorizable
 (Section~\ref{subsec:eval-worst-cases}).
 
-\paragraph{Turning the search into a lookup.}
+\paragraph{Row-local DFA decision tables.}
 When all variable predicates have masks, the engine builds a compact
 transition index for the DFA states.  Matching becomes array lookup and
 integer comparison rather than repeated dictionary and function work.
 Assignments can be stored as row segments instead of one Python object
 per row.
 
+\paragraph{Linear run-length plan.}
 A linear pattern such as \texttt{A B\{2,4\} C+} allows a second plan.
 Run-length arrays record how many consecutive rows satisfy each
 variable.  Failed token--position pairs are memoized, so the same
@@ -545,6 +619,7 @@ impossible suffix is not explored again.  Patterns with alternation use
 the row-local DFA path when eligible.  State-dependent choices use the
 exact matcher.  Neither case enters the linear run-length plan.
 
+\paragraph{Fused output drivers.}
 For eligible output modes, matching and materialization are fused.
 One path emits \texttt{ONE ROW PER MATCH} results directly.  Another
 publishes compact segments for \texttt{ALL ROWS PER MATCH}.  Both
@@ -552,7 +627,7 @@ require the default skip mode and fully compiled measures.  Any anchor,
 empty-match rule, measure, or output option outside their proof
 boundary returns to the complete path.
 
-\paragraph{Computing measures once.}
+\paragraph{Compiled measure and prefix plans.}
 Common measures are compiled once into direct plans.  Simple
 \texttt{SUM}, \texttt{AVG}, \texttt{COUNT}, statistical aggregates,
 and direct navigation can then use arrays or prefix state.  A
@@ -562,7 +637,7 @@ also covers selected arithmetic combinations and distinct aggregates.
 Filters and expressions outside these proven forms use the general
 measure evaluator.
 
-\paragraph{Reducing repeated work and memory.}
+\paragraph{LRU pattern cache.}
 Compiled automata are stored in a bounded, thread-safe
 \emph{least-recently-used} (LRU) cache.  The key includes the pattern,
 its \texttt{DEFINE} conditions, and compilation-relevant
@@ -570,6 +645,7 @@ its \texttt{DEFINE} conditions, and compilation-relevant
 NFA and DFA construction.  Condition caches are also bounded.  For a
 large partition, a small row sample warms common evaluation paths.
 
+\paragraph{Lazy rows and output projection.}
 The executor avoids copying all grouped partitions before matching.
 For eligible default-skip, non-\texttt{PERMUTE} queries, it exposes one
 partition through a lazy row view with a bounded row cache.  Other
@@ -582,57 +658,20 @@ columns.  Eligible fast paths assemble
 output columns directly before creating the result DataFrame.  These
 choices lower temporary memory, but they do not make execution
 streaming: it retains the input and result, and some paths also retain
-materialized rows or whole-column working arrays.  A cache budget bounds cache capacity, a state
-budget bounds automaton construction, and a search budget bounds exact
-search.
+materialized rows or whole-column working arrays.
 
-\begin{table}[htbp]
-  \centering
-  \caption{Performance optimizations and their activation
-    conditions}
-  \label{tab:perf-summary}
-  \begin{tabular}{p{3.8cm}p{4.2cm}p{4.4cm}}
-    \toprule
-    \textbf{Technique} & \textbf{Activation condition}
-      & \textbf{Primary benefit} \\
-    \midrule
-    Ordered-input check
-      & Requested \texttt{ORDER BY} sequence already present
-      & Avoids an unnecessary sort and DataFrame copy \\[4pt]
-    Vectorized condition masks
-      & Row-local expression, or safe row-local conjuncts in
-        a mixed \texttt{AND}
-      & Replaces repeated Python evaluation with column operations
-        and exact prefilters \\[4pt]
-    Row-local DFA decision tables
-      & All predicates are vectorized, with no empty-match, anchor,
-        exclusion, \texttt{PERMUTE}, \texttt{SUBSET}, reluctant, or
-        state-dependent requirement
-      & Replaces repeated transition dispatch with compact indexing
-        and segment assignments \\[4pt]
-    Linear run-length plan
-      & Default skip, a plain linear variable sequence, supported
-        quantifiers, and row-local masks
-      & Skips complete runs and memoizes failed suffixes \\[4pt]
-    Fused output drivers
-      & Default skip, no unmatched rows, anchors, or empty matches, an
-        eligible matcher, and fully compiled measures
-      & Avoids intermediate match and row dictionaries \\[4pt]
-    Compiled measure and prefix plans
-      & Supported direct navigation or aggregate form
-      & Reuses prepared array state; avoids repeated prefix
-        aggregation \\[4pt]
-    LRU pattern cache
-      & Caching enabled and the complete automaton fits the cache budget
-      & Eliminates redundant NFA/DFA construction across repeated
-        queries \\[4pt]
-    Lazy rows and output projection
-      & Partition path supports lazy access; selected source columns
-        can be resolved safely
-      & Reduces row copies, retained Python objects, and output width \\
-    \bottomrule
-  \end{tabular}
-\end{table}
+\paragraph{Budgets.}
+The current implementation uses separate resource limits, called
+budgets.  The compiled-pattern cache limits the number and estimated
+size of entries kept for reuse.  It removes cached entries when space
+is needed and leaves an entry uncached if it is too large to fit.
+DFA construction limits both the number of states built and the
+construction iterations.  Exact search limits the exploration steps
+from each candidate start row.  If construction or search cannot finish
+within its budget, the engine raises an explicit error rather than
+returning an incomplete result.  These checks do not cap total process
+memory, which also includes the input, temporary data, and output.
+
 
 % ----------------------------------------------------------------
 \section{Chapter Summary}
