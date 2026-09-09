@@ -224,12 +224,14 @@ Table~\ref{tab:stock_price} shows the data.
 \end{table}
 
 \paragraph{Dataset 3: the Amazon UK Products dataset.}
+\begingroup\emergencystretch=3em
 The Amazon UK Products dataset~\cite{asaniczka2023amazon} holds
 roughly 2.2\,million product records from Amazon's UK marketplace as
 one CSV file.  The benchmark uses four of its columns:
 \texttt{stars} (average rating, 1--5), \texttt{reviews} (review
 count), \texttt{price} (GBP), and \texttt{categoryName}; the
-remaining columns (IDs, titles, URLs, flags) are not needed.  It
+remaining columns (IDs, titles, URLs, flags) are not needed.\par\endgroup
+It
 supplies the data volume for the performance benchmark; the derived
 \texttt{category} column and the six dataset sizes are described in
 Section~\ref{subsec:eval-pattern-defs}.
@@ -726,7 +728,7 @@ gap widens with pattern complexity.
 \label{tab:loc_comparison}
 {\small
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{llp{4.6cm}r}
+\begin{tabularx}{\textwidth}{l l >{\raggedright\arraybackslash}X r}
 \toprule
 \textbf{Example} & \textbf{Implementation} & \textbf{Notes} & \textbf{LOC} \\
 \midrule
@@ -739,7 +741,7 @@ Stock (\texttt{stock\_price}) & Hand-written Pandas function & \texttt{groupby}/
 V-shape (\texttt{stock\_price}) & \texttt{MATCH\_RECOGNIZE} statement & quantified declarative query & 16 \\
 V-shape (\texttt{stock\_price}) & Hand-written Pandas function & nested falling/rising run scan & 32 \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 }
 \end{table}
 
@@ -840,7 +842,8 @@ exercises it and produces output identical to the reference systems.
   case for each type}
 \label{tab:pattern_type_coverage}
 {\small
-\begin{tabular}{l l p{5.1cm} c}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\textwidth}{l l >{\raggedright\arraybackslash}X c}
 \toprule
 \textbf{Pattern type} & \textbf{Pattern (regex)} &
   \textbf{Simple use case} & \textbf{Covered} \\
@@ -867,7 +870,7 @@ Anchors & \texttt{\^{}A}, \texttt{A\$} &
 Permutation & \texttt{PERMUTE(A,B,C)} &
   the same set of events in any order & yes \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 }
 \end{table}
 
@@ -1277,13 +1280,14 @@ filtered and averaged.  The engine is the highest curve in every panel
 \label{subsec:eval-memory}
 % ................................................................
 
+\begingroup\emergencystretch=3em
 For the main benchmark, both memory metrics use the same cgroup~v2
 \texttt{memory.current} counter.  It measures the dedicated engine
 control group or the complete Trino or Oracle container every 50\,ms.
 The boundaries are therefore operational rather than identical: the
 engine value covers its Python process, while each database value
 covers its server container and excludes the external client.  Shorter
-allocation spikes can also fall between samples.
+allocation spikes can also fall between samples.\par\endgroup
 
 The scripts divide byte counters by $1024^2$ and $1024^3$.  For compact
 labels, MB and GB in the memory results therefore mean the binary units
@@ -1443,11 +1447,12 @@ Scenario~B is shuffled.  The difference measures sensitivity to
 physical input order; it is not a direct profile of the sort operator
 inside each database.
 
+\begingroup\emergencystretch=3em
 The proposed-engine values describe the benchmark revision recorded in
 Appendix~\ref{app:provenance}.  The Oracle and Trino values were retained from the earlier
 unordered campaign under the same one-core, 32\,GB, five-warmup,
 twenty-run protocol.  As in the main benchmark, the systems ran
-sequentially.  Figure~\ref{fig:ordering_scenarios} shows the result.
+sequentially.  Figure~\ref{fig:ordering_scenarios} shows the result.\par\endgroup
 
 \begin{figure}[htbp]
   \centering
