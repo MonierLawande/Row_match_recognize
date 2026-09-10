@@ -1239,7 +1239,8 @@ the Amazon UK Products dataset: five pattern families, six sizes
 IQR-filtered mean of twenty runs after five warmups: the twenty times
 are averaged after the $1.5\times$ IQR rule of
 Section~\ref{subsec:eval-metrics} drops the runs that fall far outside
-the middle half.  All 90 cells completed.  The engine averaged about 6.1\,M\,rows/s.  Its per-family
+the middle half.  All 90 cells completed.  The engine averaged about
+6.1\,M\,rows/s.  Its per-family
 time fits give $R^2=0.9904$--$0.9997$, so growth is close to linear
 over these six sizes.  Complex nested patterns cost the most.
 Section~\ref{subsec:eval-pattern-defs} defines the
@@ -1254,11 +1255,11 @@ The engine does not aim to replace Oracle, Trino, or streaming
 platforms.  It brings a practical subset of row-pattern matching into
 in-memory Python and skips the load-into-a-server step.  The target is
 bounded data that already sits in memory, not an unbounded stream.
-That choice shapes the design: the engine groups the frame and sorts
+That choice shapes the design.  The engine groups the frame and sorts
 each partition before it runs the automaton, so a match needs every row
-of its partition present, while a streaming engine keeps incremental
-state per open match and must also handle events that arrive late or
-out of order.  In return it
+of its partition present.  A streaming engine instead keeps incremental
+state per open match, and it must handle events that arrive late or out
+of order.  In return it
 supports only the subset of
 Chapters~\ref{chap:methodology}--\ref{chap:implementation}, while the
 databases have mature optimizers, distributed execution, and broader SQL
@@ -1273,10 +1274,10 @@ ordering, pattern, skip, and measures in one query.
 
 Table~\ref{tab:pattern_definitions} lists the five pattern families
 used throughout the benchmark, with the detection goal of each.  They
-are the first five rows of Table~\ref{tab:pattern_type_coverage},
-chosen because their cost rises from a single sequence to nested groups
-while the category column stays the same, so the six sizes measure
-growth rather than a change of data.  The other five types are covered
+are the first five rows of Table~\ref{tab:pattern_type_coverage}.
+Their cost rises from a single sequence to nested groups while the
+category column stays the same, so the six sizes measure growth rather
+than a change of data.  The other five types are covered
 by the correctness tests of
 Section~\ref{subsec:eval-feature-coverage}, not by the timing matrix.
 
@@ -1467,7 +1468,8 @@ rows while the engine stays near-linear
 Figure~\ref{fig:throughput} plots throughput, one panel per pattern;
 higher is better.  Throughput is computed for each measured run, as
 dataset size divided by that run's time, then filtered by the same
-$1.5\times$ IQR rule and averaged.  The engine is the highest curve in every panel
+$1.5\times$ IQR rule and averaged.  The engine is the highest curve in
+every panel
 (Table~\ref{tab:throughput}).
 
 % ................................................................
@@ -1566,7 +1568,7 @@ system.  \emph{Average execution time} is the mean of the 30 cell
 means: 0.17\,s for the engine, against 1.04\,s for Oracle and
 1.98\,s for Trino.  The engine runs inside the process that already
 holds the data, so it avoids the planning, storage, and
-client-transfer layers the databases still pay for, and it compiles
+client-transfer layers the databases still pay for.  It also compiles
 supported conditions to column operations.  \emph{Average throughput}
 is the same 30 cells read as rates: 6.11\,M\,rows/s, against 1.16 and
 0.60.  The rate does not fall as data grows, which is what near-linear
@@ -1822,7 +1824,8 @@ ahead of Trino on the size averages.  It also finishes the full corpus
 on every pattern: 27.8\,s for \texttt{simple\_sequence}, 106.0\,s for
 \texttt{complex\_nested}.  The engine and Oracle~21c EE each complete
 35/35 cells.  Trino completes 33/35: \texttt{complex\_nested} crosses
-the 600\,s time budget at 160\,M and 227{,}899{,}533 rows.  Because \texttt{complex\_nested} is the slowest family for all three
+the 600\,s time budget at 160\,M and 227{,}899{,}533 rows.  Because
+\texttt{complex\_nested} is the slowest family for all three
 systems, a mean that kept it would count it for the engine and
 Oracle~21c EE at the two largest sizes but not for Trino.  Trino's
 average would then omit its hardest pattern while the others kept
@@ -1939,13 +1942,13 @@ stability of both sets of means.
 \emph{Separate campaigns.}  The systems used the same host, logical
 queries, input rows, CPU allocation, and outer memory limit, but they
 were measured one after another rather than side by side.  Every
-campaign ran on one CPU core, each with its own repetition count: five
-warmups and twenty measured runs per cell in the main benchmark, under
-a 32\,GB limit with resident inputs; two warmups and five runs in the
-stress study, under 58\,GB with system-appropriate scalable storage;
-the main protocol again for the ordering test; and twenty runs for the
-engine against two for the retained database values in the
-state-dependent case.  No figure here comes from a concurrent
+campaign ran on one CPU core, each with its own repetition count.  The
+main benchmark uses five warmups and twenty measured runs per cell,
+under a 32\,GB limit with resident inputs.  The stress study uses two
+warmups and five runs, under 58\,GB with system-appropriate scalable
+storage.  The ordering test repeats the main protocol.  The
+state-dependent case keeps twenty runs for the engine but two for the
+retained database values.  No figure here comes from a concurrent
 head-to-head run.
 
 \emph{Narrow scope.}  The claim is only that the engine is faster
