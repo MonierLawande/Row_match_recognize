@@ -52,9 +52,10 @@ The evaluation used four fixed protocols:
     but provide less evidence about variation.  All 18 cells completed.
 \end{itemize}
 
-Memory was sampled from the control group's cgroup~v2 counter every
-50\,ms.  The incremental peak subtracts a five-second pre-query
-baseline.  Timing includes query execution and result construction or
+Memory was sampled every 50\,ms from \texttt{memory.current}, the
+total that version~2 of the Linux control-group (cgroup) interface
+reports for a group of processes.  The incremental peak subtracts a
+five-second pre-query baseline.  Timing includes query execution and result construction or
 retrieval.  For the proposed engine, the absolute peak covers its
 process.  For Trino and Oracle, it covers the full database container.
 Database-native query counters are reported separately where

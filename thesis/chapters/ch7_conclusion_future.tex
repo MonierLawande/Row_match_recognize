@@ -39,14 +39,15 @@ read, and travels between notebook analysis and SQL workflows, as long
 as the query stays inside the supported subset.
 
 The performance benchmark contained 30 pattern--size
-combinations: five pattern families over six sizes from 100\,K to the
-full 2.22\,M rows.  Each cell is the mean of twenty measured runs after
-five warmups and the stated outlier rule.  Each system used the same
+combinations per system: five pattern families over six sizes from
+100\,K to the full 2.22\,M rows, so 90 cells across the three systems.
+Each cell is the mean of twenty measured runs after
+five warmups and the stated $1.5\times$ IQR outlier rule.  Each system used the same
 input and query logic under one CPU core and the same outer 32\,GB
-memory limit.  The
-proposed engine averaged
-6\,110\,392~rows/s and 0.17\,s per cell.  Oracle averaged 1.04\,s and
-Trino 1.98\,s.  The proposed engine had the lowest time in all 30
+memory limit.  Across those 30 cells the
+proposed engine averaged 0.17\,s of execution time per cell and
+6\,110\,392~rows/s of throughput.  Oracle averaged 1.04\,s and
+Trino 1.98\,s per cell.  The proposed engine had the lowest time in all 30
 cells, and all 30 normalized outputs agreed across the three systems.
 Pattern structure remained important:
 \texttt{complex\_nested} was slower than the simpler families.
@@ -55,9 +56,10 @@ Memory shows the trade-off.  Across the main benchmark, the maximum
 incremental query peaks were 189.05\,MB for the engine, 58.71\,MB for
 Oracle, and 20.75\,MB for Trino.  The maximum total footprints showed
 the reverse order: 523.97\,MB, 2{,}057.17\,MB, and
-14{,}992.90\,MB, respectively.  All six values use the same cgroup-based
-metric, but the process boundaries differ: one engine process versus a
-complete database container.  Vendor-native counters have different
+14{,}992.90\,MB, respectively.  All six values use the same instrument, the Linux
+control-group (cgroup) counter that reports the memory of a set of
+processes, but the process boundaries differ: one engine process versus
+a complete database container.  Vendor-native counters have different
 scopes and are not treated as equivalent measurements.
 
 This result has a clear boundary.  The engine is specialized for one
@@ -93,33 +95,42 @@ The architecture separates parsing, validation, logical planning,
 automata construction, matching, and output assembly.  The optimized
 paths use row-local masks, compact DFA and run-length plans, compiled
 measures, fused output, bounded caches, lazy row access, and conservative
-output projection.  Partition processing remains sequential.  The
+output projection.  Every reported measurement has all of them
+enabled, each activating where it applies, so the results describe the
+combined configuration.  Differential tests compare each eligible fast path with the general
+path on the same input, so the evidence is that none of them changes
+the answer, not a measured contribution per technique.  Two sections do
+isolate a path: Section~\ref{subsec:eval-ordering} forces the sort, and
+Section~\ref{subsec:eval-worst-cases} uses a predicate the row-local
+path cannot compile.  A full ablation, each technique alone and in
+combination, is left to future work.  Partition processing remains
+sequential.  The
 study therefore evaluates a single-node Pandas engine, not a
 distributed SQL system.  Trino and Oracle retain wider SQL coverage,
 mature optimizers, and production execution infrastructure.
 
 % ----------------------------------------------------------------
-\section{Validation of Chapter Claims}
+\section{Claims and Evidence}
 \label{sec:conc-validation}
 % ----------------------------------------------------------------
 
-Table~\ref{tab:conc-claim-validation} lists the chapter's main claims,
-the evidence behind each, and the boundary within which it holds.  The
-purpose is to keep each conclusion within the evidence reported in the
-thesis.
+Table~\ref{tab:conc-claim-validation} lists the main claims of the
+thesis, the evidence behind each, and the boundary within which it
+holds.  The purpose is to keep every conclusion inside what the
+evidence actually shows.
 
 {\small
 \begin{longtable}{@{}p{0.18\textwidth}p{0.27\textwidth}p{0.25\textwidth}p{0.20\textwidth}@{}}
-\caption[Validation mapping for the thesis claims]{Validation mapping between thesis claims, supporting
-evidence, and scope boundaries}
+\caption[Claims, evidence, and scope]{Each thesis claim, the evidence
+behind it, and the scope within which it holds}
 \label{tab:conc-claim-validation} \\
 \toprule
 \textbf{Claim area} & \textbf{Supporting evidence} &
 \textbf{Validated conclusion} & \textbf{Scope boundary} \\
 \midrule
 \endfirsthead
-\caption*{Table~\thetable{} (continued): Validation mapping between
-thesis claims, supporting evidence, and scope boundaries} \\
+\caption*{Table~\thetable{} (continued): Each thesis claim, the
+evidence behind it, and the scope within which it holds} \\
 \toprule
 \textbf{Claim area} & \textbf{Supporting evidence} &
 \textbf{Validated conclusion} & \textbf{Scope boundary} \\
@@ -168,17 +179,20 @@ The system remains a Pandas-centered prototype. \\
 \end{longtable}
 }
 
-Three validity limits remain.  \emph{Internal validity} depends on the
-reference outputs and their normalization.  \emph{Construct validity}
-depends on row equality, time, throughput, memory, and line count
-representing the claims made from them.  \emph{External validity} is
-limited by one workstation, two performance datasets, and the selected
-patterns.
+Three validity limits remain.  \emph{Internal validity}, whether the
+measured differences come from the systems themselves, depends on the
+reference outputs and their normalization.  \emph{Construct validity},
+whether the chosen metrics stand for the claims made from them, rests
+on row equality, time, throughput, memory, and line count.
+\emph{External validity}, how far the results carry beyond this setup,
+is limited by one workstation, two performance datasets, and the
+selected patterns.
 The main benchmark uses twenty measured runs per cell; the larger
-sweep uses five.  Its recorded engine and retained database results
-were not collected in one simultaneous rerun.  Trino and
-Oracle were not expert-tuned, so other configurations may narrow the
-measured gaps.
+sweep uses five.  Neither campaign was collected in one simultaneous
+rerun.  Trino and
+Oracle were not expert-tuned, and neither was the engine: all three ran
+with their default settings under the stated limits.  Other
+configurations may narrow the measured gaps.
 
 % ----------------------------------------------------------------
 \section{Limitations}
@@ -314,7 +328,9 @@ boundaries.
 \textbf{Optimization and diagnostics.}
 The automata pipeline can gain from stronger state pruning, guard
 pushdown, better selectivity estimates, and a faster exact search for
-state-dependent forms not covered by compiled plans.  This remains a
+state-dependent forms not covered by compiled plans.  A per-technique
+ablation would also quantify what each optimized path contributes on
+its own and alongside the others.  This remains a
 performance boundary (Section~\ref{subsec:eval-worst-cases}).  Better
 \texttt{EXPLAIN} output, match traces, and per-pattern counters would
 make each execution path easier to verify.

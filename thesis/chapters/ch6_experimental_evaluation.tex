@@ -71,7 +71,8 @@ twenty measured runs, each preceded by a five-second idle window that
 sets the pre-query memory baseline.
 
 The warmups matter because a first run measures start-up rather than
-steady state.  Trino runs on the JVM, which compiles its own bytecode
+steady state.  Trino runs on the Java Virtual Machine (JVM), which
+compiles its own bytecode
 to machine code while the early queries execute; that
 \emph{just-in-time} (JIT) step makes them slower than later runs.
 Oracle fills its caches, and the engine compiles the pattern once.
@@ -132,9 +133,9 @@ terms also meant changing the Trino deployment: it reads from a
 disk-backed Hive/Parquet connector rather than its in-memory
 connector.  All database containers run on the
 host's native Docker daemon, so container limits map directly to host
-control groups.  A control group is the Linux kernel facility that caps
-and reports the CPU and memory of a set of processes, and it is the
-same instrument used for the engine.
+control groups.  A control group, or \emph{cgroup}, is the Linux kernel
+facility that caps and reports the CPU and memory of a set of
+processes, and it is the same instrument used for the engine.
 
 The software stack comprised the two baseline SQL engines, Trino~473 and
 Oracle~21c EE, each run as a Docker container.  It also included the
@@ -428,7 +429,7 @@ print(result)
 \end{lstlisting}
 
 \begin{lstlisting}[float=htbp,language=Python,
-  caption={[Equivalent dip detection in pandas]Hand-written Pandas function for the same `dip' detection.},
+  caption={[Equivalent dip detection in Pandas]Hand-written Pandas function for the same `dip' detection.},
   label={lst:orders-udf}]
 import pandas as pd
 
@@ -642,7 +643,7 @@ print(result)
 \end{lstlisting}
 
 \begin{lstlisting}[float=htbp,language=Python,
-  caption={[Equivalent logic in pandas]Hand-written Pandas function for the same increasing-window detection.},
+  caption={[Equivalent logic in Pandas]Hand-written Pandas function for the same increasing-window detection.},
   label={lst:stock-pandas}]
 import pandas as pd
 
@@ -790,7 +791,7 @@ print(result)
 \end{lstlisting}
 
 \begin{lstlisting}[float=htbp,language=Python,
-  caption={[Equivalent V-shape detection in pandas]Hand-written Pandas function for the same V-shape detection.},
+  caption={[Equivalent V-shape detection in Pandas]Hand-written Pandas function for the same V-shape detection.},
   label={lst:vshape-udf}]
 import pandas as pd
 
@@ -985,9 +986,9 @@ ten row-pattern types the engine detects, each with a regex example and
 a simple use case.  A type counts as covered when at least one test
 case exercises it and produces output identical to the reference
 systems~\cite{monierashraf2025tests}.  These ten are shapes the engine
-can express; they are not the benchmark's five patterns, and neither is
-the 30 of Section~\ref{subsec:eval-cross-system}, which is those five
-run at six sizes.  The table can also be read in reverse, from a use
+can express.  The benchmark of Section~\ref{subsec:eval-cross-system}
+times the first five of them, and its 30 is those five run at six
+sizes.  The table can also be read in reverse, from a use
 case to the pattern that expresses it, and
 Section~\ref{sec:eval-correctness} writes the same detection both as a
 Pandas function and as a query.
@@ -1235,8 +1236,10 @@ of every state-dependent expression.
 This section compares the engine with Trino~473 and Oracle~21c EE on
 the Amazon UK Products dataset: five pattern families, six sizes
 (100\,K to 2.22\,M rows), 30 cells per system.  Each cell is the
-IQR-filtered mean of twenty runs after five warmups.  All 90 cells
-completed.  The engine averaged about 6.1\,M\,rows/s.  Its per-family
+IQR-filtered mean of twenty runs after five warmups: the twenty times
+are averaged after the $1.5\times$ IQR rule of
+Section~\ref{subsec:eval-metrics} drops the runs that fall far outside
+the middle half.  All 90 cells completed.  The engine averaged about 6.1\,M\,rows/s.  Its per-family
 time fits give $R^2=0.9904$--$0.9997$, so growth is close to linear
 over these six sizes.  Complex nested patterns cost the most.
 Section~\ref{subsec:eval-pattern-defs} defines the
@@ -1249,7 +1252,13 @@ Section~\ref{subsec:eval-key-findings} the summary.
 \paragraph{Positioning.}
 The engine does not aim to replace Oracle, Trino, or streaming
 platforms.  It brings a practical subset of row-pattern matching into
-in-memory Python and skips the load-into-a-server step.  In return it
+in-memory Python and skips the load-into-a-server step.  The target is
+bounded data that already sits in memory, not an unbounded stream.
+That choice shapes the design: the engine groups the frame and sorts
+each partition before it runs the automaton, so a match needs every row
+of its partition present, while a streaming engine keeps incremental
+state per open match and must also handle events that arrive late or
+out of order.  In return it
 supports only the subset of
 Chapters~\ref{chap:methodology}--\ref{chap:implementation}, while the
 databases have mature optimizers, distributed execution, and broader SQL
@@ -1263,7 +1272,13 @@ ordering, pattern, skip, and measures in one query.
 % ................................................................
 
 Table~\ref{tab:pattern_definitions} lists the five pattern families
-used throughout the benchmark, with the detection goal of each.
+used throughout the benchmark, with the detection goal of each.  They
+are the first five rows of Table~\ref{tab:pattern_type_coverage},
+chosen because their cost rises from a single sequence to nested groups
+while the category column stays the same, so the six sizes measure
+growth rather than a change of data.  The other five types are covered
+by the correctness tests of
+Section~\ref{subsec:eval-feature-coverage}, not by the timing matrix.
 
 {\small
 \setlength{\tabcolsep}{4pt}
@@ -1342,7 +1357,14 @@ a sequential \texttt{seq\_id} in source order, and the six sizes
 (100\,K to 2{,}222{,}742 rows) are nested prefixes of the same source.
 Queries use
 \texttt{ORDER~BY seq\_id} and no \texttt{PARTITION~BY}, so each dataset
-is one logical partition.  The sequence is a controlled listing order,
+is one logical partition.  Multiple partitions are exercised elsewhere:
+the worked examples of Section~\ref{sec:eval-correctness} partition by
+customer and by company, and partitioned queries appear throughout the
+correctness suite~\cite{monierashraf2025tests}.  One partition is kept
+here because it is the worst case for the sort term
+(Section~\ref{subsec:eval-complexity}) and because it leaves pattern
+and size as the only variables across the 90 cells.
+The sequence is a controlled listing order,
 not a temporal one; what matters is that all three systems process the
 identical rows.
 
@@ -1443,8 +1465,9 @@ rows while the engine stays near-linear
 \end{figure}
 
 Figure~\ref{fig:throughput} plots throughput, one panel per pattern;
-higher is better.  Throughput is computed for each measured run, then
-filtered and averaged.  The engine is the highest curve in every panel
+higher is better.  Throughput is computed for each measured run, as
+dataset size divided by that run's time, then filtered by the same
+$1.5\times$ IQR rule and averaged.  The engine is the highest curve in every panel
 (Table~\ref{tab:throughput}).
 
 % ................................................................
@@ -1469,7 +1492,8 @@ Each measured run has a five-second idle window.  Its average defines
 the \emph{baseline}.  The \emph{absolute peak} is the largest query-time
 sample, and the \emph{incremental peak} is that sample minus the
 baseline.  The subtraction removes most fixed resident memory, such as
-the already-loaded DataFrame, Oracle SGA, and Trino JVM heap.  It does
+the already-loaded DataFrame, Oracle System Global Area (SGA), and
+Trino JVM heap.  It does
 not turn the values into an exact algorithm-only measurement.  As with
 time, each reported memory value is the IQR-filtered mean over twenty
 measured runs.
@@ -1537,8 +1561,33 @@ per-query comparisons use Table~\ref{tab:memory_cache}.
   \label{fig:overall_stats}
 \end{figure}
 
-Figure~\ref{fig:overall_stats} gives four bars per system: average
-time, average throughput, peak query memory, and peak footprint.  The
+Figure~\ref{fig:overall_stats} has four panels, each with one bar per
+system.  \emph{Average execution time} is the mean of the 30 cell
+means: 0.17\,s for the engine, against 1.04\,s for Oracle and
+1.98\,s for Trino.  The engine runs inside the process that already
+holds the data, so it avoids the planning, storage, and
+client-transfer layers the databases still pay for, and it compiles
+supported conditions to column operations.  \emph{Average throughput}
+is the same 30 cells read as rates: 6.11\,M\,rows/s, against 1.16 and
+0.60.  The rate does not fall as data grows, which is what near-linear
+time means, and the spread from 2.49 to 9.40\,M\,rows/s tracks pattern
+structure rather than size.
+
+\emph{Max query memory} is the largest rise above the idle baseline.
+The engine is highest at 189\,MB.  The compiled path is vectorized: it
+builds whole-column masks and intermediate arrays over all input rows
+instead of walking row by row.  The cost therefore follows the input,
+not the result.  It stays between 56 and 90 bytes per input row in all
+30 cells, and the 189\,MB cell returns 95{,}650 rows while a
+186\,MB cell returns 276{,}776.  This is the memory side of the design
+that gives the speed.  Trino's 20.8\,MB is growth above an
+already-resident heap, not a like-for-like figure.
+\emph{Max footprint memory} is the largest total the process or
+container reached.  Here the order reverses: 524\,MB for the engine,
+2{,}057\,MB for Oracle, and 14{,}993\,MB for Trino.  The boundaries
+differ: one Python process against a complete database container, and
+Trino is the largest because the table is held in its JVM heap.  It is
+a deployment cost, not a per-query one.  The
 engine leads on time, throughput, and total footprint, and trades that
 for the highest per-query memory (Table~\ref{tab:overall_stats}).
 
@@ -1773,11 +1822,14 @@ ahead of Trino on the size averages.  It also finishes the full corpus
 on every pattern: 27.8\,s for \texttt{simple\_sequence}, 106.0\,s for
 \texttt{complex\_nested}.  The engine and Oracle~21c EE each complete
 35/35 cells.  Trino completes 33/35: \texttt{complex\_nested} crosses
-the 600\,s time budget at 160\,M and 227{,}899{,}533 rows.  Because Trino
-stops completing that family there, every size
-average in this section is taken over the four families all three
-systems finished at every size.  Otherwise the composition of the mean
-would change along the axis.
+the 600\,s time budget at 160\,M and 227{,}899{,}533 rows.  Because \texttt{complex\_nested} is the slowest family for all three
+systems, a mean that kept it would count it for the engine and
+Oracle~21c EE at the two largest sizes but not for Trino.  Trino's
+average would then omit its hardest pattern while the others kept
+theirs, so the three would no longer describe the same workload, and
+the composition of the mean would change along the axis.  The complete
+five-family values, \texttt{complex\_nested} included, stay in
+Tables~\ref{tab:stress_volume}--\ref{tab:stress_mem}.
 
 Total resident memory tells a different story from the per-query figure
 below.  The engine starts far leaner than either database: 0.7\,GB
@@ -1862,7 +1914,7 @@ maximum beyond this range.
 % ................................................................
 
 A cross-system comparison only means something if the advantage cannot
-be an artifact of the measurement.  Six checks define how the results
+be an artifact of the measurement.  Five checks define how the results
 should be read.
 
 \emph{Correctness first.}  Times are compared only where the systems
@@ -1876,12 +1928,25 @@ database result transfer to the client.  In the main matrix, five
 warmups reduce cold-start and JIT effects.  The values are end-to-end
 query latencies, not isolated matcher-kernel times.
 
-\emph{Stable main matrix.}  Each main-matrix cell is the IQR-filtered
+\emph{Stable measurements.}  Each main-matrix cell is the IQR-filtered
 mean of twenty runs.  The median coefficient of variation, the
 standard deviation divided by the mean, is 3.5\% (engine), 2.3\%
-(Oracle), and 3.8\% (Trino).  This supports the
-stability of the main-matrix means.
+(Oracle), and 3.8\% (Trino).  The stress test uses fewer runs per cell,
+five after two warmups, but varies less: its median coefficient of
+variation is at most 1.0\% for the three systems.  This supports the
+stability of both sets of means.
 
+\emph{Separate campaigns.}  The systems used the same host, logical
+queries, input rows, CPU allocation, and outer memory limit, but they
+were measured one after another rather than side by side.  Every
+campaign ran on one CPU core, each with its own repetition count: five
+warmups and twenty measured runs per cell in the main benchmark, under
+a 32\,GB limit with resident inputs; two warmups and five runs in the
+stress study, under 58\,GB with system-appropriate scalable storage;
+the main protocol again for the ordering test; and twenty runs for the
+engine against two for the retained database values in the
+state-dependent case.  No figure here comes from a concurrent
+head-to-head run.
 
 \emph{Narrow scope.}  The claim is only that the engine is faster
 \emph{on this workload} (one partition, in-memory input, the supported
@@ -1939,13 +2004,6 @@ Other state-dependent or ambiguous forms can still use the generic
 exact evaluator and may reach its explicit work limit.  At scale, the
 resident DataFrame makes RAM a likely boundary.  The study maps where
 each system's usable region lies; it does not crown a universal winner.
-
-\emph{Protocol.}  Across the aligned records, the systems used the same
-host, logical queries, input rows, CPU allocation, and outer memory
-limit.  Measurements were collected sequentially in separate
-campaigns.  The main benchmark used a 32\,GB limit and resident inputs.
-The stress study used a
-58\,GB limit and system-appropriate scalable storage.
 
 % ----------------------------------------------------------------
 \section{Chapter Summary}
