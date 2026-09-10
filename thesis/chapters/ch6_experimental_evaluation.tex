@@ -70,41 +70,23 @@ sizes, result transfer included.  Each cell runs five warmups, then
 twenty measured runs, each preceded by a five-second idle window that
 sets the pre-query memory baseline.
 
-The warmups exist because a first run measures start-up rather than
-steady state, and each system has something different to warm.  Trino
-runs on the JVM, which compiles its own bytecode to machine code while
-the early queries execute; that \emph{just-in-time} (JIT) step makes
-them slower than later runs.  Oracle fills its shared pool and buffer
-cache.  The engine imports its modules and compiles the pattern into
-automata once, after which the pattern cache of
-Section~\ref{sec:bg-performance} serves the repeats.
+The warmups matter because a first run measures start-up rather than
+steady state.  Trino runs on the JVM, which compiles its own bytecode
+to machine code while the early queries execute; that
+\emph{just-in-time} (JIT) step makes them slower than later runs.
+Oracle fills its caches, and the engine compiles the pattern once.
 
-Single runs still vary after warmup, because the measurement shares one
-machine with the operating system and its background work.  The widest
-case in the main matrix was a Trino cell whose slowest run took
-$2.09$\,s against $0.29$\,s for its fastest, a factor of $7.3$.
-Outliers are therefore removed per metric with the $1.5\times$
-interquartile range (IQR) rule: the IQR is the spread between the 25th
-and 75th percentiles, and a run lying more than $1.5\times$ that spread
-outside them is dropped.  The rule discarded 99 of the 1{,}800 measured
-time runs, or $5.5$\%, and the reported mean for that Trino cell is
-$0.33$\,s.  Cells report the mean of the retained runs with its
-standard deviation.
-Throughput is computed per run and then averaged the same way as time.
-Each run contributes one rate, the dataset size divided by that run's
-own time, and the cell reports the mean of those rates.  The obvious
-alternative is to divide the dataset size by the cell's mean time, the
-rate of the mean.  The two are not equal.  For one set of runs the mean
-of the rates is always the larger, because a rate is one over a time,
-and averaging that inverse gives a slow run less weight than averaging
-the times does.  The relative gap grows roughly with the square of the
-coefficient of variation, so it stays small while the runs are stable:
-over the main matrix it is $0.11$\% for Oracle and $0.12$\% for Trino,
-and its widest single cell is $1.18$\% for a Trino cell whose times
-varied by $11.8$\%.  The mean of the rates is reported because it treats
-every run as one observation, exactly as the time metric does.  Since
-outliers are filtered per metric, the runs retained behind the two
-numbers need not be the same ones.  For the main benchmark, the two
+Outliers are then removed per metric with the $1.5\times$ interquartile
+range (IQR) rule: the IQR is the spread between the 25th and 75th
+percentiles, and a run lying more than $1.5\times$ that spread outside
+them is dropped.  It discarded 99 of the 1{,}800 measured time runs.
+Cells report the mean of the retained runs with its standard deviation.
+Throughput is computed per run, as dataset size divided by that run's
+time, and then averaged the same way, so it is the mean of the rates
+rather than the rate of the mean.  The two differ because a rate is one
+over a time, and averaging that inverse gives a slow run less weight;
+over the main matrix the gap is $0.12$\% or less.  For the main
+benchmark, the two
 memory metrics use one instrument for all three systems.
 \emph{Query memory} is the rise above the idle baseline while the query
 runs, and \emph{footprint memory} is the highest total the process or
@@ -513,26 +495,16 @@ The second example detects bullish momentum on the
 \texttt{stock\_price} table: a three-row window where the second and
 third rows each rise.
 
-Four clauses do the work.  \texttt{PARTITION BY Company} splits the
-table into one group per company, so a match never mixes rows of
-\texttt{A} with rows of \texttt{B}.  \texttt{ORDER BY Price\_date}
-puts each group in date order, which is what makes ``the row before''
-mean anything.  \texttt{PATTERN (A B C)} asks for exactly three
-consecutive rows.  \texttt{DEFINE} then attaches a condition to two of
-those three names: \texttt{B} must be priced above the row before it,
-and \texttt{C} above the row before it in turn.  \texttt{PREV} is what
-reads that earlier row.  It steps back one row in the ordered
-partition, not one row of the same variable.
-
-\texttt{A} is left out of \texttt{DEFINE} on purpose.  A pattern
-variable with no condition is implicitly true, so any row may open a
-match and the rise is tested only from the second row onward.
+It partitions by company, orders by date, and uses
+\texttt{PATTERN (A B C)}.  \texttt{DEFINE} then requires \texttt{B} to
+be priced above the row before it and \texttt{C} above the row before
+it in turn, where \texttt{PREV} steps back one row in the ordered
+partition rather than one row of the same variable.  \texttt{A} carries
+no condition, so it is implicitly true and any row may open a match.
 On the data of Table~\ref{tab:stock_price} this returns three matches:
 $36 \rightarrow 39 \rightarrow 42$ and
 $30 \rightarrow 47 \rightarrow 71$ for company~\texttt{A}, and
 $24 \rightarrow 37 \rightarrow 63$ for company~\texttt{B}.
-\texttt{MATCH\_NUMBER()} restarts at~1 in each partition, so
-company~\texttt{B}'s only match is numbered~1 rather than~3.
 
 The same detection is written as Trino SQL
 (Listing~\ref{lst:stock-trino}), as Oracle SQL
@@ -996,8 +968,10 @@ modes; the evaluated \texttt{AFTER MATCH SKIP} modes; and
 
 Inside \texttt{DEFINE} and \texttt{MEASURES} it also evaluates
 arithmetic, comparisons, \texttt{IN} lists, \texttt{NULL} checks, and
-common scalar and string functions (\texttt{LOWER}, \texttt{CAST},
-\texttt{COALESCE}, \texttt{CASE}, \texttt{||}).  Constant scalar
+common scalar and string functions: \texttt{LOWER} lowercases a
+string, \texttt{CAST} converts a value to another type,
+\texttt{COALESCE} returns its first non-null argument, \texttt{CASE}
+picks a value by condition, and \texttt{||} joins two strings.  Constant scalar
 subqueries without a \texttt{FROM} clause are supported inside tested
 expressions.  Table-reading and correlated subqueries are not.
 General \texttt{ORDER BY} expressions, general relational planning,
@@ -1007,9 +981,16 @@ These limits define the scope of
 Chapters~\ref{chap:methodology} and~\ref{chap:implementation}.
 
 At the pattern level, Table~\ref{tab:pattern_type_coverage} lists the
-row-pattern types the engine detects, each with a regex example and a
-simple use case.  A type counts as covered when at least one test case
-exercises it and produces output identical to the reference systems.
+ten row-pattern types the engine detects, each with a regex example and
+a simple use case.  A type counts as covered when at least one test
+case exercises it and produces output identical to the reference
+systems~\cite{monierashraf2025tests}.  These ten are shapes the engine
+can express; they are not the benchmark's five patterns, and neither is
+the 30 of Section~\ref{subsec:eval-cross-system}, which is those five
+run at six sizes.  The table can also be read in reverse, from a use
+case to the pattern that expresses it, and
+Section~\ref{sec:eval-correctness} writes the same detection both as a
+Pandas function and as a query.
 
 \begin{table}[H]
 \centering
@@ -1078,7 +1059,9 @@ Depends on the hardware, operating system, Python runtime,
 Pandas, and memory behavior. \\
 \midrule
 Describes how the running time grows as the input grows, using
-asymptotic notation (Big-O, Big-$\Theta$, Big-$\Omega$). &
+asymptotic notation: Big-O for an upper bound, Big-$\Omega$ for a
+lower bound, and Big-$\Theta$ when both hold and the growth rate is
+therefore exact. &
 Uses actual execution time, throughput, and memory usage. \\
 \midrule
 Predicts scalability as input size grows. &
@@ -1088,8 +1071,13 @@ Measures real-world performance for the evaluated benchmark. \\
 \end{table}
 
 \paragraph{Theoretical analysis.}
-Costs are stated in asymptotic notation: $O(f(n))$ is an upper bound,
-$\Omega(f(n))$ a lower bound, and $\Theta(f(n))$ both at once.
+Costs are stated in asymptotic notation, which describes how a cost
+grows with the input while ignoring constant factors and machine speed.
+$O(f(n))$ is an upper bound: the cost grows no faster than $f(n)$.
+$\Omega(f(n))$ is a lower bound: it grows at least that fast.
+$\Theta(f(n))$ is both at once, so it pins the growth rate exactly.
+This chapter uses $\Theta$ where the cost is known on both sides and
+$O$ where only the ceiling is claimed.
 Five symbols recur: $n$ input rows, $m$ pattern symbols (a bounded
 quantifier \texttt{\{i,j\}} counts as $j$ copies of its fragment,
 since the builder clones the fragment per repetition), $d$
@@ -1113,14 +1101,16 @@ practice.  For a fixed pattern this is a one-time constant.
 linear for the fixed row-local benchmark path.  A full comparison sort
 costs $O(n \log n)$, done per partition.  More
 precisely it is $\sum_i O(n_i \log n_i)$ over partitions of $n_i$ rows, which
-the benchmark's single partition bounds by $O(n \log n)$.  But the
+the benchmark's single partition bounds by $O(n \log n)$.  One
+partition is the worst case for this term, not a convenience: the same
+rows split into $p$ groups would cost only $O(n \log(n/p))$.  But the
 engine sorts only when needed.  It first checks in $O(n)$ whether the
 rows are already ordered and, if so, skips the sort.
 \emph{Condition checking} prepares one Boolean result per row
 and variable on the compiled row-local path, costing $O(nd)$.
 \emph{Matching and output} then costs $O(n+k\ell)$ on the
-compiled default-skip path: one scan plus the rows materialized for the
-$k$ matches.  These bounds describe the path used by the main
+compiled default-skip path: one scan over the $n$ rows, plus the $\ell$
+rows materialized for each of the $k$ matches.  These bounds describe the path used by the main
 benchmark.  They are not a bound for every supported expression and
 skip mode.
 
@@ -1136,14 +1126,16 @@ automaton is fixed, and every data-dependent stage except ordering is
 linear, so only whether a sort is needed separates the two cases:
 \begin{itemize}
   \item \textbf{Best case} (input already ordered, as in the
-    benchmark): the $O(n)$ check skips the sort.  With fixed $d$ and
-    the benchmark's linear-size output, this gives
-    $\Theta(nd+n+k\ell)=\Theta(n)$.  The final equality depends on
-    fixed $d$ and $k\ell=O(n)$.
+    benchmark): the $O(n)$ check skips the sort, leaving
+    $\Theta(nd+n+k\ell)=\Theta(n)$.
   \item \textbf{Worst case} (input unordered, a real sort required):
-    $O(n \log n + nd + n + k\ell)$.  With fixed $d$ and
-    $k\ell=O(n)$, this reduces to $O(n\log n)$.
+    $O(n \log n + nd + n + k\ell)$, which reduces to $O(n\log n)$.
 \end{itemize}
+Both reductions rest on the same two facts.  $d$ is fixed because it
+counts \texttt{DEFINE} variables, a property of the query rather than
+of the table.  And $k\ell=O(n)$ because the default skip mode leaves
+matches non-overlapping, so the output cannot hold more rows than the
+input.
 These two bracket the engine's realistic scaling.  The ordered and
 shuffled scenarios of Section~\ref{subsec:eval-ordering} measure them
 directly.  One reading note: across the measured 100\,K--2.22\,M range,
@@ -1195,9 +1187,12 @@ Figure~\ref{fig:complexity_bigO} draws the two cases.
 
 For this fixed compiled path, ordering determines which branch applies.
 
-\emph{Axis~2: growth with pattern complexity, for fixed data.}  A few
+\emph{Axis~2: growth with pattern complexity, for fixed data.}  Three
 constructs are expensive in the pattern size~$m$ rather than in the
-number of rows~$n$.  Each is either paid once or held in check by an
+number of rows~$n$: the NFA-to-DFA conversion, \texttt{PERMUTE}, and a
+\texttt{DEFINE} predicate that reads the match built so far.  The distinction matters because $m$ is what the
+analyst types, a handful of symbols, while $n$ is the table, here up to
+227.9~million rows.  Each is either paid once or held in check by an
 explicit guard, so none appears as a growth curve in the data size.
 
 The NFA-to-DFA conversion is $O(2^{m})$ states in the worst case.  But
@@ -1210,8 +1205,9 @@ Reaching this limit raises an explicit compilation error, and the engine
 does not execute or cache a partial DFA.  None of the evaluated patterns
 came close.
 
-A \texttt{PERMUTE} of $m$ variables expands to $O(m!)$ branches,
-rejected above eight variables or an estimated fifty thousand branches.
+A \texttt{PERMUTE} of $m$ variables expands to $O(m!)$ branches.  Eight
+variables is the last size that fits under the estimated
+fifty-thousand-branch ceiling, so larger ones are rejected.
 A \texttt{DEFINE} predicate that reads the match built so far cannot
 use the row-local Boolean matrix.  Ambiguous quantified choices may
 then require the exact preference-ordered search, whose worst case is
@@ -1226,7 +1222,8 @@ budget is exhausted, the query raises an error instead of returning a partial
 result.  The main benchmark and the ordering scenarios stay on the
 compiled row-local path and exercise Axis~1.  The state-dependent test
 in Section~\ref{subsec:eval-worst-cases} uses a compiled incremental
-exact-search plan.  It measures one important form, not the worst case
+exact-search plan.  It measures one important form, a running aggregate over the match so
+far, not the worst case
 of every state-dependent expression.
 
 % ----------------------------------------------------------------
