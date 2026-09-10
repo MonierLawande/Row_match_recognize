@@ -69,7 +69,7 @@ The price falls for three days and then rises for two.  In words: one
 \textsc{start} row, then one or more \textsc{down} rows, then one or more
 \textsc{up} rows.  That sentence is written as a pattern like this:
 
-\begin{lstlisting}[language=SQL]
+\begin{lstlisting}[float=htbp,language=SQL]
 PATTERN (START DOWN+ UP+)
 \end{lstlisting}
 
@@ -228,7 +228,7 @@ approach this thesis follows.  Consider a card that a thief first tests with
 small charges and then empties.  A fraud analyst writes that sequence
 directly as the shape it is:
 
-\begin{lstlisting}[language=SQL]
+\begin{lstlisting}[float=htbp,language=SQL]
 PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)
 \end{lstlisting}
 
@@ -288,7 +288,7 @@ use \texttt{groupby().apply()}, and then pivot or rename intermediate
 columns.  Explicit loops are also common.  Listing~\ref{lst:ch1-udf} shows
 this approach for a three-row price decrease (\texttt{A~B~C}).
 
-\begin{lstlisting}[language=Python,
+\begin{lstlisting}[float=htbp,language=Python,
     caption={Detecting a three-step price-decrease pattern in
              Pandas \emph{without} \texttt{MATCH\_RECOGNIZE}},
     label={lst:ch1-udf}]
@@ -327,7 +327,7 @@ in Listing~\ref{lst:ch1-mr}: a single declarative statement that
 specifies the partition, ordering, pattern grammar, variable definitions, and
 output measures.
 
-\begin{lstlisting}[language=Python,
+\begin{lstlisting}[float=htbp,language=Python,
     caption={The same pattern expressed with \texttt{MATCH\_RECOGNIZE}
              on a Pandas DataFrame},
     label={lst:ch1-mr}]

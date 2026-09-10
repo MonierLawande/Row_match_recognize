@@ -35,19 +35,24 @@ hardware and software environment.
 The result DataFrame is compared against two independent SQL
 references, Trino~473 and Oracle~21c EE, by exact row-level equality
 (same rows, values, and order where deterministic).  This covers the
-two small synthetic tables, \texttt{orders} (Table~\ref{tab:orders})
-and \texttt{stock\_price} (Table~\ref{tab:stock_price}), and the 30
-pattern--size combinations of the Amazon benchmark
-(Section~\ref{subsec:eval-cross-system}).  The SQL engines are the
+two small synthetic tables introduced in
+Section~\ref{sec:eval-dataset}, \texttt{orders} and
+\texttt{stock\_price}, and the 30 pattern--size combinations of the
+Amazon benchmark: five pattern families run at each of six sizes, so
+30 cells per system and 90 in total.  The SQL engines are the
 correctness references.  The hand-written Pandas functions provide an
 additional output cross-check and the usability baseline
 (Section~\ref{subsec:eval-usability}).
 
 \paragraph{SQL feature coverage.}
-Two views are recorded.  \emph{Feature coverage} marks each main
-\texttt{MATCH\_RECOGNIZE} clause as \emph{supported},
+Two views are recorded, both reported in
+Section~\ref{sec:eval-coverage}.  The same boundary is written up for
+users in the package guide, which gives a status table for the main
+clauses and pattern constructs, names what is not supported, and lists
+the errors the API raises~\cite{monierashraf2025guide}.  \emph{Feature coverage} marks each
+main \texttt{MATCH\_RECOGNIZE} clause as \emph{supported},
 \emph{partially supported}, or \emph{unsupported} against the
-reference tests (Table~\ref{tab:feature_coverage}).  The clauses are
+reference tests.  The clauses are
 partitioning, ordering, \texttt{PATTERN}, \texttt{DEFINE},
 \texttt{MEASURES}, \texttt{SUBSET}, the output and skip modes, and
 navigation
@@ -55,23 +60,51 @@ functions~\cite{iso2016,ISO2021,monierashraf2025rowmatch}.
 \emph{Pattern-type coverage} groups the test cases by row-pattern
 type (simple sequences, quantified repetitions, trends, recovery,
 alternation, exclusions, anchors, and \texttt{PERMUTE}); a type is
-covered when at least one case matches the reference output
-(Table~\ref{tab:pattern_type_coverage}).
+covered when at least one case matches the reference output.
 
 \paragraph{Performance.}
 Execution time is the client-observed end-to-end latency per
 pattern--size run on the Amazon UK Products dataset
 (Section~\ref{subsec:eval-real-dataset}): five pattern families, six
-sizes, result transfer included.  Each cell runs five warmups to reduce
-cold-start and just-in-time (JIT) compilation effects, followed by twenty
-measured runs, each preceded
-by a five-second idle window that sets the pre-query memory baseline.
-Outliers are removed per metric with the $1.5\times$ interquartile range
-(IQR) rule; cells
-report the mean of the retained runs with its standard deviation.
-Throughput is computed per run, as dataset size divided by that run's
-time, and then averaged the same way, so it is the mean of the rates
-rather than the rate of the mean.  For the main benchmark, the two
+sizes, result transfer included.  Each cell runs five warmups, then
+twenty measured runs, each preceded by a five-second idle window that
+sets the pre-query memory baseline.
+
+The warmups exist because a first run measures start-up rather than
+steady state, and each system has something different to warm.  Trino
+runs on the JVM, which compiles its own bytecode to machine code while
+the early queries execute; that \emph{just-in-time} (JIT) step makes
+them slower than later runs.  Oracle fills its shared pool and buffer
+cache.  The engine imports its modules and compiles the pattern into
+automata once, after which the pattern cache of
+Section~\ref{sec:bg-performance} serves the repeats.
+
+Single runs still vary after warmup, because the measurement shares one
+machine with the operating system and its background work.  The widest
+case in the main matrix was a Trino cell whose slowest run took
+$2.09$\,s against $0.29$\,s for its fastest, a factor of $7.3$.
+Outliers are therefore removed per metric with the $1.5\times$
+interquartile range (IQR) rule: the IQR is the spread between the 25th
+and 75th percentiles, and a run lying more than $1.5\times$ that spread
+outside them is dropped.  The rule discarded 99 of the 1{,}800 measured
+time runs, or $5.5$\%, and the reported mean for that Trino cell is
+$0.33$\,s.  Cells report the mean of the retained runs with its
+standard deviation.
+Throughput is computed per run and then averaged the same way as time.
+Each run contributes one rate, the dataset size divided by that run's
+own time, and the cell reports the mean of those rates.  The obvious
+alternative is to divide the dataset size by the cell's mean time, the
+rate of the mean.  The two are not equal.  For one set of runs the mean
+of the rates is always the larger, because a rate is one over a time,
+and averaging that inverse gives a slow run less weight than averaging
+the times does.  The relative gap grows roughly with the square of the
+coefficient of variation, so it stays small while the runs are stable:
+over the main matrix it is $0.11$\% for Oracle and $0.12$\% for Trino,
+and its widest single cell is $1.18$\% for a Trino cell whose times
+varied by $11.8$\%.  The mean of the rates is reported because it treats
+every run as one observation, exactly as the time metric does.  Since
+outliers are filtered per metric, the runs retained behind the two
+numbers need not be the same ones.  For the main benchmark, the two
 memory metrics use one instrument for all three systems.
 \emph{Query memory} is the rise above the idle baseline while the query
 runs, and \emph{footprint memory} is the highest total the process or
@@ -79,18 +112,25 @@ container reaches.  Their scope is defined in
 Section~\ref{subsec:eval-memory}.
 
 \paragraph{Scalability.}
-Mean execution time is regressed against row count for each pattern
-family.  The reported $R^2$ shows how closely the measured points fit
-a straight line.  It is reported for both the six-size benchmark and
-the larger stress test.  A high $R^2$ describes the measured range; it
-does not prove the algorithm's asymptotic complexity.
+For each pattern family, the cell means are fitted with a straight
+line against row count by least squares.  The fit is summarised by
+$R^2$, the share of the variation in measured time that the line
+accounts for, where $1$ is a perfect fit.  It is reported for both the
+six-size benchmark and the larger stress test.  A high $R^2$ describes
+the measured range only.  It does not prove the algorithm's asymptotic
+complexity, because over a range this narrow an $O(n \log n)$ cost is
+itself close to straight
+(Section~\ref{subsec:eval-complexity}).
 
 \paragraph{Usability (developer effort).}
 For each worked example, the line count of the idiomatic Pandas
-solution is compared with the single
-\texttt{MATCH\_RECOGNIZE} statement
-(Table~\ref{tab:loc_comparison}); the reduction measures developer
-effort~\cite{iso2016,ISO2021,melton2017sqlrpr,Python_UDF}.
+solution is compared with the single \texttt{MATCH\_RECOGNIZE}
+statement in Section~\ref{subsec:eval-usability}, counting only the
+detection logic on both sides.  Line count is a proxy for developer
+effort rather than a measurement of it.  It reflects how much
+procedural detail the author must write and later maintain, and says
+nothing about reading time, error rate, or learning
+cost~\cite{iso2016,ISO2021,melton2017sqlrpr,Python_UDF}.
 
 % ................................
 \subsection{Environment and Configuration}
@@ -155,9 +195,14 @@ values, \texttt{cust\_1} and \texttt{cust\_2}); \texttt{order\_date}
 2020-05-11 to 2020-05-18); and \texttt{price} (\texttt{INTEGER}), the
 purchase amount on that date.  Each customer appears multiple times in
 chronological order (\texttt{cust\_1} spans five dates and
-\texttt{cust\_2} spans three), which enables focused validation of
-partitioning, ordering, and pattern detection (e.g.\ sequences of
-rising or falling prices per customer).  Table~\ref{tab:orders} shows
+\texttt{cust\_2} spans three), and the two customers are interleaved
+by date.  The query partitions by \texttt{customer\_id}, so matching
+runs separately inside each customer's rows and no match may cross
+from one customer to the other.  The partitioning carries weight here:
+\texttt{cust\_1}'s falling prices are consecutive only within that
+customer, so dropping the \texttt{PARTITION BY} leaves no match at
+all.  The table therefore gives focused validation of partitioning,
+ordering, and pattern detection.  Table~\ref{tab:orders} shows
 the eight records used.
 
 \begin{table}[H]
@@ -247,9 +292,16 @@ categories.  Only the pattern-relevant fields are taken:
 excluded.  Five categories are merged in global timestamp order into
 nested prefixes of 5\,M to 227.9\,M rows.  Each review's
 $1$--$5$ rating is mapped to the same A--E \texttt{category} alphabet as
-the benchmark.  The same five pattern families are used.  Four keep
-the main benchmark structure with different rating labels; the stress
-test's optional family uses \texttt{E D? C+ B*}.
+the benchmark.  The same five pattern families are used.  A pattern
+family is one \texttt{MATCH\_RECOGNIZE} query, not a partition of the
+data: the five queries differ only in their \texttt{PATTERN}, and each
+is run over the whole prefix in turn.  Four keep the main benchmark
+structure with different rating labels; the stress test's optional
+family uses \texttt{E D? C+ B*}.  No query in the benchmark or the
+stress test uses \texttt{PARTITION BY}, so every run scans one
+partition of the full prefix in \texttt{timestamp} order.  This is a
+deliberate worst case for the engine, since a single partition removes
+the parallel and per-group work that partitioning would allow.
 Unlike a tiled copy of a smaller table, every row is a distinct real
 event, which makes this the more honest test of scaling behavior.
 
@@ -258,13 +310,17 @@ event, which makes this the more honest test of scaling behavior.
 \label{sec:eval-correctness}
 % ----------------------------------------------------------------
 
-Each worked example compares the proposed engine, Trino, Oracle, and
-an equivalent hand-written Pandas function.  The comparison covers
-output, exercised clauses, and developer effort.  Beyond these
-examples, the engine is checked by the regression suite (709 passing
-test cases~\cite{monierashraf2025tests}).  The 30 benchmark
+Each of the three worked examples compares the proposed engine,
+Trino, Oracle, and an equivalent hand-written Pandas function.  The
+comparison covers output, exercised clauses, and developer effort.
+Trino and Oracle are the correctness references throughout, and both
+ran every benchmark case as well, not only these three examples.  The
+hand-written functions are the usability baseline, not a fourth
+correctness reference.
+Beyond the examples, the engine is checked by the regression suite (709
+passing test cases~\cite{monierashraf2025tests}), and the 30 benchmark
 pattern--size combinations in Section~\ref{subsec:eval-cross-system}
-also agree across all three systems.
+agree across the three systems.
 
 % ................................
 \subsection{Example 1: Dip Pattern on the \texttt{orders} Dataset}
@@ -274,14 +330,17 @@ also agree across all three systems.
 The first example detects a `dip', three consecutive orders with
 successively lower prices, on the \texttt{orders} dataset
 (Dataset~1, Table~\ref{tab:orders}).  The same detection is expressed
-three ways: as a Trino SQL query (Listing~\ref{lst:orders-trino}), as a
-call to the proposed engine (Listing~\ref{lst:orders-mr}), and as a
-hand-written Pandas function (Listing~\ref{lst:orders-udf}).  Oracle
-provides the second SQL reference.  All four return the same match
+four ways: as a Trino SQL query (Listing~\ref{lst:orders-trino}), as an
+Oracle SQL query (Listing~\ref{lst:orders-oracle}), as a call to the
+proposed engine (Listing~\ref{lst:orders-mr}), and as a hand-written
+Pandas function (Listing~\ref{lst:orders-udf}).  The two SQL listings
+carry the same \texttt{MATCH\_RECOGNIZE} clause; only the table
+creation and load differ, because the servers use different
+dialects~\cite{monierashraf2025oracle}.  All four return the same
+match
 (Table~\ref{tab:sql-match-recognize-examples}).
 
-\begin{lstlisting}[basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
+\begin{lstlisting}[float=htbp,language=SQL,
   caption={[Trino SQL for the dip pattern]Trino SQL: create and load the \texttt{orders} table, then detect the dip pattern with \texttt{MATCH\_RECOGNIZE}.},
   label={lst:orders-trino}]
 CREATE TABLE memory.default.orders (
@@ -316,9 +375,45 @@ MATCH_RECOGNIZE (
 );
 \end{lstlisting}
 
-\begin{lstlisting}[language=Python,
-  basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
+\begin{lstlisting}[float=htbp,language=SQL,
+  caption={[Oracle SQL for the dip pattern]Oracle SQL: the same clause as
+    Listing~\ref{lst:orders-trino} over an Oracle copy of the
+    \texttt{orders} table.},
+  label={lst:orders-oracle}]
+CREATE TABLE orders (
+    customer_id VARCHAR2(50),
+    order_date  DATE,
+    price       NUMBER
+);
+
+INSERT ALL
+    INTO orders VALUES ('cust_1', DATE '2020-05-11', 100)
+    INTO orders VALUES ('cust_1', DATE '2020-05-12', 200)
+    INTO orders VALUES ('cust_2', DATE '2020-05-13',   8)
+    INTO orders VALUES ('cust_1', DATE '2020-05-14', 100)
+    INTO orders VALUES ('cust_2', DATE '2020-05-15',   4)
+    INTO orders VALUES ('cust_1', DATE '2020-05-16',  50)
+    INTO orders VALUES ('cust_1', DATE '2020-05-17', 100)
+    INTO orders VALUES ('cust_2', DATE '2020-05-18',   6)
+SELECT * FROM dual;
+
+SELECT customer_id, start_date, end_date, bottom_price
+FROM orders
+MATCH_RECOGNIZE (
+  PARTITION BY customer_id
+  ORDER BY order_date
+  MEASURES
+    A.order_date AS start_date,
+    C.order_date AS end_date,
+    C.price      AS bottom_price
+  PATTERN (A B C)
+  DEFINE
+    B AS B.price < A.price,
+    C AS C.price < B.price
+);
+\end{lstlisting}
+
+\begin{lstlisting}[float=htbp,language=Python,
   caption={[Proposed MATCH\_RECOGNIZE on orders]Proposed engine: the same query as a \texttt{MATCH\_RECOGNIZE} string over an \texttt{orders} DataFrame.},
   label={lst:orders-mr}]
 import pandas as pd
@@ -350,9 +445,7 @@ result = match_recognize(query, orders)
 print(result)
 \end{lstlisting}
 
-\begin{lstlisting}[language=Python,
-  basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
+\begin{lstlisting}[float=htbp,language=Python,
   caption={[Equivalent dip detection in pandas]Hand-written Pandas function for the same `dip' detection.},
   label={lst:orders-udf}]
 import pandas as pd
@@ -367,17 +460,16 @@ def detect_dip(df, cust_col="customer_id",
         grp = grp.reset_index(drop=True)
         i = 0
         while i + 2 < len(grp):
-            a, b, c = (grp.loc[i, price_col],
-                       grp.loc[i + 1, price_col],
+            a, b, c = (grp.loc[i, price_col], grp.loc[i + 1, price_col],
                        grp.loc[i + 2, price_col])
-            if b < a and c < b:            # A B C: successively lower prices
+            if b < a and c < b:  # A B C: successively lower prices
                 rows.append({
                     "customer_id":  cust,
                     "start_date":   grp.loc[i,     date_col].date(),
                     "end_date":     grp.loc[i + 2, date_col].date(),
                     "bottom_price": c,
                 })
-                i += 3                     # AFTER MATCH SKIP PAST LAST ROW
+                i += 3           # AFTER MATCH SKIP PAST LAST ROW
             else:
                 i += 1
     return pd.DataFrame(rows)
@@ -419,18 +511,40 @@ Pandas function            & cust\_1 & 2020-05-12 $\rightarrow$ 2020-05-16 & 50 
 
 The second example detects bullish momentum on the
 \texttt{stock\_price} table: a three-row window where the second and
-third rows each rise.  It partitions by company, orders by date, and
-uses \texttt{PATTERN (A B C)} with \texttt{PREV}-based
-\texttt{DEFINE} predicates (\texttt{A} is implicitly always true).
-The same detection is written as Trino SQL
-(Listing~\ref{lst:stock-trino}), a call to the proposed engine
-(Listing~\ref{lst:stock-mr}), and a hand-written Pandas function
-(Listing~\ref{lst:stock-pandas});
-Table~\ref{tab:stock-results} confirms all four implementations return the
-identical three matches.
+third rows each rise.
 
-\begin{lstlisting}[basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
+Four clauses do the work.  \texttt{PARTITION BY Company} splits the
+table into one group per company, so a match never mixes rows of
+\texttt{A} with rows of \texttt{B}.  \texttt{ORDER BY Price\_date}
+puts each group in date order, which is what makes ``the row before''
+mean anything.  \texttt{PATTERN (A B C)} asks for exactly three
+consecutive rows.  \texttt{DEFINE} then attaches a condition to two of
+those three names: \texttt{B} must be priced above the row before it,
+and \texttt{C} above the row before it in turn.  \texttt{PREV} is what
+reads that earlier row.  It steps back one row in the ordered
+partition, not one row of the same variable.
+
+\texttt{A} is left out of \texttt{DEFINE} on purpose.  A pattern
+variable with no condition is implicitly true, so any row may open a
+match and the rise is tested only from the second row onward.
+On the data of Table~\ref{tab:stock_price} this returns three matches:
+$36 \rightarrow 39 \rightarrow 42$ and
+$30 \rightarrow 47 \rightarrow 71$ for company~\texttt{A}, and
+$24 \rightarrow 37 \rightarrow 63$ for company~\texttt{B}.
+\texttt{MATCH\_NUMBER()} restarts at~1 in each partition, so
+company~\texttt{B}'s only match is numbered~1 rather than~3.
+
+The same detection is written as Trino SQL
+(Listing~\ref{lst:stock-trino}), as Oracle SQL
+(Listing~\ref{lst:stock-oracle}), as a call to the proposed engine
+(Listing~\ref{lst:stock-mr}), and as a hand-written Pandas function
+(Listing~\ref{lst:stock-pandas}).  The two SQL listings carry the same
+clause over their own copies of the
+table~\cite{monierashraf2025oracle}.
+Table~\ref{tab:stock-results} confirms all four
+implementations return the identical three matches.
+
+\begin{lstlisting}[float=htbp,language=SQL,
   caption={[Trino SQL for the stock-price pattern]Trino SQL: create and load the \texttt{stock\_price} table, then detect the increasing-window pattern with \texttt{MATCH\_RECOGNIZE}.},
   label={lst:stock-trino}]
 CREATE TABLE memory.default.stock_price (
@@ -467,9 +581,58 @@ MATCH_RECOGNIZE (
 );
 \end{lstlisting}
 
-\begin{lstlisting}[language=Python,
-  basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
+\begin{lstlisting}[float=htbp,language=SQL,
+  caption={[Oracle SQL for the stock-price pattern]Oracle SQL: the same
+    clause as Listing~\ref{lst:stock-trino} over an Oracle copy of the
+    \texttt{stock\_price} table.},
+  label={lst:stock-oracle}]
+CREATE TABLE stock_price (
+    Company    VARCHAR2(10),
+    Price_date DATE,
+    Price      NUMBER
+);
+
+INSERT ALL
+    INTO stock_price VALUES ('A', DATE '2020-10-01', 50)
+    INTO stock_price VALUES ('B', DATE '2020-10-01', 89)
+    INTO stock_price VALUES ('A', DATE '2020-10-02', 36)
+    INTO stock_price VALUES ('B', DATE '2020-10-02', 24)
+    INTO stock_price VALUES ('A', DATE '2020-10-03', 39)
+    INTO stock_price VALUES ('B', DATE '2020-10-03', 37)
+    INTO stock_price VALUES ('A', DATE '2020-10-04', 42)
+    INTO stock_price VALUES ('B', DATE '2020-10-04', 63)
+    INTO stock_price VALUES ('A', DATE '2020-10-05', 30)
+    INTO stock_price VALUES ('B', DATE '2020-10-05', 65)
+    INTO stock_price VALUES ('A', DATE '2020-10-06', 47)
+    INTO stock_price VALUES ('B', DATE '2020-10-06', 56)
+    INTO stock_price VALUES ('A', DATE '2020-10-07', 71)
+    INTO stock_price VALUES ('B', DATE '2020-10-07', 50)
+    INTO stock_price VALUES ('A', DATE '2020-10-08', 80)
+    INTO stock_price VALUES ('B', DATE '2020-10-08', 54)
+    INTO stock_price VALUES ('A', DATE '2020-10-09', 75)
+    INTO stock_price VALUES ('B', DATE '2020-10-09', 30)
+    INTO stock_price VALUES ('A', DATE '2020-10-10', 63)
+    INTO stock_price VALUES ('B', DATE '2020-10-10', 32)
+SELECT * FROM dual;
+
+SELECT *
+FROM stock_price
+MATCH_RECOGNIZE (
+  PARTITION BY Company
+  ORDER BY Price_date
+  MEASURES
+    FIRST(A.Price) AS start_price,
+    LAST(C.Price)  AS end_price,
+    MATCH_NUMBER() AS match_id
+  PATTERN (A B C)
+  DEFINE
+    B AS B.Price > PREV(B.Price),
+    C AS C.Price > PREV(C.Price)
+);
+\end{lstlisting}
+
+
+\begin{lstlisting}[float=htbp,language=Python,
   caption={[Proposed MATCH\_RECOGNIZE on stock\_price]Proposed engine: the same query as a \texttt{MATCH\_RECOGNIZE} string over a \texttt{stock\_price} DataFrame.},
   label={lst:stock-mr}]
 import pandas as pd
@@ -482,8 +645,7 @@ data = {
                    "2020-10-05","2020-10-05","2020-10-06","2020-10-06",
                    "2020-10-07","2020-10-07","2020-10-08","2020-10-08",
                    "2020-10-09","2020-10-09","2020-10-10","2020-10-10"],
-    "Price": [50,89,36,24,39,37,42,63,30,65,
-              47,56,71,50,80,54,75,30,63,32],
+    "Price": [50,89,36,24,39,37,42,63,30,65,47,56,71,50,80,54,75,30,63,32],
 }
 df = pd.DataFrame(data)
 df["Price_date"] = pd.to_datetime(df["Price_date"])
@@ -507,19 +669,13 @@ result = match_recognize(query, df)
 print(result)
 \end{lstlisting}
 
-\begin{lstlisting}[language=Python,
-  basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
+\begin{lstlisting}[float=htbp,language=Python,
   caption={[Equivalent logic in pandas]Hand-written Pandas function for the same increasing-window detection.},
   label={lst:stock-pandas}]
 import pandas as pd
 
-def detect_two_consecutive_increases(
-    df: pd.DataFrame,
-    company_col: str = "Company",
-    date_col:    str = "Price_date",
-    price_col:   str = "Price",
-) -> pd.DataFrame:
+def detect_two_consecutive_increases(df, company_col="Company",
+                                     date_col="Price_date", price_col="Price"):
     gdf = df.copy()
     gdf[date_col] = pd.to_datetime(gdf[date_col])
     gdf = gdf.sort_values([company_col, date_col]).reset_index(drop=True)
@@ -527,8 +683,7 @@ def detect_two_consecutive_increases(
     for company, g in gdf.groupby(company_col, sort=False):
         g = g.reset_index(drop=True)
         inc = g[price_col].diff() > 0
-        start_mask = (inc.shift(-1).fillna(False)
-                      & inc.shift(-2).fillna(False))
+        start_mask = inc.shift(-1).fillna(False) & inc.shift(-2).fillna(False)
         candidates = [int(i) for i, ok in enumerate(start_mask)
                       if ok and i + 2 < len(g)]
         match_id, next_start_pos = 0, 0
@@ -542,7 +697,7 @@ def detect_two_consecutive_increases(
                 "end_price":   g.loc[i + 2, price_col],
                 "match_id":    match_id,
             })
-            next_start_pos = i + 3   # AFTER MATCH SKIP PAST LAST ROW
+            next_start_pos = i + 3  # AFTER MATCH SKIP PAST LAST ROW
     return pd.DataFrame(out_rows)
 
 result = detect_two_consecutive_increases(df)
@@ -584,13 +739,14 @@ uses the \texttt{+} quantifier twice, with the fall and rise defined
 through \texttt{PREV}.  The measures report the start, bottom, and
 recovered prices.  As before, the same detection
 is expressed as a Trino SQL query (Listing~\ref{lst:vshape-trino}), as
-a call to the proposed engine (Listing~\ref{lst:vshape-mr}), and as a
-hand-written Pandas function (Listing~\ref{lst:vshape-udf}).  Oracle
-provides the second SQL reference.  All four return the same matches
+an Oracle SQL query (Listing~\ref{lst:vshape-oracle}), as a call to the
+proposed engine (Listing~\ref{lst:vshape-mr}), and as a hand-written
+Pandas function (Listing~\ref{lst:vshape-udf}).  The two SQL listings
+again carry the same clause~\cite{monierashraf2025oracle}.  All four return the same
+matches
 (Table~\ref{tab:vshape-results}).
 
-\begin{lstlisting}[basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
+\begin{lstlisting}[float=htbp,language=SQL,
   caption={[Trino SQL for the V-shape pattern]Trino SQL: detect the V-shape recovery on the \texttt{stock\_price} table (already created and loaded in Listing~\ref{lst:stock-trino}).},
   label={lst:vshape-trino}]
 SELECT *
@@ -611,9 +767,31 @@ MATCH_RECOGNIZE (
 );
 \end{lstlisting}
 
-\begin{lstlisting}[language=Python,
-  basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
+\begin{lstlisting}[float=htbp,language=SQL,
+  caption={[Oracle SQL for the V-shape pattern]Oracle SQL: the same clause
+    as Listing~\ref{lst:vshape-trino} on the \texttt{stock\_price} table
+    created in Listing~\ref{lst:stock-oracle}.},
+  label={lst:vshape-oracle}]
+SELECT *
+FROM stock_price
+MATCH_RECOGNIZE (
+  PARTITION BY Company
+  ORDER BY Price_date
+  MEASURES
+    FIRST(A.Price) AS start_price,
+    LAST(B.Price)  AS bottom_price,
+    LAST(C.Price)  AS end_price,
+    MATCH_NUMBER() AS match_id
+  ONE ROW PER MATCH
+  PATTERN (A B+ C+)
+  DEFINE
+    B AS B.Price < PREV(B.Price),
+    C AS C.Price > PREV(C.Price)
+);
+\end{lstlisting}
+
+
+\begin{lstlisting}[float=htbp,language=Python,
   caption={[Proposed MATCH\_RECOGNIZE V-shape]Proposed engine: the same V-shape query over the \texttt{stock\_price} DataFrame \texttt{df} of Listing~\ref{lst:stock-mr}.},
   label={lst:vshape-mr}]
 from pandas_match_recognize import match_recognize
@@ -639,15 +817,12 @@ result = match_recognize(query, df)
 print(result)
 \end{lstlisting}
 
-\begin{lstlisting}[language=Python,
-  basicstyle=\ttfamily\small,
-  backgroundcolor=\color{gray!10},
+\begin{lstlisting}[float=htbp,language=Python,
   caption={[Equivalent V-shape detection in pandas]Hand-written Pandas function for the same V-shape detection.},
   label={lst:vshape-udf}]
 import pandas as pd
 
-def detect_v_shapes(df, key="Company",
-                    ts="Price_date", val="Price"):
+def detect_v_shapes(df, key="Company", ts="Price_date", val="Price"):
     g = df.copy()
     g[ts] = pd.to_datetime(g[ts])
     g = g.sort_values([key, ts]).reset_index(drop=True)
@@ -657,15 +832,15 @@ def detect_v_shapes(df, key="Company",
         n, i, match_id = len(v), 0, 0
         while i < n - 2:
             j = i
-            while j + 1 < n and v[j + 1] < v[j]:   # B+: strictly falling
+            while j + 1 < n and v[j + 1] < v[j]: # B+: strictly falling
                 j += 1
-            if j == i:                              # need at least one fall
+            if j == i:                           # need at least one fall
                 i += 1
                 continue
             k = j
-            while k + 1 < n and v[k + 1] > v[k]:    # C+: strictly rising
+            while k + 1 < n and v[k + 1] > v[k]: # C+: strictly rising
                 k += 1
-            if k == j:                              # need at least one rise
+            if k == j:                           # need at least one rise
                 i += 1
                 continue
             match_id += 1
@@ -676,7 +851,7 @@ def detect_v_shapes(df, key="Company",
                 "end_price":    int(v[k]),
                 "match_id":     match_id,
             })
-            i = k + 1                               # AFTER MATCH SKIP PAST LAST ROW
+            i = k + 1                            # AFTER MATCH SKIP PAST LAST ROW
     return pd.DataFrame(out)
 
 result = detect_v_shapes(df)

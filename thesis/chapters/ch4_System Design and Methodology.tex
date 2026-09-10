@@ -322,7 +322,7 @@ an extended row-pattern language, and the parser must handle both at
 once.  Listing~\ref{lst:mr-full-syntax} gives the form the core path
 accepts.
 
-\begin{lstlisting}[
+\begin{lstlisting}[float=htbp,
     language   = {},
     caption    = {Clause structure used by the supported
                   \texttt{MATCH\_RECOGNIZE} path},
@@ -333,8 +333,7 @@ SELECT <expression> [, ...]
 FROM   <table>
 MATCH_RECOGNIZE (
   [ PARTITION BY <column> [, ...] ]
-  [ ORDER BY <column> [ASC|DESC]
-      [NULLS FIRST|NULLS LAST] [, ...] ]
+  [ ORDER BY <column> [ASC|DESC] [NULLS FIRST|NULLS LAST] [, ...] ]
   [ MEASURES <expression> AS <alias> [, ...] ]
   [ ONE ROW PER MATCH
   | ALL ROWS PER MATCH

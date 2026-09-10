@@ -147,7 +147,7 @@ and \texttt{DEFINE}.  The square brackets in the listing mark the
 optional specifications.  Together, they control partitioning, order,
 output, row classification, and overlap between matches.
 
-\begin{lstlisting}[
+\begin{lstlisting}[float=htbp,
     language     = SQL,
     caption      = {General clause structure used in this thesis},
     label        = {lst:mr-syntax}
@@ -289,14 +289,13 @@ execution.
 Listing~\ref{lst:mr-example} shows a \texttt{MATCH\_RECOGNIZE}
 query that detects a V-shaped sequence in customer order prices.
 
-\begin{lstlisting}[
+\begin{lstlisting}[float=htbp,
     language = SQL,
     caption  = {Detecting V-shaped price patterns with \texttt{MATCH\_RECOGNIZE}},
     label    = {lst:mr-example}
 ]
-SELECT customer_id,
-       start_price, bottom_price, final_price,
-       start_date,  final_date
+SELECT customer_id, start_price, bottom_price, final_price,
+       start_date, final_date
 FROM   orders
 MATCH_RECOGNIZE (
     PARTITION BY customer_id
