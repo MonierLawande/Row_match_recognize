@@ -772,7 +772,8 @@ their dedicated compilers and evaluators.
       & Columns for DataFrame partitioning; empty means a single
         global partition \\[4pt]
     \texttt{order\_by}       & \texttt{List[str]}
-      & Direct columns used for intra-partition ordering \\[4pt]
+      & Column names or supported expressions used for
+        intra-partition ordering \\[4pt]
     \texttt{order\_ascending} & \texttt{List[bool]}
       & Per-key ascending or descending direction \\[4pt]
     \texttt{order\_nulls}   & \texttt{List[str]}
