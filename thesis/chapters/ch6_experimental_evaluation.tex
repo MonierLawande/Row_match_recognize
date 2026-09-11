@@ -1614,8 +1614,10 @@ instead of walking row by row.  The cost therefore follows the input,
 not the result.  It stays between 56 and 90 bytes per input row in all
 30 cells, and the 189\,MB cell returns 95{,}650 rows while a
 186\,MB cell returns 276{,}776.  This is the memory side of the design
-that gives the speed.  Trino's 20.8\,MB is growth above an
-already-resident heap, not a like-for-like figure.
+that gives the speed, so the higher figure is expected rather than a
+fault, and even its peak stays far below the 32\,GB limit.  Trino's
+20.8\,MB is growth above an already-resident heap, not a like-for-like
+figure.
 \emph{Max footprint memory} is the largest total the process or
 container reached.  Here the order reverses: 524\,MB for the engine,
 2{,}057\,MB for Oracle, and 14{,}993\,MB for Trino.  The boundaries

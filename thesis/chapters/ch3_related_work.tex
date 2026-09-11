@@ -28,7 +28,7 @@ several SQL and stream-processing engines, including
 Oracle~\cite{OracleMR,oracle2021dwhsg,book,oracle2022},
 Snowflake~\cite{snowflake2025match_recognize}, and
 Trino~\cite{trino2022,trino2021row}; Apache Flink also exposes row
-pattern recognition through Flink SQL, its SQL interface~\cite{flink}.
+pattern recognition through Flink SQL~\cite{flink}.
 By contrast, PostgreSQL~18 still lists the related SQL features as
 unsupported, while DuckDB lists native \texttt{MATCH\_RECOGNIZE} as
 planned work~\cite{postgresql18unsupported,duckdb2026roadmap,howe2020matchrecognize,findling2025bringing}.
@@ -168,7 +168,8 @@ warehouse size and query workload~\cite{snowflake2025match_recognize}.
 
 \begingroup\emergencystretch=3em
 Apache Flink is designed for real-time stream processing.  It exposes
-\texttt{MATCH\_RECOGNIZE} through Flink SQL, backed by its Complex
+\texttt{MATCH\_RECOGNIZE} through Flink SQL, the SQL interface to
+Flink's streaming engine, backed by its Complex
 Event Processing (CEP) runtime
 library~\cite{flink,vsprem2024building,georgiou2025streaming}.
 Its documented implementation is a SQL subset oriented toward
@@ -204,7 +205,7 @@ DuckDB already supports.  Their paper \emph{Democratize
 \texttt{MATCH\_RECOGNIZE}!} presents this route, and a bachelor's
 thesis and further student research projects in the same group develop
 it~\cite{lambrecht2025democratize,findling2025bringing,TURP2,
-tuebingen2025researchprojects}.  A transpiler is a source-to-source
+TURP}.  A transpiler is a source-to-source
 compiler: it rewrites code into another language at the same level of
 abstraction, rather than down to machine
 code~\cite{mogensen2024compiler}.  Here both sides are SQL.  The input
