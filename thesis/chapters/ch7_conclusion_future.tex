@@ -42,8 +42,8 @@ The performance benchmark contained 30 pattern--size
 combinations per system: five pattern families over six sizes from
 100\,K to the full 2.22\,M rows, so 90 cells across the three systems.
 Each cell is the mean of twenty measured runs after
-five warmups and the stated $1.5\times$ IQR outlier rule.  Each system used the same
-input and query logic under one CPU core and the same outer 32\,GB
+five warmups and the stated $1.5\times$ IQR outlier rule.  Each system
+used the same input and query logic under one CPU core and the same outer 32\,GB
 memory limit.  Across those 30 cells the
 proposed engine averaged 0.17\,s of execution time per cell and
 6\,110\,392~rows/s of throughput.  Oracle averaged 1.04\,s and
@@ -56,11 +56,12 @@ Memory shows the trade-off.  Across the main benchmark, the maximum
 incremental query peaks were 189.05\,MB for the engine, 58.71\,MB for
 Oracle, and 20.75\,MB for Trino.  The maximum total footprints showed
 the reverse order: 523.97\,MB, 2{,}057.17\,MB, and
-14{,}992.90\,MB, respectively.  All six values use the same instrument, the Linux
-control-group (cgroup) counter that reports the memory of a set of
-processes, but the process boundaries differ: one engine process versus
-a complete database container.  Vendor-native counters have different
-scopes and are not treated as equivalent measurements.
+14{,}992.90\,MB, respectively.  All six values use the same
+instrument: the Linux control-group (cgroup) counter that reports the
+memory of a set of processes.  But the process boundaries differ: one
+engine process versus a complete database container.  Vendor-native
+counters have different scopes and are not treated as equivalent
+measurements.
 
 This result has a clear boundary.  The engine is specialized for one
 in-process DataFrame workload.  It avoids database planning, storage,
@@ -95,19 +96,21 @@ The architecture separates parsing, validation, logical planning,
 automata construction, matching, and output assembly.  The optimized
 paths use row-local masks, compact DFA and run-length plans, compiled
 measures, fused output, bounded caches, lazy row access, and conservative
-output projection.  Every reported measurement has all of them
-enabled, each activating where it applies, so the results describe the
-combined configuration.  Differential tests compare each eligible fast path with the general
-path on the same input, so the evidence is that none of them changes
-the answer, not a measured contribution per technique.  Two sections do
-isolate a path: Section~\ref{subsec:eval-ordering} forces the sort, and
-Section~\ref{subsec:eval-worst-cases} uses a predicate the row-local
-path cannot compile.  A full ablation, each technique alone and in
-combination, is left to future work.  Partition processing remains
-sequential.  The
+output projection.  Partition processing remains sequential.  The
 study therefore evaluates a single-node Pandas engine, not a
 distributed SQL system.  Trino and Oracle retain wider SQL coverage,
 mature optimizers, and production execution infrastructure.
+
+Every reported measurement has all of these optimized paths enabled,
+each activating where it applies, so the results describe the combined
+configuration.  Differential tests compare each eligible fast path with
+the general path on the same input.  The evidence is therefore that
+none of them changes the answer, not a measured contribution per
+technique.  Two sections do isolate a path:
+Section~\ref{subsec:eval-ordering} forces the sort, and
+Section~\ref{subsec:eval-worst-cases} uses a predicate the row-local
+path cannot compile.  A full ablation, each technique alone and in
+combination, is left to future work.
 
 % ----------------------------------------------------------------
 \section{Claims and Evidence}
