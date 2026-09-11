@@ -233,13 +233,13 @@ The evaluated engine implements these forms.
     \item Concatenation: \texttt{A~B~C} (A followed by B followed by C).
     \item Alternation: \texttt{A~|~B} (either A or B).
     \item Quantifiers: \texttt{A*} (zero or more), \texttt{A+}
-      (one or more), \texttt{A?} (zero or one), \texttt{A\{n\}}
-      (exactly $n$), \texttt{A\{n,m\}} (between $n$ and $m$).
+      (one or more), \texttt{A?} (zero or one), \texttt{A\{i\}}
+      (exactly $i$), \texttt{A\{i,j\}} (between $i$ and $j$).
       A quantifier is \emph{greedy} by default: it takes as many rows
       as it can while the rest of the pattern still matches.  A
       trailing question mark makes it \emph{reluctant}, so it takes as
       few as possible: \texttt{A*?}, \texttt{A+?}, \texttt{A??}, or
-      \texttt{A\{n,m\}?}.
+      \texttt{A\{i,j\}?}.
     \item Grouping: \texttt{(A~B)+} (one or more AB pairs).
     \item Anchors: \texttt{\^{}A~B~C\$} (pattern must span the
       entire partition).

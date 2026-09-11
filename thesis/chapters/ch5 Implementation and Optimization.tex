@@ -151,17 +151,17 @@ state graph.
 A left-to-right tokenizer reads variables, alternation, grouping,
 anchors, exclusions, and \texttt{PERMUTE}.  It normalizes
 \texttt{*}, \texttt{+}, \texttt{?}, and
-\texttt{\{$n$,$m$\}} into minimum and maximum counts together with a
+\texttt{\{$i$,$j$\}} into minimum and maximum counts together with a
 greedy or reluctant preference.  The builder can then handle every
 quantifier through one internal representation.
 
 \paragraph{Building the automaton.}
 Each token contributes an NFA fragment.  When several continuations are
 possible, transition metadata preserves their pattern order.
-\texttt{PERMUTE} over $n$ variables represents all $n!$ orders.
+\texttt{PERMUTE} over $m$ variables represents all $m!$ orders.
 Construction is therefore guarded at eight variables and an estimated
 50{,}000 branches.  The two numbers are one decision: eight is the
-largest $n$ whose $n!$ still fits under the branch ceiling, since
+largest $m$ whose $m!$ still fits under the branch ceiling, since
 $8! = 40{,}320$ stays below it while $9! = 362{,}880$ passes it seven
 times over.  Both are checked before any fragment is built: the
 variables are counted, and the branches are estimated from the pattern.

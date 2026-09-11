@@ -843,11 +843,12 @@ output row; \textsc{Final} sees the complete match.
        Set $E=\mathrm{true}$ when any measure has an explicit leading\\[-2pt]
        \texttt{RUNNING} or \texttt{FINAL} prefix.};
     \node[msstart, below=of scan] (current)
-      {\textbf{For each measure $m$}\\[-2pt]
+      {\textbf{For each measure}\\[-2pt]
        Apply the first matching rule.};
 
     \node[mstest, below=of current] (explicit)
-      {1.\ Does $m$ have an explicit \texttt{RUNNING} or \texttt{FINAL} prefix?};
+      {1.\ Does the measure have an explicit \texttt{RUNNING} or
+       \texttt{FINAL} prefix?};
     \node[msdeclared, right=of explicit] (stated)
       {use declared mode};
 
