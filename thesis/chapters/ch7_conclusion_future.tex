@@ -107,10 +107,9 @@ each activating where it applies, so the results describe the combined
 configuration.  Differential tests compare each eligible fast path with
 the general path on the same input.  The evidence is therefore that
 none of them changes the answer, not a measured contribution per
-technique.  Two sections do isolate a path:
-Section~\ref{subsec:eval-ordering} forces the sort, and
-Section~\ref{subsec:eval-worst-cases} uses a predicate the row-local
-path cannot compile.  A full ablation, each technique alone and in
+technique.  Two cases in Section~\ref{subsec:eval-ordering} do isolate
+a path: the first forces the sort, and the second uses a predicate the
+row-local path cannot compile.  A full ablation, each technique alone and in
 combination, is left to future work.
 
 % ----------------------------------------------------------------

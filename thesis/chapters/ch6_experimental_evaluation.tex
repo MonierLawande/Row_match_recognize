@@ -117,7 +117,7 @@ Throughput is computed per run, as dataset size divided by that run's
 time, and then averaged the same way, so it is the mean of the rates
 rather than the rate of the mean.  The two differ because a rate is one
 over a time, and averaging that inverse gives a slow run less weight;
-over the main matrix the gap is $0.12$\% or less.  For the main
+on the main-matrix averages the gap is $0.12$\% or less.  For the main
 benchmark, the two
 memory metrics use one instrument for all three systems.
 \emph{Query memory} is the rise above the idle baseline while the query
@@ -348,9 +348,7 @@ proposed engine (Listing~\ref{lst:orders-mr}), and as a hand-written
 Pandas function (Listing~\ref{lst:orders-udf}).  The two SQL listings
 carry the same \texttt{MATCH\_RECOGNIZE} clause; only the table
 creation and load differ, because the servers use different
-dialects~\cite{monierashraf2025oracle}.  All four return the same
-match
-(See Table~\ref{tab:sql-match-recognize-examples}).
+dialects~\cite{monierashraf2025oracle}.
 
 \begin{lstlisting}[float=htbp,language=SQL,
   caption={[Trino SQL for the dip pattern]Trino SQL: create and load the \texttt{orders} table, then detect the dip pattern with \texttt{MATCH\_RECOGNIZE}.},
@@ -1285,8 +1283,10 @@ Section~\ref{subsec:eval-pattern-defs} defines the
 patterns and the resource policy,
 Section~\ref{subsec:eval-cross-system} the results,
 Sections~\ref{subsec:eval-throughput}
-and~\ref{subsec:eval-memory} throughput and memory, and
-Section~\ref{subsec:eval-key-findings} the summary.
+and~\ref{subsec:eval-memory} throughput and memory,
+Section~\ref{subsec:eval-key-findings} the summary, and
+Sections~\ref{subsec:eval-ordering}--\ref{subsec:eval-findings} sensitivity,
+scalability, validity, and the key findings.
 
 \paragraph{Positioning.}
 The engine does not aim to replace Oracle, Trino, or streaming
@@ -1791,7 +1791,7 @@ engine values use five warmups and twenty measured runs per size.  The retained
 Trino and Oracle values use one warmup and two measured runs per size.
 The systems ran sequentially.  This test therefore shows the
 performance boundary, but its database means have less repetition than
-the main benchmark.  The three systems are plotted on it (See
+the main benchmark.  The three systems are plotted for this test (See
 Figure~\ref{fig:worstcase_coverage}).
 
 \begin{figure}[htbp]
@@ -1868,7 +1868,8 @@ Section~\ref{subsec:eval-complexity}.
   \label{fig:stress_volume}
 \end{figure}
 
-Left is execution time and right is absolute peak memory.  Each size
+Left is execution time and right is absolute peak memory (See
+Figure~\ref{fig:stress_volume}).  Each size
 average uses the same four families completed by all three systems at
 all seven sizes.  The engine is fastest on every completed
 cell, about $5.1$--$10.1\times$ ahead of Oracle~21c EE and
@@ -1930,7 +1931,8 @@ pattern.
 \end{figure}
 
 The engine leads on all five patterns.  Oracle~21c EE beats Trino on the
-three heavy families; for \texttt{quantified}, the times are 372\,s
+three heavy families (\texttt{simple\_sequence}, \texttt{quantified}, and
+\texttt{optional\_pattern}); for \texttt{quantified}, the times are 372\,s
 and 554\,s.  Oracle is also the only database to finish
 \texttt{complex\_nested}, at 498\,s.  Trino wins only on the cheapest
 family, \texttt{alternation}, at 154\,s versus 183\,s.  It reaches the
@@ -1949,7 +1951,7 @@ The systems trade speed for memory in opposite directions.
 \end{figure}
 
 The query-memory counters give a diagnostic view, not a same-instrument
-comparison (See Figure~\ref{fig:stress_memory}).  It places the engine's
+comparison (See Figure~\ref{fig:stress_memory}).  The figure places the engine's
 cgroup incremental
 peak beside the database-native counters (Oracle PGA and Trino
 \texttt{peakMemoryBytes}).  Each series is averaged over the same four

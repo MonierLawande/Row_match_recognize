@@ -69,7 +69,7 @@ The price falls for three days and then rises for two.  In words: one
 \textsc{start} row, then one or more \textsc{down} rows, then one or more
 \textsc{up} rows.  That sentence is written as a pattern like this:
 
-\begin{lstlisting}[float=htbp,language=SQL]
+\begin{lstlisting}[language=SQL]
 PATTERN (START DOWN+ UP+)
 \end{lstlisting}
 
@@ -229,7 +229,7 @@ approach this thesis follows.  Consider a card that a thief first tests with
 small charges and then empties.  A fraud analyst writes that sequence
 directly as the shape it is:
 
-\begin{lstlisting}[float=htbp,language=SQL]
+\begin{lstlisting}[language=SQL]
 PATTERN (PROBE+ (TRANSFER | WITHDRAW){2,5} DRAIN)
 \end{lstlisting}
 
