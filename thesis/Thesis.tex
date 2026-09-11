@@ -144,7 +144,8 @@
 
 \lstset{
   backgroundcolor   = \color{codebg},
-  basicstyle        = \ttfamily\small,
+  % smaller type and tighter leading so a listing fits on one page
+  basicstyle        = {\ttfamily\scriptsize\setstretch{0.85}},
   keywordstyle      = \color{keyword}\bfseries,
   commentstyle      = \color{comment}\itshape,
   stringstyle       = \color{string},
@@ -221,8 +222,13 @@
 % Long repository URLs in the bibliography have no natural break point and
 % ran past the right margin.  These penalties let biblatex break a URL at
 % lower-case letters, capitals, and digits instead.
-\setcounter{biburllcpenalty}{100}
-\setcounter{biburlucpenalty}{100}
+\setcounter{biburllcpenalty}{200}
+\setcounter{biburlucpenalty}{200}
+% no stretch inside URLs, so a long URL never spreads its letters apart
+\setlength{\biburlbigskip}{0mu}
+\setlength{\biburlnumskip}{0mu}
+\setlength{\biburlucskip}{0mu}
+\setlength{\biburllcskip}{0mu}
 \setcounter{biburlnumpenalty}{100}
 
 % ---- Custom commands ----
@@ -360,35 +366,98 @@ August, 2026
 \addcontentsline{toc}{front}{List of Abbreviations and Acronyms}
 \markboth{LIST OF ABBREVIATIONS AND ACRONYMS}{}
 \thispagestyle{plain}
+\begingroup
+\singlespacing
 \begin{center}
-\begin{longtable}{@{}ll@{}}
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{2.4cm}%
+  >{\raggedright\arraybackslash}p{\dimexpr\textwidth-2.4cm-2\tabcolsep\relax}@{}}
 \toprule
-\textbf{Abbreviation} & \textbf{Full Name} \\
+\textbf{Abbreviation} & \textbf{Full name or meaning} \\
 \midrule
+\endfirsthead
+\toprule
+\textbf{Abbreviation} & \textbf{Full name or meaning} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
 ANTLR & ANother Tool for Language Recognition \\
+ANTLR4 & ANother Tool for Language Recognition, version 4 \\
 API   & Application Programming Interface \\
+ASC   & Ascending (SQL ordering direction) \\
 AST   & Abstract Syntax Tree \\
 CEP   & Complex Event Processing \\
 CPU   & Central Processing Unit \\
 CSV   & Comma-Separated Values \\
 CTE   & Common Table Expression \\
+DESC  & Descending (SQL ordering direction) \\
 DFA   & Deterministic Finite Automaton \\
 EE    & Enterprise Edition (Oracle) \\
 GB    & Gigabyte \\
+GBP   & Pound sterling (currency code) \\
+GiB   & Gibibyte ($2^{30}$ bytes) \\
+IEEE  & Institute of Electrical and Electronics Engineers \\
+IoT   & Internet of Things \\
 IQR   & Interquartile Range \\
 JIT   & Just-In-Time (compilation) \\
 JVM   & Java Virtual Machine \\
+$LL(*)$ & Left-to-right parsing with a leftmost derivation and variable lookahead \\
 LOC   & Lines of Code \\
 LRU   & Least Recently Used \\
+LTS   & Long-Term Support \\
 MB    & Megabyte \\
+MiB   & Mebibyte ($2^{20}$ bytes) \\
+MIT   & Massachusetts Institute of Technology (license name) \\
 NFA   & Nondeterministic Finite Automaton \\
 PGA   & Program Global Area (Oracle) \\
 RAM   & Random Access Memory \\
+SD    & Standard Deviation \\
 SGA   & System Global Area (Oracle) \\
 SQL   & Structured Query Language \\
-\bottomrule
+UK    & United Kingdom \\
 \end{longtable}
 \end{center}
+\endgroup
+
+%%%%%%%%%%%%%%%% LIST OF SYMBOLS %%%%%%%%%%%%%%%%%%%%
+\phantomsection
+\chapter*{LIST OF SYMBOLS}
+\addcontentsline{toc}{front}{List of Symbols}
+\markboth{LIST OF SYMBOLS}{}
+\thispagestyle{plain}
+\begingroup
+\singlespacing
+\begin{center}
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{2.4cm}%
+  >{\raggedright\arraybackslash}p{\dimexpr\textwidth-2.4cm-2\tabcolsep\relax}@{}}
+\toprule
+\textbf{Symbol} & \textbf{Meaning} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Symbol} & \textbf{Meaning} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+$n$ & Number of input rows \\
+$m$ & Number of pattern symbols, with a bounded quantifier
+  \texttt{\{i,j\}} counted as $j$ copies; a \texttt{PERMUTE} of $m$
+  variables has $m!$ orders \\
+$i$, $j$ & Lower and upper bounds of a quantifier \texttt{\{i,j\}} \\
+$d$ & Number of \texttt{DEFINE} variables \\
+$k$ & Number of matches \\
+$\ell$ & Average number of rows per match materialized in the output \\
+$p$ & Number of partitions \\
+$\varepsilon$ & Empty transition of an automaton, which consumes no row \\
+$O(f(n))$ & Upper bound: the cost grows no faster than $f(n)$ \\
+$\Omega(f(n))$ & Lower bound: the cost grows at least as fast as $f(n)$ \\
+$\Theta(f(n))$ & Tight bound: both $O(f(n))$ and $\Omega(f(n))$ hold \\
+$R^2$ & Share of the variation in measured time that a fitted line
+  explains; 1 is a perfect fit \\
+\end{longtable}
+\end{center}
+\endgroup
 
 \let\cleardoublepage\mainmattercleardoublepage
 \cleardoublepage
@@ -424,7 +493,11 @@ SQL   & Structured Query Language \\
 
 % ---- Bibliography ----
 \cleardoublepage
+% a few reference strings (long arXiv ids) have no break point and
+% otherwise reach into the margin
+\begingroup\emergencystretch=3em
 \printbibliography[heading=bibintoc]
+\endgroup
 
 \appendix
 \IfFileExists{chapters/appendix_benchmark_tables.tex}
