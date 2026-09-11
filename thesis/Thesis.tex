@@ -2,7 +2,14 @@
 \documentclass[ms,twoside,openright]{osudissert96}
 %% Language %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \usepackage[USenglish]{babel}
-\renewcommand{\contentsname}{TABLE OF CONTENTS}
+% NU thesis template names for the generated lists and headings
+\addto\captionsUSenglish{%
+  \renewcommand\contentsname{Table of Contents}%
+  \renewcommand\listfigurename{List of Figures}%
+  \renewcommand\listtablename{List of Tables}%
+  \renewcommand\bibname{References}%
+  \renewcommand\appendixname{Appendix}%
+  \renewcommand\chaptername{Chapter}}
 \usepackage[ansinew]{inputenc}
 \usepackage{mathptmx} % Times-style text and maths fonts
 
@@ -49,7 +56,7 @@
 % \leftmark carries the current chapter or appendix title.
 \makeatletter
 \renewcommand{\chaptermark}[1]{%
-  \markboth{\MakeUppercase{\@chapapp\ \thechapter.\ #1}}{}}
+  \markboth{\@chapapp\ \thechapter:\ #1}{}}
 \makeatother
 \usepackage[table,xcdraw]{xcolor}
 
@@ -99,19 +106,31 @@
 \onehalfspacing
 \usepackage{microtype}
 \usepackage{titlesec}
-\titleformat{\chapter}[display]
-  {\normalfont\bfseries\fontsize{14}{16}\selectfont\centering}
-  {\MakeUppercase{\chaptername}~\thechapter}
+% NU thesis template: chapter titles 18pt bold as "Chapter 1: Title";
+% headings 16pt (level 1), 14pt (level 2), and 12pt (level 3), all bold.
+% The acknowledgment and abstract pages keep their earlier heading style,
+% so unnumbered chapter headings switch only once \nuheadtrue is set.
+\newif\ifnuhead \nuheadfalse
+\newcommand{\nuheadcase}[1]{\ifnuhead#1\else\MakeUppercase{#1}\fi}
+\titleformat{\chapter}[block]
+  {\normalfont\bfseries\fontsize{18}{22}\selectfont\centering}
+  {\chaptertitlename~\thechapter:}
+  {0.4em}
+  {}
+\titleformat{name=\chapter,numberless}[display]
+  {\normalfont\bfseries\ifnuhead\fontsize{18}{22}\else\fontsize{14}{16}\fi
+   \selectfont\centering}
+  {}
   {0pt}
-  {\MakeUppercase}
+  {\nuheadcase}
 \titlespacing*{\chapter}{0pt}{0pt}{18pt}
 \titleformat{\section}
-  {\normalfont\bfseries\fontsize{12}{14}\selectfont}
+  {\normalfont\bfseries\fontsize{16}{19}\selectfont}
   {\thesection}
   {1em}
-  {\MakeUppercase}
+  {}
 \titleformat{\subsection}
-  {\normalfont\bfseries\fontsize{12}{14}\selectfont}
+  {\normalfont\bfseries\fontsize{14}{17}\selectfont}
   {\thesubsection}
   {1em}
   {}
@@ -120,6 +139,10 @@
   {\thesubsubsection}
   {1em}
   {}
+% one blank line before a main heading
+\titlespacing*{\section}{0pt}{12pt plus 3pt minus 2pt}{6pt plus 2pt}
+\titlespacing*{\subsection}{0pt}{12pt plus 3pt minus 2pt}{6pt plus 2pt}
+\titlespacing*{\subsubsection}{0pt}{10pt plus 3pt minus 2pt}{4pt plus 2pt}
 % Run-in \paragraph headings kept the class default of zero left indent,
 % while body paragraphs are indented by \parindent.  That made every
 % \paragraph start further left than the text around it.  Give the heading
@@ -130,6 +153,55 @@
   {0pt}
   {}
 \titlespacing*{\paragraph}{\parindent}{6pt}{0.5em}
+
+% ---- NU thesis template: table of contents and lists ----
+\makeatletter
+% Chapter entries read "Chapter 1: Title" (or "Appendix A: Title"), with
+% no "Chapters:" or "Appendices" label line in the table of contents.
+\def\@chapter[#1]#2{%
+  \refstepcounter{chapter}%
+  \renewcommand\thepage{\arabic{page}}%
+  \ifapp\else\ifnum\value{chapter}=1 \pagenumbering{arabic}\fi\fi
+  \pagestyle{headings}%
+  \typeout{\@chapapp\space\thechapter.}%
+  \addcontentsline{toc}{chapter}{\@chapapp\ \thechapter: #1}%
+  \chaptermark{#1}%
+  \@makechapterhead{#2}}
+% bold entries with dot leaders, as in the template
+\renewcommand*\l@front[2]{\vskip 0.3em plus 1pt
+  {\bfseries\@dottedtocline{0}{0pt}{2.3em}{#1}{#2}}}
+\renewcommand*\l@chapter[2]{%
+  \ifnum\c@tocdepth>\m@ne
+    \addpenalty{-\@highpenalty}\vskip 0.5em plus 1pt
+    {\bfseries\@dottedtocline{0}{0pt}{2.3em}{#1}{#2}}%
+    \penalty\@highpenalty
+  \fi}
+\renewcommand*\l@section[2]{{\bfseries\@dottedtocline{1}{1.2em}{2.6em}{#1}{#2}}}
+\renewcommand*\l@subsection[2]{{\bfseries\@dottedtocline{2}{3.8em}{3.4em}{#1}{#2}}}
+\renewcommand*\l@subsubsection[2]{{\bfseries\@dottedtocline{3}{7.2em}{4.2em}{#1}{#2}}}
+\renewcommand*\l@figure[2]{{\bfseries\@dottedtocline{1}{0em}{6.8em}{#1}{#2}}}
+\let\l@table\l@figure
+\renewcommand\tableofcontents{%
+  \chapter*{\contentsname}%
+  \phantomsection\addcontentsline{toc}{front}{\contentsname}%
+  \thispagestyle{plain}\pagestyle{plain}%
+  \startsinglespace\@starttoc{toc}\startdoublespace}
+\renewcommand\listoftables{%
+  \chapter*{\listtablename}%
+  \phantomsection\addcontentsline{toc}{front}{\listtablename}%
+  \thispagestyle{plain}\pagestyle{plain}%
+  \startsinglespace\@starttoc{lot}\startdoublespace}
+\renewcommand\listoffigures{%
+  \chapter*{\listfigurename}%
+  \phantomsection\addcontentsline{toc}{front}{\listfigurename}%
+  \thispagestyle{plain}\pagestyle{plain}%
+  \startsinglespace\@starttoc{lof}\startdoublespace}
+\makeatother
+% Figures, tables, and listings are numbered "chapter-serial", e.g. 2-1.
+\AtBeginDocument{%
+  \renewcommand{\thefigure}{\thechapter-\arabic{figure}}%
+  \renewcommand{\thetable}{\thechapter-\arabic{table}}%
+  \renewcommand{\thelstlisting}{\thechapter-\arabic{lstlisting}}}
 
 % ---- Maths ----
 \usepackage{amsmath, amssymb, amsthm}
@@ -245,6 +317,11 @@
 }
 \captionsetup[table]{position=top}
 \captionsetup[figure]{position=bottom}
+% list entries read "Figure 2-1: Title" and "Table 2-1: Title"
+\DeclareCaptionListFormat{nufigure}{\figurename~#1#2:}
+\DeclareCaptionListFormat{nutable}{\tablename~#1#2:}
+\captionsetup[figure]{listformat=nufigure}
+\captionsetup[table]{listformat=nutable}
 \newtheorem{theorem}{Theorem}
 \newtheorem{lemma}{Lemma}
 \newtheorem{definition}{Definition}
@@ -348,9 +425,12 @@ August, 2026
 \end{abstract}
 %\dedication{To my beloved family}
 
+% From here on the NU thesis template applies: lists and headings in title
+% case at 18pt, single line spacing.
+\nuheadtrue
 \tableofcontents
-\listoffigures
 \listoftables
+\listoffigures
 
 \cleardoublepage
 % Policy: chapter titles must appear at the top of each page.
@@ -360,27 +440,47 @@ August, 2026
 \fancyfoot[C]{\thepage}
 \renewcommand{\headrulewidth}{0.3pt}
 
-%%%%%%%%%%%%%%%% LIST OF ABBREVIATIONS AND ACRONYMS %%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%% LIST OF SYMBOLS, ABBREVIATIONS AND NOMENCLATURE %%%%%%%%%%%%%%%%
 \phantomsection
-\chapter*{LIST OF ABBREVIATIONS AND ACRONYMS}
-\addcontentsline{toc}{front}{List of Abbreviations and Acronyms}
-\markboth{LIST OF ABBREVIATIONS AND ACRONYMS}{}
+\chapter*{List of Symbols, Abbreviations and Nomenclature}
+\addcontentsline{toc}{front}{List of Symbols, Abbreviations and Nomenclature}
+\markboth{List of Symbols, Abbreviations and Nomenclature}{}
 \thispagestyle{plain}
 \begingroup
 \singlespacing
-\begin{center}
-\begin{longtable}{@{}>{\raggedright\arraybackslash}p{2.4cm}%
-  >{\raggedright\arraybackslash}p{\dimexpr\textwidth-2.4cm-2\tabcolsep\relax}@{}}
-\toprule
-\textbf{Abbreviation} & \textbf{Full name or meaning} \\
-\midrule
-\endfirsthead
-\toprule
-\textbf{Abbreviation} & \textbf{Full name or meaning} \\
-\midrule
-\endhead
-\bottomrule
-\endfoot
+\newcommand{\nulisthead}[1]{\par\vspace{6pt}\noindent #1\par\vspace{2pt}}
+\newcommand{\nulisttable}[3]{%
+  \begin{longtable}{@{}>{\raggedright\arraybackslash}p{2.4cm}%
+    >{\raggedright\arraybackslash}p{\dimexpr\textwidth-2.4cm-2\tabcolsep\relax}@{}}
+  \toprule \textbf{#1} & \textbf{#2} \\ \midrule \endfirsthead
+  \toprule \textbf{#1} & \textbf{#2} \\ \midrule \endhead
+  \bottomrule \endfoot
+  #3
+  \end{longtable}}
+
+\nulisthead{Nomenclature}
+\nulisttable{Symbol}{Meaning}{%
+$n$ & Number of input rows \\
+$m$ & Number of pattern symbols, with a bounded quantifier
+  \texttt{\{i,j\}} counted as $j$ copies; a \texttt{PERMUTE} of $m$
+  variables has $m!$ orders \\
+$i$, $j$ & Lower and upper bounds of a quantifier \texttt{\{i,j\}} \\
+$d$ & Number of \texttt{DEFINE} variables \\
+$k$ & Number of matches \\
+$\ell$ & Average number of rows per match materialized in the output \\
+$p$ & Number of partitions \\
+$O(f(n))$ & Upper bound: the cost grows no faster than $f(n)$ \\
+$R^2$ & Share of the variation in measured time that a fitted line
+  explains; 1 is a perfect fit \\}
+
+\nulisthead{Greek Letters}
+\nulisttable{Symbol}{Meaning}{%
+$\varepsilon$ & Empty transition of an automaton, which consumes no row \\
+$\Omega(f(n))$ & Lower bound: the cost grows at least as fast as $f(n)$ \\
+$\Theta(f(n))$ & Tight bound: both $O(f(n))$ and $\Omega(f(n))$ hold \\}
+
+\nulisthead{Abbreviations}
+\nulisttable{Abbreviation}{Full name or meaning}{%
 ANTLR & ANother Tool for Language Recognition \\
 ANTLR4 & ANother Tool for Language Recognition, version 4 \\
 API   & Application Programming Interface \\
@@ -414,57 +514,35 @@ RAM   & Random Access Memory \\
 SD    & Standard Deviation \\
 SGA   & System Global Area (Oracle) \\
 SQL   & Structured Query Language \\
-UK    & United Kingdom \\
-\end{longtable}
-\end{center}
+UK    & United Kingdom \\}
 \endgroup
 
-%%%%%%%%%%%%%%%% LIST OF SYMBOLS %%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%% LIST OF PUBLICATIONS %%%%%%%%%%%%%%%%
 \phantomsection
-\chapter*{LIST OF SYMBOLS}
-\addcontentsline{toc}{front}{List of Symbols}
-\markboth{LIST OF SYMBOLS}{}
+\chapter*{List of Publications out of This Thesis}
+\addcontentsline{toc}{front}{List of Publications out of This Thesis}
+\markboth{List of Publications out of This Thesis}{}
 \thispagestyle{plain}
 \begingroup
 \singlespacing
-\begin{center}
-\begin{longtable}{@{}>{\raggedright\arraybackslash}p{2.4cm}%
-  >{\raggedright\arraybackslash}p{\dimexpr\textwidth-2.4cm-2\tabcolsep\relax}@{}}
-\toprule
-\textbf{Symbol} & \textbf{Meaning} \\
-\midrule
-\endfirsthead
-\toprule
-\textbf{Symbol} & \textbf{Meaning} \\
-\midrule
-\endhead
-\bottomrule
-\endfoot
-$n$ & Number of input rows \\
-$m$ & Number of pattern symbols, with a bounded quantifier
-  \texttt{\{i,j\}} counted as $j$ copies; a \texttt{PERMUTE} of $m$
-  variables has $m!$ orders \\
-$i$, $j$ & Lower and upper bounds of a quantifier \texttt{\{i,j\}} \\
-$d$ & Number of \texttt{DEFINE} variables \\
-$k$ & Number of matches \\
-$\ell$ & Average number of rows per match materialized in the output \\
-$p$ & Number of partitions \\
-$\varepsilon$ & Empty transition of an automaton, which consumes no row \\
-$O(f(n))$ & Upper bound: the cost grows no faster than $f(n)$ \\
-$\Omega(f(n))$ & Lower bound: the cost grows at least as fast as $f(n)$ \\
-$\Theta(f(n))$ & Tight bound: both $O(f(n))$ and $\Omega(f(n))$ hold \\
-$R^2$ & Share of the variation in measured time that a fitted line
-  explains; 1 is a perfect fit \\
-\end{longtable}
-\end{center}
+\begin{enumerate}
+  \item M.~Lawande, M.~El-helw, and A.~Awad, ``Row Pattern Recognition for
+    Pandas: Bringing \texttt{MATCH\_RECOGNIZE} to Python DataFrames,'' in
+    \emph{2026 IEEE 23rd Mediterranean Electrotechnical Conference
+    (MELECON)}, IEEE, 2026, doi: \nolinkurl{10.1109/MELECON64486.2026.11418885}.
+  \item A manuscript extending this work, submitted to a journal (under
+    review).
+\end{enumerate}
 \endgroup
 
 \let\cleardoublepage\mainmattercleardoublepage
 \cleardoublepage
 
-% The class sets 26pt (double) leading for the front matter.  The body
-% runs at one-and-a-half spacing, so re-assert it here.
-\onehalfspacing
+% The class sets 26pt (double) leading for the front matter.  The NU
+% thesis template asks for single spacing and a 0.5 cm first-line indent
+% in the main text, so set both here.
+\singlespacing
+\setlength{\parindent}{0.5cm}
 
 \IfFileExists{chapters/ch1_introduction.tex}
   {\input{chapters/ch1_introduction}}
@@ -488,15 +566,13 @@ $R^2$ & Share of the variation in measured time that a fitted line
   {\input{chapters/ch7_conclusion_future}}
   {\input{ch7_conclusion_future}}
 
-\addtocontents{toc}{\vspace{2em}}
-\addtocontents{toc}{\vspace{2em}}
 
 % ---- Bibliography ----
 \cleardoublepage
 % a few reference strings (long arXiv ids) have no break point and
 % otherwise reach into the margin
 \begingroup\emergencystretch=3em
-\printbibliography[heading=bibintoc]
+\printbibliography[heading=bibintoc,title={References}]
 \endgroup
 
 \appendix

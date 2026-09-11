@@ -299,19 +299,21 @@
 %    *            TOC, LOF, LOT             *
 %    ****************************************
 
-\addtocontents{lof}{%
-    \vskip 0.55in
-    \typesetColumnHeading{\figurename}\hfill\typesetColumnHeading{\pagename}%
-    \vskip 0.25em%
-    \rm%
-}
+% NU thesis template: the lists carry no column headings.
+%\addtocontents{lof}{%
+%    \vskip 0.55in
+%    \typesetColumnHeading{\figurename}\hfill\typesetColumnHeading{\pagename}%
+%    \vskip 0.25em%
+%    \rm%
+%}
 
-\addtocontents{lot}{%
-    \vskip 0.55in
-    \typesetColumnHeading{\tablename}\hfill\typesetColumnHeading{\pagename}
-    \vskip 0.25em%
-    \rm%
-}
+% NU thesis template: the lists carry no column headings.
+%\addtocontents{lot}{%
+%    \vskip 0.55in
+%    \typesetColumnHeading{\tablename}\hfill\typesetColumnHeading{\pagename}
+%    \vskip 0.25em%
+%    \rm%
+%}
 
 %% MM. 1994/08/17. Redefining Ram's environments using new standards.
 \newenvironment{los}{
@@ -320,7 +322,8 @@
   \addcontentsline{toc}{front}{\typesetColumnHeading{\listsymbolname}}
   \pagestyle{plain}}
 
-\addtocontents{toc}{~\hfill{\typesetColumnHeading{\pagename}}}
+% NU thesis template: the lists carry no column headings.
+%\addtocontents{toc}{~\hfill{\typesetColumnHeading{\pagename}}}
 
 %% MM. 1994/08/09. The main reason Ram changed these was to avoid
 %% boldfacing of chapter and part names in toc. Good choice, IMHO.

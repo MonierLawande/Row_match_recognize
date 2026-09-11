@@ -25,7 +25,7 @@ execution, and optimization.
 
 The engine takes two inputs: an SQL query and a Pandas
 DataFrame.  It returns a result DataFrame.  The work has five stages
-(Figure~\ref{fig:system-architecture}).  \emph{Parsing} creates an
+(See Figure~\ref{fig:system-architecture}).  \emph{Parsing} creates an
 abstract syntax tree (AST).  \emph{Semantic validation} checks
 references and supported clause combinations while the tree is built.
 \emph{Logical-plan construction} resolves the execution configuration.
@@ -753,7 +753,7 @@ construction (Section~\ref{sec:meth-logical}).
 
 The logical plan is resolved as an execution configuration.  It collects
 the typed AST fields pulled from the \texttt{MatchRecognizeClause} that compilation and matching need
-(Table~\ref{tab:logical-plan}).  Later stages do not reparse the full
+(See Table~\ref{tab:logical-plan}).  Later stages do not reparse the full
 SQL query.  Pattern, predicate, and measure text remain available to
 their dedicated compilers and evaluators.
 

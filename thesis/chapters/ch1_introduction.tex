@@ -250,12 +250,14 @@ far each system implements it.
 \section{Problem Statement}
 \label{sec:intro-problem}
 % ----------------------------------------------------------------
+% a long code word in the first line has no break point
+\begingroup\emergencystretch=2em
 SQL:2016 standardized row-pattern recognition through the
 \texttt{MATCH\_RECOGNIZE} clause~\cite{iso2016,ISO2021}.  The clause lets a
 query define and search patterns within ordered rows.  Oracle had already
 introduced it in Oracle Database~12c in 2013~\cite{OracleMR,
 oracle2021dwhsg,book}.
-Support nevertheless remains uneven.
+Support nevertheless remains uneven.\par\endgroup
 
 Trino~\cite{trino2022,trino2021row},
 Snowflake~\cite{snowflake2025match_recognize}, and Apache
@@ -522,8 +524,8 @@ procedural Pandas code while preserving the expected results in the studied
 cases.
 
 \item[Second Publication.]
-A second manuscript extending this work has been submitted to
-\textit{Scientific Reports} and is currently under review.
+A second manuscript extending this work has been submitted to a journal
+and is currently under review.
 
 \end{description}
 
