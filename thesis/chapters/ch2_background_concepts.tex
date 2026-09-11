@@ -34,7 +34,10 @@ become associated with pattern variables such as \texttt{A},
 \texttt{B}, or \texttt{DOWN} when their predicates hold.  A row
 sequence can therefore be read as a sequence of variable assignments.
 This explains why regular-expression-like syntax and finite automata
-fit the problem.  Later chapters use this connection to compile row
+fit the problem.  The combination gives the best of both.  The syntax
+is a readable way to write the pattern, and the automaton is an
+efficient way to run it, one row at a time.
+Later chapters use this connection to compile row
 patterns into automata and execute them over ordered Pandas partitions.
 
 Relational databases are strong at set-based operations such as
@@ -145,7 +148,9 @@ described through the eight specifications shown in
 Listing~\ref{lst:mr-syntax}.  The standard requires \texttt{PATTERN}
 and \texttt{DEFINE}.  The square brackets in the listing mark the
 optional specifications.  Together, they control partitioning, order,
-output, row classification, and overlap between matches.
+output, row classification, and overlap between matches.  The clause
+thus mixes two languages: ordinary SQL for partitioning, ordering, and
+expressions, and a regular-expression-like language for the pattern.
 
 \begin{lstlisting}[float=htbp,
     language     = SQL,

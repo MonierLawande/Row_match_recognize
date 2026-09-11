@@ -112,11 +112,8 @@ complete construction exceeds a resource limit, compilation fails
 explicitly; it never executes a partial automaton.  Chapter~\ref{chap:implementation}
 explains compilation and DataFrame execution in detail.
 
-% ................................
-\subsection{Worked Pipeline Example}
+\paragraph{Worked pipeline example.}
 \label{subsec:meth-worked-pipeline}
-% ................................
-
 Figure~\ref{fig:orders-pipeline} applies the architecture to the
 \texttt{orders} example.  It carries both inputs, an SQL query and an
 eight-row DataFrame, and traces them through the stages of
@@ -317,9 +314,8 @@ because the two chapters form one pipeline.
 % ----------------------------------------------------------------
 
 Section~\ref{subsec:bg-clause-structure} described the clause
-structure.  A \texttt{MATCH\_RECOGNIZE} query mixes ordinary SQL with
-an extended row-pattern language, and the parser must handle both at
-once.  Listing~\ref{lst:mr-full-syntax} gives the form the core path
+structure and the two languages it mixes.  The parser must handle both
+at once.  Listing~\ref{lst:mr-full-syntax} gives the form the core path
 accepts.
 
 \begin{lstlisting}[float=htbp,
@@ -755,7 +751,7 @@ construction (Section~\ref{sec:meth-logical}).
 \label{sec:meth-logical}
 % ................................................................
 
-The logical plan is a resolved execution configuration.  It collects
+The logical plan is resolved as an execution configuration.  It collects
 the typed AST fields pulled from the \texttt{MatchRecognizeClause} that compilation and matching need
 (Table~\ref{tab:logical-plan}).  Later stages do not reparse the full
 SQL query.  Pattern, predicate, and measure text remain available to

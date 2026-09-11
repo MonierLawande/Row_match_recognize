@@ -1,14 +1,15 @@
 SQL:2016 introduced the \texttt{MATCH\_RECOGNIZE} clause to search ordered
 rows for user-defined patterns.  It is useful when the information is a
-sequence, not one isolated row.  It expresses V-, W-, and U-shaped patterns
-and repeated behavior, as in fraud detection, IoT monitoring, and clickstreams.
+sequence, not one row.  It expresses V-, W-, and U-shaped patterns
+(one dip, two dips, a long dip) and repeated behavior, as in fraud
+detection, IoT monitoring, and clickstreams.
 Oracle and Trino provide it, but Pandas does not, so analysts fall back on
 shifted columns, loops, and state handling that are harder to verify.
 
 The standard defines row-pattern recognition as three independent optional
-features rather than required behavior: R010 places the clause in
-the \texttt{FROM} clause, so a pattern reads like a table; R020 and R030 cover
-window placement and aggregates.  A vendor may implement any or none, so
+features: R010 places the clause in the \texttt{FROM} clause, so a pattern
+reads like a table, and the other two cover windows and aggregates.  A
+vendor may implement any or none, so
 support differs widely.
 
 This thesis addresses that gap with an in-process engine for a subset of

@@ -28,7 +28,7 @@ several SQL and stream-processing engines, including
 Oracle~\cite{OracleMR,oracle2021dwhsg,book,oracle2022},
 Snowflake~\cite{snowflake2025match_recognize}, and
 Trino~\cite{trino2022,trino2021row}; Apache Flink also exposes row
-pattern recognition through Flink SQL~\cite{flink}.
+pattern recognition through Flink SQL, its SQL interface~\cite{flink}.
 By contrast, PostgreSQL~18 still lists the related SQL features as
 unsupported, while DuckDB lists native \texttt{MATCH\_RECOGNIZE} as
 planned work~\cite{postgresql18unsupported,duckdb2026roadmap,howe2020matchrecognize,findling2025bringing}.
@@ -289,11 +289,8 @@ Other DataFrame libraries, including Dask, Polars, and Modin, are
 outside the Pandas-specific implementation and evaluation scope of
 this thesis~\cite{Evaluation}.
 
-% ................................
-\subsection{Research Gap in the Pandas Ecosystem}
+\paragraph{Research gap in the Pandas ecosystem.}
 \label{subsec:related-gap-synthesis}
-% ................................
-
 The reviewed systems expose a deployment and workflow gap.  Each fits
 when the data already lives in its environment or needs distributed or
 stream processing.  None is the direct execution path for a Pandas

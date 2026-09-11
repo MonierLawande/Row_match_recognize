@@ -39,10 +39,41 @@ two small synthetic tables introduced in
 Section~\ref{sec:eval-dataset}, \texttt{orders} and
 \texttt{stock\_price}, and the 30 pattern--size combinations of the
 Amazon benchmark: five pattern families run at each of six sizes, so
-30 cells per system and 90 in total.  The SQL engines are the
+30 cells per system and 90 in total.  Each of the two tables has three
+columns: a key that partitions the rows, a date that orders them, and a
+price the pattern tests (Figure~\ref{fig:eval-sample-tables}).  The SQL
+engines are the
 correctness references.  The hand-written Pandas functions provide an
 additional output cross-check and the usability baseline
 (Section~\ref{subsec:eval-usability}).
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+      tbl/.style={draw=black!55, rounded corners=2pt, inner sep=5pt,
+                  align=left, font=\footnotesize},
+      note/.style={font=\footnotesize, text=black!70}]
+    \node[tbl] (orders) {\textbf{\texttt{orders}}\\[3pt]
+      \begin{tabular}{@{}ll@{}}
+        \texttt{customer\_id} & $\rightarrow$ \texttt{PARTITION BY}\\
+        \texttt{order\_date}  & $\rightarrow$ \texttt{ORDER BY}\\
+        \texttt{price}        & $\rightarrow$ \texttt{DEFINE}
+      \end{tabular}};
+    \node[tbl, right=10mm of orders] (stock)
+      {\textbf{\texttt{stock\_price}}\\[3pt]
+      \begin{tabular}{@{}ll@{}}
+        \texttt{Company}     & $\rightarrow$ \texttt{PARTITION BY}\\
+        \texttt{Price\_date} & $\rightarrow$ \texttt{ORDER BY}\\
+        \texttt{Price}       & $\rightarrow$ \texttt{DEFINE}
+      \end{tabular}};
+    \node[note, below=3pt of orders] {Example~1};
+    \node[note, below=3pt of stock] {Examples~2 and~3};
+  \end{tikzpicture}
+  \caption[Columns of the two synthetic tables]{Columns of the two
+    synthetic tables and the clause that uses each one.  The tables are
+    independent; each serves its own worked examples.}
+  \label{fig:eval-sample-tables}
+\end{figure}
 
 \paragraph{SQL feature coverage.}
 Two views are recorded, both reported in
@@ -157,13 +188,11 @@ systems and result sets are compared by row order and measure values
 \label{sec:eval-dataset}
 % ----------------------------------------------------------------
 
-% ................................
-\subsection{Datasets}
 \label{subsec:eval-dataset-orders}
-% ................................
 
 Four datasets are used.  Two are small synthetic tables that can be
-verified by hand, \texttt{orders} and \texttt{stock\_price}.  The
+verified by hand, \texttt{orders} and \texttt{stock\_price}
+(Figure~\ref{fig:eval-sample-tables}).  The
 real-world Amazon UK Products dataset, up to 2.2\,million rows, carries
 the cross-system timing and memory benchmark.  The Amazon Reviews~2023
 corpus, up to 227.9\,million rows, carries the scalability test
@@ -681,6 +710,9 @@ All four implementations return the same three matches
 (Table~\ref{tab:stock-results}), covering partitioning, ordering,
 implicit \texttt{DEFINE}, \texttt{PREV} navigation,
 \texttt{MATCH\_NUMBER()}, and measure materialization.
+\texttt{MATCH\_NUMBER()} counts the matches 1, 2, \ldots{} within each
+partition and restarts at 1 in the next, so company~\texttt{B}'s only
+match is 1.
 
 \begin{table}[H]
 \centering
