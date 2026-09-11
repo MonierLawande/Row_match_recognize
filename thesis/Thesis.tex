@@ -1,3 +1,5 @@
+% !TEX program = lualatex
+% !BIB program = biber
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \documentclass[ms,twoside,openright]{osudissert96}
 %% Language %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -10,8 +12,23 @@
   \renewcommand\bibname{References}%
   \renewcommand\appendixname{Appendix}%
   \renewcommand\chaptername{Chapter}}
-\usepackage[ansinew]{inputenc}
-\usepackage{mathptmx} % Times-style text and maths fonts
+% NU thesis template: Times New Roman, 12pt.  LuaLaTeX uses the real
+% Times New Roman font; a pdfLaTeX build falls back to the Times-style
+% mathptmx font.  Times New Roman has no small capitals, so \textsc takes
+% them from TeX Gyre Termes, a Times design shipped with TeX Live.
+\usepackage{iftex}
+\ifPDFTeX
+  % UTF-8 (the LaTeX default) keeps the biber .bbl file in one encoding
+  % for both engines; every source file is plain ASCII.
+  \usepackage[utf8]{inputenc}
+  \usepackage{mathptmx} % Times-style text and maths fonts
+\else
+  \usepackage{mathptmx} % Times-style maths
+  \usepackage[no-math]{fontspec}
+  \setmainfont{Times New Roman}[
+    SmallCapsFont    = {TeX Gyre Termes},
+    SmallCapsFeatures= {Letters=SmallCaps}]
+\fi
 
 %% Packages for Graphics & Figures %%%%%%%%%%%%%%%%%%%%%%%%%%
 \usepackage{graphicx}
@@ -99,7 +116,7 @@
 \usepackage{multirow}
 
 % ---- Encoding & Fonts ----
-\usepackage[T1]{fontenc}
+\ifPDFTeX\usepackage[T1]{fontenc}\fi
 
 % ---- Typography ----
 \usepackage{setspace}
@@ -448,7 +465,11 @@ August, 2026
 \thispagestyle{plain}
 \begingroup
 \singlespacing
-\newcommand{\nulisthead}[1]{\par\vspace{6pt}\noindent #1\par\vspace{2pt}}
+% keep each group heading on the same page as its table
+% (a conditional page break: move on if fewer than six lines remain)
+\newcommand{\nulisthead}[1]{\par\vspace{0pt plus 6\baselineskip}%
+  \penalty-200\vspace{0pt plus -6\baselineskip}\vspace{6pt}%
+  \noindent #1\par\nopagebreak\vspace{2pt}}
 \newcommand{\nulisttable}[3]{%
   \begin{longtable}{@{}>{\raggedright\arraybackslash}p{2.4cm}%
     >{\raggedright\arraybackslash}p{\dimexpr\textwidth-2.4cm-2\tabcolsep\relax}@{}}
@@ -471,13 +492,26 @@ $\ell$ & Average number of rows per match materialized in the output \\
 $p$ & Number of partitions \\
 $O(f(n))$ & Upper bound: the cost grows no faster than $f(n)$ \\
 $R^2$ & Share of the variation in measured time that a fitted line
-  explains; 1 is a perfect fit \\}
+  explains; 1 is a perfect fit \\
+$\overline{x}$ & Arithmetic mean of a metric across the 30 benchmark
+  cells \\
+$q_0, q_1, \ldots$ & States of a non-deterministic finite automaton \\
+$D_0, D_1, \ldots$ & States of a deterministic finite automaton \\}
 
 \nulisthead{Greek Letters}
 \nulisttable{Symbol}{Meaning}{%
 $\varepsilon$ & Empty transition of an automaton, which consumes no row \\
 $\Omega(f(n))$ & Lower bound: the cost grows at least as fast as $f(n)$ \\
 $\Theta(f(n))$ & Tight bound: both $O(f(n))$ and $\Omega(f(n))$ hold \\}
+
+\nulisthead{Subscripts}
+\nulisttable{Subscript}{Meaning}{%
+$0, 1, 2, \ldots$ & Index of an automaton state, as in $q_0$ or $D_0$ \\
+$h$ & Index of a partition; $n_h$ is the number of rows in partition $h$ \\
+$\mathrm{proposed}$ & The proposed engine, as in
+  $\overline{x}_{\mathrm{proposed}}$ \\
+$\mathrm{reference}$ & The SQL engine it is compared with, as in
+  $\overline{x}_{\mathrm{reference}}$ \\}
 
 \nulisthead{Abbreviations}
 \nulisttable{Abbreviation}{Full name or meaning}{%

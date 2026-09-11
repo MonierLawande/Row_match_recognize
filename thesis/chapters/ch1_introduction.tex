@@ -41,8 +41,8 @@ The third step is the same idea used to search text.  A search for a word
 followed by any digits does not look for one fixed string; it describes a
 shape that many different strings can take.  A row pattern does this for
 rows instead of characters~\cite{winand_match_recognize,zemke2007pattern}.
-Table~\ref{tab:intro-rowlabels} shows the idea on six days of one
-customer's prices.
+The idea is shown on six days of one customer's prices (See
+Table~\ref{tab:intro-rowlabels}).
 
 \begin{table}[H]
 \centering
@@ -73,16 +73,17 @@ The price falls for three days and then rises for two.  In words: one
 PATTERN (START DOWN+ UP+)
 \end{lstlisting}
 
-Each name in the line is a label from Table~\ref{tab:intro-rowlabels}, and
-the order of the names is the order the rows must appear in.  The symbol
+Each name in the line is one of the row labels (See
+Table~\ref{tab:intro-rowlabels}), and the order of the names is the order
+the rows must appear in.  The symbol
 \texttt{+} after a name means \emph{one or more rows of that kind}.  So
 \texttt{START} matches day~1, \texttt{DOWN+} matches days~2 to~4, and
 \texttt{UP+} matches days~5 and~6.
 
 Because \texttt{+} does not fix a number, the same line also matches a fall
 lasting two days or ten.  It describes the shape rather than one exact
-length, which is what makes it a pattern.  This is the V of
-Figure~\ref{fig:intro-shapes}.  Writing \texttt{DOWN\{3\}} instead would
+length, which is what makes it a pattern.  This is the V shape (See
+Figure~\ref{fig:intro-shapes}).  Writing \texttt{DOWN\{3\}} instead would
 demand exactly three falling days, and \texttt{DOWN?} would make the fall
 optional.
 
@@ -95,8 +96,8 @@ disappears the moment the rows are treated as an unordered
 set~\cite{melton2017sqlrpr}.
 
 Analysts often name these patterns by the outline they trace when the
-measured value is plotted against time.  Three names recur, and
-Figure~\ref{fig:intro-shapes} shows them side by side.
+measured value is plotted against time.  Three names recur, shown side by
+side (See Figure~\ref{fig:intro-shapes}).
 
 \begin{figure}[htbp]
   \centering
@@ -236,8 +237,9 @@ It is built the same way as \texttt{PATTERN (START DOWN+ UP+)} above, with
 two additions.  \texttt{PROBE+} again means one or more test charges.  The
 bar in \texttt{(TRANSFER | WITHDRAW)} means \emph{or}, so that row may be
 either kind, and \texttt{\{2,5\}} allows between two and five of them.
-\texttt{DRAIN} matches the final large movement.  As in Table~\ref{tab:intro-rowlabels}, the names are not
-keywords of the language: the analyst invents them and gives each one a
+\texttt{DRAIN} matches the final large movement.  As with the row labels
+(See Table~\ref{tab:intro-rowlabels}), the names are not keywords of the
+language: the analyst invents them and gives each one a
 meaning through a condition, so \texttt{PROBE} might mean an amount below a
 small threshold.  Chapter~\ref{chap:background} presents the full
 clause and its sub-clauses.

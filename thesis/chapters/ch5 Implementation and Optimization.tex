@@ -23,8 +23,8 @@ Section~\ref{sec:bg-performance} explains the optimization layer.
 \label{sec:meth-automata}
 % ----------------------------------------------------------------
 
-This section covers Stage~4 of
-Figure~\ref{fig:system-architecture}.  Stage~3 resolves the execution
+This section covers Stage~4 of the architecture (See
+Figure~\ref{fig:system-architecture}).  Stage~3 resolves the execution
 settings.  Stage~4 turns the pattern into the automata used for
 matching.  These are separate tasks, completed before the rows are
 scanned in Stage~5.
@@ -52,9 +52,9 @@ directly.  The builder follows Thompson's construction.  Each pattern
 part becomes a small fragment, and the fragments are joined to form the
 whole pattern~\cite{Thompson1968,DragonBook}.  The implementation also
 carries SQL-specific metadata for conditions, exclusions, anchors, and
-preference order.  Figure~\ref{fig:meth-nfa} shows a simplified NFA for
-$A^{+}\,B?$ that accepts the same row sequences as the compiled
-pattern.  Intermediate wrapper states used during construction are not
+preference order.  A simplified NFA for $A^{+}\,B?$ accepts the same row
+sequences as the compiled pattern (See Figure~\ref{fig:meth-nfa}).
+Intermediate wrapper states used during construction are not
 shown.
 
 \begin{figure}[htbp]
@@ -213,9 +213,11 @@ applies them to the input rows.
 Pandas~\cite{McKinney2010} stores each DataFrame column as an
 array.  This suits both row-by-row matching and the \emph{vectorized}
 fast paths in Section~\ref{sec:bg-performance}, which test a condition
-on a whole column at once instead of one row at a time.  Figure~\ref{fig:system-architecture}
-shows the system boundary, while Figure~\ref{fig:exec-pipeline} expands
-Stage~5 and shows the preceding planning and compilation stages.
+on a whole column at once instead of one row at a time.  The system
+boundary appears in the architecture overview (See
+Figure~\ref{fig:system-architecture}); Stage~5 is expanded here together
+with the preceding planning and compilation stages (See
+Figure~\ref{fig:exec-pipeline}).
 Stage~5 takes the execution settings with the compiled pattern and the
 Pandas DataFrame.  Its five logical execution steps are labelled
 5a--5e: partitioning, ordering, match
@@ -408,7 +410,8 @@ state-dependent case.
 After recording a match the engine must decide where to resume, which
 controls whether matches can overlap.  SQL:2016 defines four
 \texttt{AFTER MATCH SKIP} modes, summarized with their next-start
-computation in Table~\ref{tab:skip-modes}.  Empty matches always advance
+computation (See Table~\ref{tab:skip-modes}).  Empty matches always
+advance
 by one row.  A variable-based target that does not occur in the match,
 or that points back to the current start, raises an error.  This
 prevents a silent loop or a changed match sequence.
@@ -448,8 +451,8 @@ The engine supports \texttt{ONE ROW PER MATCH} and
 shown by default; omitting them removes their output rows, while
 unmatched mode also emits input rows not covered by a non-empty match.
 \texttt{CLASSIFIER()} can expose the variable assigned to an output
-row.  Table~\ref{tab:rows-per-match} summarizes the row counts and
-measure contexts.
+row.  The row counts and measure contexts are summarized together (See
+Table~\ref{tab:rows-per-match}).
 
 \begin{table}[htbp]
   \centering
@@ -505,8 +508,8 @@ general path on the same input and output mode.
 
 The techniques remove repeated predicate work, avoid unnecessary
 sorting and materialization, and reuse compiled structures.
-Table~\ref{tab:perf-summary} gives their activation boundaries, and
-each technique below carries the name used there.
+Their activation boundaries are listed together, and each technique below
+carries the name used there (See Table~\ref{tab:perf-summary}).
 
 \begin{table}[htbp]
   \centering

@@ -65,11 +65,13 @@ transactions in locations that are too far apart to be realistic.
 Writing these rules in SQL can make them easier to manage than
 procedural code~\cite{petkovic2022fraud}.
 
+% a long code word near the end has no break point
+\begingroup\emergencystretch=2em
 \paragraph{IoT and Sensor Data.}
 Manufacturing systems monitor sensor readings for signs of equipment
 degradation.  One example is a gradual temperature rise followed by a
 sudden drop.  Pattern queries over ordered sensor readings are a
-natural use of \texttt{MATCH\_RECOGNIZE}~\cite{OracleMR}.
+natural use of \texttt{MATCH\_RECOGNIZE}~\cite{OracleMR}.\par\endgroup
 
 \paragraph{Clickstream and Funnel Analysis.}
 E-commerce platforms study the paths that lead to a purchase or an

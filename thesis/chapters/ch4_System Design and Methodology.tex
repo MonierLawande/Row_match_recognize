@@ -114,10 +114,11 @@ explains compilation and DataFrame execution in detail.
 
 \paragraph{Worked pipeline example.}
 \label{subsec:meth-worked-pipeline}
-Figure~\ref{fig:orders-pipeline} applies the architecture to the
-\texttt{orders} example.  It carries both inputs, an SQL query and an
-eight-row DataFrame, and traces them through the stages of
-Figure~\ref{fig:system-architecture}.
+The architecture is applied here to the \texttt{orders} example (See
+Figure~\ref{fig:orders-pipeline}).  It carries both inputs, an SQL query
+and an
+eight-row DataFrame, and traces them through the five stages (See
+Figure~\ref{fig:system-architecture}).
 Chapter~\ref{chap:evaluation} reuses the same example for the
 usability comparison.
 
@@ -415,8 +416,8 @@ The node type selects the operation, while the concrete visitor
 determines what that operation does.  This two-part selection is
 called \emph{double dispatch}.
 
-Figure~\ref{fig:visitor-dispatch} shows this process as a pipeline using
-\texttt{SELECT price FROM orders}.  The visitor records
+This process is shown as a pipeline using \texttt{SELECT price FROM
+orders} (See Figure~\ref{fig:visitor-dispatch}).  The visitor records
 \texttt{price} as the selected column and \texttt{orders} as the
 source table.  The keywords guide parsing, but are not kept as
 separate token nodes in the AST.  A different visitor could display
@@ -562,8 +563,8 @@ predicates and \texttt{MEASURES} expressions are extracted as strings
 and parsed later by the restricted evaluator.  This keeps the outer
 query AST compact.
 
-Figure~\ref{fig:meth-ast} shows this structure for the worked
-\texttt{orders} query.  The outer clauses and the row-pattern clause
+This structure is shown for the worked \texttt{orders} query (See
+Figure~\ref{fig:meth-ast}).  The outer clauses and the row-pattern clause
 share one root.  Each measure stores its expression and output alias
 as separate fields.  The orange leaves show the expressions kept as
 text, rather than expanded into operator trees at this stage.
@@ -787,8 +788,7 @@ their dedicated compilers and evaluators.
     \texttt{measures}        & \texttt{Dict[str, str]}
       & Measure alias $\to$ expression string \\[4pt]
     \texttt{measure\_semantics} & \texttt{Dict[str, str]}
-      & Measure alias $\to$ \texttt{"RUNNING"}/\texttt{"FINAL"}, per
-        the rules in Figure~\ref{fig:measure-sem-resolution} \\[4pt]
+      & Measure alias $\to$ \texttt{"RUNNING"}/\texttt{"FINAL"}, per the priority rules (See Figure~\ref{fig:measure-sem-resolution}) \\[4pt]
     \texttt{rows\_per\_match} & \texttt{RowsPerMatch}
       & Output-row multiplicity \\[4pt]
     \texttt{skip\_mode}      & \texttt{SkipMode}
@@ -800,8 +800,8 @@ their dedicated compilers and evaluators.
 \end{table}
 
 Two defaults matter.  A variable without \texttt{DEFINE} uses an
-implicit true predicate.  Measure semantics follow the priority rules
-in Figure~\ref{fig:measure-sem-resolution}.  An explicit
+implicit true predicate.  Measure semantics follow a set of priority rules
+(See Figure~\ref{fig:measure-sem-resolution}).  An explicit
 \texttt{RUNNING} or \texttt{FINAL} prefix wins.
 \texttt{ONE ROW PER MATCH} uses final values.  Under
 \texttt{ALL ROWS PER MATCH}, navigation rules are resolved before

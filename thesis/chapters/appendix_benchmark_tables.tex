@@ -87,8 +87,9 @@ simple column operation does not by itself imply exact search.
 \label{app:match-counts}
 
 Runtime and memory also depend on output size.
-Table~\ref{tab:match_counts} therefore reports the returned rows under
-\texttt{ONE ROW PER MATCH}.  The counts are identical across the three
+The returned rows are therefore reported under \texttt{ONE ROW PER MATCH}
+(See Table~\ref{tab:match_counts}).  The counts are identical across the
+three
 systems.  In this dataset, \texttt{optional\_pattern} produces the
 largest output and \texttt{alternation} the smallest.
 
@@ -119,8 +120,9 @@ largest output and \texttt{alternation} the smallest.
 \section{Performance Summary by Pattern and by Dataset Size}
 \label{app:perf-summaries}
 
-Tables~\ref{tab:pattern_summary} and~\ref{tab:size_summary} summarize
-the same 30 cells.  The first groups results by pattern.  The second
+The same 30 cells are summarized by pattern and by size (See
+Tables~\ref{tab:pattern_summary} and~\ref{tab:size_summary}).  The first
+groups results by pattern.  The second
 groups them by dataset size.  Each displayed time is an arithmetic
 mean of cell mean times.  Each displayed throughput is an arithmetic
 mean of cell throughputs; it is not recomputed from the displayed mean
@@ -417,8 +419,8 @@ complex\_nested & 2{,}222{,}742 & 507.50 & 14{,}992.90 & 2{,}057.17 \\
 
 The engine footprint is its process peak.  The Trino and Oracle
 footprints cover their full containers.  This difference matters when
-reading the absolute values in Tables~\ref{tab:overall_stats}
-and~\ref{tab:avg_footprint_by_size}.
+reading the absolute values (See Tables~\ref{tab:overall_stats}
+and~\ref{tab:avg_footprint_by_size}).
 
 % --- overall statistics by system ---
 \begin{table}[H]
@@ -503,8 +505,8 @@ complex\_nested & reference result & 6/6 identical & 6/6 identical \\
 For each metric, the relative value is the ratio of the two
 arithmetic means across the 30 cells:
 \[
-100\left(\frac{\overline{x}_{\mathrm{proposed}}}
-{\overline{x}_{\mathrm{reference}}}-1\right).
+100\left(\overline{x}_{\mathrm{proposed}}
+/\overline{x}_{\mathrm{reference}}-1\right).
 \]
 It is not the arithmetic mean of 30 cell-wise percentage differences.
 Lower execution time and memory are better.  Higher throughput is
