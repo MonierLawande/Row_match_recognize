@@ -899,7 +899,7 @@ Table~\ref{tab:loc_comparison} counts the detection logic on both
 sides, the \texttt{MATCH\_RECOGNIZE} statement against the Pandas
 detection function, in non-blank, non-comment lines of code (LOC).  Data setup, the
 imports, and the printing are shared, so they are left out of both.  The
-declarative form takes 14 vs 24, 14 vs 30, and 16 vs 32 lines, and the
+declarative form takes 14 vs 23, 14 vs 25, and 16 vs 31 lines, and the
 gap widens with pattern complexity.
 
 \begin{table}[H]
@@ -913,13 +913,13 @@ gap widens with pattern complexity.
 \textbf{Example} & \textbf{Implementation} & \textbf{Notes} & \textbf{LOC} \\
 \midrule
 Dip (\texttt{orders}) & \texttt{MATCH\_RECOGNIZE} statement & single declarative query & 14 \\
-Dip (\texttt{orders}) & Hand-written Pandas function & loop / index / skip bookkeeping & 24 \\
+Dip (\texttt{orders}) & Hand-written Pandas function & loop / index / skip bookkeeping & 23 \\
 \midrule
 Stock (\texttt{stock\_price}) & \texttt{MATCH\_RECOGNIZE} statement & single declarative query & 14 \\
-Stock (\texttt{stock\_price}) & Hand-written Pandas function & \texttt{groupby}/\texttt{shift}/index bookkeeping & 30 \\
+Stock (\texttt{stock\_price}) & Hand-written Pandas function & \texttt{groupby}/\texttt{shift}/index bookkeeping & 25 \\
 \midrule
 V-shape (\texttt{stock\_price}) & \texttt{MATCH\_RECOGNIZE} statement & quantified declarative query & 16 \\
-V-shape (\texttt{stock\_price}) & Hand-written Pandas function & nested falling/rising run scan & 32 \\
+V-shape (\texttt{stock\_price}) & Hand-written Pandas function & nested falling/rising run scan & 31 \\
 \bottomrule
 \end{tabularx}
 }
