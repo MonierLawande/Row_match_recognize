@@ -372,7 +372,16 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% DOCUMENT
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% The NU template prints these front-matter titles in title case at 18pt.
+\renewcommand\acknowledgmentname{Acknowledgement}
+\renewcommand\acknowledgmentnameLC{Acknowledgement}
+\renewcommand\abstractname{Abstract}
+% The class sets these front-matter titles with \large; the template uses 18pt.
+\renewcommand\typesetHeading[1]{{\normalfont\fontsize{18}{24}\selectfont\bfseries #1}}
+
 \begin{document}
+% The pages before the Declaration carry no printed number.
+\pagestyle{empty}
 \thispagestyle{empty}
 
 % Front matter is printed one-sided.  Keep its PDF pages consecutive,
@@ -380,71 +389,80 @@
 \let\mainmattercleardoublepage\cleardoublepage
 \let\cleardoublepage\clearpage
 
-\begin{figure}
-    \centering
-    \includegraphics[width=1\linewidth]{images/header_logo.png}
-\end{figure}
+\begingroup
+\singlespacing
+\vspace*{-\dimexpr\headheight+\headsep\relax}
+\vspace*{-13bp}
+\noindent\hspace*{-44bp}\includegraphics[width=171bp]{images/nu_logo.png}
 
+\vspace{44bp}
 \begin{center}
+{\fontsize{16}{16}\selectfont\bfseries Row Pattern Matching Analytics: Bringing SQL\\[10bp]
+MATCH\_RECOGNIZE to Pandas DataFrames}
 
-Nile University
+\vspace{10bp}
+{\fontsize{16}{16}\selectfont by}
 
-School of Information Technology and Computer Science
+\vspace{10bp}
+{\fontsize{16}{16}\selectfont\bfseries Monier Ashraf Monier Lawande}
 
-Program of Informatics
-
-\vspace{\baselineskip}
-{\Large \textbf{Row Pattern Matching Analytics: Bringing SQL MATCH\_RECOGNIZE to Pandas DataFrames}}
-
-\vspace{\baselineskip}
-A thesis submitted to the School of Information Technology and Computer Science at Nile University in Partial Fulfillment of the Requirements for the degree of Master of Science in Informatics.
-
-\textbf{By}
-
-Monier Ashraf Monier Lawande\\
-\textbf{Under Supervision of}
-
-Prof. Mohamed ElHelw
-
-Prof. Ahmed Awad \\
-
-***
-
-Nile University
-
-August, 2026
+\vspace{12bp}
+\fontsize{14}{24}\selectfont
+A Thesis Submitted to the\par
+School of Information Technology and Computer Science\\
+at Nile University\par
+In Partial Fulfillment of the\par
+Requirements for the Degree of\par
+Master of Science\par
+In\par
+\textbf{Informatics}\par
+\vspace{24bp}
+Date of submission\par
+\textbf{SEPTEMBER/2026}\par
 \end{center}
+\endgroup
 
 \clearpage
+\thispagestyle{empty}
+\input{titlepage}
+\clearpage
+
+\thispagestyle{empty}
+\input{approval}
+\clearpage
+
+% Roman numbering starts at the copyright page; the cover, the title page
+% and the certification of approval carry no printed number.
 \pagenumbering{roman}
-\setcounter{page}{2}
-\input{committee}
-\clearpage
-
+\pagestyle{plain}
+\thispagestyle{plain}
 \input{copyright}
 \clearpage
 
+\nuheadtrue
 \startdoublespace
 \begin{acknowledgments}
 \input{Acknowledgment}
 \end{acknowledgments}
 \clearpage
 
-
+\thispagestyle{plain}
+\phantomsection
+\addcontentsline{toc}{front}{Declaration}
+\input{declaration}
+\clearpage
 
 \startdoublespace
 \begin{abstract}
 % The class's acknowledgments environment sets a running mark but its
-% abstract environment does not, so a two-page abstract inherited the
-% stale ACKNOWLEDGMENTS header.  Set the mark explicitly.
-\markboth{\MakeUppercase{\abstractname}}{\MakeUppercase{\abstractname}}
+% abstract environment does not, so set the mark explicitly.
+\markboth{\abstractname}{\abstractname}
 \input{Abstract}
 \end{abstract}
-%\dedication{To my beloved family}
+\clearpage
 
 % From here on the NU thesis template applies: lists and headings in title
 % case at 18pt, single line spacing.
-\nuheadtrue
 \tableofcontents
 \listoftables
 \listoffigures
@@ -568,6 +586,7 @@ UK    & United Kingdom \\}
     review).
 \end{enumerate}
 \endgroup
+
 
 \let\cleardoublepage\mainmattercleardoublepage
 \cleardoublepage
