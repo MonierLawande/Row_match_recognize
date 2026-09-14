@@ -1,0 +1,4 @@
+system,successful_tests,avg_time_seconds,avg_throughput_rows_per_second,max_query_memory_mb,max_footprint_memory_mb,all_correct
+proposed_pandas_engine,30,0.23974308858652135,4131591.195803257,313.3212722143308,638.15859375,True
+oracle_21c_ee,30,1.083471974313343,1118616.0459377756,58.1875,2030.9504,True
+trino_473,30,2.1931247816933226,520364.07752183924,41.52575035095215,23828.48,True

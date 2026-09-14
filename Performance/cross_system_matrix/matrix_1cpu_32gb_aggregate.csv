@@ -1,0 +1,2 @@
+system,successful_tests,avg_time_seconds,avg_throughput_rows_per_second,max_query_memory_mb,max_footprint_memory_mb,all_correct
+proposed_pandas_engine,30,0.16718760441861177,6110391.643666922,189.04739038825758,523.9712890625,True
