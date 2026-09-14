@@ -68,7 +68,7 @@
 \setotherlanguage{english}
 
 % الخط العربي الأساسي.  Amiri متاح على أوفرليف وفي توزيعات لينكس.
-\newfontfamily\arabicfont[Script=Arabic,Scale=1.0]{Amiri}
+\newfontfamily\arabicfont[Script=Arabic,Renderer=HarfBuzz,Scale=1.0]{Amiri}
 
 % الخط اللاتيني للمصطلحات التقنية داخل النص العربي.
 % مغلَّف بفحص وجود حتى لا يتعطّل البناء على بيئة لا تملك DejaVu
@@ -88,6 +88,8 @@
 \newcommand{\SizeTitle}  {\fontsize{19pt}{38pt}\selectfont} % عنوان الأطروحة
 \newcommand{\SizeCenter} {\fontsize{14pt}{29pt}\selectfont} % أسطر صفحة العنوان
 \newcommand{\SizeBody}   {\fontsize{12pt}{21pt}\selectfont} % نص المستخلص
+\newcommand{\SizeT}   {\fontsize{16pt}{26pt}\selectfont} % أسطر 16 نقطة
+\newcommand{\SizeS}   {\fontsize{14pt}{24pt}\selectfont} % أسطر 14 نقطة
 \newcommand{\SizeStars}  {\fontsize{14pt}{29pt}\selectfont} % الفاصل ***
 
 % تباعد الأسطر (113% للنص و132% لصفحة العنوان) مضمَّن أصلًا في القيمة
@@ -106,6 +108,10 @@
 % أسطر صفحة العنوان — التباعد مطابق لأنماط الأودت
 \newcommand{\CenterLine}[1]{{\SizeCenter #1\par}\vspace{0.09in}}
 \newcommand{\CenterBoldLine}[1]{\vspace{0.12in}{\SizeCenter #1\par}\vspace{0.05in}}
+
+% طبقة نص قابلة للبحث والنسخ: XeTeX يكتب /ActualText لكل مقطع عربي،
+% وبدونها تخرج الحروف مشوّشة عند استخراج النص من الـ PDF.
+\ifdefined\XeTeXgenerateactualtext \XeTeXgenerateactualtext=1 \fi
 
 \pagestyle{empty}          % بلا أرقام صفحات — تُدمج لاحقًا مع الأطروحة
 \setlength{\parindent}{0pt}
@@ -171,47 +177,94 @@
 \clearpage
 
 % ---------------------------------------------------------------------
-% الصفحة الثانية — صفحة العنوان
+% الصفحة الثانية — صفحة العنوان ولجنة الإشراف (مطابقة لصفحة القالب)
 % ---------------------------------------------------------------------
-% تباعد الفقرات مأخوذ حرفيًا من أنماط الأودت:
-%   Center     أسفل 0.09in            TitleBig  أعلى/أسفل 0.14in
-%   CenterBold أعلى 0.12in أسفل 0.05in  Stars    أعلى 0.14in أسفل 0.10in
-%   LogoPara   أعلى 0.10in أسفل 0.16in
 \begin{center}
   \LeadTitlePage
+  {\SizeT\bfseries استخراج أنماط السجلات التسلسلية:\\
+   تعزيز إطارات بيانات بانداس بتنفيذ آلية التعرف على الأنماط\par}
 
-  \vspace*{0.10in}
-  \includegraphics[width=\LogoWidth]{nu-logo.png}
-  \vspace{0.16in}
+  \vspace{10pt}
+  {\SizeT إعداد\par}
 
-  \CenterLine{جامعة النيل الأهلية}
-  \CenterLine{كلية تكنولوجيا المعلومات وعلوم الحاسب}
-  \CenterLine{برنامج المعلوماتية}
+  \vspace{8pt}
+  {\SizeT\bfseries منير أشرف منير لوندي\par}
 
-  \vspace{0.14in}
-  {\SizeTitle
-    استخراج أنماط السجلات التسلسلية\\
-    تعزيز إطارات بيانات بانداس بتنفيذ آلية التعرف على الأنماط\par}
-  \vspace{0.14in}
+  \vspace{10pt}
+  {\SizeS رسالة مقدمة إلى كلية تكنولوجيا المعلومات وعلوم الحاسب\\
+   جامعة النيل الأهلية\par}
 
-  \CenterLine{أطروحة مقدَّمة إلى كلية تكنولوجيا المعلومات وعلوم الحاسب
-              بجامعة النيل الأهلية للحصول على درجة ماجستير العلوم
-              في المعلوماتية}
+  \vspace{6pt}
+  {\SizeS كجزء من متطلبات الحصول على درجة\par}
 
-  \CenterBoldLine{إعداد}
-  \CenterLine{منير أشرف منير لواندي}
+  \vspace{6pt}
+  {\SizeS ماجستير العلوم\par}
 
-  \CenterBoldLine{إشراف}
-  \CenterLine{أ.د. محمد الحلو}
-  \CenterLine{أ.د. أحمد عوض}
+  \vspace{6pt}
+  {\SizeS في\par}
 
-  \vspace{0.14in}
-  {\SizeStars ***\par}
-  \vspace{0.10in}
+  \vspace{6pt}
+  {\SizeS\bfseries المعلوماتية\par}
+\end{center}
 
-  \CenterLine{جامعة النيل الأهلية}
-  \CenterLine{أغسطس 2026}
+\vspace{18pt}
+{\SizeS\bfseries لجنة الإشراف:\par}
 
+\vspace{14pt}
+{\SizeS
+\rule{6cm}{0.4pt}\par
+\textbf{المشرف الرئيسي}\par
+\textbf{أ.د. محمد الحلو، أستاذ بكلية تكنولوجيا المعلومات وعلوم الحاسب،
+جامعة النيل الأهلية}\par
+
+\vspace{14pt}
+\rule{6cm}{0.4pt}\par
+\textbf{مشرف}\par
+\textbf{د. أحمد عوض، أستاذ مشارك بالجامعة البريطانية في دبي، الإمارات،
+وجامعة القاهرة، مصر}\par
+}
+
+\clearpage
+
+% ---------------------------------------------------------------------
+% الصفحة الثالثة — الغلاف العربي (مطابقة لصفحة القالب)
+% ---------------------------------------------------------------------
+% الشعار على اليسار كما في صفحة القالب (المستند عربي الاتجاه)
+\noindent\hfill\includegraphics[width=171bp]{nu_logo_template.png}\hspace*{-40bp}
+
+\vspace{30pt}
+\begin{center}
+  \LeadTitlePage
+  {\SizeT\bfseries استخراج أنماط السجلات التسلسلية:\\
+   تعزيز إطارات بيانات بانداس بتنفيذ آلية التعرف على الأنماط\par}
+
+  \vspace{10pt}
+  {\SizeT إعداد\par}
+
+  \vspace{8pt}
+  {\SizeT\bfseries منير أشرف منير لوندي\par}
+
+  \vspace{10pt}
+  {\SizeS رسالة مقدمة إلى كلية تكنولوجيا المعلومات وعلوم الحاسب\\
+   جامعة النيل الأهلية\par}
+
+  \vspace{6pt}
+  {\SizeS كجزء من متطلبات الحصول على درجة\par}
+
+  \vspace{6pt}
+  {\SizeS ماجستير العلوم\par}
+
+  \vspace{6pt}
+  {\SizeS في\par}
+
+  \vspace{6pt}
+  {\SizeS\bfseries المعلوماتية\par}
+
+  \vspace{24pt}
+  {\SizeT تاريخ\par}
+
+  \vspace{6pt}
+  {\SizeT\bfseries سبتمبر/2026\par}
 \end{center}
 
 \end{document}
