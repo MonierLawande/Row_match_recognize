@@ -1,7 +1,10 @@
-%% Elsevier article, converted from the Springer LNCS manuscript.
-%% Class options: preprint = single column, the layout Elsevier expects for
-%% submission.  After acceptance, swap for [final,5p,times,twocolumn,a4paper]
-%% to get the two-column journal layout; nothing else needs to change.
+%% Elsevier manuscript in a single-column preprint layout.
+%% Editorial Manager: upload main.tex, references.bib, the class/style files,
+%% and the five referenced PNGs at one folder level. Do not upload main.pdf
+%% or generated main.* files together with main.tex (LaTeX_Guide, pp. 2, 6--7).
+%% Upload order: manuscript, bibliography, class/style files, then figures.
+%% Use Manuscript for source/support files and Figure for PNGs. Match the
+%% submission metadata to this file (LaTeX_Guide, pp. 2--4, 8).
 \documentclass[preprint,12pt,times,a4paper]{elsarticle}
 
 %% --- Encoding & fonts
@@ -13,14 +16,14 @@
 
 %% --- Tables & figures
 \usepackage{graphicx}
-%% Figures live in Images/; LaTeX also checks the current folder first,
-%% so the same source builds if the images are flattened for submission.
-\graphicspath{{Images/}}
+%% Search the submission folder first, then the local Images/ folder.
+\graphicspath{{./}{Images/}}
 \usepackage{array}
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{longtable}
 \usepackage{float}
+\usepackage{placeins}
 \usepackage{adjustbox}
 \usepackage{tabularx}
 \usepackage{tikz}
@@ -63,12 +66,13 @@
 \usepackage[hyphens]{url}
 \Urlmuskip=0mu plus 1mu\relax
 \usepackage[hidelinks]{hyperref}
+\hypersetup{pdfauthor={Monier Lawande; Mohamed Elhelw; Ahmed Awad}}
 
 %% Long \texttt{} identifiers and URLs cannot be hyphenated; let TeX stretch
 %% the interword space a little rather than run into the margin.
 \emergencystretch=4em
 
-%% Float placement: this paper has ten full-width tables. The defaults allow
+%% Float placement: this paper has several full-width tables. The defaults allow
 %% only two double-column floats per page, so they accumulate and push the
 %% closing sections apart. These values let them settle near their text.
 \setcounter{topnumber}{4}
@@ -85,7 +89,7 @@
 
 \begin{frontmatter}
 
-\title{Bringing SQL Row Pattern Matching \texttt{MATCH\_RECOGNIZE} Operator to
+\title{Bringing the SQL Row Pattern Recognition \texttt{MATCH\_RECOGNIZE} Operator to
   Pandas DataFrames}
 
 %% ORCID iDs from the LNCS version:
@@ -114,18 +118,25 @@
   country={Egypt}}
 
 \begin{abstract}
-The SQL standard introduced the \texttt{MATCH\_RECOGNIZE} operator in 2016 to support row pattern recognition, enabling the detection of ordered sequences of rows in a table that match a user-defined pattern. This capability is useful in diverse domains—for example, a financial institution may detect a sequence of small deposits followed by rapid transfers and large withdrawals, a known indicator of potential money laundering, or climate analysts may identify heatwaves as three or more consecutive days with maximum temperatures exceeding 40°C.
-\texttt{MATCH\_RECOGNIZE} is now supported by several leading database systems, such as Oracle, Snowflake, and Flink. In this paper, we present a prototype that brings this functionality to Pandas DataFrames, a widely used in-memory data structure in the Python data science ecosystem. Our prototype parses SQL-based pattern queries that execute
-\texttt{MATCH\_RECOGNIZE()} queries directly from an SQL string on a \texttt{pandas} DataFrame. The system supports SQL:2016 row pattern recognition (RPR) semantics, including \texttt{PARTITION BY}, \texttt{ORDER BY}, \texttt{PATTERN}, \texttt{DEFINE}, and \texttt{MEASURES} for offline analytics in Python. It constructs an abstract syntax tree (AST), compiles patterns into non-deterministic finite automata (NFA), and executes them efficiently over DataFrames. We evaluate the engine against Trino~473 and Oracle~21c EE on the Amazon UK
-Products dataset, running five pattern families over six sizes up to 2,222,742
-rows. The three systems return identical results in all 30 pattern--size cells,
-and the engine averages 0.17 seconds per cell against 1.04 for Oracle and 1.98
-for Trino. A scalability test on the Amazon Reviews 2023 corpus extends the
-input to 227,899,533 rows, which the engine completes on every pattern family.
-The declarative form also reduces code size compared to native Pandas
-implementations, extending the convenience of SQL pattern matching to Python
-users while preserving correctness equivalent to that of established SQL
-engines.
+SQL:2016 introduced \texttt{MATCH\_RECOGNIZE} to find user-defined patterns
+in ordered table rows. In Pandas, the same task usually needs loops or a
+combination of grouping, shifts, and Boolean masks. We present an engine that
+takes an SQL query and a Pandas DataFrame and returns a result DataFrame in
+the same Python process. It supports a tested subset of row pattern
+recognition in the \texttt{FROM} clause, including partitioning, ordering,
+pattern definitions, measures, and match-control modes. The engine parses the
+query, compiles the pattern into finite automata, and uses vectorized
+operations when the query allows them. Other supported cases use general
+evaluation or exact search with explicit limits. We compare the engine with
+Trino~473 and Oracle~21c EE on five pattern families and six sizes of the
+Amazon UK Products dataset, up to 2,222,742 rows. All 30 pattern--size combinations return
+identical normalized results across the three systems. Mean execution time
+per combination is 0.17 seconds for the proposed engine, 1.04 for Oracle, and
+1.98 for Trino. A separate Amazon Reviews 2023 study reaches 227,899,533 rows,
+and the engine completes all 35 combinations. These results support SQL row
+pattern analysis within Pandas under the tested single-core, single-partition
+conditions. Exact search can still be costly, and the input and output must
+fit in memory.
 \end{abstract}
 
 \begin{keyword}
@@ -135,193 +146,114 @@ Pattern Matching \sep MATCH\_RECOGNIZE \sep Pandas \sep SQL \sep Finite Automata
 \end{frontmatter}
 
 \section{Introduction}
-Pattern matching is the process of analyzing a sequence of data points, which can be rows in a table or events in a stream. Pattern matching plays a crucial role in data analysis, especially for identifying patterns and shapes or specific sequences of events or behaviors in areas like identifying chains of transactions related to money laundering in finance\cite{10.5120/ijca2022922446}, revealing fraudulent behaviours of users in security logs\cite{zemke2007pattern}. Patterns in data can be described using regular-expression-like syntax, like those commonly used in textual analysis. However, unlike traditional text-based regular expressions, these patterns are applied at the row level, enabling analysts to match and extract meaningful sequences across entire records rather than individual characters.
+Row pattern recognition searches an ordered sequence of table rows or stream
+events for relationships that span several rows. It can identify trends,
+repeated events, and shapes such as a fall followed by a recovery. Applications
+include transaction chains related to money
+laundering~\cite{10.5120/ijca2022922446} and suspicious user behavior in security
+logs~\cite{zemke2007pattern}. Patterns use syntax similar to regular expressions,
+but they match rows rather than individual characters.
 
-The \texttt{MATCH\_RECOGNIZE} (MR) clause was introduced in the SQL:2016 standard \cite{iso2016,ISO2021}, enabling users to define and search for patterns within ordered sequences of rows directly in SQL queries.
-The {MATCH\_RECOGNIZE} SQL clause enables advanced pattern-based querying over data tables. Although it was standardized in SQL:2016 \cite{iso2016,ISO2021}, a few DBMS support it. For example, among well-known traditional RDBMSs, only Oracle\cite{oracle2022,book} supports the MR operator. In the big data analytics systems, Trino~\cite {trino2022,trino2021row}, Snowflake~\cite{snowflake2025match_recognize}, and Apache Flink~\cite{flink} support the MR operator.
-Cloud warehouses have since followed: BigQuery documents the
-clause~\cite{bigquery2025matchrecognize}, and Databricks introduced beta
-support in Runtime~19.0~\cite{databricks2026matchrecognize}. By contrast,
-PostgreSQL~18 still lists the related SQL features as
-unsupported~\cite{postgresql18unsupported}, while DuckDB lists native
-\texttt{MATCH\_RECOGNIZE} as planned work~\cite{duckdb2026roadmap}. 
+The \texttt{MATCH\_RECOGNIZE} (MR) clause was introduced in
+SQL:2016~\cite{iso2016,ISO2021}. It lets users describe a row pattern, the
+conditions that define its variables, and the values to return from each match.
+Implementations discussed in this paper include Oracle~21c~\cite{oracle2022,book},
+Trino~473~\cite{trino2022,trino2021row},
+Snowflake~\cite{snowflake2025match_recognize}, and Apache
+Flink~\cite{flink}. These systems support different processing environments and
+sets of features, as reviewed in Section~2.
 
-% and it was supported in several modern databases like Trino  and Oracle , this feature is missing from the Python data science landscape. In this paper, we address this gap by bringing \texttt{MATCH\_RECOGNIZE} support to Pandas.
+Pandas is widely used for data analysis in Python~\cite{McKinney2010}.
+The Pandas API used in this work does not provide a native
+\texttt{MATCH\_RECOGNIZE} operator~\cite{pandas233api}.
+Users can combine operations such as \texttt{groupby}, \texttt{shift}, and
+Boolean masks to detect simple patterns. More complex patterns require code
+that handles row positions, repetitions, earlier matched rows, and where the
+next search starts. For example, finding three consecutive purchases with
+decreasing prices in each customer's history requires both price comparisons
+and control of overlapping matches. Extending this code to longer or optional
+sequences can be difficult.
 
-Without the support for the declarative MR clause, tasks requiring detecting multi-row patterns often require complicated combinations of SQL window functions, self-joins, or even procedural extensions and user-defined functions to loop through rows and maybe add some external programming outside the database~\cite{findling2025bringing}. As soon as the pattern grew beyond two or three steps, the SQL statement expanded into multiple lines full of row-number calculations, timestamp comparisons, and complex JOIN conditions. Not only is the code hard to write and even harder to maintain, but each extra join or analytic window often means an extra table scan, leading to poor performance. In practice, many teams either accepted these limitations or abandoned SQL for external scripts and ETL pipelines just to get reliable pattern matching SQL expanded into multiple lines~\cite{cao2012optimizationanalyticwindowfunctions}.
+The available SQL implementations are useful when data is already stored in a
+database or when distributed or stream processing is needed. A Pandas user,
+however, may already have the data in a notebook or script. DuckDB reduces
+setup because it runs in the same process, but the cited row-pattern approach
+translates the query and executes it inside
+DuckDB~\cite{lambrecht2025democratize}. The gap addressed here is direct,
+declarative row pattern recognition within Pandas DataFrame processing,
+without requiring the user to write a procedural matching loop or move the
+data to a separate query service.
 
-With the introduction of MATCH\_RECOGNIZE in the SQL:2016 standard, rather than a multitude of lines of code and using window functions and self-joins, Instead, a single declarative MATCH\_RECOGNIZE statement that clearly defines the data partitions, ordering, pattern, and output measures. Simplifying both the syntax and readability of pattern-matching queries, MATCH\_RECOGNIZE clause enables users to organize their data into logical groups using \texttt{PARTITION BY}, specify the sequence of row analysis using  \texttt{ORDER BY}, and define the actual pattern using the \texttt{PATTERN} section, which uses regular expression-like syntax. Logical conditions that define each pattern element are clearly stated in the \texttt{DEFINE} clause, while the \texttt{MEASURES} clause determines what information is extracted from each detected match. This structure allows complex sequence patterns to be described clearly and concisely. It ensures that detecting, classifying, and summarizing sequences can be performed efficiently and consistently within standard SQL queries, such as trends, repeated behaviors, or sudden changes, directly within standard SQL queries \cite{michels2018new}.
-
-%the following has nothing new complexity-wise. It does not matter if this is Pandas or any other other DBMS that provides its own programming language.
-
-% we need instead to motivate that PANDAS is a powerful libarary for (multi-dimensional ) tabular data processing for several data analytics projects. Despite its powwer, it provides its own DSL (imperative language) to compute data transformations. 
-
-% The contribution, in this paper, we bring the power of row pattern matching using Match_recognize on top of PANDAS. this should boost the performance of data analysts and ML engineerings by declaratively and succinctly defining their patterns and using the reulsts for further analysis of engineering features for their ML models.
-
-Before introducing the MATCH\_RECOGNIZE method in Pandas, detecting multi-row patterns such as consecutive upward trends, cyclical oscillations, or conditional event sequences required manual integration of multiple low-level operations. A typical workflow involved creating multiple shifted versions of each column (df['value'].shift(-1), shift(-2), etc.), building complex boolean masks, filtering or using groupby().apply() to stitch subsequences back together, and then pivoting or renaming columns to get the desired output. This approach was verbose (often 10+ lines for modest patterns), prone to off-by-one or alignment bugs, and hard to extend to longer or conditional patterns.
-
-For example, an e-commerce platform that tracks all customer purchases: the marketing team wants to find customers who are decreasing their spending money by buying progressively cheaper items in three consecutive purchases, by detecting three consecutive purchases using pandas functions for pattern (A B C) (Listing~\ref{lst:UDF-match-recognize}).
-\begin{lstlisting}[basicstyle=\ttfamily\footnotesize,language=Python,
-                   caption={Apply \texttt{MATCH\_RECOGNIZE} using pandas functions},
-                   label={lst:UDF-match-recognize},
-                   frame=single]
-import pandas as pd
-df['order_date'] = pd.to_datetime(df['order_date'])
-# Sort for partition
-df = df.sort_values(['customer_id', 'order_date']).reset_index(drop=True)
-def match_pattern_ABC(group: pd.DataFrame):
-    """Find matches where B.price < A.price and C.price < B.price."""
-    matches = []
-    n = len(group)
-    for i in range(n - 2):  # need at least 3 rows for A,B,C
-        A = group.iloc[i]
-        B = group.iloc[i + 1]
-        C = group.iloc[i + 2]
-
-        if (B['price'] < A['price']) and (C['price'] < B['price']):
-            matches.append({
-                'customer_id': A['customer_id'],
-                'start_date': A['order_date'],
-                'end_date': C['order_date'],
-                'bottom_price': C['price']
-            })
-    return matches
-# Apply per partition
-all_matches = []
-for cust_id, grp in df.groupby('customer_id'):
-    all_matches.extend(match_pattern_ABC(grp))
-
-result_df = pd.DataFrame(all_matches)
-print(result_df)
-\end{lstlisting}
-
-
-
-
-These systems leave a deployment and workflow gap. Each fits when the data
-already lives in its environment or needs distributed or stream processing, but
-none is the direct execution path for a Pandas DataFrame already held in a
-notebook or script. DuckDB reduces the setup cost because it runs in-process,
-yet its row-pattern support relies on translating the query and executing it
-inside DuckDB~\cite{lambrecht2025democratize}. What is missing is a
-Pandas-native interface that keeps the declarative SQL structure without a
-second engine or a transpilation step.
-
-This paper addresses that gap with an in-process engine that executes
-\texttt{MATCH\_RECOGNIZE} queries directly on Pandas DataFrames: it takes an SQL
-query and a DataFrame and returns the matches as a DataFrame, with no database
-server and no data transfer.
-
-For example, an e-commerce platform that tracks all customer purchases, the marketing team wants to
-find customers who are decreasing their spending money by buying progressively cheaper items in three
-consecutive purchases, by detecting three consecutive purchases using MATCH\_RECOGNIZE for the pattern (A B C) (Listing~\ref{lst:basic-match-recognize}).
-\begin{lstlisting}[language=Python,
-                   caption={Using \texttt{MATCH\_RECOGNIZE}},
-                   label={lst:basic-match-recognize},
-                   frame=single]
-import pandas as pd
-from src.executor.match_recognize import match_recognize
-df['order_date'] = pd.to_datetime(df['order_date'])
-# Define the MATCH_RECOGNIZE query
-query = """
-SELECT customer_id, start_date, end_date, bottom_price
-FROM orders
-MATCH_RECOGNIZE (
-  PARTITION BY customer_id
-  ORDER BY order_date
-  MEASURES
-    A.order_date AS start_date,
-    C.order_date AS end_date,
-    C.price      AS bottom_price
-  PATTERN (A B C)
-  DEFINE
-    B AS B.price < A.price,
-    C AS C.price < B.price
-);
-"""
-# Execute and print results
-output_df = match_recognize(query, df)
-print(output_df)
-\end{lstlisting}
-
-
-After integrating MATCH\_RECOGNIZE into Pandas, the complex operations that were applied before were eliminated. In a single statement, it is possible to define partitioning column(s), ordering key, pattern grammar (e.g., "A B C"), logical definitions for each step, and the summary or detail measures that will be returned. The method returns a clean, annotated DataFrame of full matches. Additionally, it is simple to expand to more intricate patterns, varying lengths, or conditional patterns; simply update the pattern string or definitions to align with specifications. Using the same declarative SQL syntax can be effectively utilized for multiple analytical use cases \cite{petkovic2022rpr}.
+This paper presents an in-process engine that accepts an SQL
+\texttt{MATCH\_RECOGNIZE} query and a Pandas DataFrame and returns a result
+DataFrame. The SQL statement brings the pattern, conditions, ordering, and
+output measures together, while the result remains available for further
+Pandas analysis. The procedural and SQL versions of the consecutive-price
+example are given in Appendix~\ref{Step-by-Step}.
 
 The main contributions of this paper are as follows:
 \begin{itemize}
   \item \textbf{SQL-based row pattern recognition for Pandas.} An in-process
-    engine that executes an R010-style subset of SQL:2016
-    \texttt{MATCH\_RECOGNIZE} (row pattern recognition in the \texttt{FROM}
-    clause) directly on DataFrames, covering the main clauses, output and skip
-    modes, navigation functions, aggregates, and pattern constructs from
-    quantifiers and alternation to anchors, exclusions, and \texttt{PERMUTE}.
-  \item \textbf{Automata-based execution.} Each pattern is compiled once into
-    a finite automaton and executed over ordered DataFrame partitions, with
-    explicit guards that reject a pattern whose automaton would exceed a fixed
-    budget instead of running it partially.
-  \item \textbf{Performance optimization.} A guarded optimization layer of
-    vectorized predicates, compiled measures, fused output construction, and
-    bounded caching, in which a faster path is used only when it provably
-    returns the same answer as the general path.
+    engine executes an R010-style subset of SQL:2016
+    \texttt{MATCH\_RECOGNIZE}, which specifies row patterns in the
+    \texttt{FROM} clause, directly on DataFrames. It supports the main
+    clauses, pattern constructs, navigation functions, aggregates, and output
+    and skip modes described in this paper.
+  \item \textbf{Automata-based execution.} Patterns are compiled into finite
+    automata and evaluated over ordered DataFrame partitions. The execution
+    model also handles conditions that depend on earlier rows in a match.
+  \item \textbf{Performance optimization.} The engine combines vectorized
+    predicate evaluation, compiled measures, efficient result construction,
+    and bounded caching. Each optimization is used only for supported cases,
+    and differential tests compare optimized and general evaluation.
   \item \textbf{Correctness, performance, and scalability evaluation.} A
-    cross-system study against Trino~473 and Oracle~21c EE on real data, in
-    which all 30 pattern--size cells agree and the engine records the lowest
-    time, together with a scalability test up to 227.9 million rows.
+    cross-system study compares the engine with Trino~473 and Oracle~21c EE.
+    All systems return the same results in the 30 pattern--size cells of the
+    main benchmark, and the proposed engine has the lowest execution time in
+    each cell. A separate scalability test covers up to 227.9 million rows.
 \end{itemize}
 
 \section{Background and Related Work}
 
-This section first examines how ordered data and sequential patterns are
-handled in Pandas, the target environment of this work, and then reviews the
-systems that implement \texttt{MATCH\_RECOGNIZE} and the approaches proposed to
-optimize it.
+This section describes how Pandas handles ordered data and row patterns. It
+then reviews existing \texttt{MATCH\_RECOGNIZE} implementations and approaches
+to optimizing them.
 
 \subsection{Row Pattern Recognition in Pandas}
 
-Pandas is a popular, open-source Python library for data analysis and
-manipulation~\cite{McKinney2010}. Its straightforward installation process and
-strong community support make it a good choice for students, researchers, and
-professionals who frequently need to analyze data without using complicated
-systems like Oracle, Trino, or Snowflake. Pandas is highly popular due to ease
-of setup and use, absence of licensing fees, and smooth integration within the
-larger Python libraries.
+Pandas is an open-source Python library for data analysis and
+manipulation~\cite{McKinney2010}. Its DataFrame interface supports tabular
+processing and works with other Python libraries. It is the target environment
+of this work.
 
 Ordered data is handled by sorting a DataFrame with \texttt{sort\_values} and
 splitting it into independent groups with \texttt{groupby}, so that each
 customer, sensor, or account is processed in time order. Within each group,
-pattern detection is assembled from low-level operations: \texttt{shift} aligns
-a row with its neighbours, \texttt{diff} measures the change between consecutive
+pattern detection uses several operations: \texttt{shift} aligns
+a row with its neighbors, \texttt{diff} measures the change between consecutive
 rows, \texttt{rolling} computes windowed statistics, and Boolean masks combine
-these into conditions. For everyday tasks, Pandas offers straightforward methods
-for managing data sequences, filtering, grouping, and performing basic
-time-series analyses.
+these into conditions. These methods support filtering, grouping, and basic
+time-series analysis, but Pandas has no native row-pattern operator. Users must
+write the matching logic themselves or send the data to another engine. Custom
+code becomes harder to manage when patterns grow, require overlap control, or
+refer to rows already assigned to the current match.
 
-However, it has difficulty with advanced pattern detection in contrast to SQL's
-\texttt{MATCH\_RECOGNIZE} clause. Pandas lacks a straightforward way to express
-complex patterns; users must create their own solutions using functions like
-\texttt{rolling}, \texttt{groupby}, or \texttt{shift}. These custom approaches
-can become complicated and error-prone, especially as patterns lengthen, need
-overlap control, or refer to rows that are already part of a match.
-
-The Pandas API has no native row-pattern primitive, so such logic must be
-assembled by hand or sent to another engine. A declarative pattern interface
-inside Pandas would keep the data in memory while letting the analyst state what
-to find rather than how to find it. Additionally, for datasets that fit
-comfortably in memory, tools like Pandas offer a faster and more direct
-alternative, eliminating the latency of disk-based operations common to larger
-database engines~\cite{Evaluation,in-memory_processing}. This makes Pandas the
-target environment of this work.
+A declarative pattern interface inside Pandas would let the analyst describe
+the pattern while keeping the data in memory. In-process execution also avoids a
+separate database deployment and client transfer for data already held in a
+DataFrame. Its performance relative to a database still depends on the workload
+and storage configuration.
 
 \subsection{Existing MATCH\_RECOGNIZE Implementations}
 
-Several SQL engines implement \texttt{MATCH\_RECOGNIZE} natively, while others
-are still considering it, such as PostgreSQL~\cite{howe2020matchrecognize} and
-MariaDB~\cite{mariadb2025regex}. Systems without native support must emulate
-row-pattern matching using a combination of window functions, user-defined
-aggregates, or external procedural layers—approaches that are often more
-complex, less efficient, and harder to maintain~\cite{TURP2,TURP}. This
-subsection first summarises the operator and its main clauses, then reviews the
-main implementations and optimization approaches, and closes with a comparison.
+Several SQL engines implement \texttt{MATCH\_RECOGNIZE} natively. Systems
+without native support can express row-pattern matching through window
+functions, user-defined aggregates, or procedural
+code~\cite{findling2025bringing,lambrecht2025democratize}. These alternatives
+can require more code and can be harder to maintain. Their performance depends
+on the query and execution plan. This subsection summarizes the operator and its
+main clauses, reviews the implementations and optimization approaches, and
+compares their scope.
 
 \paragraph{SQL MATCH\_RECOGNIZE}
 The SQL standard distinguishes three optional row-pattern features: R010 (row
@@ -339,104 +271,156 @@ MATCH_RECOGNIZE
   [ MEASURES <expressions to define output values> ]
   [ ONE ROW PER MATCH | ALL ROWS PER MATCH ]
   [ AFTER MATCH <skip to option> ]
-  [ PATTERN ( pattern_expression ) ]
+  PATTERN ( pattern_expression )
   [ SUBSET <combine multiple variables into one> ]
-  DEFINE <rules for each pattern variable>
+  [ DEFINE <rules for pattern variables> ]
 );
 \end{lstlisting}
 
-Row pattern recognition in SQL, as standardized in SQL:2016, detects patterns in sequential data through the 
-\texttt{MATCH\_RECOGNIZE} clause. The foundational architecture establishes independent pattern matching scopes via \texttt{PARTITION BY} clauses and defines temporal ordering through \texttt{ORDER BY} specifications within each partition. Pattern definitions utilize regular expression-inspired syntax (e.g., A B+ C?) to express complex event sequences, incorporating fundamental operations such as concatenation, alternation, and quantified repetition through standard quantifiers (\texttt{*}, \texttt{+}, \texttt{?}, \texttt{\{i,j\}}). The \texttt{DEFINE} clause establishes boolean predicates for pattern variables, enabling the incorporation of navigation functions (\texttt{FIRST}, \texttt{LAST}, \texttt{PREV}, \texttt{NEXT}) that facilitate temporal and positional analysis of data relationships with appropriate boundary condition handling. The \texttt{MEASURES} clause enables the extraction of computed values from successful pattern matches, supporting standard functions including \texttt{CLASSIFIER()} for pattern variable identification and \texttt{MATCH\_NUMBER()} for match sequence enumeration, with dual semantic evaluation modes: \texttt{RUNNING} for incremental computation and \texttt{FINAL} for complete match evaluation. \texttt{SUBSET} variables provide pattern abstraction capabilities through hierarchical variable grouping mechanisms.
-Pattern anchors (\texttt{\^{}}, \texttt{\$}), exclusion blocks
-(\texttt{\{-~\ldots~-\}}), and \texttt{PERMUTE} extend the pattern language
-further, and a variable used in \texttt{PATTERN} without a \texttt{DEFINE}
-predicate is treated as implicitly true. Match control policies, implemented via \texttt{AFTER MATCH SKIP} directives, govern result cardinality and pattern overlap behavior while determining continuation strategies for subsequent pattern detection iterations, ensuring deterministic matching behavior in compliance with SQL:2016 specifications.
+The \texttt{PARTITION BY} clause divides the rows into independent groups, and
+\texttt{ORDER BY} sets their order within each group. Patterns use syntax
+similar to regular expressions, such as \texttt{A B+ C?}. The main operations
+are concatenation, alternation, and repetition, with quantifiers such as
+\texttt{*}, \texttt{+}, \texttt{?}, and \texttt{\{i,j\}}.
+
+The \texttt{DEFINE} clause gives each pattern variable a Boolean condition.
+Navigation functions such as \texttt{FIRST}, \texttt{LAST}, \texttt{PREV}, and
+\texttt{NEXT} allow conditions to refer to other rows, with defined behavior at
+the boundaries. The \texttt{MEASURES} clause specifies the output values for
+each match. It can use \texttt{CLASSIFIER()} to identify the variable assigned
+to a row and \texttt{MATCH\_NUMBER()} to number the matches. Measures can use
+\texttt{RUNNING} values, computed up to the current row, or \texttt{FINAL}
+values, computed over the complete match. A \texttt{SUBSET} alias combines
+primary pattern variables into a union variable.
+
+Other pattern constructs include anchors (\texttt{\^{}}, \texttt{\$}),
+exclusion blocks (\texttt{\{-~\ldots~-\}}), and \texttt{PERMUTE}. A variable
+used in \texttt{PATTERN} without a \texttt{DEFINE} condition has an implicit
+true condition. The \texttt{AFTER MATCH SKIP} clause sets where the next search
+starts and therefore controls whether matches can overlap. Pattern preferences
+determine which match is selected when several matches are possible in the
+supported subset.
 
 \paragraph{Oracle}
 Oracle introduced SQL row-pattern recognition in Database~12c, and Oracle~21c
 is a main reference for relational \texttt{MATCH\_RECOGNIZE}
-semantics~\cite{oracle2022,book}. It provides a comprehensive and robust
-implementation of the clause, well-suited for complex, enterprise-scale
-analytics. Its documentation places \texttt{MATCH\_RECOGNIZE} in a table
-expression and does not document the window form, and its documented aggregate
-support is limited to \texttt{COUNT}, \texttt{SUM}, \texttt{AVG}, \texttt{MAX},
-and \texttt{MIN}. However, this power comes with high operational costs,
-including licensing fees, and a separate database deployment.
+semantics~\cite{oracle2022,book}. Its documentation places
+\texttt{MATCH\_RECOGNIZE} in a table expression and does not document the
+window form. Its documented aggregate support is limited to
+\texttt{COUNT}, \texttt{SUM}, \texttt{AVG}, \texttt{MAX},
+and \texttt{MIN}. Oracle uses a proprietary license and requires a separate
+database deployment.
 
 \paragraph{Trino}
 Trino is an open-source distributed query engine designed for parallel,
 federated query execution across large data sources~\cite{trino2022,trino2021row}.
 It supports \texttt{MATCH\_RECOGNIZE} with a syntax close to the SQL:2016
-standard, documents row pattern recognition both in the \texttt{FROM} clause and
-in window structures, and performs well in distributed data environments. It is
-more accessible than Oracle in terms of deployment and cost, but it remains a
-query server that requires considerable infrastructure management rather than
-an in-process library.
+standard. It documents row pattern recognition both in the \texttt{FROM} clause
+and in window structures~\cite{TrinoDocumentation}. It uses a query server or cluster that must be deployed
+and managed separately from the Python process.
 
 \paragraph{Snowflake}
-Snowflake is a cloud-native, managed data platform that provides a
-user-friendly \texttt{MATCH\_RECOGNIZE} feature with rich \texttt{DEFINE} and
+Snowflake is a managed cloud data platform that supports
+\texttt{MATCH\_RECOGNIZE}, including \texttt{DEFINE} conditions and
 \texttt{MEASURES} expressions~\cite{snowflake2025match_recognize}. Its engine
 uses backtracking, so some pattern and data combinations can take a long time to
 execute, and Snowflake therefore recommends selective conditions and bounded
 quantifiers. Some row-pattern functions are restricted to particular clauses,
-and computational costs relate to the size of the warehouse.
+and execution costs depend on the warehouse size.
 
 \paragraph{Apache Flink}
-Apache Flink is designed for real-time stream processing, allowing rapid
-detection of event patterns in continuous data flows. It exposes
-\texttt{MATCH\_RECOGNIZE} through Flink SQL, backed by its Complex Event
-Processing (CEP) library~\cite{flink}, but its documented implementation is a
-streaming subset that lists pattern groups, \texttt{PERMUTE}, anchors,
+Apache Flink is designed for stream processing and event-pattern detection in
+continuous data. It provides \texttt{MATCH\_RECOGNIZE} through Flink SQL,
+backed by its Complex Event Processing (CEP) library~\cite{flink}. Its
+version~1.20 documentation describes a streaming subset that lists pattern
+groups, \texttt{PERMUTE}, anchors,
 exclusions, \texttt{ALL ROWS PER MATCH}, and \texttt{SUBSET} among the
-unsupported features. While Flink is highly scalable and effective for
-high-velocity data, it introduces its own learning curve and assumes a streaming
-runtime rather than a batch-oriented DataFrame
-workflow~\cite{vsprem2024building,georgiou2025streaming}.
+unsupported features. It requires a separate processing runtime, which differs
+from working directly with a DataFrame in a Python script.
 
 \paragraph{DuckDB}
-DuckDB is an in-process analytical database whose Python API can query a Pandas
-DataFrame directly from SQL, but it does not yet implement
-\texttt{MATCH\_RECOGNIZE}; its roadmap lists the clause as planned
-work~\cite{duckdb2026roadmap}. The database group at the University of
-T\"ubingen instead translates row-pattern queries into recursive common table
-expressions (CTEs) that DuckDB already
-executes~\cite{lambrecht2025democratize,findling2025bringing}. This approach
+Research on DuckDB, an in-process analytical database, translates row-pattern
+queries into recursive common table expressions (CTEs) that the database can
+execute~\cite{lambrecht2025democratize,findling2025bringing}. This approach
 expresses pattern variables, ordering, skip behavior, and measures without
 adding a native operator, but it still requires translation and execution
 through a second engine.
+The DuckDB roadmap still lists native \texttt{MATCH\_RECOGNIZE} as planned
+work in October~2026~\cite{duckdb2026roadmap}.
 
 \paragraph{Existing optimization approaches}
-Optimization work on row patterns shares one broad goal: reduce unnecessary work
-before or during the automaton scan without changing the query result. Zhu et
+Work on row-pattern optimization aims to reduce unnecessary work before or
+during the automaton scan without changing the query result. Zhu et
 al.~\cite{10.14778/3579075.3579090} find pattern variables whose conditions can
 be checked independently, use relational joins to remove rows that cannot take
 part in a match, and then run the automaton matcher on the smaller input, with
-cost estimates guiding the choice. This work addresses a different setting: it
-compiles conditions and match plans for in-memory arrays and falls back to the
-general execution path when an optimization does not apply.
+cost estimates guiding the choice. Our engine compiles conditions and match
+plans for in-memory arrays. It uses the general execution path when an
+optimization does not apply.
 
 \paragraph{Comparison}
-In terms of documented scope and deployment, Oracle and Snowflake support \texttt{FROM}-clause row patterns and Trino supports both the \texttt{FROM} and window forms; Oracle is proprietary and runs on premises or in the cloud, Snowflake is a proprietary cloud service, and Trino is an Apache~2.0 server or cluster. BigQuery documents the clause and Databricks offers it in beta (Runtime~19.0), both as proprietary cloud services. Apache Flink (Apache~2.0) supports a streaming SQL subset over its complex-event-processing engine on a streaming cluster, while DuckDB (MIT, in-process) has no native clause and relies on an external research transpiler. The proposed engine runs in-process in Python under the MIT license and covers the evaluated R010-style subset. A major limitation shared by all these platforms is the complexity of integrating SQL-based pattern matching with machine learning workflows and other analytics tools~\cite{ML_Workflow,Makrynioti2019sql4mlAD}. Typically, data must be exported from the database to external environments for ML modeling, resulting in data duplication, consistency challenges, and more complicated data pipelines \cite{naphade2025evolution}. Keeping track of multiple versions of the same dataset across systems also increases the risk of errors and inefficiency. For many users especially those with modest analytics needs or who work independently, installing and managing large-scale systems like Oracle, Trino, Snowflake, or Flink can be overly complicated for some users. These users may only need to perform occasional pattern detection and would prefer to avoid the overhead of learning different functions or dealing with varying syntax for similar queries across platforms \cite{8509400}.
-Although Oracle, Trino, Snowflake, and Flink each have unique strengths for SQL pattern matching in large-scale or real-time scenarios, they introduce extra costs, infrastructure requirements, and integration issues that can be prohibitive for everyday users. These limitations highlight the value of Pandas, as it offers simpler, memory-based tools and unified workflows, where pattern matching and data analytics can be performed seamlessly and without unnecessary duplication or complexity.
+Table~\ref{tab:engine_comparison} summarizes the documented scope and
+deployment of these systems. It follows the comparison in the thesis, with
+the cited documentation checked on 22 October 2026. Oracle~21c, Trino~473,
+and Flink~1.20 refer to specific documented versions. The table compares scope
+and deployment; the systems do not all provide the same SQL semantics.
+
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{Documented row-pattern scope and deployment of the reviewed systems.}
+\label{tab:engine_comparison}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.22\textwidth}
+  >{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{0.24\textwidth}@{}}
+\toprule
+\textbf{System} & \textbf{Documented scope} & \textbf{Deployment} \\
+\midrule
+Oracle 21c~\cite{oracle2022} & \texttt{FROM}-clause row patterns;
+documented restrictions on aggregates and subqueries. & Database server,
+on premises or in the cloud. \\
+Trino 473~\cite{trino2022,TrinoDocumentation} & Row patterns in
+\texttt{FROM} clauses and window structures. & Distributed SQL server
+or cluster. \\
+Snowflake~\cite{snowflake2025match_recognize} & \texttt{FROM}-clause row
+patterns with backtracking and clause-specific restrictions. & Managed
+cloud warehouse. \\
+Apache Flink 1.20~\cite{flink} & Streaming SQL subset backed by CEP;
+several pattern constructs and output modes are unsupported. & Stream
+processing runtime or cluster. \\
+DuckDB research~\cite{lambrecht2025democratize,duckdb2026roadmap} &
+Translation into recursive SQL; native row-pattern support is listed as
+planned work. & In-process database with an external query translator. \\
+\midrule
+Proposed engine & Evaluated R010-style subset; supported clauses,
+constructs, and limits are listed in Section~5.3. & Direct execution on
+Pandas DataFrames in the Python process. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The proposed engine suits workflows that already hold data in Pandas. It
+avoids a separate query service while keeping SQL pattern definitions and
+DataFrame output in the same workflow. Distributed execution, storage
+management, and general SQL planning remain outside its scope.
 
 
+\FloatBarrier
 \section{System Design and Methodology}
 
 \subsection{System Architecture}
 
-Our \texttt{MATCH\_RECOGNIZE} implementation follows a modular, five-stage architecture specifically designed for SQL row pattern recognition. The engine executes SQL queries directly on \texttt{pandas} DataFrames~\cite{monierashraf2025rowmatch}, while preserving SQL:2016 semantics for the evaluated R010-style subset~\cite{iso2016,ISO2021,melton2017sqlrpr}. It takes two inputs, an SQL query and a Pandas DataFrame, and returns a result DataFrame. The pipeline consists of five phases: parsing, semantic validation, logical plan construction, pattern compilation, and execution (Fig.~\ref{fig:system-architecture}).
+Our \texttt{MATCH\_RECOGNIZE} implementation has five stages. The engine runs SQL queries directly on Pandas DataFrames~\cite{monierashraf2025rowmatch} and follows SQL:2016 semantics for the evaluated R010-style subset~\cite{iso2016,ISO2021,michels2018new}. It takes an SQL query and a Pandas DataFrame as input and returns a result DataFrame. The five stages are parsing, semantic validation, logical plan construction, pattern compilation, and execution (Fig.~\ref{fig:system-architecture}).
 
-Each stage hands one artifact to the next. Parsing turns the query text into an
-abstract syntax tree (AST); semantic validation checks that tree while it is
-built; logical-plan construction resolves it into an execution configuration;
-pattern compilation turns the pattern into an automaton; and execution applies
-that automaton to the DataFrame and assembles the result. The query text is
-therefore read only once, and only the last stage touches the input rows. The
-stages are design boundaries rather than five separate runtime objects—parsing
-and validation share one traversal, and the logical plan is a group of resolved
-attributes—but the separation keeps every error close to the clause that caused
-it, before any row is matched.
+Each stage passes its output to the next. Parsing converts the query text into
+an abstract syntax tree (AST). Semantic validation checks the tree while it is
+built, and logical plan construction turns it into an execution configuration.
+Pattern compilation builds an automaton. The execution stage then selects a
+matching plan, applies it to the DataFrame, and builds the result. The query
+text is parsed once, and only the execution stage reads the input rows. These
+stages describe the design; they are not five separate runtime objects.
+Parsing and validation share one traversal, and the logical plan is a group of
+resolved attributes. Query errors can therefore be reported with the relevant
+clause before matching starts.
 
 \begin{figure}[H]
 \centering
@@ -456,7 +440,7 @@ it, before any row is matched.
   \node[phase] (parse) {\textbf{1. Parsing}\\[-1pt]\footnotesize SQL text $\longrightarrow$ abstract syntax tree};
   \node[phase, below=of parse] (validate) {\textbf{2. Semantic validation}\\[-1pt]\footnotesize check supported clauses and references};
   \node[phase, below=of validate] (plan) {\textbf{3. Logical-plan construction}\\[-1pt]\footnotesize resolve the execution configuration};
-  \node[phase, below=of plan] (compile) {\textbf{4. Pattern compilation}\\[-1pt]\footnotesize pattern tokens $\longrightarrow$ NFA and complete DFA};
+  \node[phase, below=of plan] (compile) {\textbf{4. Pattern compilation}\\[-1pt]\footnotesize pattern tokens $\longrightarrow$ NFA and guarded DFA};
   \node[execute, below=of compile] (run) {\textbf{5. DataFrame execution}\\[-1pt]\footnotesize partition and order $\longrightarrow$ match\\[-1pt]\footnotesize evaluate measures $\longrightarrow$ assemble result};
   \node[input, left=0.45cm of parse] (sqlin) {\textbf{Input 1}\\SQL query};
   \node[input, left=0.45cm of run] (dfin) {\textbf{Input 2}\\Pandas DataFrame};
@@ -475,52 +459,71 @@ it, before any row is matched.
 
 \subsection{SQL Parsing and Logical Plan Construction}
 
-The process starts by analyzing the user's SQL query, identifying its logical components. This proceeds through a parsing process that explores the query, recognizes its main components such as grouping (\texttt{PARTITION BY}), ordering (\texttt{ORDER BY}), the pattern to be searched, and any specific conditions or output metrics, and then organizes these into an Abstract Syntax Tree (AST). The AST provides a clear and structured representation of the query. This approach eases query validation and prepares it for pattern matching in the following stages.
+The parser identifies the query clauses and stores them in an AST. This
+includes the outer \texttt{SELECT}/\texttt{FROM} clauses and the
+\texttt{MATCH\_RECOGNIZE} subclauses, such as partitioning
+(\texttt{PARTITION BY}), ordering (\texttt{ORDER BY}), the pattern,
+conditions, and measures~\cite{antlr_trino_sql,parr2013definitive}.
+Semantic validation checks pattern-variable references, supported expressions,
+skip policies, and output modes. Input column names are resolved against the
+DataFrame at execution time. These checks enforce the supported combinations
+before matching begins.
 
-In the parsing stage, the SQL query is transformed into an abstract syntax tree (AST) that captures both the \texttt{SELECT}/\texttt{FROM} clauses and \texttt{MATCH\_RECOGNIZE} subclauses~\cite{tarazona2021antlr,parr2013definitive}. Semantic validation then checks schema references, variable usage, predicates, skip policies, and output modes. Compliance rules are applied to ensure standard conformance, correct use of navigation functions, consistent measure semantics, and robust handling of edge cases such as empty matches, partition boundaries, and skip behaviors.
-
-Validation resolves every name against the pattern. Qualified references in
+Validation checks references to pattern variables. Qualified references in
 \texttt{DEFINE} and \texttt{MEASURES} are checked against the pattern variables
 and \texttt{SUBSET} aliases, so a condition on \texttt{Q.price} is rejected when
 \texttt{Q} does not appear in the pattern, while a variable without a
 \texttt{DEFINE} predicate is valid because its predicate is implicitly true.
-Function calls must use a supported form, and settings must work together: an
-exclusion block combined with \texttt{WITH UNMATCHED ROWS} is rejected because
-one removes rows that the other requires, and an \texttt{AFTER MATCH SKIP}
-target must name a pattern variable or subset. DataFrame column names are
-resolved later, when the configuration is applied to the input.
+Function calls must use a supported form, and clause settings must be
+compatible. For example, an exclusion block cannot be combined with
+\texttt{WITH UNMATCHED ROWS}, and an \texttt{AFTER MATCH SKIP} target must
+name a pattern variable or subset.
 
-The validated plan is resolved into a logical plan composed of modular operators for partitioning, sorting, matching, measuring, and skipping. In practice, the logical plan is an execution
-configuration of typed fields that represents each clause directly: the
+The validated AST is resolved into a logical plan for partitioning, sorting,
+matching, measuring, and skipping. This plan is an execution
+configuration of typed fields that stores each clause directly: the
 partition keys, the ordering keys with per-key direction and null placement, the
 normalized pattern text, the \texttt{DEFINE} mappings, the \texttt{SUBSET}
 aliases, the measures with their resolved \texttt{RUNNING} or \texttt{FINAL}
 semantics, the rows-per-match mode, and the skip mode with its target. Defaults
-are fixed at this point: an omitted null placement becomes \texttt{NULLS LAST},
-an explicit \texttt{RUNNING} or \texttt{FINAL} prefix wins, and
+are set at this point: an omitted null placement becomes \texttt{NULLS LAST},
+an explicit \texttt{RUNNING} or \texttt{FINAL} prefix takes priority, and
 \texttt{ONE ROW PER MATCH} uses final values. Later stages read this
 configuration instead of reparsing the SQL text.
 
 \subsection{Pattern Matching and Execution Model}
 
-Once the AST is completed, the system focuses on the pattern component described in the SQL query. This pattern is then converted into a finite automaton, which defines a set of states and transitions for detecting complex sequences or behaviors in the data. 
-This process begins by constructing a non-deterministic finite automaton (NFA) from the pattern and then, for improved efficiency, transforms it into a deterministic finite automaton (DFA) \cite{georgiou2025streaming}. The DFA  enhances the matching process by removing ambiguity in transitions, enabling the system to scan data sequences quickly and accurately. This compilation process enables the system to handle a wide variety of pattern features, such as repetitions, alternatives, and specific sequences, in a unified and efficient way. The resulting automaton acts as the core mechanism for scanning and detecting patterns within the data.
+The execution model combines the resolved query configuration, the compiled
+pattern, and the input DataFrame. Pattern compilation prepares a representation
+of the allowed row sequences and their matching preferences. The same compiled
+pattern can then be used across the query's partitions.
 
-The execution phase uses the constructed DFA to perform pattern matching directly over input data represented as Pandas DataFrames. The engine begins by partitioning and ordering the data according to the query’s specifications. It then applies the DFA to scan the dataset, identifying all sequences that fit the defined pattern. For every detected match, the engine computes any requested measures or calculations and compiles the results into a DataFrame formatted to mirror standard SQL query outputs. By utilizing Pandas, the system retains both flexibility and accessibility, smoothly incorporating advanced pattern matching into conventional Python data analysis workflows.
+The executor first divides the DataFrame by the \texttt{PARTITION BY} keys and
+orders each partition by the \texttt{ORDER BY} keys. Matching searches these
+ordered rows for sequences allowed by the pattern. The \texttt{DEFINE}
+predicates determine whether a candidate row can be assigned to a pattern
+variable, using the current row and, where required, the earlier assignments in
+the match. The skip policy determines where the next search begins after a
+match is found.
 
-Predicate evaluation happens per candidate row. Conditions that depend only on
-the current row can be prepared for a whole partition at once, while conditions
-that depend on the match built so far are evaluated as that match grows. Each
-completed match then passes to measure evaluation and result construction.
-
-Finally, execution is performed over ordered partitions using the compiled automaton. Matches are materialized with the correct \texttt{RUNNING}/\texttt{FINAL} semantics. The evaluation engine manages context separation, applies navigation functions (\texttt{FIRST}, \texttt{LAST}, \texttt{PREV}, \texttt{NEXT}) with partition awareness, and computes aggregates such as \texttt{COUNT}, \texttt{SUM}, and \texttt{AVG} across pattern variables. This preserves SQL:2016 semantics for the supported subset while producing results directly as \texttt{pandas} DataFrames.
+Completed matches pass to measure evaluation. Navigation functions and
+supported aggregates use the partition and match context, with the requested
+\texttt{RUNNING} or \texttt{FINAL} semantics. The rows-per-match mode determines
+which rows are returned. Result construction then combines the selected rows,
+partition keys, and measures into an output DataFrame. Section~4 explains the
+matching algorithms, execution paths, and optimizations used in these stages.
 
 \section{Implementation and Optimization}
 
 \subsection{ANTLR4 Grammar and AST Implementation}
 
-Our system reuses the community ANTLR4 grammar for the Trino SQL dialect, whose row-pattern rule already covers all eight \texttt{MATCH\_RECOGNIZE} sub-clauses, so no grammar changes were needed. This grammar was defined by ANTLR4, including complex patterns, nested patterns, alternation, quantifiers, grouping, and exclusions \cite{antlr_trino_sql}. The parser’s output is a detailed parse tree that captures the syntactic structure of each SQL query\cite{parr2013definitive},\cite{tarazona2021antlr}. ANTLR4 generates the lexer, parser, and traversal
-scaffolding directly from the rule in Listing~\ref{lst:grammar}.
+The system uses the community ANTLR4 grammar for the Trino SQL dialect. Its
+row-pattern rule covers all eight \texttt{MATCH\_RECOGNIZE} subclauses, so
+no grammar changes were needed. The grammar supports nested patterns,
+alternation, quantifiers, grouping, and exclusions~\cite{antlr_trino_sql}.
+The parser produces a parse tree that represents the query
+syntax~\cite{parr2013definitive,antlr_trino_sql}. ANTLR4 generates the lexer,
+parser, and traversal classes from the rule in Listing~\ref{lst:grammar}.
 
 \begin{lstlisting}[language={},basicstyle=\ttfamily\scriptsize,caption={The \texttt{patternRecognition} rule of the Trino ANTLR4 grammar (whitespace reflowed)},label={lst:grammar}]
 patternRecognition
@@ -543,27 +546,31 @@ patternRecognition
   ;
 \end{lstlisting}
 
-ANTLR4's parse tree is a concrete syntax tree that keeps every keyword and
-punctuation token. The engine converts it into a compact typed AST using the
-Visitor pattern: two visitors extend the generated base class, one for the outer
-query and one for the row-pattern clause, and each sub-clause is stored in a
-dataclass with named fields. Expression leaves remain textual by design;
-\texttt{DEFINE} predicates and \texttt{MEASURES} expressions are kept as strings
-and parsed later by the restricted evaluator.
+ANTLR4's parse tree keeps every keyword and punctuation token. The engine
+converts it into a compact typed AST using the
+Visitor pattern. Two visitors extend the generated base class: one handles
+the outer query and the other handles the row-pattern clause. Each subclause
+is stored in a dataclass with named fields. Expression leaves are kept as
+text. The restricted evaluator later parses the \texttt{DEFINE} predicates
+and \texttt{MEASURES} expressions.
 
-The core path targets one \texttt{MATCH\_RECOGNIZE} clause inside a top-level
+The main execution path supports one \texttt{MATCH\_RECOGNIZE} clause inside a top-level
 \texttt{SELECT}, with an optional outer \texttt{ORDER BY}. \texttt{DEFINE} is
 optional, ordering keys support per-key \texttt{ASC}/\texttt{DESC} direction and
 \texttt{NULLS FIRST}/\texttt{NULLS LAST}, and a key may also be an expression
 over the input columns. Conditional and subquery ordering keys, rewriting of
 \texttt{WITH} clauses, set operations, and general nested subqueries remain
-outside the supported path. Syntax errors go through a custom error listener
-instead of ANTLR's console default, and each error carries a line, column, and
-source snippet; semantic errors are raised by the validation pass before any
-automaton is built, so they still name the clause that caused them.
+outside the supported path. A custom error listener replaces ANTLR's default
+console messages. Each syntax error includes a line number, column number,
+and source snippet. The validation pass reports semantic errors with the
+relevant clause before automaton construction starts.
 
 \paragraph{Condition and Measure Evaluation}
-A dedicated evaluation subsystem parses SQL pattern conditions and measures into a small expression tree and evaluates it through an allowlist, so user expressions are never executed as Python code; it supports navigation functions and aggregations with SQL:2016 compliant NULL semantics for both running and final calculations.\\ The allowlist covers comparisons, Boolean and arithmetic
+The expression evaluator parses SQL pattern conditions and measures into a
+small expression tree. It evaluates only allowed operations, so user
+expressions are never executed as Python code. It supports navigation
+functions and aggregates with SQL NULL semantics for the supported running
+and final forms. The allowed operations include comparisons, Boolean and arithmetic
 operators, literals, \texttt{IN} lists, conditional expressions, qualified
 references such as \texttt{A.price}, navigation functions,
 \texttt{CLASSIFIER}, \texttt{MATCH\_NUMBER}, and the supported aggregates;
@@ -572,23 +579,30 @@ imports, assignments, and access to Python built-ins are never evaluated.
 \subsection{Finite Automata-Based Pattern Matching}
 
 \paragraph{Pattern Tokenization}
-Pattern expressions are tokenized using a recursive descent tokenization algorithm that supports anchors, grouping, quantifiers, and nested constructs. The tokenizer normalizes the quantifiers \texttt{*},
-\texttt{+}, \texttt{?}, and \texttt{\{i,j\}} into minimum and maximum counts
-together with a greedy or reluctant preference, where a trailing \texttt{?}
-makes a quantifier reluctant, so the builder handles every quantifier through
-one internal representation.
+Pattern expressions are split into tokens and parsed recursively. The parser
+supports anchors, grouping, quantifiers, and nested patterns. It represents
+the quantifiers \texttt{*},
+\texttt{+}, \texttt{?}, and \texttt{\{i,j\}} with minimum and maximum counts
+together with a greedy or reluctant preference. A trailing \texttt{?}
+makes a quantifier reluctant. This gives the builder one internal
+representation for all quantifiers.
 
 \paragraph{NFA Construction}
-We use Thompson’s construction algorithm to translate pattern tokens into a Non-deterministic Finite Automaton (NFA). Each state captures transitions, variable bindings, anchors, and metadata for advanced features. Quantifiers (\texttt{*}, \texttt{+}, \texttt{?}, \texttt{\{i,j\}}) are directly mapped to sub-automata, and each transition is guarded by the \texttt{DEFINE} predicate of its variable~\cite{salomaa1996nfa,georgiou2025streaming}. Fig.~\ref{fig:meth-nfa} shows a simplified NFA for
-\texttt{A+ B?}: state $q_1$ is reached after one or more \texttt{A} rows and is
-accepting because \texttt{B} is optional, an $\varepsilon$-transition leads to
-the connector state $r$, and consuming one \texttt{B} row reaches the second
-accepting state $q_2$. When several continuations are possible, transition
-metadata preserves their pattern order, so greedy quantifiers prefer a longer
-valid match, reluctant quantifiers a shorter one, and alternation follows
-declaration order. Grouping, alternation, anchors, and exclusions are built the
-same way; rows inside an exclusion block still take part in matching, and only
-their output is suppressed. \texttt{PERMUTE} over $m$ variables represents all
+We use Thompson's construction to convert pattern tokens into an NFA.
+The automaton stores transitions, variable bindings, anchors, and metadata
+for additional pattern features. Quantifiers (\texttt{*}, \texttt{+},
+\texttt{?}, \texttt{\{i,j\}}) are mapped to sub-automata. Each transition
+that consumes a row is guarded by the \texttt{DEFINE} predicate of its
+variable~\cite{Thompson1968,HopcroftUllman}. Fig.~\ref{fig:meth-nfa} shows a simplified NFA for
+\texttt{A+ B?}. State $q_1$ is reached after one or more \texttt{A} rows and is
+accepting because \texttt{B} is optional. An $\varepsilon$-transition leads
+to the connector state $r$. Consuming one \texttt{B} row then reaches the
+second accepting state $q_2$. When several continuations are possible, transition
+metadata preserves their pattern order. Greedy quantifiers prefer a longer
+valid match, reluctant quantifiers prefer a shorter one, and alternation follows
+declaration order. The builder also handles grouping, alternation, anchors,
+and exclusions. Rows inside an exclusion block still take part in matching,
+but are left out of the output. \texttt{PERMUTE} over $m$ variables represents all
 $m!$ orders.
 
 \begin{figure}[H]
@@ -633,195 +647,245 @@ $m!$ orders.
 \caption{Language-equivalent NFA for $A^{+}\,B?$. Double circles are accepting
   states; the dashed $\varepsilon$-transition consumes no row. After one or more
   \texttt{A} rows, $q_1$ accepts without \texttt{B}, while $q_2$ accepts after
-  one \texttt{B} row.}
+  one \texttt{B} row. Transition preferences are stored as metadata and are
+  omitted from this language-level diagram.}
 \label{fig:meth-nfa}
 \end{figure}
 
 \paragraph{DFA Construction and Optimization}
-The NFA is systematically converted into a Deterministic Finite Automaton (DFA) using subset construction, drastically reducing the number of active states during execution. After construction, unreachable states are removed and transitions are normalized; this reduction is deliberately conservative and does not perform full DFA minimization, which would also merge states that behave identically. The resulting DFA supports efficient row-by-row evaluation while preserving pattern semantics and priorities and custom conditions for accurate pattern semantics \cite{e104-d_3_381,10.1145/986537.986588,georgiou2025streaming}.
+The NFA is converted into a DFA using subset construction. After construction,
+unreachable states are removed and transitions are normalized; this is a
+conservative reduction rather than full DFA minimization. The engine keeps
+pattern metadata and evaluates predicates during matching. A DFA transition
+alone does not resolve every SQL preference or state-dependent condition
+\cite{HopcroftUllman}.
 
-\paragraph{Construction limits} Because subset construction is exponential in the worst
-case, the compiler is guarded. \texttt{PERMUTE} is rejected above eight
-variables or an estimated 50,000 branches, which are one decision, since
-$8! = 40{,}320$ stays below that ceiling while $9! = 362{,}880$ exceeds it. DFA
-construction is bounded by a ceiling of 50,000 states, which a memory-aware
-budget may lower on a constrained system, and by an iteration limit. Reaching
-any limit raises an explicit compilation error, so the engine never executes or
-caches a partial automaton; none of the evaluated patterns reached these limits.
+\paragraph{Construction limits} Subset construction has exponential worst-case
+cost, so the compiler uses explicit limits. \texttt{PERMUTE} is rejected
+above eight variables or an estimated 50,000 branches. Both limits reject
+nine variables: $8! = 40{,}320$ is below the branch limit, while
+$9! = 362{,}880$ exceeds it. DFA construction has a maximum of 50,000
+states and an iteration limit. The state limit may be lower when less
+memory is available. Reaching any limit raises a compilation error. The
+engine never executes or caches a partial automaton, and none of the
+evaluated patterns reached these limits.
 
 \subsection{Execution Engine and Performance Optimization}
 
 \paragraph{Execution engine}
-The matching engine applies the DFA sequentially over each partition of the DataFrame with specialized handling for anchors, skip modes, and edge cases. The executor coordinates the entire pattern matching process, integrating parsing, automata construction, match identification, and result formatting.
+The matching engine processes DataFrame partitions sequentially, selecting an
+eligible compiled plan or general evaluation, with specialized handling for
+anchors, skip modes, and edge cases. The executor coordinates parsing,
+automaton construction, matching, and result formatting.
 
 A match never crosses a partition boundary, so the DataFrame is first split on
 the \texttt{PARTITION BY} columns, or treated as one partition when there are
 none. The engine then checks whether each partition already follows the
-complete \texttt{ORDER BY} specification and sorts it otherwise, using a stable
-sort so that rows with equal keys keep their DataFrame order. Matching walks the
-ordered rows, tests the possible transitions at each position, and applies the
-pattern's preference; each completed match records its start, end, variable
-assignments, and excluded rows, which drive skip handling and measure
-evaluation.
+complete \texttt{ORDER BY} specification and sorts it if needed. A stable
+sort keeps rows with equal keys in their original DataFrame order. The matcher
+scans the ordered rows, tests the possible transitions at each position, and
+follows the pattern's preferences. Each completed match records its start,
+end, variable assignments, and excluded rows. These records are used for skip
+handling and measure evaluation.
 
-Some predicates depend on the tentative match, for example when accepting a row
-changes a running average used by a later condition. These cases use a
-preference-ordered depth-first search with backtracking. The search is
+Some predicates depend on the match built so far, for example when accepting a
+row changes a running average used by a later condition. When these dependencies
+require exact search, the engine uses preference-ordered depth-first search
+with backtracking. The search is
 iterative, so Python's recursion depth does not limit the match length, and a
-state budget and a search budget bound the explored states and steps; exhausting
-either raises an explicit error instead of returning a partial or different
-match.
+state budget and a search budget limit the explored states and steps.
+Reaching either limit raises an error instead of returning a partial or
+different match.
 
 After a match, the engine resumes according to the four
 \texttt{AFTER MATCH SKIP} modes: past the last row (the default), to the next
 row, or to the first or last row of a named variable. Empty matches always
 advance by one row, and a target that is absent from the match or points back
 to its start raises an error, which prevents a silent loop.
-\texttt{ONE ROW PER MATCH} emits one summary row per match, while
-\texttt{ALL ROWS PER MATCH} emits every visible matched row and supports
+\texttt{ONE ROW PER MATCH} returns one summary row per match, while
+\texttt{ALL ROWS PER MATCH} returns every visible matched row and supports
 \texttt{SHOW EMPTY MATCHES}, \texttt{OMIT EMPTY MATCHES}, and
 \texttt{WITH UNMATCHED ROWS}. Measures are compiled once for common navigation
-and aggregate forms; navigation uses bounds-checked lookups that return
-\texttt{NULL} out of range, and \texttt{MATCH\_NUMBER()} numbers matches within
-each partition. Eligible paths assemble the output columns directly before the
-result DataFrame is created.
+and aggregate forms. Navigation checks row bounds and returns \texttt{NULL}
+when a reference is out of range. \texttt{MATCH\_NUMBER()} numbers matches
+within each partition. Eligible paths build the output columns directly
+before creating the result DataFrame.
 
 \paragraph{Performance optimization}
-One rule governs the optimization layer: a faster path may never change the
-answer. Each technique is switched on only when the engine can prove that it
-applies, and the general path takes over otherwise; differential tests compare
-every eligible fast path with the general path on the same input and output
-mode. Before sorting a partition, the engine checks in $O(n)$ whether the rows
-already follow the requested \texttt{ORDER BY} sequence and skips the sort and
-its copy when they do. Predicates that depend only on the current row, literals,
-and fixed-offset \texttt{PREV}/\texttt{NEXT} are evaluated once per partition as
-vectorized column masks, so the matcher reads a Boolean array instead of calling
-the expression evaluator for every candidate row. When every variable has a
-mask, the DFA runs over compact decision tables, and linear patterns such as
-\texttt{A B\{2,4\} C+} use run-length arrays that skip complete runs. For
-eligible output modes, matching and result construction are fused, common
-measures are compiled into direct array plans, compiled automata are reused
-through a bounded least-recently-used (LRU) cache, and partitions are exposed
-through a lazy row view with conservative output projection. Separate budgets
-bound cache capacity, DFA construction, and exact search; exhausting one raises
-an explicit error rather than returning a partial result. A running aggregate in a \texttt{DEFINE} predicate, such as
-the running average above, receives an incremental plan that updates the
-aggregate as the matched prefix grows and rolls it back on backtracking, which
-removes the quadratic cost of recomputing it from the beginning. These choices
-lower temporary memory, but they do not make execution streaming: the engine
-retains the input and the result, and the budgets bound construction and search
-rather than total process memory.
+The engine checks the conditions for each optimization before using it.
+Supported queries outside these conditions use general evaluation.
+Differential tests compare optimized and general evaluation on the covered
+inputs and output modes. Table~\ref{tab:performance_optimizations} summarizes
+the techniques, their main conditions, and their expected effects. The
+experiments evaluate the combined engine; they do not measure each technique
+separately.
 
-The techniques serve three purposes. Three of them avoid copies: the
-ordered-input check, active when the requested \texttt{ORDER BY} sequence is
-already present, avoids an unnecessary sort and DataFrame copy; the fused output
-drivers, active under the default skip with no unmatched rows, anchors, or empty
-matches, an eligible matcher, and fully compiled measures, avoid intermediate
-match and row dictionaries; and lazy rows with output projection, active when the
-partition path supports lazy access and the selected source columns can be
-resolved safely, reduce row copies, retained Python objects, and output width.
-The LRU pattern cache serves reuse: when caching is enabled and the complete
-automaton fits the cache budget, it eliminates redundant automaton construction
-across repeated queries.
+\begin{table*}[tbp]
+\centering\footnotesize
+\caption{Performance optimizations, activation conditions, and expected effects.}
+\label{tab:performance_optimizations}
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.20\textwidth}>{\raggedright\arraybackslash}p{0.43\textwidth}>{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Optimization} & \textbf{When it is used} & \textbf{Expected effect} \\
+\midrule
+Ordered-input check & A partition already follows the complete requested
+\texttt{ORDER BY} sequence. & Avoids sorting and its DataFrame copy. \\
+\addlinespace[3pt]
+Vectorized condition masks & Current-row expressions, literals, and eligible
+fixed-offset \texttt{PREV}/\texttt{NEXT} forms; safe row-local parts of a mixed
+\texttt{AND} can act as prefilters. & Evaluates conditions once per partition
+and reuses Boolean masks. \\
+\addlinespace[3pt]
+Row-local DFA decision tables & All predicates are vectorized; no empty
+matches, anchors, exclusions, \texttt{PERMUTE}, \texttt{SUBSET}, reluctant
+quantifiers, or state-dependent conditions. & Replaces repeated transition
+dispatch with compact indexing and segment assignments. \\
+\addlinespace[3pt]
+Linear run-length plan & Default skip mode, a plain linear variable sequence,
+supported quantifiers, and row-local masks. & Skips complete runs and stores
+failed suffixes to avoid checking them again. \\
+\addlinespace[3pt]
+Fused output drivers & Default skip mode, no unmatched rows, anchors, or empty
+matches, an eligible matcher, and fully compiled measures. & Builds output
+without intermediate match and row dictionaries. \\
+\addlinespace[3pt]
+Compiled measure and prefix plans & Supported direct navigation or aggregate
+forms. & Reuses prepared array state and avoids repeated prefix aggregation. \\
+\addlinespace[3pt]
+LRU pattern cache & Caching is enabled and the complete automaton fits within
+the cache budget. & Reuses compiled automata across repeated queries. \\
+\addlinespace[3pt]
+Lazy rows and output projection & The partition path supports lazy access;
+selected source columns can be resolved safely. & Reduces row copies,
+retained Python objects, and output width. \\
+\addlinespace[3pt]
+Incremental aggregate evaluation & A supported running aggregate in a
+\texttt{DEFINE} predicate or compiled measure. & Updates prefix state instead
+of repeatedly aggregating the full prefix. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
 
-The remaining four avoid rework. Vectorized condition masks apply to a row-local
-expression, or to safe row-local conjuncts in a mixed \texttt{AND}, and replace
-repeated Python evaluation with column operations and exact prefilters.
-Row-local DFA decision tables require all predicates to be vectorized, with no
-empty-match, anchor, exclusion, \texttt{PERMUTE}, \texttt{SUBSET}, reluctant,
-or state-dependent requirement, and replace repeated transition dispatch with
-compact indexing and segment assignments. The linear run-length plan needs the
-default skip, a plain linear variable sequence, supported quantifiers, and
-row-local masks, and it skips complete runs and memoizes failed suffixes.
-Compiled measure and prefix plans cover the supported direct navigation and
-aggregate forms, reusing prepared array state and avoiding repeated prefix
-aggregation.
+The ordered-input check takes $O(n)$ time for a partition of $n$ rows.
+For a linear pattern such as \texttt{A B\{2,4\} C+}, the run-length plan
+records consecutive rows that satisfy each variable. Patterns with alternation
+use another eligible path. A supported running-average predicate uses a
+separate incremental plan, which updates the aggregate as the matched prefix
+grows and reverses updates during backtracking. This avoids repeated
+full-prefix aggregation for that form; it does not make all state-dependent
+conditions vectorizable.
+
+Memory management uses compact masks and segments where the semantics allow
+them, lazy row access, output projection, and separate cache, construction,
+and search budgets. The bounded least-recently-used (LRU) cache removes old
+entries when it needs space; an automaton too large for the cache is left
+uncached. Reaching a DFA construction or exact-search limit instead raises
+an error. These techniques reduce temporary memory use, but the engine still
+keeps the input and result in memory. Some paths also keep materialized rows
+or whole-column arrays. The budgets do not limit total process memory.
 
 
+\FloatBarrier
 \section{Experimental Evaluation}
 
 \subsection{Evaluation Methodology}
 
 \subsubsection{Evaluation Criteria and Metrics}
 
-We evaluate the proposed \texttt{MATCH\_RECOGNIZE} engine through the
-following criteria and metrics. \texttt{Correctness}: results are compared with
-Trino 473 and Oracle 21c EE by row-level equality across multiple pattern
-types—the same rows, values, and order where it is deterministic, after
-normalizing case-only column-name differences—ensuring identical matching,
-pattern alignment, and measure calculations. \texttt{Feature coverage}:
-following SQL:2016 \texttt{MATCH\_RECOGNIZE} semantics—including
-\texttt{PERMUTE} patterns, exclusions, quantifiers, navigation functions, and
-output modes—each main clause is marked supported, partially supported, or
-unsupported against the reference tests, and a row-pattern type counts as covered
-when at least one test case produces output identical to the reference
-systems~\cite{iso2016,ISO2021,monierashraf2025rowmatch}.
-\texttt{Developer effort (code size)}: the lines required to express equivalent
-logic in idiomatic \texttt{pandas}; baselines typically need substantially more
-code (e.g., chained \texttt{groupby}/\texttt{shift}/joins) than a single
-\texttt{MATCH\_RECOGNIZE} statement, yielding reduced LOC in line with the row
-pattern recognition (RPR) goal of lowering implementation effort
-\cite{iso2016,ISO2021,melton2017sqlrpr,Python_UDF}.
+We evaluate correctness, feature coverage, code size, execution time,
+throughput, memory use, and scalability. A \emph{cell} is one pattern--size
+combination for one system.
 
-\texttt{Execution time}: the client-observed end-to-end latency of one run,
-which includes query execution and result materialization or transfer but
-excludes data loading. Each pattern--size cell reports the mean of twenty
-measured runs after five warm-up runs, with outliers removed by the 1.5$\times$
-interquartile range (IQR) rule, which drops a run lying more than 1.5 times the
-spread between the 25th and 75th percentiles outside them.
-\texttt{Throughput}: computed for each run as the dataset size divided by that
-run's time, then filtered and averaged the same way, so it is the mean of the
-rates rather than the rate of the mean. \texttt{Query memory}: the incremental
-peak, that is, the largest memory sample during the query minus a baseline
-averaged over a five-second idle window before it; memory is read every 50\,ms
-from the Linux control-group (cgroup v2) counter of the engine process or of the
-database container. \texttt{Footprint}: the absolute peak of the same counter,
-which includes everything already resident, such as the input DataFrame, the
-Java Virtual Machine (JVM) heap of Trino, or the System Global Area (SGA) of
-Oracle. \texttt{Scalability}: how execution time and memory grow as the input
-grows, measured on real data up to 227,899,533 rows and summarised by a
-least-squares linear fit whose $R^2$ is the share of the variation in measured
-time that the line explains.
+\texttt{Correctness}: we compare normalized output rows and values with
+Trino~473 and Oracle~21c EE. Agreement applies to the tested queries and
+datasets. It does not establish full SQL conformance or the same output order
+for every query.
 
+\texttt{Feature coverage}: each main clause is marked as supported, partly
+supported, or unsupported based on the reference tests. These tests cover
+\texttt{PERMUTE}, exclusions, quantifiers, navigation functions, and output
+modes. A pattern type counts as covered when at least one case returns the
+same output as the reference systems~\cite{iso2016,ISO2021,monierashraf2025rowmatch}.
 
+\texttt{Developer effort (code size)}: we count lines of detection logic in
+three worked examples. We exclude blank lines, comments, imports, setup, and
+printing. The thesis records 14 versus 23 lines for dip detection, 14 versus
+25 for rising-price detection, and 16 versus 31 for V-shaped recovery (SQL
+versus hand-written Pandas). This compares code size; it is not a user study
+of productivity.
 
+\texttt{Execution time}: time is measured at the client and includes query
+execution and creating or transferring the result. Data loading is excluded.
+Each main-benchmark cell uses five warm-up runs and twenty measured runs.
+Outliers are removed using the 1.5$\times$ interquartile range (IQR) rule.
+The IQR is the difference between the 25th and 75th percentiles. Values more
+than 1.5 IQR below the lower percentile or above the upper percentile are
+removed.
+
+\texttt{Throughput}: for each run, we divide the input row count by execution
+time. We filter and average these rates separately, so the reported value is
+the mean of the run rates.
+
+\texttt{Query memory}: this is the incremental peak, or the extra memory
+used during a query. We subtract a baseline averaged over a five-second idle
+period before the query from the highest sample taken during the query.
+Samples are read every 50\,ms from the Linux control-group (cgroup v2)
+counter for the engine process or database container.
+
+\texttt{Footprint}: this is the absolute peak from the same counter. It
+includes memory already in use, such as the input DataFrame, the Trino Java
+Virtual Machine (JVM) heap, or the Oracle System Global Area (SGA). Memory is
+reported in MiB ($2^{20}$ bytes) and GiB ($2^{30}$ bytes). Each cell gives the
+mean of filtered per-run sampled peaks. A maximum across cells is the largest
+of these means, not the largest allocation in any single run.
+
+\texttt{Scalability}: we measure how time and memory use change as input size
+increases, up to 227,899,533 rows. A least-squares linear fit summarizes time
+growth. Its $R^2$ value shows how much of the measured variation the fitted
+line explains.
 
 \subsubsection{Environment and Configuration}
 
-The experiments were performed on a workstation running Ubuntu 24.04.4 LTS with an Intel Core i7\-11800H (8 cores, 16 threads, 2.30 GHz) and 64 GB of DDR4 RAM at 3200 MHz. The software setup uses Trino 473 and Oracle 21c EE as baseline SQL engines, each run as a Docker container on the host's native Docker daemon; Java 11.0.25 LTS and Python 3.12.7; Python libraries including \texttt{pandas} 2.3.3, \texttt{numpy} 2.1.3, \texttt{antlr4-python3-runtime} 4.13.2, \texttt{antlr4-tools} 0.2.1, \texttt{pytest} 8.3.4, Jupyter, \texttt{unittest}, \texttt{matplotlib} 3.10.0, \texttt{plotly} 5.24.1, and \texttt{seaborn} 0.13.2; and standard libraries such as \texttt{typing}, \texttt{dataclasses}, \texttt{re}, \texttt{operator}, \texttt{math}, \texttt{itertools}, \texttt{collections}, \texttt{enum}, \texttt{time}, \texttt{sys}, \texttt{os}, \texttt{logging}, and \texttt{traceback}. 
-\texttt{MATCH\_RECOGNIZE} implementation using ANTLR4 for parsing Trino SQL, \texttt{pandas} for DataFrame management, and custom AST/NFA/DFA modules for pattern detection.
+The experiments used Ubuntu~24.04.4 LTS on an Intel Core i7-11800H
+(8 cores, 16 threads, 2.30\,GHz) with 64\,GB DDR4 RAM at 3200\,MHz.
+Trino~473 and Oracle~21c EE ran in Docker containers on the host daemon.
+The recorded runtime environment included Java~11.0.25 LTS,
+Python~3.12.7, \texttt{pandas}~2.3.3, \texttt{numpy}~2.1.3, and
+\texttt{antlr4-python3-runtime}~4.13.2. ANTLR4 handles SQL parsing,
+Pandas manages the input and output tables, and custom AST and automata
+modules implement row-pattern execution.
 
-Every system ran under the same outer limit of one CPU core and 32\,GB of
-memory, enforced through Linux control groups: the engine ran in its own control
-group, and the database containers map directly to host control groups, so one
-counter measures all three. For the main benchmark Trino reads from its
-in-memory connector; for the large-scale test, which uses a 58\,GB limit, it
-reads a disk-backed Hive/Parquet table and Oracle reads a native table loaded by
-direct path. The systems ran one after another rather than concurrently, and the
-database containers were restarted before each dataset size. The main benchmark
-uses five warm-up runs and twenty measured runs per cell, and the large-scale
-test two warm-up runs, five measured runs, and a 600-second budget per query.
-Fairness rests on the same host, logical queries, input rows, CPU allocation,
-and outer memory limit for every system, with each system in its default
-configuration rather than expert-tuned. The full measurement protocols are
-given in Appendix~\ref{app:provenance}.
+In the main benchmark, every system had the same limits: one CPU core and 32\,GB of
+memory, enforced through Linux control groups. The engine had its own group,
+and each database container mapped to a host control group. The same type of
+counter was therefore used for all three systems.
 
-
-
-
+In the main benchmark, Trino used its in-memory connector. In the large-scale
+test, the memory limit was 58\,GB; Trino used a disk-backed Hive/Parquet table,
+and Oracle used a native table loaded by direct path. Systems ran one at a
+time, and the database containers were restarted before each dataset size.
+The main benchmark used five warm-up runs and twenty measured runs per cell.
+The large-scale test used two warm-up runs, five measured runs, and a
+600-second limit per query. All systems used the same host, logical queries,
+input rows, CPU allocation, and outer memory limits. Database configurations
+were left at their defaults. Appendix~\ref{app:provenance} gives the full
+protocols.
 
 \subsection{Datasets and Test Patterns}
 
-Four datasets are used. Two small synthetic tables, \texttt{orders} and
-\texttt{stock\_price}, can be verified by hand and validate the semantics; the
-Amazon UK Products dataset carries the cross-system timing and memory benchmark;
-and the Amazon Reviews 2023 corpus carries the scalability test.
+We use four datasets. Two small synthetic tables, \texttt{orders} and
+\texttt{stock\_price}, allow the example results to be checked by hand.
+Amazon UK Products is used for the cross-system timing and memory benchmark,
+and Amazon Reviews 2023 is used for the scalability test.
 
 \paragraph{Orders}
-We use an Orders table to demonstrate and validate pattern-matching queries. The dataset comprises three attributes\cite{trino2021row}:
-
-\texttt{customer\_id} (VARCHAR), which identifies the customer (two distinct values: \texttt{cust\_1} and \texttt{cust\_2}); \texttt{order\_date} (DATE), the date the order was placed (ranging from May~11,~2020 to May~18,~2020); and \texttt{price} (INTEGER), the purchase amount on that date. Table~\ref{tab:orders} shows a sample of data from eight records:
-
+The \texttt{orders} table has eight rows and three columns~\cite{trino2021row}:
+\texttt{customer\_id} (VARCHAR), \texttt{order\_date} (DATE), and
+\texttt{price} (INTEGER). It contains two customers, \texttt{cust\_1} and
+\texttt{cust\_2}, with orders from May~11 to May~18,~2020.
+Table~\ref{tab:orders} shows all eight rows.
 
 \begin{table}[H]
   \centering\small
@@ -843,9 +907,13 @@ We use an Orders table to demonstrate and validate pattern-matching queries. The
   \end{tabular}
 \end{table}
 
-Since each customer appears multiple times in chronological order with \texttt{cust\_1} spanning five dates and \texttt{cust\_2} spanning three, this table allows us to test pattern‐matching queries (e.g., sequences of rising/falling prices per customer). This dataset structure enables comprehensive validation of partitioning, ordering, and pattern detection. In our experiments, we load this data via a simple SQL VALUES clause and verify that our \texttt{MATCH\_RECOGNIZE} implementation produces exactly the same matched rows and measures as Trino’s \texttt{MATCH\_RECOGNIZE}.\\ Listings~\ref{lst:orders-create} and~\ref{lst:orders-insert} create and load the same table in Trino for the cross-system comparison.
+The five orders for \texttt{cust\_1} and three for \texttt{cust\_2} let us
+check partitioning, date ordering, and consecutive-row matching. We load the
+rows with an SQL \texttt{VALUES} clause and compare the matched rows and
+measures with Trino. Listings~\ref{lst:orders-create} and~\ref{lst:orders-insert}
+show how the table is created and loaded in Trino.
 
-\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10} ,caption={Creating the in-memory table in Trino },label={lst:orders-create}]
+\begin{lstlisting}[language=SQL,basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10} ,caption={Creating the in-memory table in Trino },label={lst:orders-create}]
 CREATE TABLE memory.default.orders (
     customer_id VARCHAR,
     order_date DATE,
@@ -855,7 +923,7 @@ CREATE TABLE memory.default.orders (
 \end{lstlisting}
 
 
-\begin{lstlisting}[basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10},caption={Inserting data into the table },label={lst:orders-insert}]
+\begin{lstlisting}[language=SQL,basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10},caption={Inserting data into the table },label={lst:orders-insert}]
 
 INSERT INTO memory.default.orders
 VALUES 
@@ -885,18 +953,16 @@ dataset~\cite{asaniczka2023amazon}, roughly 2.2\,million product records from
 Amazon's UK marketplace in a single CSV file. Four columns are used:
 \texttt{stars}, \texttt{reviews}, \texttt{price} (GBP), and
 \texttt{categoryName}. A derived \texttt{category} column maps the price into
-five bands: A (${\le}$\pounds10), B (\pounds10--25), C (\pounds25--50),
-D (\pounds50--100), and E (${>}$\pounds100). Each row carries a sequential
+five non-overlapping bands: A ($p\le\pounds10$),
+B ($\pounds10<p\le\pounds25$), C ($\pounds25<p\le\pounds50$),
+D ($\pounds50<p\le\pounds100$), and E ($p>\pounds100$). Each row carries a sequential
 \texttt{seq\_id} in source order.
 
 \paragraph{Amazon Reviews 2023}
-The scalability test needs far more rows than the product table provides, so it
-uses the Amazon Reviews 2023 corpus~\cite{hou2024amazonreviews} from the
-McAuley Lab at UC San Diego, roughly 571\,million genuine review events. Only
-the pattern-relevant fields are taken: \texttt{user\_id},
+For the larger inputs needed by the scalability test, we use the Amazon Reviews 2023 corpus~\cite{hou2024amazonreviews} from the
+McAuley Lab at UC San Diego, roughly 571\,million review events. We use only the fields needed for matching: \texttt{user\_id},
 \texttt{parent\_asin}, \texttt{rating}, and \texttt{timestamp}; review text,
-images, and product metadata are excluded. Five categories are merged in global
-timestamp order, and each review's 1--5 rating is mapped to the same A--E
+images, and product metadata are excluded. Reviews from five product categories are combined in global timestamp order, and each review's 1--5 rating is mapped to the same A--E
 alphabet, so the same pattern families apply to both datasets.
 
 \paragraph{Test patterns}
@@ -907,7 +973,7 @@ alphabet, so the same pattern families apply to both datasets.
 \setlength{\LTright}{0pt}
 \begin{table*}[!tbp]
 \centering\footnotesize
-\caption{SQL Pattern Definitions and Detection Goals}
+\caption{SQL Pattern Definitions and Detection Goals (Amazon UK Products)}
 \label{tab:pattern_definitions}
 \begin{tabularx}{\textwidth}{@{}ll>{\raggedright\arraybackslash}X@{}}
 \toprule
@@ -917,122 +983,159 @@ alphabet, so the same pattern families apply to both datasets.
 
 simple\_sequence & \texttt{A+ B+} &
 \textbf{Goal:} Detect transitions from budget to low-mid price listings. \newline
-\textbf{Use:} Identify runs where budget products (${\le}$\pounds10) are immediately followed by low-mid products (\pounds10--25), useful for detecting problematic product sequences or data quality issues in listings. \\
+\textbf{Use:} Identify runs where budget products (${\le}$\pounds10) are immediately followed by low-mid products (\pounds10--25), in source listing order; this exercises consecutive price-band transitions. \\
 \midrule
 
 alternation & \texttt{A (B|C)+ D} &
 \textbf{Goal:} Detect budget-to-upper-mid transitions through mixed middle bands. \newline
-\textbf{Use:} Find sequences that start with a budget product, continue with a mix of low-mid and mid products (\pounds10--50), and end with an upper-mid product (\pounds50--100). Useful for analyzing quality improvement patterns in product browsing sequences or sorted lists. \\
+\textbf{Use:} Find sequences that start with a budget product, continue with a mix of low-mid and mid products (\pounds10--50), and end with an upper-mid product (\pounds50--100). Exercises alternation inside a quantified group. \\
 \midrule
 
 quantified & \texttt{A\{1,5\} B* C+} &
 \textbf{Goal:} Detect bounded budget runs followed by mid-band products. \newline
-\textbf{Use:} Find sequences with 1--5 budget products, optionally followed by low-mid products, then one or more mid products (\pounds25--50). Enforces minimum unrated product counts for identifying problematic product clusters. \\
+\textbf{Use:} Find sequences with 1--5 budget products, optionally followed by low-mid products, then one or more mid products (\pounds25--50). Exercises bounded, optional, and unbounded repetition in one pattern. \\
 \midrule
 
 optional\_pattern & \texttt{A+ B? C*} &
 \textbf{Goal:} Flexible budget-run detection with optional band transitions. \newline
-\textbf{Use:} Broad matching of budget runs with an optional low-mid product and optional mid products. High recall for various low-quality sequence scenarios in e-commerce data. \\
+\textbf{Use:} Broad matching of budget runs with an optional low-mid product and optional mid products. Produces the largest match sets in this benchmark. \\
 \midrule
 
 complex\_nested & \texttt{(A|B)+ (C\{1,3\} D*)+} &
 \textbf{Goal:} Nested grouping of low-price runs followed by mid/upper-mid groups. \newline
-\textbf{Use:} Detect runs of low-priced products (${\le}$\pounds25) followed by one or more groups of 1--3 mid products with optional upper-mid products. Useful for multi-level quality grouping and advanced sorting pattern detection in product listings. \\
+\textbf{Use:} Detect runs of low-priced products (${\le}$\pounds25) followed by one or more groups of 1--3 mid products with optional upper-mid products. Exercises nested alternation and bounded repetition. \\
 \bottomrule
 \end{tabularx}
 \end{table*}
 }
 
-All patterns run on the derived \texttt{category} column, where A is budget (${\le}$\pounds10), B low-mid (\pounds10--25), C mid (\pounds25--50), D upper-mid (\pounds50--100), and E premium (${>}$\pounds100). On the Amazon Reviews corpus the same A--E alphabet is derived from the 1--5 rating.
-Table~\ref{tab:pattern_definitions} provides detailed specifications of all five SQL patterns used in the evaluation, including their formal syntax and intended detection goals. Each pattern represents a different complexity level and use case, ranging from simple sequential matching to complex nested structures with quantifiers and alternation operators.
+The product benchmark uses the price bands defined above as its
+\texttt{category} values. The patterns describe sequences in source listing
+order; they have not been validated as indicators of product quality or
+customer browsing behavior. In Amazon Reviews, A--E instead represents
+ratings 1--5. Table~\ref{tab:pattern_definitions} lists the five product
+patterns and the constructs they test. The scale-test patterns are given
+below.
 
-
-
-
-
-Two campaigns are run, one on each real dataset. The first measures performance
+We run two sets of experiments, one on each real dataset. The first measures performance
 on the Amazon UK Products data over six nested prefixes: 100K, 200K, 400K,
 800K, 1.6M, and the full 2,222,742 rows. The five pattern families of
 Table~\ref{tab:pattern_definitions} run at every size, giving 30 pattern--size
 cells per system, and Trino 473 and Oracle 21c EE execute the same query bodies
 as references. Each cell is the mean of twenty measured runs after five warm-up
 runs, with outliers removed by the 1.5$\times$ interquartile range rule. All 90
-cells completed, and the three systems returned the same normalised result set
+cells completed, and the three systems returned the same normalized result set
 in every cell.
 
-The second campaign tests scalability on the Amazon Reviews corpus over seven
+The second set tests scalability on the Amazon Reviews corpus over seven
 prefixes: 5M, 10M, 20M, 40M, 80M, 160M, and 227,899,533 rows, under a 58\,GB
 limit and a 600-second per-query budget, with two warm-up runs and five
-measured runs per cell. The same five families are used; four keep the
-benchmark structure with rating labels, and the optional family uses
-\texttt{E D? C+ B*}. No query uses \texttt{PARTITION BY}, so every run scans a
-single partition in order, which removes the parallel work that partitioning
-would otherwise allow.
+measured runs per cell. In the order of Table~\ref{tab:pattern_definitions},
+the scale patterns are \texttt{E+ D+}, \texttt{D (C|B)+ E},
+\texttt{E\{1,5\} D* C+}, \texttt{E D? C+ B*}, and
+\texttt{(E|D)+ (C\{1,3\} B*)+}. Four use the same structure as the main benchmark with different rating
+labels. The optional family uses a different structure. No timed benchmark query
+uses \texttt{PARTITION BY}, so every run scans a
+single partition in order. Multi-partition performance is not measured, and
+the current executor processes partitions sequentially.
 
 \subsection{Correctness and Feature Coverage}
 
-Correctness is established at three levels. First, the worked examples—the dip pattern on the \texttt{orders} table
-(Table~\ref{tab:orders}) and the rising-price and V-shape recovery patterns on
-\texttt{stock\_price}—return the same rows when written as a Trino query, an
-Oracle query, a call to the proposed engine, and a hand-written Pandas
-function. Second, all 30 pattern--size combinations of the
-main benchmark return the same normalised result set from the engine, Trino~473,
-and Oracle~21c EE (Table~\ref{tab:match_counts}), and every completed cell of the large-scale campaign matches
-the engine. Third, the regression suite contains 709 passing test cases covering
-pattern families, constructs, output modes, navigation, and aggregation
+\paragraph{Correctness validation}
+Correctness is checked in three ways. First, the dip example on
+\texttt{orders} (Table~\ref{tab:orders}) and the rising-price and V-shaped
+recovery examples on \texttt{stock\_price} return the same rows in Trino,
+Oracle, the proposed engine, and hand-written Pandas functions. Second, the
+main benchmark returns identical normalized results in all 30 pattern--size
+combinations across the three systems (Table~\ref{tab:match_counts}). Every
+completed database result in the large-scale test also agrees with the engine.
+Third, the thesis reports 709 passing tests in its recorded regression snapshot, covering
+pattern constructs, output modes, navigation, and aggregation
 behavior~\cite{monierashraf2025rowmatch}.
+These checks provide evidence for the tested semantics; they do not establish
+full SQL:2016 conformance or cover every possible combination of features.
 
-Feature coverage is recorded against the same reference tests and covers the
-R010-style subset listed under the evaluation criteria. Ten row-pattern types, from simple sequences to
-permutations, each produce output identical to the reference systems.
-Conditional and subquery ordering keys, general relational planning, distributed
-execution, and the window form (R020) are outside the evaluated scope.
+\paragraph{Feature coverage}
+Table~\ref{tab:paper_feature_coverage} summarizes the implemented and tested
+R010-style subset. Here, supported means that the listed common forms are
+implemented and checked in the reference tests. It does not mean that every
+SQL expression is accepted in each clause. Ten pattern
+types, from simple sequences to permutations, each have at least one case
+that matches the reference output; only the five families in
+Table~\ref{tab:pattern_definitions} are timed in the main benchmark.
 
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{Feature coverage of the proposed engine, based on the thesis reference tests.}
+\label{tab:paper_feature_coverage}
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.27\textwidth}
+  >{\raggedright\arraybackslash}p{0.14\textwidth}X}
+\toprule
+\textbf{Feature group} & \textbf{Status} & \textbf{Scope} \\
+\midrule
+Core clauses & Supported & \texttt{PARTITION BY}, \texttt{ORDER BY},
+  \texttt{PATTERN}, \texttt{DEFINE}, \texttt{MEASURES}, and \texttt{SUBSET}. \\
+Pattern constructs & Supported & Quantifiers, alternation, grouping,
+  nesting, exclusions, anchors, and guarded \texttt{PERMUTE}. \\
+Navigation and measures & Supported & \texttt{PREV}, \texttt{NEXT},
+  \texttt{FIRST}, \texttt{LAST}, core aggregates, \texttt{RUNNING}/\texttt{FINAL},
+  \texttt{MATCH\_NUMBER()}, and \texttt{CLASSIFIER()}. \\
+Skip and output modes & Supported & Evaluated \texttt{AFTER MATCH SKIP}
+  modes and \texttt{ONE}/\texttt{ALL ROWS PER MATCH}, including tested
+  empty-match and unmatched-row options. \\
+Scalar expressions and subqueries & Partial & Arithmetic, comparisons,
+  \texttt{IN}, \texttt{NULL} checks, common scalar functions, and tested
+  constant scalar subqueries without \texttt{FROM}. \\
+Table-reading and correlated subqueries & Unsupported & These forms are
+  not supported inside the evaluated expressions. \\
+Other query paths & Outside scope & Conditional and subquery ordering
+  keys, general relational planning, distributed execution, and the
+  separate R020 window path are not evaluated. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\FloatBarrier
 \subsection{Complexity Analysis}
 
-Costs are stated in asymptotic notation over five symbols: $n$ input rows, $m$
-pattern symbols, $d$ \texttt{DEFINE} variables, $k$ matches, and $\ell$ the
-average number of rows per match materialised in the output, so $\ell = 1$
-under \texttt{ONE ROW PER MATCH}. Running a query does five kinds of work:
-parsing, automaton construction, ordering, condition checking, and matching
-with output construction.
+\paragraph{Theoretical bounds}
+Let $n$ be the input row count, $m$ the expanded pattern size, $d$ the number
+of \texttt{DEFINE} variables, $k$ the number of matches, and $\ell$ the mean
+number of output rows per match. Bounded repetitions count their expanded
+fragments in $m$; $\ell=1$ under \texttt{ONE ROW PER MATCH}.
 
-Parsing and automaton construction depend on the pattern rather than on the
-data. NFA construction is $O(m)$, and the NFA-to-DFA conversion is $O(2^{m})$
-states in the worst case but a handful in practice; for a fixed pattern this is
-a one-time constant, and the compiled automaton is cached across queries.
-Ordering is the only data-dependent cost above linear: a comparison sort costs
-$O(n \log n)$ per partition, but the engine first checks in $O(n)$ whether the
-rows already follow the requested order and skips the sort when they do.
-Condition checking prepares one Boolean result per row and variable on the
-compiled row-local path, costing $O(nd)$, and matching with output construction
-then costs $O(n + k\ell)$ on the default-skip path.
+Pattern compilation is independent of the input rows. Thompson construction
+produces an NFA with $O(m)$ states and uses $O(m)$ space for its graph.
+Subset construction can produce
+$O(2^m)$ DFA states in the worst case. \texttt{PERMUTE} over $v$ variables
+expands to $v!$ orders. Compilation has explicit limits and a bounded cache;
+these costs are constant with respect to $n$ for a fixed query, but they are
+not necessarily small for arbitrary patterns. Reaching a construction limit
+raises an error; an incomplete DFA is not executed or cached.
 
-Two independent axes follow. Along the data axis, with the pattern fixed, the
-engine is $\Theta(nd + n + k\ell) = \Theta(n)$ when the input is already
-ordered, as it is in the benchmark, and $O(n \log n)$ when a sort is required,
-because $d$ is a property of the query rather than of the table and
-$k\ell = O(n)$ while matches do not overlap. Along the pattern axis, with the
-data fixed, three constructs are expensive in $m$ rather than in $n$: the
-NFA-to-DFA conversion, \texttt{PERMUTE}, which expands to $O(m!)$ branches, and
-a \texttt{DEFINE} predicate that reads the match built so far, which cannot use
-the row-local Boolean matrix and may require the preference-ordered exact
-search. Each of the three is either paid once or held in check by the explicit
-compiler guards, so none of them appears as a growth curve in the data size.
-Extra memory on this compiled path is $O(nd + n + k\ell)$, which reduces to
-$O(n)$ for a fixed query with non-overlapping matches. The worst case lies on the
-pattern axis: a state-dependent or ambiguous predicate may require the exact
-search, whose cost can grow exponentially, which is why that search runs under
-an explicit budget.
+Consider a fixed pattern that supports the compiled row-local path and uses
+the default skip policy. On this path,
+predicate preparation costs $O(nd)$ and matching with output construction costs
+$O(n+k\ell)$. Sorting costs $\sum_h O(n_h\log n_h)$ over partitions of $n_h$
+rows, bounded by $O(n\log n)$, and an $O(n)$ order check avoids sorting already
+ordered input. With fixed $d$ and non-overlapping, nonempty matches,
+$k\ell=O(n)$: the ordered benchmark path is therefore $\Theta(n)$, and the
+unordered case is $O(n\log n)$. Extra memory on this path is
+$O(nd+n+k\ell)$, or $O(n)$ for the fixed benchmark queries.
 
-These bounds are theoretical; the measurements in Section~\ref{sec:empirical}
-test them on one machine. The ordered benchmark follows the $\Theta(n)$ case,
-and its per-family linear fits give $R^2 = 0.9904$--$0.9997$. The shuffled
-scenario measures the $O(n \log n)$ case directly; over the measured 100K--2.22M
-range $\log_2 n$ grows only from about 17 to 21, so that case also looks almost
-straight and separates from the ordered one by a near-constant factor rather
-than a visible bend. A high $R^2$ therefore describes the measured range; it does
-not prove the asymptotic bound.
+These bounds do not cover every supported expression, output mode, or skip
+policy. General evaluation and preference-ordered exact search can depend on
+both data size and pattern ambiguity, and search can be exponential in the
+worst case. The search has a work limit and raises an error when that limit is reached.
+Compiler limits do not remove this dependence on the input data. The evaluated running-average form has a separate incremental plan. Its
+linear cost does not apply to all state-dependent predicates.
+
+\paragraph{Empirical evidence}
+The main benchmark's per-family linear fits give $R^2=0.9904$--$0.9997$.
+The shuffled-input case measures the additional sorting cost; over 100K--2.22M
+rows, $\log_2 n$ changes only from about 17 to 21, so the observed curve can
+still appear nearly straight. A high $R^2$ describes the measured range and
+does not prove a general complexity bound.
 
 \subsection{Empirical and Cross-System Analysis}\label{sec:empirical}
 
@@ -1045,12 +1148,13 @@ not prove the asymptotic bound.
 \label{fig:summary-pattern}
 \end{figure*}
 
-Table~\ref{tab:pattern_summary} and Fig.~\ref{fig:summary-pattern} summarise each family averaged over the six
-sizes. Pattern structure, not match volume, drives the cost: \texttt{complex\_nested}
-is the slowest family for all three systems, at 0.34 seconds for the engine
-against 2.52 for Oracle and 5.28 for Trino. The engine leads every family, with
-throughput from 2.58 million rows/sec on \texttt{complex\_nested} to 8.13 million
-on \texttt{simple\_sequence}.
+Table~\ref{tab:pattern_summary} and Fig.~\ref{fig:summary-pattern} show
+averages over the six sizes for each pattern family. The
+\texttt{complex\_nested} family has the highest mean time in all three systems:
+0.34 seconds for the engine, 2.52 for Oracle, and 5.28 for Trino. The engine
+has the lowest mean time for every family. Its mean throughput ranges from
+2.58 million rows/sec for \texttt{complex\_nested} to 8.13 million for
+\texttt{simple\_sequence}.
 
 
 \begin{figure*}[t]
@@ -1060,15 +1164,14 @@ on \texttt{simple\_sequence}.
 \label{fig:summary-size}
 \end{figure*}
 
-Table~\ref{tab:size_summary} and Fig.~\ref{fig:summary-size} group the same cells by size. The engine records
-the lowest time in all 30 cells, and the margin holds as the input grows:
-4.3--7.0$\times$ over Oracle and 9.3--13.3$\times$ over Trino.
+Table~\ref{tab:size_summary} and Fig.~\ref{fig:summary-size} show the same
+results grouped by input size. The engine has the lowest time in all 30 cells.
+Across the size averages, it is 4.3--7.0$\times$ faster than Oracle and
+9.3--13.3$\times$ faster than Trino.
 
-
-Table~\ref{tab:execution_times} gives the engine's time for every
-pattern--size cell. Execution time grows close to linearly with input size for
-all five families, and the per-family linear fits give $R^2 = 0.9904$--$0.9997$
-over the measured range.
+Table~\ref{tab:execution_times} gives the engine's time for each pattern--size
+cell. Time grows close to linearly for all five families. The per-family
+linear fits give $R^2=0.9904$--$0.9997$ over the measured sizes.
 
 \subsubsection{Throughput Analysis}
 
@@ -1080,14 +1183,15 @@ over the measured range.
 \label{fig:throughput}
 \end{figure*}
 
-Throughput in Table~\ref{tab:throughput} and Fig.~\ref{fig:throughput} stays flat as the data grows, which is
-what near-linear execution time means in practice. It ranges from 2.49 to 9.40
-million rows/sec and tracks pattern structure rather than dataset size. Across systems, the engine
-averages 6.11 million rows/sec per cell against 1.16 million for Oracle and 0.60
-million for Trino (Table~\ref{tab:overall_stats}). Pattern complexity lowers
-throughput for every system in the same way: \texttt{complex\_nested} is the
-slowest family for all three, at 2.58, 0.51, and 0.24 million rows/sec
-respectively (Fig.~\ref{fig:summary-pattern}).
+Table~\ref{tab:throughput} and Fig.~\ref{fig:throughput} show that throughput
+stays within a similar range as input size increases. This agrees with the
+near-linear time growth. Engine throughput ranges from 2.49 to 9.40 million
+rows/sec. Averaged across cells, it is 6.11 million rows/sec, compared with
+1.16 million for Oracle and 0.60 million for Trino
+(Table~\ref{tab:overall_stats}). The \texttt{complex\_nested} family has the
+lowest mean throughput in each system: 2.58 million rows/sec for the engine,
+0.51 million for Oracle, and 0.24 million for Trino
+(Fig.~\ref{fig:summary-pattern}).
 
 \subsubsection{Memory Consumption Analysis}
 
@@ -1095,56 +1199,67 @@ respectively (Fig.~\ref{fig:summary-pattern}).
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{viz_query_memory.png}
-\caption{Query memory (incremental peak) by pattern, size, and system.}
+\caption{Mean incremental query peaks by pattern, size, and system.
+Memory values are MiB; the original thesis image labels the axes MB.}
 \label{fig:query-memory}
 \end{figure*}
 
-The two memory metrics answer different questions. The incremental query peak
-measures the extra memory a query needs above what is already resident, while the
-footprint measures the total that the process or container holds, including the
-input DataFrame, the Trino JVM heap, or the Oracle SGA; the boundaries also
-differ, one Python process against a complete database container.
+Query memory measures the increase above the pre-query baseline. Footprint
+measures total memory use, including the input DataFrame, Trino JVM heap, or
+Oracle SGA. The measurement boundaries also differ: the engine is measured
+as one Python process, while each database is measured as a full container.
 
-Table~\ref{tab:memory_cache} and Fig.~\ref{fig:query-memory} show the trade-off.
-Query memory rises with input size, from 6.9 MB at 100K rows to 163.1 MB at the
-full size, because the compiled path builds whole-column masks and intermediate
-arrays over all input rows rather than evaluating row by row; it stays between 56
-and 90 bytes per input row in all 30 cells, so it follows the input rather than
-the number of matches. The engine's peak of 189.0 MB is the highest of the three,
-against 58.7 MB for Oracle, while Trino's incremental value stays small because it
-measures growth above an already-resident heap; Trino's own counter reports
-1.3--41.5 MB. The deployment footprint reverses the order: the engine runs as a
-single Python process and peaks at 524 MB, against 2,057 MB for Oracle and
-14,993 MB for Trino, whose table resides in the JVM heap.
+Table~\ref{tab:memory_cache} and Fig.~\ref{fig:query-memory} show that mean
+engine query memory increases from 6.9 MiB at 100K rows to 163.1 MiB at the
+full size. The compiled path prepares column masks and intermediate arrays
+over the input. Query memory stays between 56 and 90 bytes per input row in
+all 30 cells. The largest cell mean is 189.05 MiB for the engine, compared
+with 58.7 MiB for Oracle. Trino's incremental value is small because it
+measures the increase above an existing heap. Trino's separate internal
+query-memory counter reports 1.3--41.5 MiB.
+
+For total footprint, the engine uses less memory in this benchmark. Its
+largest cell mean is 524 MiB, compared with 2,057 MiB for Oracle and
+14,993 MiB for Trino. These database figures include memory already in use;
+Trino's input table is held in the JVM heap.
 
 \subsubsection{Sensitivity and Boundary Analysis}
 \label{sec:sensitivity}
 
-The main matrix uses input that is already ordered and predicates that depend
-only on the current row. Two sensitivity cases remove these advantages. In the
-first, every input of the main matrix is deterministically shuffled, so the
-engine must take its $O(n \log n)$ sorting branch; all 90 cells still complete
-with identical match counts (Table~\ref{tab:ordering_by_size}). The engine slows down by 1.43$\times$ on average,
-against 1.04$\times$ for Oracle and 1.11$\times$ for Trino, and at 2,222,742
-rows its time rises from 0.43 to 0.63 seconds. The ranking holds: under shuffled
-input the engine remains 4.5$\times$ faster than Oracle and 8.8$\times$ faster
-than Trino at the full size, against 6.2$\times$ and 11.2$\times$ with ordered
-input, so the advantage is not an artifact of the ordered shortcut.
+The main benchmark uses ordered input and predicates that depend only on the
+current row. We test two changes to these conditions. First, we shuffle each
+input using a fixed procedure while keeping the same logical ordering key.
+The engine must then sort the rows, with an $O(n\log n)$ cost. All 90 cells
+complete with the same match counts (Table~\ref{tab:ordering_by_size}). The
+mean slowdown is 1.43$\times$ for the engine, 1.04$\times$ for Oracle, and
+1.11$\times$ for Trino. At 2,222,742 rows, mean engine time increases from
+0.43 to 0.63 seconds. With shuffled input, it remains 4.5$\times$ faster
+than Oracle and 8.8$\times$ faster than Trino at full size. The corresponding
+ordered-input ratios are 6.2$\times$ and 11.2$\times$. The engine therefore
+keeps its measured lead when sorting is required.
 
-In the second case, the \texttt{simple\_sequence} query's \texttt{DEFINE}
-becomes \texttt{B AS category = 'B' AND price > AVG(A.price)}, a running
-aggregate that depends on the match so far and therefore cannot use the
-row-local Boolean masks. An earlier recorded run that used the generic exact evaluator was the slowest of
-the three systems at every size, 64.41 seconds at the full size, because it
-recomputed \texttt{AVG(A.price)} each time the tentative match grew. The engine
-now evaluates this form with an incremental plan that updates the aggregate as
-the match grows. It takes 1.28 seconds at the full size, about 50$\times$ faster
-than that run, against 2.32 for Oracle and 8.67 for Trino, leading by 1.2--1.8$\times$
-and 5.0--15.9$\times$ across the six sizes with identical output (181,147
-matches, Table~\ref{tab:worstcase_coverage}); the database values in this case use two measured runs per size. This
-covers one important state-dependent form; other state-dependent or ambiguous
-predicates fall back to the exact search, whose worst case is exponential and
-which stops with an explicit error when its budget is exhausted.
+Second, we change the \texttt{simple\_sequence} query's \texttt{DEFINE} to
+\texttt{B AS category = 'B' AND price > AVG(A.price)}. The running average
+depends on the match built so far, so the condition cannot be evaluated
+entirely with row-local Boolean masks. An earlier recorded implementation
+used the general exact evaluator and took 64.41 seconds at full size. It was
+the slowest system at every size because it repeatedly calculated
+\texttt{AVG(A.price)} from the matched rows. The current engine updates this
+average incrementally. It takes 1.28 seconds at full size, about 50$\times$
+faster than that earlier run, compared with 2.32 seconds for Oracle and
+8.67 for Trino. Across the six sizes, it is 1.2--1.8$\times$ faster than
+Oracle and 5.0--15.9$\times$ faster than Trino. All three return identical
+output, with 181,147 matches at full size (Table~\ref{tab:worstcase_coverage}).
+The database means in this test use only two measured runs per size.
+
+This test covers one supported aggregate form. Prices in category A are at most
+\pounds10, and prices in category B exceed \pounds10, so every B row after a nonempty A
+run already satisfies the average comparison. The test therefore measures
+the cost of handling the aggregate; it does not test difficult cases where
+the average causes a candidate row to be rejected. Other state-dependent or
+ambiguous cases may need exact search when a faster supported plan does not
+apply. Exact search can be exponential and raises an error when its work
+limit is reached.
 
 \subsubsection{Scalability on Large-Scale Data}
 \label{sec:scalability}
@@ -1153,128 +1268,170 @@ which stops with an explicit error when its budget is exhausted.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{viz_stress_volume.png}
-\caption{Volume scaling on the Amazon Reviews corpus: execution time (left) and peak memory (right).}
+\caption{Volume scaling on Amazon Reviews: means over the same four pattern
+families completed by all three systems at every size. Execution time is shown
+on the left and absolute peak footprint on the right. Memory values are GiB;
+the original thesis image labels the axis GB.}
 \label{fig:stress-volume}
 \end{figure*}
 
-Table~\ref{tab:stress_volume} and Fig.~\ref{fig:stress-volume} report the second campaign. The engine and
-Oracle completed all 35 cells; Trino completed 33, because
-\texttt{complex\_nested} exceeded the 600-second budget at 160M and
-227,899,533 rows. The engine finished the full corpus on every family, from
-24.8 seconds on \texttt{alternation} to 106.0 seconds on
-\texttt{complex\_nested}, holding 2.2--9.2 million rows/sec across the range. Execution time stays close
-to linear in the input size: the per-family linear fits give
-$R^2 = 0.9966$--$0.9998$ for the engine, against 0.9824--0.9992 for Oracle and
-0.9912--0.9999 for Trino over its completed sizes.
-Averaged over the four families that all three systems completed at every
-size, the engine is 5.1--10.1$\times$ faster than Oracle and 11.4--13.8$\times$
-faster than Trino, and at the full corpus the four-family means are 28.9 seconds
-for the engine, 291.7 for Oracle, and 375.6 for Trino. On the same four families
-the engine holds 7.1--8.0 million rows/sec across the whole range, against
-0.8--1.6 million for Oracle and 0.7--0.8 million for Trino. Its resident
-footprint (Table~\ref{tab:stress_mem}) starts far leaner than either database, 0.7 GB at 5M rows against
-15.5 GB for Oracle and 13.4 GB for Trino, but it grows with the data: at the full
-corpus the four-family average reaches 31.9 GB, above Oracle's 27.1 GB though
-still below Trino's 42.3 GB, and the largest single cell reaches 35.7 GB, so
-available memory is the practical limit for an in-memory engine.
+Table~\ref{tab:stress_volume} and Fig.~\ref{fig:stress-volume} show the
+large-scale results. The engine and Oracle complete all 35 cells. Trino
+completes 33 because \texttt{complex\_nested} exceeds the 600-second limit
+at 160M and 227,899,533 rows. At full size, engine time ranges from
+24.8 seconds for \texttt{alternation} to 106.0 for \texttt{complex\_nested},
+with throughput of 2.2--9.2 million rows/sec. Time grows close to linearly.
+The per-family fits give $R^2=0.9966$--$0.9998$ for the engine,
+0.9824--0.9992 for Oracle, and 0.9912--0.9999 for Trino over its completed
+sizes.
+
+For comparison across all sizes, we average over the same four families
+completed by all three systems. On these averages, the engine is
+5.1--10.1$\times$ faster than Oracle and 11.4--13.8$\times$ faster than
+Trino. At full size, mean times are 28.9 seconds for the engine, 291.7 for
+Oracle, and 375.6 for Trino. Across the tested sizes, mean throughput for
+these families is 7.1--8.0 million rows/sec for the engine, 0.8--1.6 million
+for Oracle, and 0.7--0.8 million for Trino.
+
+For the same four families, mean engine footprint starts at 0.7 GiB at 5M
+rows, compared with 15.5 GiB for Oracle and 13.4 GiB for Trino
+(Table~\ref{tab:stress_mem}). It increases with input size. At full size,
+the engine average is 31.9 GiB, above Oracle's 27.1 GiB and below Trino's
+42.3 GiB. The largest engine cell mean is 35.7 GiB. Available RAM is
+therefore a practical limit for this in-memory engine.
 
 \subsection{Discussion and Key Findings}
 
-Table~\ref{tab:overall_stats} aggregates the first campaign. The engine
+Table~\ref{tab:overall_stats} summarizes the main benchmark. The engine
 averages 0.17 seconds and 6.11 million rows/sec per cell, against 1.04 seconds
-for Oracle and 1.98 for Trino, and it records the lowest time in all 30 cells
-while every cell agrees on the returned rows. 
+for Oracle and 1.98 for Trino. It records the lowest time in all 30 cells,
+and all three systems return the same normalized results in each cell.
 
 \begin{table}[H]
 \centering\footnotesize
 \setlength{\tabcolsep}{3pt}
-\caption{Overall Benchmark Statistics by System (Amazon UK Products)}
+\caption{Overall benchmark statistics (Amazon UK Products). Memory maxima
+are the largest cell means of sampled per-run peaks.}
 \label{tab:overall_stats}
 \begin{tabular}{lrrrrr}
 \toprule
 \textbf{System} & \textbf{Cells} & \textbf{Avg} & \textbf{Avg Thr.} & \textbf{Max Query} & \textbf{Max Footpr.} \\
- & & \textbf{Time (s)} & \textbf{(rows/s)} & \textbf{Mem (MB)} & \textbf{Mem (MB)} \\
+ & & \textbf{Time (s)} & \textbf{(rows/s)} & \textbf{Mem (MiB)} & \textbf{Mem (MiB)} \\
 \midrule
-Proposed engine & 30 & 0.17 & 6,110,392 & 189.0 & 524 \\
+Proposed engine & 30 & 0.17 & 6,110,392 & 189.05 & 524 \\
 Oracle 21c EE & 30 & 1.04 & 1,156,106 & 58.7 & 2,057 \\
 Trino 473 & 30 & 1.98 & 602,098 & 20.8 & 14,993 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The advantage comes from specialization rather than from a better general query
-engine. The engine runs inside the process that already holds the data, so it
-avoids database planning, catalog, transaction, client-protocol, and
-data-transfer costs, and its compiler turns supported predicates into column
-operations and integer comparisons. The sensitivity cases show that the lead does
-not depend on the ordered shortcut: it survives a forced sort and a running
-aggregate in \texttt{DEFINE}. Every reported measurement has all optimized paths
-enabled, each activating only where it applies, so the results describe the
-combined configuration; differential tests show that no fast path changes the
-answer, but the study does not isolate the contribution of each technique.
+Several design choices help explain the observed performance. The engine
+works directly on a DataFrame already in memory, so it does not need a
+database client protocol or result transfer from a separate server. Supported
+predicates become column operations and integer comparisons, reducing
+repeated Python expression evaluation. Ordered input also avoids sorting.
+These are possible reasons for the measured differences; the experiment
+does not separate their individual costs from database planning and other
+system overheads.
 
-The cost of that speed is per-query memory, where the engine is the highest of
-the three at 189.0 MB, while its total footprint stays the lowest in the main
-benchmark. That relationship reverses against Oracle at the largest scalability
-size, because the engine keeps its DataFrame resident, so speed and memory
-residency must be read together.
+All optimizations were enabled, with each used only when its conditions were
+met. Differential tests show agreement with general evaluation in the covered
+cases, but no ablation study measures the separate effect of each optimization.
+The sorting test shows that the engine keeps its measured lead when a sort is
+required. The aggregate test supports the incremental plan for one running-average
+form. As discussed in Section~\ref{sec:sensitivity}, its price bands make
+the aggregate comparison true for every eligible B row, so this result does
+not describe difficult state-dependent searches in general.
 
-Measured against the goals stated in the introduction, the results show that an
-R010-style subset of \texttt{MATCH\_RECOGNIZE} can run in process on a DataFrame
-without a database server, that its results agree with two independent
-production engines, and that its execution time grows close to linearly while its
-memory grows with the input. These results describe one workstation,
-single-partition queries over in-memory input, five pattern families, and default
-configurations of all three systems, measured in sequential rather than
-concurrent campaigns; other configurations may narrow the measured gaps, and the
-results do not establish a general ranking of SQL engines.
+The main memory trade-off is higher incremental query memory. Whole-column
+working arrays reduce repeated computation but need additional RAM. The engine's
+largest cell mean is 189.05 MiB, the highest of the three, while its total
+footprint is the lowest in the main benchmark. These measures answer
+different questions: query memory is growth above the pre-query baseline,
+whereas the footprint includes memory already held by the engine process or
+database container. At the largest scale-test size, the engine's mean
+footprint exceeds Oracle's. Faster execution therefore does not imply the
+lowest memory use at every scale.
+
+The results address the main research objectives: declarative pattern
+recognition runs directly on a DataFrame, the tested outputs agree with two
+SQL reference engines, and the engine completes the evaluated corpus up to
+227.9 million rows. Execution time is close to linear in the tested range,
+while growing memory use makes available RAM a practical boundary. The
+worked examples also show how one query can replace procedural matching
+logic; they do not measure developer productivity.
+
+These findings apply to one workstation, single-partition timed queries,
+five pattern families, and the recorded system configurations. The worked
+examples test partitioning, but the benchmarks do not measure its performance.
+Systems ran one at a time, and the scale study uses different storage models
+for the three systems. Other hardware, predicates, patterns, or database
+settings may change the measured differences. The results therefore support
+the proposed engine for the evaluated workload rather than a general ranking
+of SQL engines.
 
 \section{Conclusions, Limitations and Future Work}
 
 \paragraph{Conclusions}
 
-We presented a SQL-in-\texttt{pandas} engine for executing \texttt{MATCH\_RECOGNIZE} queries over DataFrames. That provides \texttt{SQL:2016 MATCH\_RECOGNIZE} functionality for 
-\texttt{pandas} DataFrames, bridging the gap between the
-expressiveness of relational queries and the flexibility of in-memory analytics, bringing SQL pattern matching capabilities to python data science workflows. This opens the door to unified and portable pipelines that preserve both semantics and developer productivity. On the Amazon UK Products benchmark the engine returned the same results as Trino 473 and Oracle 21c EE in all 30 pattern--size cells while averaging 0.17 seconds per cell against 1.04 and 1.98, and it completed the 227.9-million-row Amazon Reviews corpus on every pattern family.
-
-\noindent\texttt{MATCH\_RECOGNIZE} allows data scientists and analysts to use powerful pattern-matching semantics directly within their familiar Pandas environment, without the need for complex Python code or external SQL engine dependencies. This reduces development complexity and enhances productivity for sequential data analysis across domains, including financial analysis, log processing, and time series pattern detection.\\
+We presented an in-process engine for an evaluated R010-style subset of
+SQL:2016 \texttt{MATCH\_RECOGNIZE} over Pandas DataFrames. It parses SQL, checks the supported semantics, compiles patterns into
+automata, and returns a DataFrame. Execution plans have explicit conditions
+and limits. On Amazon UK Products, all 30 pattern--size combinations
+returned normalized results identical to Trino~473 and Oracle~21c EE. The mean
+cell time was 0.17 seconds for the proposed engine, 1.04 for Oracle, and 1.98
+for Trino. The separate Amazon Reviews study completed all five pattern
+families up to 227,899,533 rows. The worked examples also used fewer lines of
+detection logic in SQL than in the corresponding Pandas functions.
 
 \paragraph{Limitations}
 
-Despite the system’s comprehensive capabilities, several limitations remain. First,
+The engine implements a supported subset rather than full SQL:2016
+conformance. The window form (R020), conditional and subquery ordering keys,
+arbitrary user-defined aggregates, and general relational query planning are
+outside the evaluated scope. Nested or unbounded quantifiers can increase
+automaton size, and \texttt{PERMUTE} expands factorially; compilation limits
+can therefore reject large patterns. State-dependent or ambiguous cases may
+require exact search, which has no general linear bound and raises an error
+when its search budget is exhausted.
 
-\noindent\texttt{complex pattern and quantifier interactions}: although the system supports concatenation, alternation, grouping, and standard quantifiers (\texttt{*}, \texttt{+}, \texttt{?}, \texttt{\{i,j\}}), certain combinations—particularly multiple greedy quantifiers nested within groups (e.g.,\texttt{(A+B*)
-+C?})can trigger exponential state-space growth during automata construction. This issue primarily arises with three or more levels of nesting combined with unbounded quantifiers; by contrast, simpler patterns and bounded quantifiers behave efficiently. Second, \texttt{limited support for aggregate functions}: while a wide range of built-in aggregates (including conditional and statistical functions) is supported, the current implementation offers only limited support for user-defined aggregate functions. Third, \texttt{SQL:2016 coverage}: the engine implements an evaluated R010-style subset rather than the full standard; the window form (R020), conditional and subquery ordering keys, and vendor-specific extensions are outside it. Fourth, \texttt{memory}: the input DataFrame and the result must stay resident, so available RAM bounds the largest input and the engine is not an out-of-core system. Fifth, \texttt{generalization}: the measurements come from one workstation, single-partition queries, five pattern families, and default configurations of all three systems, so other hardware, many small partitions, wider schemas, or tuned databases may change the measured gaps.
+The input DataFrame and result must stay in memory. At the largest
+scalability size, the engine's four-family mean footprint exceeds Oracle's,
+so lower execution time does not always mean lower memory use. Results come
+from one workstation, one CPU core, single-partition queries, five timed
+pattern families, and default database configurations. Storage representations
+also differ in the scale study, and loading time is excluded. All optimizations were measured together; no ablation study measured their
+separate effects.
 
 \paragraph{Future Work}
 
-By addressing the identified limitations and implementing the future enhancements, our goal is to develop a more adaptable and efficient solution. That can handle complex pattern-matching scenarios across various data processing environments. Future work will focus on addressing current limitations through enhanced SQL clause support, distributed processing capabilities, and advanced analytics integration. This development roadmap outlined above provides a clear path for improving performance for the current implementation.\\
-
-We plan to extend the engine through some updates,
-\texttt{Memory Residency on Large Datasets:} the engine completed the full 227.9-million-row corpus, but it keeps the input DataFrame resident in memory, so available RAM bounds the largest input, and an out-of-core or columnar backend would lift that limit; \texttt{Memory Usage for Large Patterns:} patterns with many variables and complex quantifiers can generate large automata that increase memory consumption; \texttt{ Integration with Query Optimizers:}because the pattern-matching engine currently operates independently of database query optimizers, it may miss plan-level optimization opportunities; \texttt{Pattern Compilation:} full DFA minimization, stronger state pruning, and a faster exact search for state-dependent predicates would reduce construction cost and widen the compiled fast paths; \texttt{Parallel Processing:} independent partitions are a natural unit of parallel work and could run in separate workers while preserving deterministic output order; \texttt{Execution Engine:} a backend abstraction targeting Polars or Apache Arrow, together with a per-technique ablation of the optimization layer, would extend the engine and quantify what each fast path contributes.
+Future work includes out-of-core execution, so the input would not need to
+fit entirely in RAM, and support for columnar backends such as Polars or
+Apache Arrow. Stronger state pruning, DFA minimization, and faster handling
+of state-dependent predicates could reduce execution and compilation costs.
+Independent partitions could run in separate workers while keeping a fixed
+result order. Further work should also extend the supported SQL clauses and
+measure expressions. Further experiments should test wider tables, more partitions,
+other query structures, and tuned databases. An ablation study should also
+measure the separate effect of each optimization. Integration with query
+optimizers could support improvements at the plan level.
 
 \section*{Declarations}
 
-\paragraph{Ethical Approval} Not applicable\\
+\paragraph{Ethical Approval} Not applicable.
 
-\paragraph{Funding} This research did not receive any specific grant from funding agencies in the public, commercial, or not-for-profit sectors.\\
+\paragraph{Funding} This research did not receive any specific grant from funding agencies in the public, commercial, or not-for-profit sectors.
 
-\paragraph{Declaration of competing interest} The authors declare that they have no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper.\\
+\paragraph{Declaration of competing interest} The authors declare that they have no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper.
 
 \paragraph{Data availability}
-The code used for this study is publicly available in the GitHub repository: 
-\href{https://github.com/MonierAshraf/Row_match_recognize}{%
-https://github.com/MonierAshraf/
-Row\_MATCH\_RECOGNIZE%
-}. The dataset from the UK Amazon products marketplace used in the analysis is available from Kaggle: 
-\href{https://www.kaggle.com/datasets/asaniczka/amazon-uk-products-dataset-2023}{%
-https://www.kaggle.com/datasets/asaniczka/
-amazon-uk-products-dataset-2023%
-}.  
-In this study, nested prefixes of up to 2{,}222{,}742 rows from the Amazon UK Products dataset and up to 227{,}899{,}533 rows from the Amazon Reviews 2023 corpus (\href{https://amazon-reviews-2023.github.io/}{https://amazon-reviews-2023.github.io/}) were used for experimental evaluation and performance testing. Additional methodological details and example usage are drawn from the Trino blog post~\href{https://trino.io/blog/2021/05/19/row_pattern_matching.html}{\url{https://trino.io/blog/2021/05/19/row_pattern_matching.html}} and from the article~\href{https://link.springer.com/article/10.1007/s13222-022-00404-3}{\url{https://link.springer.com/article/10.1007/s13222-022-00404-3}}. All datasets and code referenced in this work are publicly available, and the links above provide direct access.
-
-
-
+The implementation is available in the
+\href{https://github.com/MonierAshraf/Row_match_recognize}{project's GitHub repository}.
+The evaluation uses nested prefixes of up to 2,222,742 rows from the
+\href{https://www.kaggle.com/datasets/asaniczka/amazon-uk-products-dataset-2023}{Amazon UK Products dataset}
+and up to 227,899,533 rows from the
+\href{https://amazon-reviews-2023.github.io/}{Amazon Reviews 2023 corpus}.
+These source datasets are publicly available from their respective providers.
 
 \bibliographystyle{elsarticle-num}
 \bibliography{references}
@@ -1282,19 +1439,24 @@ In this study, nested prefixes of up to 2{,}222{,}742 rows from the Amazon UK Pr
 \appendix
 \setcounter{table}{0}
 \setcounter{figure}{0}
+\renewcommand{\thetable}{\Alph{section}.\arabic{table}}
+\renewcommand{\theHtable}{\Alph{section}.\arabic{table}}
+\renewcommand{\thefigure}{\Alph{section}.\arabic{figure}}
+\renewcommand{\theHfigure}{\Alph{section}.\arabic{figure}}
 \section{Supplementary Experimental Results}
 
-This appendix keeps the full values behind the results reported in
+This appendix gives the detailed values for the results reported in
 Section~\ref{sec:empirical}. Unless stated otherwise, the tables use the
 Amazon UK Products benchmark and the cross-system protocol below.
 
 \subsection{Measurement Provenance and Reproducibility}
 \label{app:provenance}
 
-All systems ran sequentially, one at a time, so they never competed for the
-same CPU core or memory. Proposed-engine runs were refreshed on revision
-\texttt{f8b052d}; Trino and Oracle values were retained from protocol-aligned
-earlier campaigns. The final regression run passed 709 tests.
+Systems ran one at a time, so they did not compete for the same CPU core
+or memory. The engine results were updated using revision \texttt{f8b052d}.
+Trino and Oracle values were kept from earlier experiments that followed the
+same protocol. The thesis reports 709 passing cases for the recorded
+regression snapshot; this is the historical evaluation count.
 
 \paragraph{Benchmark protocols}
 The evaluation used four fixed protocols:
@@ -1325,13 +1487,14 @@ processes. The incremental peak subtracts a five-second pre-query baseline.
 For the proposed engine the absolute peak covers its process; for Trino and
 Oracle it covers the full database container. Timing includes query execution
 and result construction or retrieval, while data generation and loading are
-excluded. MB and GB in the memory tables mean MiB and GiB.
+excluded. Memory values use MiB and GiB throughout; the thesis source plots
+retain their original MB/GB axis labels.
 
 \paragraph{Measurement exclusions}
 No complete benchmark cell was omitted. The 1.5$\times$ IQR rule could remove
 individual samples from a cell, and the number removed was retained with the
-measurements. A complete cell may be rejected only when there is recorded
-evidence of an invalid run, such as a wrong revision, incorrect resource
+measurements. The protocol allows a whole cell to be rejected only with recorded evidence
+of an invalid run, such as a wrong revision, incorrect resource
 limits, host contention, sampler failure, process failure, or incomplete
 output.
 
@@ -1370,7 +1533,9 @@ The tables below give the per-pattern and per-size values behind the
 results reported in Section~\ref{sec:empirical}. Each displayed time is an
 arithmetic mean of cell mean times, and each displayed throughput is an
 arithmetic mean of cell throughputs; it is not recomputed from the displayed
-mean time.
+mean time. Comparison ratios retain the thesis summaries and were computed
+before display rounding, so they may differ slightly from ratios of the printed
+times.
 
 \begin{table*}[t]
 \centering\small
@@ -1452,7 +1617,7 @@ mean time.
 
 \begin{table*}[t]
 \centering\small
-\caption{Memory by Dataset Size: Average Query Peak and Deployment Footprint of the Three Systems (MB)}
+\caption{Memory by Dataset Size: Average Query Peak and Deployment Footprint of the Three Systems (MiB)}
 \label{tab:memory_cache}
 \begin{tabular}{lrrrrrr}
 \toprule
@@ -1530,7 +1695,7 @@ output (Table~\ref{tab:worstcase_coverage}).
 \end{tabular}
 \end{table*}
 
-\subsection{Full SQL Syntax Reference} \label{Full_SQL}
+\subsection{SQL Clause Syntax Reference} \label{Full_SQL}
 \begin{verbatim}
 SELECT <select list>
 FROM <source table>
@@ -1543,160 +1708,130 @@ MATCH_RECOGNIZE
   [ AFTER MATCH <skip-to-option> ]
   PATTERN ( <row pattern> )
   [ SUBSET <subset list> ]
-  DEFINE <definition list>
-) AS <table alias>;
+  [ DEFINE <definition list> ]
+) [ [AS] <table alias> ];
 \end{verbatim}
 
 \subsection{Step-by-Step Execution Analysis}\label{Step-by-Step}
+
+The following examples find three consecutive purchases with decreasing
+prices within each customer's ordered history. Listing~\ref{lst:UDF-match-recognize}
+implements the \texttt{A B C} pattern procedurally in Pandas and resumes after
+the last row of each match.
+
+\begin{lstlisting}[basicstyle=\ttfamily\footnotesize,language=Python,
+                   caption={Procedural Pandas baseline for consecutive price declines},
+                   label={lst:UDF-match-recognize},
+                   frame=single]
+import pandas as pd
+
+def detect_dip(df, cust_col="customer_id",
+               date_col="order_date", price_col="price"):
+    g = df.copy()
+    g[date_col] = pd.to_datetime(g[date_col])
+    g = g.sort_values([cust_col, date_col]).reset_index(drop=True)
+    rows = []
+    for cust, grp in g.groupby(cust_col, sort=False):
+        grp = grp.reset_index(drop=True)
+        i = 0
+        while i + 2 < len(grp):
+            a, b, c = (grp.loc[i, price_col], grp.loc[i + 1, price_col],
+                       grp.loc[i + 2, price_col])
+            if b < a and c < b:
+                rows.append({
+                    "customer_id": cust,
+                    "start_date": grp.loc[i, date_col].date(),
+                    "end_date": grp.loc[i + 2, date_col].date(),
+                    "bottom_price": c,
+                })
+                i += 3  # AFTER MATCH SKIP PAST LAST ROW
+            else:
+                i += 1
+    return pd.DataFrame(rows)
+
+result_df = detect_dip(df)
+print(result_df)
+\end{lstlisting}
+
+Listing~\ref{lst:basic-match-recognize} expresses the same task using the
+proposed engine. Its omitted skip clause defaults to
+\texttt{AFTER MATCH SKIP PAST LAST ROW}, matching the policy in the Pandas
+function. Both examples return the customer's identifier, the first and last
+purchase dates, and the final price.
+
+\begin{lstlisting}[language=Python,
+                   caption={Using \texttt{MATCH\_RECOGNIZE}},
+                   label={lst:basic-match-recognize},
+                   frame=single]
+import pandas as pd
+from src.executor.match_recognize import match_recognize
+df['order_date'] = pd.to_datetime(df['order_date'])
+# Define the MATCH_RECOGNIZE query
+query = """
+SELECT customer_id, start_date, end_date, bottom_price
+FROM orders
+MATCH_RECOGNIZE (
+  PARTITION BY customer_id
+  ORDER BY order_date
+  MEASURES
+    A.order_date AS start_date,
+    C.order_date AS end_date,
+    C.price      AS bottom_price
+  PATTERN (A B C)
+  DEFINE
+    B AS B.price < A.price,
+    C AS C.price < B.price
+);
+"""
+# Execute and print results
+output_df = match_recognize(query, df)
+print(output_df)
+\end{lstlisting}
+
+This walkthrough applies Listing~\ref{lst:basic-match-recognize} to the eight
+orders in Table~\ref{tab:orders}. Positions within a sorted customer partition
+are zero-based and differ from positions in the original interleaved table.
+
 \begin{enumerate}
-  \item \textbf{Query Parsing: In this step SQL parser extracts components from the query.}\\ Input: Raw SQL query string\\ Process: ANTLR4 parsing of each clause into an abstract syntax tree (AST)\\ Output: AST with the parsed components.\\
-    The parser extracts:
-    \begin{itemize}
-      \item \texttt{PARTITION BY: customer\_id} \\
-      To group the data by customer\_id, meaning pattern matching will be performed separately for each customer
-      \item \texttt{ORDER BY: order\_date}\\
-     To sort data within each partition chronologically by order\_date to establish sequence order 
-      \item \texttt{MEASURES:}
-        \begin{itemize}
-          \item \texttt{start\_date = A.order\_date}
-          \item \texttt{end\_date   = C.order\_date}
-          \item \texttt{bottom\_price = C.price}
-        \end{itemize}
-    To define what values to extract from matched patterns. Each measure specifies which variable's column value to return in the result.
-        
-      \item \texttt{PATTERN: (A B C)}\\
-     To specify the sequence pattern to match exactly 3 consecutive rows labeled A, B, and C
-      
-      \item \texttt{DEFINE:}
-        \begin{itemize}
-          \item \texttt{B AS B.price < A.price}
-          \item \texttt{C AS C.price < B.price}
-        \end{itemize}
-    \end{itemize}
-    To define conditions for each pattern variable must be satisfied. \\ {B} must have lower price than {A} and {C} must have a lower price than {B}.\\
-  \item \textbf{Data Partitioning}\\
-    To groupby operation splits the DataFrame into separate groups based on the PARTITION BY columns.\\
-    Input: partition\_by columns: df.groupby(['customer\_id']) \\Output: Two separate DataFrames, one per customer.\\
-    
-    {\small
-    \noindent\begin{tabular}{llr}
-    \multicolumn{3}{l}{\emph{Group 1 -- cust\_1}}\\
-    customer\_id & order\_date & price\\\hline
-    cust\_1      & 2020-05-11  & 100\\
-    cust\_1      & 2020-05-12  & 200\\
-    cust\_1      & 2020-05-14  & 100\\
-    cust\_1      & 2020-05-16  &  50\\
-    cust\_1      & 2020-05-17  & 100
-    \end{tabular}
-    \quad
-    \begin{tabular}{llr}
-    \multicolumn{3}{l}{\emph{Group 2 -- cust\_2}}\\
-    customer\_id & order\_date & price\\\hline
-    cust\_2      & 2020-05-13  &   8\\
-    cust\_2      & 2020-05-15  &   4\\
-    cust\_2      & 2020-05-18  &   6
-    \end{tabular}
-    \par}
+  \item \textbf{Parse and validate the query.} The parser extracts
+    \texttt{PARTITION BY customer\_id}, \texttt{ORDER BY order\_date},
+    \texttt{PATTERN (A B C)}, the two price comparisons, and the three
+    measures. A has no explicit \texttt{DEFINE} predicate and is therefore
+    implicitly true. The pattern requires three consecutive rows within the
+    ordered partition.
 
-  \item \textbf{Pattern Matching for \texttt{cust\_1}}  \\
-  Tries to match the pattern starting from each possible row position. Here, row~$k$ is the position in the original table and Row/Index~$k$ the position within the partition; the three rows A, B, and C must be consecutive.\\
-    \begin{itemize}
-      \item \emph{Attempt 1 (row~0, price=100):} \\
-      Try to build pattern A-B-C starting from the first row
-        \begin{itemize}
-          \item A = row 0 (100):Row 0 (date=2020-05-11, price=100)
-          \item B: the next row must satisfy $B.price < A.price$ (price $< 100$)\\
-          Index 1: price=200 → $200 < 100$? FALSE \\
-          No valid B found, PATTERN MATCH FAILED\\\\
-        \end{itemize}
-      \item \emph{Attempt 2 (row~1, price=200):}
-        \begin{itemize}
-          \item A = row1 (200): Row 1 (date=2020-05-12, price=200)  
-          \item B = row3 (100) :Row 2 (date=2020-05-14, price=100)  \\Index 2: price=100 → $100 < 200$?   TRUE 
-          \item C  =row5 (50): Row 3 (date=2020-05-16, price=50)
-          \\Index 3: price=50 → $50 < 100$? TRUE
-          \\row5 (50) \(\Rightarrow\) \emph{match found (rows 1, 3, 5)}
-        \\Match Dictionary:  {\{'A': 1, 'B': 2, 'C': 3\}}\\
-        \end{itemize}
-      \item \emph{Attempt 3 (row~6, price=100):}\\
-      The default \texttt{AFTER MATCH SKIP PAST LAST ROW} resumes after the last matched row (Row 3)
-        \begin{itemize}
-          \item A = row6 (100): Row 4 (date=2020-05-17, price=100)
-          \item B: no row after Row 4 \(\Rightarrow\) \emph{no match}
-          \\PATTERN MATCH FAILED
-        \end{itemize}
-    \end{itemize}
+  \item \textbf{Partition and order.} For \texttt{cust\_1}, the prices are $[100,200,100,50,100]$. Their original positions are
+    $[0,1,3,5,6]$. The \texttt{cust\_2} partition has prices $[8,4,6]$,
+    at original positions $[2,4,7]$. Both are already in date order.
 
-  \item \textbf{Pattern Matching for \texttt{cust\_2}}  
-    \begin{itemize}
-       \item \emph{Attempt 1 (row~2, price=8):}
-        \begin{itemize}
-          \item A = row2 (8): Row 0 (date=2020-05-13, price=8)
-         \item  B = row4 (4): Row 1 (date=2020-05-15, price=4) \\ (Look for row where $B.price < A.price$ ($price < 8$)
-          \\Index 1: price=4 → $4 < 8$? TRUE 
-          \item C: Look for row where $C.price < B.price$ ($price < 4$)
-        \\ Index 2: price=6 → $6 < 4$? FALSE
-        \\  No valid C found, PATTERN MATCH FAILED\\
-        \end{itemize}
-        
-      \item \emph{Attempt 2 (row~4, price=4):}
-        no B \(\Rightarrow\) no match
-        \begin{itemize}
-          \item A = row4 (4): Row 1 (date=2020-05-15, price=4)
-         \item  B: Look for row where $B.price < A.price$ ($price < 4$)
-          \\Index 2: price=6 → $6 < 4$? FALSE
-          \\No valid B found, PATTERN MATCH FAILED
-          \item C: cannot form a complete 3-row pattern
-        \\  PATTERN MATCH FAILED
-        \end{itemize}
-        
-    \end{itemize}
+  \item \textbf{Try the first start in \texttt{cust\_1}.} At local
+    position~0, A has price~100. The next row has price~200, so
+    $B.price<A.price$ fails. The matcher cannot skip this row and search
+    farther ahead for B in the consecutive pattern \texttt{A B C}.
 
-  \item \textbf{Apply Measures}\\
-  The evaluate\_measure function extracts specific column values from the matched pattern rows according to the MEASURES clause.\\
-    Only one match: \texttt{cust\_1} at rows 1, 3, 5.
-    \\input:Match dictionary: {'A': 1, 'B': 2, 'C': 3} (from cust\_1)
+  \item \textbf{Find the successful match.} Starting at local position~1,
+    the assignments are A~=~200, B~=~100, and C~=~50. Both comparisons hold.
+    The local positions are $(1,2,3)$, corresponding to original input
+    positions $(1,3,5)$ and dates May~12, May~14, and May~16,~2020.
 
-Measures: \texttt{\{'start\_date': 'A.order\_date',
-'end\_date': 'C.order\_date',\\
-'bottom\_price': 'C.price'\}}
+  \item \textbf{Apply the skip policy.} The default
+    \texttt{AFTER MATCH SKIP PAST LAST ROW} resumes at local position~4
+    (original position~6). Only one row remains, so no further complete
+    match is possible in this partition.
 
-\begin{description}
-  \item[start\_date = A.order\_date] 
-    Extract \texttt{order\_date} from the row matched to variable A.  
-    \\A is at index 1: \texttt{df.iloc[1][\char`\'order\_date\char`\'}] = \texttt{\char`\'2020-05-12\char`\'}.
-  \item[end\_date = C.order\_date] 
-    Extract \texttt{order\_date} from the row matched to variable C.\\  
-    C is at index 3: \texttt{df.iloc[3][\char`\'order\_date\char`\'}] = \texttt{\char`\'2020-05-16\char`\'}.
-  \item[bottom\_price = C.price] 
-    Extract \texttt{price} from the row matched to variable C.\\  
-    C is at index 3: \texttt{df.iloc[3][\char`\'price\char`\'}] = 50.
-  \item[customer\_id] 
-    The partition key identifies which group this match belongs to  
-    Value: \texttt{\char`\'cust\_1\char`\'}.
-\end{description}
+  \item \textbf{Check \texttt{cust\_2}.} The only complete three-row
+    candidate has prices $(8,4,6)$. B satisfies $4<8$, but C fails
+    $6<4$. Later starts have too few rows for a complete match.
 
- \item \textbf{ Outputs:\\}
+  \item \textbf{Evaluate measures.} With \texttt{grp} denoting the
+    date-ordered \texttt{cust\_1} partition, A is \texttt{grp.iloc[1]}
+    and C is \texttt{grp.iloc[3]}. The measures are therefore
+    \texttt{start\_date}=2020-05-12, \texttt{end\_date}=2020-05-16,
+    and \texttt{bottom\_price}=50. These local indices must not be applied
+    to the original interleaved DataFrame.
 
-
-Our goal is to represent a detected pattern in customer behavior.
-
-\paragraph{Pattern Meaning}
-\begin{itemize}
-  \item \textbf{Customer:} \texttt{cust\_1}
-  \item \textbf{Pattern Type:} Consecutive price decline ($A > B > C$)
-  \item \textbf{Time Period:} 2020-05-12 to 2020-05-16 (4 days)
-  \item \textbf{Price Sequence:} 200 \(\to\) 100 \(\to\) 50
-  \item \textbf{Business Insight:} Customer \texttt{cust\_1} exhibited a consistent downward trend in order values.\\
-\end{itemize}
-
- The final step assembles all successful matches into a result \texttt{DataFrame}.
-\begin{description}
-
-  \item[Input:] List of result rows (one per successful match)
-  \item[Process:] \texttt{pd.DataFrame(results)}
-  \item[Output:] Final result \texttt{DataFrame}
-\end{description}
+  \item \textbf{Materialize the output.} One result row is returned:
+\end{enumerate}
 
 \begin{center}
 \small
@@ -1709,13 +1844,9 @@ Our goal is to represent a detected pattern in customer behavior.
 \end{tabular}
 \end{center}
 
-This reflects a consistent downward trend:
-\begin{itemize}
-  \item 200 on 2020-05-12 $\to$ 100 on 2020-05-14 $\to$ 50 on 2020-05-16
-\end{itemize}
-
-
-\end{enumerate}
+The match describes three consecutive purchases with declining prices for
+\texttt{cust\_1}; it does not imply that all of this customer's purchases
+follow a declining trend.
 
 \onecolumn
 \raggedbottom
@@ -1773,7 +1904,8 @@ completed; the two incomplete Trino cells reached the time limit
 
 \begin{table}[H]
 \centering\footnotesize
-\caption{Absolute Peak Memory (GB) on the Amazon Reviews Corpus}
+\caption{Mean sampled absolute peak footprint (GiB) on Amazon Reviews;
+\textit{timeout} denotes an incomplete query.}
 \label{tab:stress_mem}
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{@{\extracolsep{\fill}}lccccc}
@@ -1810,46 +1942,5 @@ completed; the two incomplete Trino cells reached the time limit
 \end{tabular}
 \end{adjustbox}
 \end{table}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 \end{document}
