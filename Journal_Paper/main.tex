@@ -1,10 +1,14 @@
 %% Elsevier manuscript in a single-column preprint layout.
-%% Editorial Manager: upload main.tex, references.bib, the class/style files,
+%% Editorial Manager: upload main.tex, references.bib, elsarticle.cls, IEEEtran.bst,
 %% and the five referenced PNGs at one folder level. Do not upload main.pdf
 %% or generated main.* files together with main.tex (LaTeX_Guide, pp. 2, 6--7).
 %% Upload order: manuscript, bibliography, class/style files, then figures.
 %% Use Manuscript for source/support files and Figure for PNGs. Match the
 %% submission metadata to this file (LaTeX_Guide, pp. 2--4, 8).
+%% The journal requires a separate identifying title page and an anonymized
+%% review manuscript (Guide for Authors, p. 6). This is the working master.
+%% PNGs compile in Editorial Manager; final artwork must also satisfy the
+%% journal's vector PDF/EPS or raster TIFF/JPEG requirements (pp. 8--9).
 \documentclass[preprint,12pt,times,a4paper]{elsarticle}
 
 %% --- Encoding & fonts
@@ -90,7 +94,12 @@
 \begin{frontmatter}
 
 \title{Bringing the SQL Row Pattern Recognition \texttt{MATCH\_RECOGNIZE} Operator to
-  Pandas DataFrames}
+  Pandas DataFrames\tnoteref{abbr}}
+\tnotetext[abbr]{Abbreviations: ANTLR, ANother Tool for Language Recognition;
+  AST, abstract syntax tree; DFA, deterministic finite automaton;
+  EE, Enterprise Edition;
+  IQR, interquartile range; LRU, least recently used;
+  MR, \texttt{MATCH\_RECOGNIZE}; NFA, nondeterministic finite automaton.}
 
 %% ORCID iDs from the LNCS version:
 %%   Monier Lawande 0009-0002-6531-8709, Ahmed Awad 0000-0003-1879-1026
@@ -103,32 +112,36 @@
 
 \author[buid,cu]{Ahmed Awad}
 \ead{ahmed.awad@buid.ac.ae}
-
 \affiliation[nu]{organization={Center for Informatics Science (CIS), School of
     Information Technology and Computer Science (ITCS), Nile University},
+  addressline={Juhayna Square, 26th of July Corridor, El Sheikh Zayed},
   city={Giza},
   country={Egypt}}
 
 \affiliation[buid]{organization={British University in Dubai},
+  addressline={Block 11, 1st and 2nd floors, Dubai International Academic City,
+    P.O. Box 345015},
   city={Dubai},
-  country={UAE}}
+  country={United Arab Emirates}}
 
 \affiliation[cu]{organization={Cairo University},
+  addressline={1 Gamaa Street},
   city={Giza},
+  postcode={12613},
   country={Egypt}}
 
 \begin{abstract}
 SQL:2016 introduced \texttt{MATCH\_RECOGNIZE} to find user-defined patterns
 in ordered table rows. In Pandas, the same task usually needs loops or a
-combination of grouping, shifts, and Boolean masks. We present an engine that
-takes an SQL query and a Pandas DataFrame and returns a result DataFrame in
-the same Python process. It supports a tested subset of row pattern
+combination of grouping, shifts, and Boolean masks. We present an extended
+SQL-in-Pandas engine that takes an SQL query and a DataFrame and returns a
+result DataFrame in the same Python process. It supports a tested subset of row pattern
 recognition in the \texttt{FROM} clause, including partitioning, ordering,
 pattern definitions, measures, and match-control modes. The engine parses the
 query, compiles the pattern into finite automata, and uses vectorized
 operations when the query allows them. Other supported cases use general
 evaluation or exact search with explicit limits. We compare the engine with
-Trino~473 and Oracle~21c EE on five pattern families and six sizes of the
+Trino~473 and Oracle~21c Enterprise Edition on five pattern families and six sizes of the
 Amazon UK Products dataset, up to 2,222,742 rows. All 30 pattern--size combinations return
 identical normalized results across the three systems. Mean execution time
 per combination is 0.17 seconds for the proposed engine, 1.04 for Oracle, and
@@ -140,7 +153,7 @@ fit in memory.
 \end{abstract}
 
 \begin{keyword}
-Pattern Matching \sep MATCH\_RECOGNIZE \sep Pandas \sep SQL \sep Finite Automata \sep Data Engineering
+Row pattern recognition \sep MATCH\_RECOGNIZE \sep Pandas \sep SQL \sep Finite automaton \sep Sequential pattern
 \end{keyword}
 
 \end{frontmatter}
@@ -149,9 +162,9 @@ Pattern Matching \sep MATCH\_RECOGNIZE \sep Pandas \sep SQL \sep Finite Automata
 Row pattern recognition searches an ordered sequence of table rows or stream
 events for relationships that span several rows. It can identify trends,
 repeated events, and shapes such as a fall followed by a recovery. Applications
-include transaction chains related to money
-laundering~\cite{10.5120/ijca2022922446} and suspicious user behavior in security
-logs~\cite{zemke2007pattern}. Patterns use syntax similar to regular expressions,
+include suspicious bank-account
+transactions~\cite{10.5120/ijca2022922446} and unusual behavior in security
+applications~\cite{zemke2007pattern}. Patterns use syntax similar to regular expressions,
 but they match rows rather than individual characters.
 
 The \texttt{MATCH\_RECOGNIZE} (MR) clause was introduced in
@@ -191,26 +204,32 @@ output measures together, while the result remains available for further
 Pandas analysis. The procedural and SQL versions of the consecutive-price
 example are given in Appendix~\ref{Step-by-Step}.
 
+An earlier implementation of SQL row pattern recognition for Pandas was
+introduced in~\cite{lawande2026rpr}. The present study develops this work
+further and examines the execution architecture, optimization techniques,
+correctness, performance, memory use, and scalability.
+
 The main contributions of this paper are as follows:
-\begin{itemize}
-  \item \textbf{SQL-based row pattern recognition for Pandas.} An in-process
-    engine executes an R010-style subset of SQL:2016
-    \texttt{MATCH\_RECOGNIZE}, which specifies row patterns in the
-    \texttt{FROM} clause, directly on DataFrames. It supports the main
-    clauses, pattern constructs, navigation functions, aggregates, and output
-    and skip modes described in this paper.
-  \item \textbf{Automata-based execution.} Patterns are compiled into finite
-    automata and evaluated over ordered DataFrame partitions. The execution
-    model also handles conditions that depend on earlier rows in a match.
-  \item \textbf{Performance optimization.} The engine combines vectorized
-    predicate evaluation, compiled measures, efficient result construction,
-    and bounded caching. Each optimization is used only for supported cases,
-    and differential tests compare optimized and general evaluation.
-  \item \textbf{Correctness, performance, and scalability evaluation.} A
-    cross-system study compares the engine with Trino~473 and Oracle~21c EE.
-    All systems return the same results in the 30 pattern--size cells of the
-    main benchmark, and the proposed engine has the lowest execution time in
-    each cell. A separate scalability test covers up to 227.9 million rows.
+\begin{itemize}[beginpenalty=10000]
+  \item \textbf{Extended implementation.} We develop the earlier
+    SQL-in-Pandas implementation into a fuller framework for an evaluated
+    R010-style subset of SQL:2016 \texttt{MATCH\_RECOGNIZE}. It covers
+    pattern constructs, navigation, aggregates, output modes, and skip
+    policies, with explicit validation and execution limits.
+  \item \textbf{Execution optimization.} We combine vectorized condition
+    evaluation, compiled matching and measure plans, bounded caching,
+    efficient output construction, and memory-saving techniques. Each
+    optimization is used only when its conditions are met. Differential
+    tests compare optimized and general evaluation.
+  \item \textbf{Comprehensive experimental evaluation.} We evaluate
+    correctness, SQL feature coverage, execution time, throughput, and
+    memory use. The main benchmark compares the engine with Oracle~21c EE
+    and Trino~473 across 30 pattern--size combinations, with identical
+    normalized outputs from all three systems.
+  \item \textbf{Scalability and complexity analysis.} We analyze the
+    costs and limits of compilation and execution, evaluate input sizes
+    up to 227.9 million rows, and study the effects of sorting and a
+    supported state-dependent aggregate form on performance.
 \end{itemize}
 
 \section{Background and Related Work}
@@ -247,11 +266,11 @@ and storage configuration.
 \subsection{Existing MATCH\_RECOGNIZE Implementations}
 
 Several SQL engines implement \texttt{MATCH\_RECOGNIZE} natively. Systems
-without native support can express row-pattern matching through window
-functions, user-defined aggregates, or procedural
-code~\cite{findling2025bringing,lambrecht2025democratize}. These alternatives
-can require more code and can be harder to maintain. Their performance depends
-on the query and execution plan. This subsection summarizes the operator and its
+without native support can translate row-pattern queries into SQL that uses
+window functions and recursive common table
+expressions~\cite{findling2025bringing,lambrecht2025democratize}. The resulting
+SQL can be long, and its performance depends on the query and execution plan.
+This subsection summarizes the operator and its
 main clauses, reviews the implementations and optimization approaches, and
 compares their scope.
 
@@ -259,7 +278,7 @@ compares their scope.
 The SQL standard distinguishes three optional row-pattern features: R010 (row
 pattern recognition in the \texttt{FROM} clause), R020 (row patterns in
 \texttt{WINDOW} specifications), and R030 (full aggregate support); this work
-targets an R010-style subset~\cite{iso2016,ISO2021}. The general structure of
+targets an R010-style subset~\cite{iso2016,ISO2021,petkovic2022rpr}. The general structure of
 the clause is shown in Listing~\ref{lst:mr-structure}.
 \begin{lstlisting}[language=SQL,frame=single,caption={General structure of the \texttt{MATCH\_RECOGNIZE} clause},label={lst:mr-structure}]
 SELECT <columns to return>
@@ -367,8 +386,7 @@ and deployment; the systems do not all provide the same SQL semantics.
 
 \begin{table}[htbp]
 \centering\footnotesize
-\caption{Documented row-pattern scope and deployment of the reviewed systems.}
-\label{tab:engine_comparison}
+
 \setlength{\tabcolsep}{4pt}
 \begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.22\textwidth}
   >{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{0.24\textwidth}@{}}
@@ -396,12 +414,19 @@ constructs, and limits are listed in Section~5.3. & Direct execution on
 Pandas DataFrames in the Python process. \\
 \bottomrule
 \end{tabularx}
+\caption{Documented row-pattern scope and deployment of the reviewed systems.}
+\label{tab:engine_comparison}
 \end{table}
 
 The proposed engine suits workflows that already hold data in Pandas. It
 avoids a separate query service while keeping SQL pattern definitions and
 DataFrame output in the same workflow. Distributed execution, storage
 management, and general SQL planning remain outside its scope.
+
+Our earlier paper introduced the SQL-in-Pandas approach, automata-based
+matching, and initial tests~\cite{lawande2026rpr}. This study develops the
+framework further and examines its supported SQL features, execution
+optimizations, correctness, performance, memory use, and scalability.
 
 
 \FloatBarrier
@@ -515,6 +540,9 @@ matching algorithms, execution paths, and optimizations used in these stages.
 
 \section{Implementation and Optimization}
 
+This section describes the implementation of the evaluated framework:
+SQL parsing, automata construction, matching, and execution optimizations.
+
 \subsection{ANTLR4 Grammar and AST Implementation}
 
 The system uses the community ANTLR4 grammar for the Trino SQL dialect. Its
@@ -588,12 +616,13 @@ makes a quantifier reluctant. This gives the builder one internal
 representation for all quantifiers.
 
 \paragraph{NFA Construction}
-We use Thompson's construction to convert pattern tokens into an NFA.
+We use Thompson's construction to convert pattern tokens into a
+nondeterministic finite automaton (NFA)~\cite{Thompson1968,HopcroftUllman}.
 The automaton stores transitions, variable bindings, anchors, and metadata
 for additional pattern features. Quantifiers (\texttt{*}, \texttt{+},
 \texttt{?}, \texttt{\{i,j\}}) are mapped to sub-automata. Each transition
 that consumes a row is guarded by the \texttt{DEFINE} predicate of its
-variable~\cite{Thompson1968,HopcroftUllman}. Fig.~\ref{fig:meth-nfa} shows a simplified NFA for
+variable. Fig.~\ref{fig:meth-nfa} shows a simplified NFA for
 \texttt{A+ B?}. State $q_1$ is reached after one or more \texttt{A} rows and is
 accepting because \texttt{B} is optional. An $\varepsilon$-transition leads
 to the connector state $r$. Consuming one \texttt{B} row then reaches the
@@ -653,12 +682,12 @@ $m!$ orders.
 \end{figure}
 
 \paragraph{DFA Construction and Optimization}
-The NFA is converted into a DFA using subset construction. After construction,
+The NFA is converted into a deterministic finite automaton (DFA) using subset
+construction~\cite{HopcroftUllman}. After construction,
 unreachable states are removed and transitions are normalized; this is a
 conservative reduction rather than full DFA minimization. The engine keeps
 pattern metadata and evaluates predicates during matching. A DFA transition
-alone does not resolve every SQL preference or state-dependent condition
-\cite{HopcroftUllman}.
+alone does not resolve every SQL preference or state-dependent condition.
 
 \paragraph{Construction limits} Subset construction has exponential worst-case
 cost, so the compiler uses explicit limits. \texttt{PERMUTE} is rejected
@@ -722,8 +751,7 @@ separately.
 
 \begin{table*}[tbp]
 \centering\footnotesize
-\caption{Performance optimizations, activation conditions, and expected effects.}
-\label{tab:performance_optimizations}
+
 \setlength{\tabcolsep}{3pt}
 \renewcommand{\arraystretch}{1.12}
 \begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.20\textwidth}>{\raggedright\arraybackslash}p{0.43\textwidth}>{\raggedright\arraybackslash}X@{}}
@@ -738,7 +766,7 @@ fixed-offset \texttt{PREV}/\texttt{NEXT} forms; safe row-local parts of a mixed
 \texttt{AND} can act as prefilters. & Evaluates conditions once per partition
 and reuses Boolean masks. \\
 \addlinespace[3pt]
-Row-local DFA decision tables & All predicates are vectorized; no empty
+Row-local\newline DFA decision tables & All predicates are vectorized; no empty
 matches, anchors, exclusions, \texttt{PERMUTE}, \texttt{SUBSET}, reluctant
 quantifiers, or state-dependent conditions. & Replaces repeated transition
 dispatch with compact indexing and segment assignments. \\
@@ -766,6 +794,8 @@ Incremental aggregate evaluation & A supported running aggregate in a
 of repeatedly aggregating the full prefix. \\
 \bottomrule
 \end{tabularx}
+\caption{Performance optimizations, activation conditions, and expected effects.}
+\label{tab:performance_optimizations}
 \end{table*}
 
 The ordered-input check takes $O(n)$ time for a partition of $n$ rows.
@@ -889,8 +919,7 @@ Table~\ref{tab:orders} shows all eight rows.
 
 \begin{table}[H]
   \centering\small
-  \caption{Sample “orders” dataset (\texttt{customer\_id}, \texttt{order\_date}, \texttt{price})}
-  \label{tab:orders}
+
   \begin{tabular}{lcr}
     \toprule
     \textbf{customer\_id} & \textbf{order\_date} & \textbf{price} \\
@@ -905,6 +934,8 @@ Table~\ref{tab:orders} shows all eight rows.
     cust\_2 & 2020-05-18 &   6 \\
     \bottomrule
   \end{tabular}
+\caption{Sample “orders” dataset (\texttt{customer\_id}, \texttt{order\_date}, \texttt{price})}
+  \label{tab:orders}
 \end{table}
 
 The five orders for \texttt{cust\_1} and three for \texttt{cust\_2} let us
@@ -926,7 +957,7 @@ CREATE TABLE memory.default.orders (
 \begin{lstlisting}[language=SQL,basicstyle=\ttfamily\small, backgroundcolor=\color{gray!10},caption={Inserting data into the table },label={lst:orders-insert}]
 
 INSERT INTO memory.default.orders
-VALUES 
+VALUES
     ('cust_1', DATE '2020-05-11', 100),
     ('cust_1', DATE '2020-05-12', 200),
     ('cust_2', DATE '2020-05-13',   8),
@@ -973,8 +1004,7 @@ alphabet, so the same pattern families apply to both datasets.
 \setlength{\LTright}{0pt}
 \begin{table*}[!tbp]
 \centering\footnotesize
-\caption{SQL Pattern Definitions and Detection Goals (Amazon UK Products)}
-\label{tab:pattern_definitions}
+
 \begin{tabularx}{\textwidth}{@{}ll>{\raggedright\arraybackslash}X@{}}
 \toprule
 \textbf{Pattern Name} & \textbf{SQL Pattern} & \textbf{Description \& Goal} \\
@@ -1006,6 +1036,8 @@ complex\_nested & \texttt{(A|B)+ (C\{1,3\} D*)+} &
 \textbf{Use:} Detect runs of low-priced products (${\le}$\pounds25) followed by one or more groups of 1--3 mid products with optional upper-mid products. Exercises nested alternation and bounded repetition. \\
 \bottomrule
 \end{tabularx}
+\caption{SQL Pattern Definitions and Detection Goals (Amazon UK Products)}
+\label{tab:pattern_definitions}
 \end{table*}
 }
 
@@ -1066,8 +1098,7 @@ Table~\ref{tab:pattern_definitions} are timed in the main benchmark.
 
 \begin{table}[htbp]
 \centering\footnotesize
-\caption{Feature coverage of the proposed engine, based on the thesis reference tests.}
-\label{tab:paper_feature_coverage}
+
 \begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.27\textwidth}
   >{\raggedright\arraybackslash}p{0.14\textwidth}X}
 \toprule
@@ -1093,6 +1124,8 @@ Other query paths & Outside scope & Conditional and subquery ordering
   separate R020 window path are not evaluated. \\
 \bottomrule
 \end{tabularx}
+\caption{Feature coverage of the proposed engine, based on the thesis reference tests.}
+\label{tab:paper_feature_coverage}
 \end{table}
 
 \FloatBarrier
@@ -1310,9 +1343,7 @@ and all three systems return the same normalized results in each cell.
 \begin{table}[H]
 \centering\footnotesize
 \setlength{\tabcolsep}{3pt}
-\caption{Overall benchmark statistics (Amazon UK Products). Memory maxima
-are the largest cell means of sampled per-run peaks.}
-\label{tab:overall_stats}
+
 \begin{tabular}{lrrrrr}
 \toprule
 \textbf{System} & \textbf{Cells} & \textbf{Avg} & \textbf{Avg Thr.} & \textbf{Max Query} & \textbf{Max Footpr.} \\
@@ -1323,6 +1354,9 @@ Oracle 21c EE & 30 & 1.04 & 1,156,106 & 58.7 & 2,057 \\
 Trino 473 & 30 & 1.98 & 602,098 & 20.8 & 14,993 \\
 \bottomrule
 \end{tabular}
+\caption{Overall benchmark statistics (Amazon UK Products). Memory maxima
+are the largest cell means of sampled per-run peaks.}
+\label{tab:overall_stats}
 \end{table}
 
 Several design choices help explain the observed performance. The engine
@@ -1374,8 +1408,11 @@ of SQL engines.
 
 \paragraph{Conclusions}
 
-We presented an in-process engine for an evaluated R010-style subset of
-SQL:2016 \texttt{MATCH\_RECOGNIZE} over Pandas DataFrames. It parses SQL, checks the supported semantics, compiles patterns into
+We presented an extended in-process framework for an evaluated R010-style
+subset of SQL:2016 \texttt{MATCH\_RECOGNIZE} over Pandas DataFrames. The
+work combines the supported SQL implementation, execution optimizations,
+cross-system validation, and complexity and scalability analysis. The engine
+parses SQL, checks the supported semantics, compiles patterns into
 automata, and returns a DataFrame. Execution plans have explicit conditions
 and limits. On Amazon UK Products, all 30 pattern--size combinations
 returned normalized results identical to Trino~473 and Oracle~21c EE. The mean
@@ -1425,15 +1462,27 @@ optimizers could support improvements at the plan level.
 \paragraph{Declaration of competing interest} The authors declare that they have no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper.
 
 \paragraph{Data availability}
-The implementation is available in the
-\href{https://github.com/MonierAshraf/Row_match_recognize}{project's GitHub repository}.
 The evaluation uses nested prefixes of up to 2,222,742 rows from the
 \href{https://www.kaggle.com/datasets/asaniczka/amazon-uk-products-dataset-2023}{Amazon UK Products dataset}
 and up to 227,899,533 rows from the
 \href{https://amazon-reviews-2023.github.io/}{Amazon Reviews 2023 corpus}.
 These source datasets are publicly available from their respective providers.
 
-\bibliographystyle{elsarticle-num}
+\paragraph{Code availability}
+The implementation is available in the
+\href{https://github.com/MonierLawande/Row_match_recognize}{project's GitHub repository}.
+Appendix~\ref{app:provenance} identifies the engine revision and measurement
+protocols used for the reported results.
+
+\section*{Declaration of generative AI and AI-assisted technologies in the manuscript preparation process}
+During the preparation of this manuscript, ChatGPT (OpenAI, GPT-6) was used to improve
+the English and readability, help organize and draft text based on the
+existing thesis material, and assist with \LaTeX{} preparation and formatting.
+The authors are responsible for reviewing and editing the assisted content
+and for the accuracy and integrity of the final manuscript.
+
+%% The journal specifies numbered references with quoted article titles.
+\bibliographystyle{IEEEtran}
 \bibliography{references}
 
 \appendix
@@ -1443,6 +1492,7 @@ These source datasets are publicly available from their respective providers.
 \renewcommand{\theHtable}{\Alph{section}.\arabic{table}}
 \renewcommand{\thefigure}{\Alph{section}.\arabic{figure}}
 \renewcommand{\theHfigure}{\Alph{section}.\arabic{figure}}
+\renewcommand{\thesubsection}{\Alph{section}.\arabic{subsection}}
 \section{Supplementary Experimental Results}
 
 This appendix gives the detailed values for the results reported in
@@ -1509,8 +1559,7 @@ counts are identical across the three systems. In this dataset,
 
 \begin{table*}[t]
 \centering\small
-\caption{Returned Rows by Pattern and Dataset Size under \texttt{ONE ROW PER MATCH} (Identical for the Three Systems)}
-\label{tab:match_counts}
+
 \begin{tabular}{@{\extracolsep{\fill}}lrrrrrr}
 \toprule
 \textbf{Pattern} & \multicolumn{6}{c}{\textbf{Dataset Size (rows)}} \\
@@ -1524,6 +1573,8 @@ counts are identical across the three systems. In this dataset,
 \texttt{complex\_nested} & 9,420 & 17,759 & 32,360 & 58,616 & 119,299 & 167,641 \\
 \bottomrule
 \end{tabular}
+\caption{Returned Rows by Pattern and Dataset Size under \texttt{ONE ROW PER MATCH} (Identical for the Three Systems)}
+\label{tab:match_counts}
 \end{table*}
 
 \subsection{Detailed Benchmark Tables}
@@ -1539,8 +1590,7 @@ times.
 
 \begin{table*}[t]
 \centering\small
-\caption{Pattern Performance Summary (5 Patterns $\times$ 6 Dataset Sizes = 30 Tests per System)}
-\label{tab:pattern_summary}
+
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{lrrrrrr}
 \toprule
@@ -1556,12 +1606,13 @@ times.
 \bottomrule
 \end{tabular}
 \end{adjustbox}
+\caption{Pattern Performance Summary (5 Patterns $\times$ 6 Dataset Sizes = 30 Tests per System)}
+\label{tab:pattern_summary}
 \end{table*}
 
 \begin{table*}[t]
 \centering\small
-\caption{Performance Summary by Dataset Size}
-\label{tab:size_summary}
+
 \begin{tabular}{lrrrrr}
 \toprule
 \textbf{Dataset Size} & \textbf{Engine} & \textbf{Oracle} & \textbf{Trino} & \textbf{Oracle/} & \textbf{Trino/} \\
@@ -1575,12 +1626,13 @@ times.
 2,222,742 & 0.426 & 2.622 & 4.788 & 6.2$\times$ & 11.2$\times$ \\
 \bottomrule
 \end{tabular}
+\caption{Performance Summary by Dataset Size}
+\label{tab:size_summary}
 \end{table*}
 
 \begin{table*}[t]
 \centering\small
-\caption{Engine Execution Time (seconds) by Pattern and Dataset Size}
-\label{tab:execution_times}
+
 \begin{tabular}{@{\extracolsep{\fill}}lrrrrrr}
 \toprule
 \textbf{Pattern} & \multicolumn{6}{c}{\textbf{Dataset Size (rows)}} \\
@@ -1594,12 +1646,13 @@ times.
 \texttt{complex\_nested} & 0.040 & 0.076 & 0.152 & 0.317 & 0.604 & 0.875 \\
 \bottomrule
 \end{tabular}
+\caption{Engine Execution Time (seconds) by Pattern and Dataset Size}
+\label{tab:execution_times}
 \end{table*}
 
 \begin{table*}[t]
 \centering\small
-\caption{Engine Throughput (million rows/sec) by Pattern and Dataset Size}
-\label{tab:throughput}
+
 \begin{tabular}{@{\extracolsep{\fill}}lrrrrrr}
 \toprule
 \textbf{Pattern} & \multicolumn{6}{c}{\textbf{Dataset Size (rows)}} \\
@@ -1613,12 +1666,13 @@ times.
 \texttt{complex\_nested} & 2.49 & 2.64 & 2.63 & 2.53 & 2.65 & 2.54 \\
 \bottomrule
 \end{tabular}
+\caption{Engine Throughput (million rows/sec) by Pattern and Dataset Size}
+\label{tab:throughput}
 \end{table*}
 
 \begin{table*}[t]
 \centering\small
-\caption{Memory by Dataset Size: Average Query Peak and Deployment Footprint of the Three Systems (MiB)}
-\label{tab:memory_cache}
+
 \begin{tabular}{lrrrrrr}
 \toprule
  & \multicolumn{3}{c}{\textbf{Query peak (incremental)}} & \multicolumn{3}{c}{\textbf{Footprint (absolute)}} \\
@@ -1633,6 +1687,8 @@ times.
 2,222,742 & 163.1 & 58.5 & 3.3 & 486 & 2,050 & 14,957 \\
 \bottomrule
 \end{tabular}
+\caption{Memory by Dataset Size: Average Query Peak and Deployment Footprint of the Three Systems (MiB)}
+\label{tab:memory_cache}
 \end{table*}
 
 \subsection{Ordered vs.\ Shuffled Input and the State-Dependent Pattern}
@@ -1648,8 +1704,7 @@ show that shuffling improves execution.
 
 \begin{table*}[t]
 \centering\small
-\caption{Execution Time (seconds) and Slowdown by Dataset Size for Ordered (``ord'') and Shuffled (``shuf'') Input}
-\label{tab:ordering_by_size}
+
 \setlength{\tabcolsep}{4pt}
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{lrrrrrrrrr}
@@ -1669,6 +1724,8 @@ Average & 0.167 & 0.240 & 1.43$\times$ & 1.045 & 1.083 & 1.04$\times$ & 1.978 & 
 \bottomrule
 \end{tabular}
 \end{adjustbox}
+\caption{Execution Time (seconds) and Slowdown by Dataset Size for Ordered (``ord'') and Shuffled (``shuf'') Input}
+\label{tab:ordering_by_size}
 \end{table*}
 
 The state-dependent pattern uses \texttt{price > AVG(A.price)} in
@@ -1678,8 +1735,7 @@ output (Table~\ref{tab:worstcase_coverage}).
 
 \begin{table*}[t]
 \centering\small
-\caption{Mean Execution Time (seconds) for the State-Dependent Aggregate Pattern}
-\label{tab:worstcase_coverage}
+
 \begin{tabular}{lrrrrr}
 \toprule
 \textbf{Dataset Size} & \textbf{Engine} & \textbf{Oracle} & \textbf{Trino} & \textbf{Oracle/} & \textbf{Trino/} \\
@@ -1693,6 +1749,8 @@ output (Table~\ref{tab:worstcase_coverage}).
 2,222,742 & 1.279 & 2.324 & 8.665 & 1.8$\times$ & 6.8$\times$ \\
 \bottomrule
 \end{tabular}
+\caption{Mean Execution Time (seconds) for the State-Dependent Aggregate Pattern}
+\label{tab:worstcase_coverage}
 \end{table*}
 
 \subsection{SQL Clause Syntax Reference} \label{Full_SQL}
@@ -1830,11 +1888,12 @@ are zero-based and differ from positions in the original interleaved table.
     and \texttt{bottom\_price}=50. These local indices must not be applied
     to the original interleaved DataFrame.
 
-  \item \textbf{Materialize the output.} One result row is returned:
+  \item \textbf{Materialize the output.} Table~\ref{tab:worked-output}
+    gives the single result row.
 \end{enumerate}
 
-\begin{center}
-\small
+\begin{table}[H]
+\centering\small
 \begin{tabular}{l l l r}
 \toprule
 \textbf{customer\_id} & \textbf{start\_date} & \textbf{end\_date} & \textbf{bottom\_price} \\
@@ -1842,7 +1901,9 @@ are zero-based and differ from positions in the original interleaved table.
 \texttt{cust\_1} & 2020-05-12 & 2020-05-16 & 50 \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Result of the consecutive-price example.}
+\label{tab:worked-output}
+\end{table}
 
 The match describes three consecutive purchases with declining prices for
 \texttt{cust\_1}; it does not imply that all of this customer's purchases
@@ -1864,8 +1925,7 @@ completed; the two incomplete Trino cells reached the time limit
 
 \begin{table}[H]
 \centering\footnotesize
-\caption{Execution Time (seconds; mean\,$\pm$\,SD) on the Amazon Reviews Corpus; \textit{timeout} marks a query that exceeded the 600-second budget}
-\label{tab:stress_volume}
+
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{@{}lccccc@{}}
 \toprule
@@ -1900,13 +1960,13 @@ completed; the two incomplete Trino cells reached the time limit
 \bottomrule
 \end{tabular}
 \end{adjustbox}
+\caption{Execution Time (seconds; mean\,$\pm$\,SD) on the Amazon Reviews Corpus; \textit{timeout} marks a query that exceeded the 600-second budget}
+\label{tab:stress_volume}
 \end{table}
 
 \begin{table}[H]
 \centering\footnotesize
-\caption{Mean sampled absolute peak footprint (GiB) on Amazon Reviews;
-\textit{timeout} denotes an incomplete query.}
-\label{tab:stress_mem}
+
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{@{\extracolsep{\fill}}lccccc}
 \toprule
@@ -1941,6 +2001,9 @@ completed; the two incomplete Trino cells reached the time limit
 \bottomrule
 \end{tabular}
 \end{adjustbox}
+\caption{Mean sampled absolute peak footprint (GiB) on Amazon Reviews;
+\textit{timeout} denotes an incomplete query.}
+\label{tab:stress_mem}
 \end{table}
 
 \end{document}
