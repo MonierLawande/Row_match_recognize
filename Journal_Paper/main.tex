@@ -1,7 +1,8 @@
 %% Elsevier article, converted from the Springer LNCS manuscript.
 %% Class options: preprint = single column, the layout Elsevier expects for
-%% submission.  Swap for [final,5p,times,twocolumn] to preview the journal layout.
-\documentclass[final,5p,times,twocolumn,a4paper]{elsarticle}
+%% submission.  After acceptance, swap for [final,5p,times,twocolumn,a4paper]
+%% to get the two-column journal layout; nothing else needs to change.
+\documentclass[preprint,12pt,times,a4paper]{elsarticle}
 
 %% --- Encoding & fonts
 \usepackage[T1]{fontenc}
@@ -20,8 +21,15 @@
 \usepackage{multirow}
 \usepackage{longtable}
 \usepackage{float}
+\usepackage{adjustbox}
+\usepackage{tabularx}
 \usepackage{tikz}
 \usetikzlibrary{positioning,fit,backgrounds,arrows.meta}
+%% Width of the two drawn figures: the full column in the two-column layout,
+%% a narrower share of the line in the one-column submission layout.
+\makeatletter
+\newcommand{\drawnfigwidth}{\if@twocolumn\columnwidth\else0.7\textwidth\fi}
+\makeatother
 
 %% --- Lists
 \usepackage{enumitem}
@@ -58,7 +66,7 @@
 
 %% Long \texttt{} identifiers and URLs cannot be hyphenated; let TeX stretch
 %% the interword space a little rather than run into the margin.
-\emergencystretch=3em
+\emergencystretch=4em
 
 %% Float placement: this paper has ten full-width tables. The defaults allow
 %% only two double-column floats per page, so they accumulate and push the
@@ -432,7 +440,7 @@ it, before any row is matched.
 
 \begin{figure}[H]
 \centering
-\resizebox{\columnwidth}{!}{%
+\resizebox{\drawnfigwidth}{!}{%
 \begin{tikzpicture}[
     node distance=0.30cm,
     every node/.style={font=\small},
@@ -585,7 +593,7 @@ $m!$ orders.
 
 \begin{figure}[H]
 \centering
-\resizebox{\columnwidth}{!}{%
+\resizebox{\drawnfigwidth}{!}{%
 \begin{tikzpicture}[
     nfastate/.style={circle, draw=black!80, line width=0.85pt, fill=white,
                      minimum size=0.98cm, inner sep=0pt, font=\small},
@@ -897,11 +905,11 @@ alphabet, so the same pattern families apply to both datasets.
 {\small
 \setlength{\LTleft}{0pt}
 \setlength{\LTright}{0pt}
-\begin{table*}[t]
-\centering
+\begin{table*}[!tbp]
+\centering\footnotesize
 \caption{SQL Pattern Definitions and Detection Goals}
 \label{tab:pattern_definitions}
-\begin{tabular}{@{\extracolsep{\fill}}llp{0.45\textwidth}}
+\begin{tabularx}{\textwidth}{@{}ll>{\raggedright\arraybackslash}X@{}}
 \toprule
 \textbf{Pattern Name} & \textbf{SQL Pattern} & \textbf{Description \& Goal} \\
 \midrule
@@ -931,7 +939,7 @@ complex\_nested & \texttt{(A|B)+ (C\{1,3\} D*)+} &
 \textbf{Goal:} Nested grouping of low-price runs followed by mid/upper-mid groups. \newline
 \textbf{Use:} Detect runs of low-priced products (${\le}$\pounds25) followed by one or more groups of 1--3 mid products with optional upper-mid products. Useful for multi-level quality grouping and advanced sorting pattern detection in product listings. \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table*}
 }
 
@@ -1368,6 +1376,7 @@ mean time.
 \centering\small
 \caption{Pattern Performance Summary (5 Patterns $\times$ 6 Dataset Sizes = 30 Tests per System)}
 \label{tab:pattern_summary}
+\begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{lrrrrrr}
 \toprule
  & \multicolumn{2}{c}{\textbf{Proposed engine}} & \multicolumn{2}{c}{\textbf{Oracle 21c EE}} & \multicolumn{2}{c}{\textbf{Trino 473}} \\
@@ -1381,6 +1390,7 @@ mean time.
 \texttt{complex\_nested} & 2,582,321 & 0.34 & 505,612 & 2.52 & 238,402 & 5.28 \\
 \bottomrule
 \end{tabular}
+\end{adjustbox}
 \end{table*}
 
 \begin{table*}[t]
@@ -1476,6 +1486,7 @@ show that shuffling improves execution.
 \caption{Execution Time (seconds) and Slowdown by Dataset Size for Ordered (``ord'') and Shuffled (``shuf'') Input}
 \label{tab:ordering_by_size}
 \setlength{\tabcolsep}{4pt}
+\begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{lrrrrrrrrr}
 \toprule
  & \multicolumn{3}{c}{\textbf{Proposed engine}} & \multicolumn{3}{c}{\textbf{Oracle 21c EE}} & \multicolumn{3}{c}{\textbf{Trino 473}} \\
@@ -1492,6 +1503,7 @@ show that shuffling improves execution.
 Average & 0.167 & 0.240 & 1.43$\times$ & 1.045 & 1.083 & 1.04$\times$ & 1.978 & 2.193 & 1.11$\times$ \\
 \bottomrule
 \end{tabular}
+\end{adjustbox}
 \end{table*}
 
 The state-dependent pattern uses \texttt{price > AVG(A.price)} in
@@ -1566,7 +1578,8 @@ MATCH_RECOGNIZE
     To groupby operation splits the DataFrame into separate groups based on the PARTITION BY columns.\\
     Input: partition\_by columns: df.groupby(['customer\_id']) \\Output: Two separate DataFrames, one per customer.\\
     
-    \begin{tabular}{llr}
+    {\small
+    \noindent\begin{tabular}{llr}
     \multicolumn{3}{l}{\emph{Group 1 -- cust\_1}}\\
     customer\_id & order\_date & price\\\hline
     cust\_1      & 2020-05-11  & 100\\
@@ -1583,6 +1596,7 @@ MATCH_RECOGNIZE
     cust\_2      & 2020-05-15  &   4\\
     cust\_2      & 2020-05-18  &   6
     \end{tabular}
+    \par}
 
   \item \textbf{Pattern Matching for \texttt{cust\_1}}  \\
   Tries to match the pattern starting from each possible row position. Here, row~$k$ is the position in the original table and Row/Index~$k$ the position within the partition; the three rows A, B, and C must be consecutive.\\
@@ -1721,6 +1735,7 @@ completed; the two incomplete Trino cells reached the time limit
 \centering\footnotesize
 \caption{Execution Time (seconds; mean\,$\pm$\,SD) on the Amazon Reviews Corpus; \textit{timeout} marks a query that exceeded the 600-second budget}
 \label{tab:stress_volume}
+\begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{@{}lccccc@{}}
 \toprule
 \textbf{Dataset Size} & \texttt{simple\_sequence} & \texttt{alternation} & \texttt{quantified} & \texttt{optional\_pattern} & \texttt{complex\_nested} \\
@@ -1753,12 +1768,14 @@ completed; the two incomplete Trino cells reached the time limit
 227.9M & 483.85\,$\pm$\,17.26 & 154.04\,$\pm$\,0.90 & 553.56\,$\pm$\,2.83 & 310.91\,$\pm$\,1.58 & \textit{timeout} \\
 \bottomrule
 \end{tabular}
+\end{adjustbox}
 \end{table}
 
 \begin{table}[H]
 \centering\footnotesize
 \caption{Absolute Peak Memory (GB) on the Amazon Reviews Corpus}
 \label{tab:stress_mem}
+\begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{@{\extracolsep{\fill}}lccccc}
 \toprule
 \textbf{Dataset Size} & \texttt{simple\_sequence} & \texttt{alternation} & \texttt{quantified} & \texttt{optional\_pattern} & \texttt{complex\_nested} \\
@@ -1791,6 +1808,7 @@ completed; the two incomplete Trino cells reached the time limit
 227.9M & 37.83 & 47.46 & 47.48 & 36.42 & \textit{timeout} \\
 \bottomrule
 \end{tabular}
+\end{adjustbox}
 \end{table}
 
 
