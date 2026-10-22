@@ -1,12 +1,14 @@
-%% Elsevier manuscript in a single-column preprint layout.
+%% Anonymized review manuscript in a single-column preprint layout.
 %% Editorial Manager: upload main.tex, references.bib, elsarticle.cls, IEEEtran.bst,
 %% and the five referenced PNGs at one folder level. Do not upload main.pdf
 %% or generated main.* files together with main.tex (LaTeX_Guide, pp. 2, 6--7).
 %% Upload order: manuscript, bibliography, class/style files, then figures.
 %% Use Manuscript for source/support files and Figure for PNGs. Match the
-%% submission metadata to this file (LaTeX_Guide, pp. 2--4, 8).
-%% The journal requires a separate identifying title page and an anonymized
-%% review manuscript (Guide for Authors, p. 6). This is the working master.
+%% submission author metadata to title_page.tex (LaTeX_Guide, pp. 2--4, 8).
+%% Author details, CRediT contributions, and identifying code information are
+%% in title_page.tex/title_page.pdf. Upload that PDF as Title Page, separately
+%% from this Manuscript; upload declaration_of_interest.docx separately too.
+%% Do not include these identifying documents in the reviewer manuscript.
 %% PNGs compile in Editorial Manager; final artwork must also satisfy the
 %% journal's vector PDF/EPS or raster TIFF/JPEG requirements (pp. 8--9).
 \documentclass[preprint,12pt,times,a4paper]{elsarticle}
@@ -70,7 +72,7 @@
 \usepackage[hyphens]{url}
 \Urlmuskip=0mu plus 1mu\relax
 \usepackage[hidelinks]{hyperref}
-\hypersetup{pdfauthor={Monier Lawande; Mohamed Elhelw; Ahmed Awad}}
+\hypersetup{pdfauthor={},pdfsubject={},pdfkeywords={}}
 
 %% Long \texttt{} identifiers and URLs cannot be hyphenated; let TeX stretch
 %% the interword space a little rather than run into the margin.
@@ -100,35 +102,6 @@
   EE, Enterprise Edition;
   IQR, interquartile range; LRU, least recently used;
   MR, \texttt{MATCH\_RECOGNIZE}; NFA, nondeterministic finite automaton.}
-
-%% ORCID iDs from the LNCS version:
-%%   Monier Lawande 0009-0002-6531-8709, Ahmed Awad 0000-0003-1879-1026
-\author[nu]{Monier Lawande\corref{cor1}}
-\ead{m.ashraf2288@nu.edu.eg}
-\cortext[cor1]{Corresponding author.}
-
-\author[nu]{Mohamed Elhelw}
-\ead{melhelw@nu.edu.eg}
-
-\author[buid,cu]{Ahmed Awad}
-\ead{ahmed.awad@buid.ac.ae}
-\affiliation[nu]{organization={Center for Informatics Science (CIS), School of
-    Information Technology and Computer Science (ITCS), Nile University},
-  addressline={Juhayna Square, 26th of July Corridor, El Sheikh Zayed},
-  city={Giza},
-  country={Egypt}}
-
-\affiliation[buid]{organization={British University in Dubai},
-  addressline={Block 11, 1st and 2nd floors, Dubai International Academic City,
-    P.O. Box 345015},
-  city={Dubai},
-  country={United Arab Emirates}}
-
-\affiliation[cu]{organization={Cairo University},
-  addressline={1 Gamaa Street},
-  city={Giza},
-  postcode={12613},
-  country={Egypt}}
 
 \begin{abstract}
 SQL:2016 introduced \texttt{MATCH\_RECOGNIZE} to find user-defined patterns
@@ -205,8 +178,8 @@ Pandas analysis. The procedural and SQL versions of the consecutive-price
 example are given in Appendix~\ref{Step-by-Step}.
 
 An earlier implementation of SQL row pattern recognition for Pandas was
-introduced in~\cite{lawande2026rpr}. The present study develops this work
-further and examines the execution architecture, optimization techniques,
+introduced in~\cite{lawande2026rpr}. The present study examines an extended
+framework, including its execution architecture, optimization techniques,
 correctness, performance, memory use, and scalability.
 
 The main contributions of this paper are as follows:
@@ -423,9 +396,9 @@ avoids a separate query service while keeping SQL pattern definitions and
 DataFrame output in the same workflow. Distributed execution, storage
 management, and general SQL planning remain outside its scope.
 
-Our earlier paper introduced the SQL-in-Pandas approach, automata-based
-matching, and initial tests~\cite{lawande2026rpr}. This study develops the
-framework further and examines its supported SQL features, execution
+An earlier study introduced the SQL-in-Pandas approach, automata-based
+matching, and initial tests~\cite{lawande2026rpr}. The present study examines
+an extended framework and evaluates its supported SQL features, execution
 optimizations, correctness, performance, memory use, and scalability.
 
 
@@ -434,7 +407,7 @@ optimizations, correctness, performance, memory use, and scalability.
 
 \subsection{System Architecture}
 
-Our \texttt{MATCH\_RECOGNIZE} implementation has five stages. The engine runs SQL queries directly on Pandas DataFrames~\cite{monierashraf2025rowmatch} and follows SQL:2016 semantics for the evaluated R010-style subset~\cite{iso2016,ISO2021,michels2018new}. It takes an SQL query and a Pandas DataFrame as input and returns a result DataFrame. The five stages are parsing, semantic validation, logical plan construction, pattern compilation, and execution (Fig.~\ref{fig:system-architecture}).
+Our \texttt{MATCH\_RECOGNIZE} implementation has five stages. The engine runs SQL queries directly on Pandas DataFrames and follows SQL:2016 semantics for the evaluated R010-style subset~\cite{iso2016,ISO2021,michels2018new}. It takes an SQL query and a Pandas DataFrame as input and returns a result DataFrame. The five stages are parsing, semantic validation, logical plan construction, pattern compilation, and execution (Fig.~\ref{fig:system-architecture}).
 
 Each stage passes its output to the next. Parsing converts the query text into
 an abstract syntax tree (AST). Semantic validation checks the tree while it is
@@ -837,7 +810,7 @@ for every query.
 supported, or unsupported based on the reference tests. These tests cover
 \texttt{PERMUTE}, exclusions, quantifiers, navigation functions, and output
 modes. A pattern type counts as covered when at least one case returns the
-same output as the reference systems~\cite{iso2016,ISO2021,monierashraf2025rowmatch}.
+same output as the reference systems~\cite{iso2016,ISO2021}.
 
 \texttt{Developer effort (code size)}: we count lines of detection logic in
 three worked examples. We exclude blank lines, comments, imports, setup, and
@@ -1083,7 +1056,7 @@ combinations across the three systems (Table~\ref{tab:match_counts}). Every
 completed database result in the large-scale test also agrees with the engine.
 Third, the thesis reports 709 passing tests in its recorded regression snapshot, covering
 pattern constructs, output modes, navigation, and aggregation
-behavior~\cite{monierashraf2025rowmatch}.
+behavior.
 These checks provide evidence for the tested semantics; they do not establish
 full SQL:2016 conformance or cover every possible combination of features.
 
@@ -1469,9 +1442,9 @@ and up to 227,899,533 rows from the
 These source datasets are publicly available from their respective providers.
 
 \paragraph{Code availability}
-The implementation is available in the
-\href{https://github.com/MonierLawande/Row_match_recognize}{project's GitHub repository}.
-Appendix~\ref{app:provenance} identifies the engine revision and measurement
+The public repository and exact implementation revision are identified on
+the separate title page. These identifying details are withheld here for
+anonymous review. Appendix~\ref{app:provenance} documents the measurement
 protocols used for the reported results.
 
 \section*{Declaration of generative AI and AI-assisted technologies in the manuscript preparation process}
@@ -1503,7 +1476,8 @@ Amazon UK Products benchmark and the cross-system protocol below.
 \label{app:provenance}
 
 Systems ran one at a time, so they did not compete for the same CPU core
-or memory. The engine results were updated using revision \texttt{f8b052d}.
+or memory. The engine results use the implementation revision recorded on
+the separate title page.
 Trino and Oracle values were kept from earlier experiments that followed the
 same protocol. The thesis reports 709 passing cases for the recorded
 regression snapshot; this is the historical evaluation count.
