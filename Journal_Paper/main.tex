@@ -529,7 +529,8 @@ alternation, quantifiers, grouping, and exclusions. We adapted the original
 grammar for use in the proposed engine.
 The parser produces a parse tree that represents the query
 syntax~\cite{parr2013definitive,antlr_trino_sql}. ANTLR4 generates the lexer,
-parser, and traversal classes from the rule in Listing~\ref{lst:grammar}.
+parser, and traversal classes from the grammar files. Listing~\ref{lst:grammar}
+shows the adapted row-pattern rule.
 
 \begin{lstlisting}[language={},basicstyle=\ttfamily\scriptsize,caption={The \texttt{patternRecognition} rule adapted from the community Trino ANTLR4 grammar},label={lst:grammar}]
 patternRecognition
