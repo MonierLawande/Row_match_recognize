@@ -145,7 +145,7 @@ applications~\cite{zemke2007pattern}. Patterns use syntax similar to regular exp
 but they match rows rather than individual characters.
 
 The \texttt{MATCH\_RECOGNIZE} (MR) clause was introduced in
-SQL:2016~\cite{iso2016,ISO2021}. It lets users describe a row pattern, the
+SQL:2016~\cite{iso9075_2_2016,ISO2021}. It lets users describe a row pattern, the
 conditions that define its variables, and the values to return from each match.
 Implementations discussed in this paper include Oracle~21c~\cite{oracle2022,book},
 Trino~473~\cite{trino2022,trino2021row},
@@ -255,7 +255,7 @@ compares their scope.
 The SQL standard distinguishes three optional row-pattern features: R010 (row
 pattern recognition in the \texttt{FROM} clause), R020 (row patterns in
 \texttt{WINDOW} specifications), and R030 (full aggregate support); this work
-targets an R010-style subset~\cite{iso2016,ISO2021,petkovic2022rpr}. The general structure of
+targets an R010-style subset~\cite{iso9075_2_2016,ISO2021,petkovic2022rpr}. The general structure of
 the clause is shown in Listing~\ref{lst:mr-structure}.
 \begin{lstlisting}[language=SQL,frame=single,caption={General structure of the \texttt{MATCH\_RECOGNIZE} clause},label={lst:mr-structure}]
 SELECT <columns to return>
@@ -411,7 +411,7 @@ optimizations, correctness, performance, memory use, and scalability.
 
 \subsection{System Architecture}
 
-Our \texttt{MATCH\_RECOGNIZE} implementation has five stages. The engine runs SQL queries directly on Pandas DataFrames and follows SQL:2016 semantics for the evaluated R010-style subset~\cite{iso2016,ISO2021,michels2018new}. It takes an SQL query and a Pandas DataFrame as input and returns a result DataFrame. The five stages are parsing, semantic validation, logical plan construction, pattern compilation, and execution (Fig.~\ref{fig:system-architecture}).
+Our \texttt{MATCH\_RECOGNIZE} implementation has five stages. The engine runs SQL queries directly on Pandas DataFrames and follows SQL:2016 semantics for the evaluated R010-style subset~\cite{iso9075_2_2016,ISO2021,michels2018new}. It takes an SQL query and a Pandas DataFrame as input and returns a result DataFrame. The five stages are parsing, semantic validation, logical plan construction, pattern compilation, and execution (Fig.~\ref{fig:system-architecture}).
 
 Each stage passes its output to the next. Parsing converts the query text into
 an abstract syntax tree (AST). Semantic validation checks the tree while it is
@@ -814,7 +814,7 @@ for every query.
 supported, or unsupported based on the reference tests. These tests cover
 \texttt{PERMUTE}, exclusions, quantifiers, navigation functions, and output
 modes. A pattern type counts as covered when at least one case returns the
-same output as the reference systems~\cite{iso2016,ISO2021}.
+same output as the reference systems~\cite{iso9075_2_2016,ISO2021}.
 
 \texttt{Developer effort (code size)}: we count lines of detection logic in
 three worked examples. We exclude blank lines, comments, imports, setup, and
