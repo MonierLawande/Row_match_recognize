@@ -522,15 +522,16 @@ SQL parsing, automata construction, matching, and execution optimizations.
 
 \subsection{ANTLR4 Grammar and AST Implementation}
 
-The system uses the community ANTLR4 grammar for the Trino SQL dialect. Its
-row-pattern rule covers all eight \texttt{MATCH\_RECOGNIZE} subclauses, so
-no grammar changes were needed. The grammar supports nested patterns,
-alternation, quantifiers, grouping, and exclusions~\cite{antlr_trino_sql}.
+The system builds on the community ANTLR4 grammar for the Trino SQL
+dialect~\cite{antlr_trino_sql}. Its row-pattern rule covers all eight
+\texttt{MATCH\_RECOGNIZE} subclauses and supports nested patterns,
+alternation, quantifiers, grouping, and exclusions. We adapted the original
+grammar for use in the proposed engine.
 The parser produces a parse tree that represents the query
 syntax~\cite{parr2013definitive,antlr_trino_sql}. ANTLR4 generates the lexer,
 parser, and traversal classes from the rule in Listing~\ref{lst:grammar}.
 
-\begin{lstlisting}[language={},basicstyle=\ttfamily\scriptsize,caption={The \texttt{patternRecognition} rule of the Trino ANTLR4 grammar (whitespace reflowed)},label={lst:grammar}]
+\begin{lstlisting}[language={},basicstyle=\ttfamily\scriptsize,caption={The \texttt{patternRecognition} rule adapted from the community Trino ANTLR4 grammar},label={lst:grammar}]
 patternRecognition
   : aliasedRelation (
       MATCH_RECOGNIZE_ LPAREN_
@@ -810,11 +811,13 @@ Trino~473 and Oracle~21c EE. Agreement applies to the tested queries and
 datasets. It does not establish full SQL conformance or the same output order
 for every query.
 
-\texttt{Feature coverage}: each main clause is marked as supported, partly
-supported, or unsupported based on the reference tests. These tests cover
+\texttt{Feature coverage}: the evaluated SQL clauses and pattern constructs
+are described in the SQL specification and its row-pattern
+guidance~\cite{iso9075_2_2016,ISO2021}. We mark each main clause as supported,
+partly supported, or unsupported based on the reference tests. These tests cover
 \texttt{PERMUTE}, exclusions, quantifiers, navigation functions, and output
-modes. A pattern type counts as covered when at least one case returns the
-same output as the reference systems~\cite{iso9075_2_2016,ISO2021}.
+modes. For pattern-type coverage in this study, we count a type as covered
+when at least one case returns the same output as the reference systems.
 
 \texttt{Developer effort (code size)}: we count lines of detection logic in
 three worked examples. We exclude blank lines, comments, imports, setup, and
